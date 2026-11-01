@@ -1,0 +1,11 @@
+{
+  "app": "broken-markup",
+  "bug": "leaves <b> open for hot items",
+  "expect": [
+    {
+      "kind": "broken_markup",
+      "min": "warn"
+    }
+  ],
+  "allow": []
+}

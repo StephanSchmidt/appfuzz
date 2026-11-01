@@ -1,0 +1,23 @@
+{
+  "app": "nested-fanout",
+  "bug": "reads every child of every item, one by one",
+  "expect": [
+    {
+      "kind": "nested_fan_out",
+      "min": "warn"
+    }
+  ],
+  "allow": [
+    "n_plus_1",
+    "chatty",
+    "retry_storm",
+    "over_budget",
+    "hang",
+    "big_output",
+    "serial_chain",
+    "slow_host_sensitivity",
+    "redundant_calls",
+    "cpu_blowup",
+    "output_amplification"
+  ]
+}

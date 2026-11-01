@@ -1,0 +1,13 @@
+{
+  "app": "empty-panic",
+  "bug": "indexes the first item without checking for an empty list",
+  "expect": [
+    {
+      "kind": "crash",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "crash_on_host_value"
+  ]
+}

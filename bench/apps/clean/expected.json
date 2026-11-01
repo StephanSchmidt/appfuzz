@@ -1,0 +1,6 @@
+{
+  "app": "clean",
+  "bug": "a well-behaved page: one read, sorted, escaped, bounded",
+  "expect": [],
+  "allow": []
+}

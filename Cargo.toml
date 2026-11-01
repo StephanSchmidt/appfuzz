@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/appfuzz-core", "crates/appfuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/StephanSchmidt/appfuzz"
+homepage = "https://appfuzz.dev"
+
+[workspace.dependencies]
+appfuzz-core = { path = "crates/appfuzz-core" }
+anyhow = "1"
+async-trait = "0.1"
+blake3 = "1"
+rustc-demangle = "0.1"
+clap = { version = "4", features = ["derive"] }
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng"] }
+regex = "1"
+psl = "2"
+rayon = "1.12"
+url = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "0.8"
+wasmparser = "0.262"
+wasmtime = { version = "50.0.0", features = ["anyhow"] }
+wasmtime-wasi = "50.0.0"
+wit-component = "0.262"

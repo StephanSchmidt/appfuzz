@@ -1,0 +1,14 @@
+{
+  "app": "quadratic-200",
+  "bug": "compares every item with every other item",
+  "expect": [
+    {
+      "kind": "cpu_blowup",
+      "min": "warn"
+    }
+  ],
+  "allow": [
+    "hang",
+    "over_budget"
+  ]
+}

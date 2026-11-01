@@ -1,0 +1,14 @@
+{
+  "app": "slow-chain",
+  "bug": "fetches 40 items one after another, each a slow call",
+  "expect": [
+    {
+      "kind": "serial_chain",
+      "min": "warn"
+    }
+  ],
+  "allow": [
+    "slow_host_sensitivity",
+    "over_budget"
+  ]
+}

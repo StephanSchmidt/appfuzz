@@ -1,0 +1,30 @@
+# Allowlist: ignore everything, then re-include what is published.
+/*
+!/.gitignore
+!/.github/
+!/README.md
+!/LICENSE
+!/AGENTS.md
+!/Cargo.toml
+!/Cargo.lock
+!/crates/
+!/website/
+
+/bench/*
+!/bench/
+!/bench/Cargo.toml
+!/bench/Cargo.lock
+!/bench/prelude.rs
+!/bench/apps.py
+!/bench/apps/
+!/bench/wit/
+!/bench/lang/
+
+# Never, at any depth: build output, dependencies, appfuzz state, binaries.
+target/
+node_modules/
+.appfuzz/
+__pycache__/
+*.wasm
+.env
+.env.*

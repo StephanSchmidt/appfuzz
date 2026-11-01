@@ -1,0 +1,13 @@
+{
+  "app": "busy-wait",
+  "bug": "spins on the clock for 50 ms instead of sleeping",
+  "expect": [
+    {
+      "kind": "busy_wait",
+      "min": "warn"
+    }
+  ],
+  "allow": [
+    "over_budget"
+  ]
+}

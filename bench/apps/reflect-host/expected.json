@@ -1,0 +1,13 @@
+{
+  "app": "reflect-host",
+  "bug": "renders item names from the host unescaped",
+  "expect": [
+    {
+      "kind": "stored_reflection",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "broken_markup"
+  ]
+}

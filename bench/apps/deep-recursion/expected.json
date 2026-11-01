@@ -1,0 +1,20 @@
+{
+  "app": "deep-recursion",
+  "bug": "nests one element per level of ?depth, recursively",
+  "expect": [
+    {
+      "kind": "stack_overflow",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "hang",
+    "over_budget",
+    "big_output",
+    "cpu_blowup",
+    "memory_blowup",
+    "output_amplification",
+    "input_amplification",
+    "crash"
+  ]
+}

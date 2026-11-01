@@ -1,0 +1,30 @@
+[package]
+name = "appfuzz-core"
+description = "Engine of appfuzz: runs WebAssembly components against scripted, simulated host functions and measures what they do"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+blake3.workspace = true
+rustc-demangle.workspace = true
+rand.workspace = true
+regex.workspace = true
+psl.workspace = true
+rayon.workspace = true
+url.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+wasmparser.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+wit-component.workspace = true
+
+[dev-dependencies]
+wat = "1.262"
+wit-parser = "0.262"

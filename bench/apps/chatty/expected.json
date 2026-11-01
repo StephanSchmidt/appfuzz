@@ -1,0 +1,17 @@
+{
+  "app": "chatty",
+  "bug": "lists all items, then fetches each one again",
+  "expect": [
+    {
+      "kind": "chatty",
+      "min": "warn"
+    }
+  ],
+  "allow": [
+    "n_plus_1",
+    "redundant_calls",
+    "over_budget",
+    "serial_chain",
+    "slow_host_sensitivity"
+  ]
+}

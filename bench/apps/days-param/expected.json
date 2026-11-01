@@ -1,0 +1,16 @@
+{
+  "app": "days-param",
+  "bug": "reads one day per ?days, unbounded",
+  "expect": [
+    {
+      "kind": "input_amplification",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "over_budget",
+    "serial_chain",
+    "hang",
+    "slow_host_sensitivity"
+  ]
+}

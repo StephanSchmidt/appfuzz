@@ -1,0 +1,55 @@
+// A small, generic web-app world for the appfuzz bench. Not tied to any
+// platform: a request handler plus a few host interfaces.
+package bench:web@0.1.0;
+
+interface types {
+    record request {
+        method: string,
+        path: string,
+        query: list<tuple<string, string>>,
+        form: list<tuple<string, string>>,
+        today: string,
+        now: string,
+    }
+    record response {
+        status: u16,
+        body: string,
+        headers: list<tuple<string, string>>,
+    }
+}
+
+interface items {
+    record item { id: u64, name: string, owner: string, score: u32 }
+    all: func() -> list<item>;
+    get: func(id: u64) -> result<item, string>;
+    for-day: func(date: string) -> list<item>;
+    children: func(id: u64) -> list<item>;
+}
+
+interface store {
+    save: func(key: string, value: string) -> result<u64, string>;
+    load: func(key: string) -> option<string>;
+}
+
+interface mail {
+    send: func(to: string, body: string) -> result<_, string>;
+}
+
+interface handler {
+    use types.{request, response};
+    handle: func(req: request) -> response;
+}
+
+world app {
+    import items;
+    import store;
+    import mail;
+    export handler;
+}
+
+// A narrower world for toolchains that import every interface of the world
+// they build against (componentize-js, componentize-py).
+world items-app {
+    import items;
+    export handler;
+}

@@ -1,0 +1,14 @@
+{
+  "app": "utf8-slice",
+  "bug": "cuts names at byte 8, which panics inside a multi-byte character",
+  "expect": [
+    {
+      "kind": "crash",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "crash_on_host_value",
+    "n_plus_1"
+  ]
+}

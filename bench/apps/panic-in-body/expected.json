@@ -1,0 +1,11 @@
+{
+  "app": "panic-in-body",
+  "bug": "shows the host's error text, with internal details, to the user",
+  "expect": [
+    {
+      "kind": "leaky_error",
+      "min": "warn"
+    }
+  ],
+  "allow": []
+}

@@ -1,0 +1,16 @@
+{
+  "app": "form-fanout",
+  "bug": "saves one record per `count` in a posted form",
+  "expect": [
+    {
+      "kind": "input_amplification",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "over_budget",
+    "serial_chain",
+    "hang",
+    "slow_host_sensitivity"
+  ]
+}

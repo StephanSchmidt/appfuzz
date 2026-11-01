@@ -1,0 +1,15 @@
+# The phase 1 bench: small components with one bad pattern each. Built for
+# wasm32-wasip2; `cargo test --release -p appfuzz --test bench -- --ignored`
+# builds them and checks every app's expected.json.
+[workspace]
+resolver = "3"
+members = ["apps/*"]
+
+[workspace.dependencies]
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+lto = true
+# Keep the name section: findings then name functions.
+strip = "debuginfo"

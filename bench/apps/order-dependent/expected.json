@@ -1,0 +1,11 @@
+{
+  "app": "order-dependent",
+  "bug": "calls the first item the top one without sorting",
+  "expect": [
+    {
+      "kind": "order_dependence",
+      "min": "info"
+    }
+  ],
+  "allow": []
+}

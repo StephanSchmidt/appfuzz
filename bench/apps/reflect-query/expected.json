@@ -1,0 +1,11 @@
+{
+  "app": "reflect-query",
+  "bug": "echoes ?q into the page unescaped",
+  "expect": [
+    {
+      "kind": "reflection",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

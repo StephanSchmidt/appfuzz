@@ -1,0 +1,11 @@
+{
+  "app": "duplicate-400",
+  "bug": "counts list entries against distinct ids, so a duplicate passes 100 %",
+  "expect": [
+    {
+      "kind": "duplicate_sensitivity",
+      "min": "warn"
+    }
+  ],
+  "allow": []
+}

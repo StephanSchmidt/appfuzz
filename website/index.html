@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>appfuzz: fuzz WebAssembly apps instead of reviewing them</title>
+<meta name="description" content="appfuzz runs your WebAssembly app thousands of times against a simulated backend and finds the bugs a code review misses: crashes, XSS, n+1 queries that hammer your database. Rust, TypeScript, Python. One command, pass or fail.">
+<link rel="canonical" href="https://appfuzz.dev/">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#ffffff">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="appfuzz">
+<meta property="og:url" content="https://appfuzz.dev/">
+<meta property="og:title" content="No more code reviews. Fuzz instead.">
+<meta property="og:description" content="appfuzz runs your WebAssembly app thousands of times against a simulated backend and finds crashes, XSS and n+1 queries before they ship. Open source.">
+<meta property="og:image" content="https://appfuzz.dev/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="appfuzz: No more code reviews. Fuzz instead. A chart shows 11, 101 and 1,001 database queries per page view at 10, 100 and 1,000 rows.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="No more code reviews. Fuzz instead.">
+<meta name="twitter:description" content="appfuzz runs your WebAssembly app thousands of times against a simulated backend and finds crashes, XSS and n+1 queries before they ship.">
+<meta name="twitter:image" content="https://appfuzz.dev/og.png">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "appfuzz",
+  "url": "https://appfuzz.dev/",
+  "description": "Fuzzer for WebAssembly components: runs an app against a simulated backend and reports crashes, XSS, n+1 queries and other bad patterns.",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Linux, macOS, Windows",
+  "license": "https://opensource.org/licenses/MIT",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..900&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="bar">
+  <div class="frame bar-in">
+    <a class="logo" href="#"><span class="mark" aria-hidden="true"></span>appfuzz</a>
+    <div class="links">
+      <a href="#finds">What it finds</a>
+      <a href="#minute">Walkthrough</a>
+      <a href="#languages">Languages</a>
+      <a href="#limits">Limits</a>
+    </div>
+    <a class="go" href="#start">Install</a>
+  </div>
+</nav>
+
+<header class="frame hero">
+  <div class="hero-text">
+    <p class="tag"><span>Phase 1</span> Open source, early, works today</p>
+    <h1>No more code reviews. Fuzz&nbsp;instead.</h1>
+    <p class="sub">appfuzz runs your WebAssembly app thousands of times against a simulated backend and finds what a review misses: crashes on empty lists and Unicode, user input in your HTML unescaped, loops that send one database query per row. Pass or fail, in CI.</p>
+    <p class="install-label">Install from the repository</p>
+    <div class="install">
+      <code id="install-cmd"><span class="p">$</span> cargo install --path crates/appfuzz</code>
+      <button type="button" class="copy" data-copy="install-cmd" aria-label="Copy install command">Copy</button>
+    </div>
+    <p class="then">Then run <code>appfuzz review</code> next to your <code>.wasm</code>.</p>
+  </div>
+
+  <figure class="card" id="hero-card">
+    <div class="card-tabs" role="tablist" aria-label="Example finding">
+      <button role="tab" id="ht-db" aria-controls="hp-db" aria-selected="true">Database</button>
+      <button role="tab" id="ht-crash" aria-controls="hp-crash" aria-selected="false" tabindex="-1">Crash</button>
+      <button role="tab" id="ht-xss" aria-controls="hp-xss" aria-selected="false" tabindex="-1">Security</button>
+    </div>
+
+    <div role="tabpanel" id="hp-db" aria-labelledby="ht-db" class="card-body">
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">One page view, as the table grows</h2>
+          <p class="card-sub">Database queries per request, lower is better</p>
+        </div>
+        <button type="button" class="replay" id="replay-bars">Replay</button>
+      </div>
+      <ol class="bars" id="bars">
+        <li style="--v:11"><span class="who">10 rows<small>development</small></span><span class="track"><span class="fill"></span><span class="line"></span></span><b>11</b></li>
+        <li style="--v:101" class="over"><span class="who">100 rows<small>launch week</small></span><span class="track"><span class="fill"></span><span class="line"></span></span><b>101</b></li>
+        <li style="--v:1001" class="over"><span class="who">1,000 rows<small>a good year</small></span><span class="track"><span class="fill"></span><span class="line"></span></span><b>1,001</b></li>
+      </ol>
+      <p class="axis"><span>0</span><span class="lim">limit 100</span><span>1,000</span></p>
+      <p class="verdict"><b>fail</b> <span class="kind">n_plus_1</span> calls to items#get grow as 1·n with n = length of the list items#all returns; cost breaks its limit at n = 100</p>
+      <p class="foot">The <code>chatty</code> test app, Rust build. <code>appfuzz run</code> with 10, 100 and 1,000 rows from the simulated <code>items#all</code>: 11, 101 and 1,001 host calls, and 11 ms, 101 ms and 1,004 ms of simulated database time.</p>
+    </div>
+
+    <div role="tabpanel" id="hp-crash" aria-labelledby="ht-crash" class="card-body" hidden>
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">Works on the demo data</h2>
+          <p class="card-sub">Crashes on the first account with no items</p>
+        </div>
+      </div>
+<pre class="code"><code><span class="kw">let</span> all = items::all();
+<span class="kw">let</span> first = &amp;all[<span class="n">0</span>];
+<span class="kw">let</span> short = &amp;first.name[..<span class="n">8</span>];</code></pre>
+      <p class="verdict"><b>fail</b> <span class="kind">crash</span> when items#all returns empty list: index out of bounds: the len is 0 but the index is 0</p>
+      <p class="verdict"><b>fail</b> <span class="kind">crash</span> when items#all returns 3-byte chars: end byte index 8 is not a char boundary; it is inside '日'</p>
+      <p class="foot">Two of the 26 test apps appfuzz must pass on every commit. The simulated backend tries empty lists, huge lists, errors and non-English text on every function the app imports.</p>
+    </div>
+
+    <div role="tabpanel" id="hp-xss" aria-labelledby="ht-xss" class="card-body" hidden>
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">A search box</h2>
+          <p class="card-sub">The query goes straight into the page</p>
+        </div>
+      </div>
+<pre class="code"><code><span class="kw">let</span> q = param(&amp;req.query, <span class="str">"q"</span>).unwrap_or(<span class="str">""</span>);
+html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</code></pre>
+      <p class="verdict"><b>fail</b> <span class="kind">reflection</span> handle puts the request field query.q into its HTML output unescaped</p>
+      <p class="verdict"><b>fail</b> <span class="kind">stored_reflection</span> handle puts a string items#all returned into its HTML output unescaped</p>
+      <p class="foot">appfuzz plants marker strings in request fields and in backend data, then looks for them, unescaped, in the HTML the app returns.</p>
+    </div>
+  </figure>
+</header>
+
+<div class="strip">
+  <div class="frame strip-in">
+    <p>Tested on components built from</p>
+    <ul>
+      <li><b>Rust</b> <span>cargo, wasm32-wasip2</span></li>
+      <li><b>TypeScript</b> <span>jco, componentize-js</span></li>
+      <li><b>Python</b> <span>componentize-py</span></li>
+    </ul>
+  </div>
+</div>
+
+<main>
+
+<section id="finds" class="frame sec">
+  <div class="sec-head">
+    <h2>Four kinds of bug a quick read lets through.</h2>
+    <p>Each one passes review because the code looks fine. appfuzz doesn't read code. It runs it, with the inputs and backend answers you didn't think of.</p>
+  </div>
+  <div class="grid4">
+    <article>
+      <h3>Crashes</h3>
+      <p class="mono">panics, exceptions, hangs, stack overflows</p>
+      <p>Empty results, failing queries, Unicode, a leap day, the year 2038. Every crash is shrunk to the smallest input that causes it.</p>
+      <code class="chip">appfuzz probe values</code>
+    </article>
+    <article>
+      <h3>Security</h3>
+      <p class="mono">XSS, leaked errors, ungranted imports</p>
+      <p>Request fields and stored data that reach your HTML unescaped. Internal error text on the page. Imports the platform never granted.</p>
+      <code class="chip">appfuzz review</code>
+    </article>
+    <article>
+      <h3>Database</h3>
+      <p class="mono">n+1, nested loops, retry storms</p>
+      <p>Queries that grow with a list or a request field, the same query twice, a loop that retries a failed write 50 times.</p>
+      <code class="chip">appfuzz amplify</code>
+    </article>
+    <article>
+      <h3>Wrong answers</h3>
+      <p class="mono">200 %, order bugs, swallowed errors</p>
+      <p>Usage above 100 %, a total that changes when rows come back in another order, an error page sent with status 200.</p>
+      <code class="chip">appfuzz probe pairs</code>
+    </article>
+  </div>
+  <p class="aside">Also for ops: CPU and memory that grow faster than the input, slow call chains, busy waiting, one slow dependency that blows the latency budget.</p>
+</section>
+
+<section id="minute" class="frame sec">
+  <div class="sec-head">
+    <h2>A minute with appfuzz.</h2>
+    <p>Five commands on <code>chatty</code>, a small app that lists items and then fetches each one again. Every output is real, cut short.</p>
+  </div>
+  <div class="minute">
+    <ol class="steps" role="tablist" aria-label="Walkthrough step" aria-orientation="vertical">
+      <li><button role="tab" id="st-1" aria-controls="sp-1" aria-selected="true"><code>appfuzz inspect</code><span>What the app exports and imports, and what looks risky before it runs.</span></button></li>
+      <li><button role="tab" id="st-2" aria-controls="sp-2" aria-selected="false" tabindex="-1"><code>appfuzz run</code><span>One request against the simulated backend. Every call counted.</span></button></li>
+      <li><button role="tab" id="st-3" aria-controls="sp-3" aria-selected="false" tabindex="-1"><code>appfuzz review</code><span>180,488 runs in 10 seconds. A verdict and an exit code for CI.</span></button></li>
+      <li><button role="tab" id="st-4" aria-controls="sp-4" aria-selected="false" tabindex="-1"><code>appfuzz explain</code><span>Why the worst run is bad, compared with all the others.</span></button></li>
+      <li><button role="tab" id="st-5" aria-controls="sp-5" aria-selected="false" tabindex="-1"><code>appfuzz confirm</code><span>Replayed three times, identical. Saved as a case you can rerun.</span></button></li>
+    </ol>
+
+    <div class="term">
+      <div class="term-bar"><span>~/bench/apps/chatty</span></div>
+<pre role="tabpanel" id="sp-1" aria-labelledby="st-1"><code><span class="p">$</span> appfuzz inspect
+{
+  <span class="k">"exports"</span>: [ "bench:web/handler#handle" ],
+  <span class="k">"imports"</span>: [ "bench:web/items@0.1.0", "wasi:cli", "wasi:io", … ],
+  <span class="k">"findings"</span>: [
+    { <span class="k">"severity"</span>: <span class="info">"info"</span>, <span class="k">"kind"</span>: <span class="s">"host_call_in_loop"</span>,
+      <span class="k">"title"</span>: "handle calls bench:web/items#get inside a loop
+               (static; check with `scale`)" }
+  ],
+  <span class="k">"next"</span>: [ "appfuzz run", "appfuzz fuzz --time 2m" ]
+}</code></pre>
+<pre role="tabpanel" id="sp-2" aria-labelledby="st-2" hidden><code><span class="p">$</span> appfuzz run
+{
+  <span class="k">"run"</span>: "rd6d5fddc2a",
+  <span class="k">"outcome"</span>: <span class="ok">"ok"</span>,
+  <span class="k">"result"</span>: { <span class="k">"status"</span>: 200, <span class="k">"body"</span>: "&lt;ul&gt;&lt;li&gt;alpha grove&lt;/li&gt;&lt;/ul&gt;" },
+  <span class="k">"totals"</span>: {
+    <span class="k">"host_calls"</span>: 2,
+    <span class="k">"cost"</span>: 2,
+    <span class="k">"fuel"</span>: 10477,
+    <span class="k">"virtual_ms"</span>: 2.01
+  },
+  <span class="k">"next"</span>: [ "appfuzz explain rd6d5fddc2a", "appfuzz probe pairs rd6d5fddc2a" ]
+}</code></pre>
+<pre role="tabpanel" id="sp-3" aria-labelledby="st-3" hidden><code><span class="p">$</span> appfuzz review --time 10s
+{
+  <span class="k">"verdict"</span>: <span class="fail">"fail"</span>,
+  <span class="k">"exit_code"</span>: 2,
+  <span class="k">"counts"</span>: { <span class="k">"fail"</span>: 2, <span class="k">"warn"</span>: 3, <span class="k">"info"</span>: 1, <span class="k">"confirmed"</span>: 5 },
+  <span class="k">"coverage"</span>: { <span class="k">"fuzz_runs"</span>: 180488, <span class="k">"unreached_call_sites"</span>: 0 },
+  <span class="k">"findings"</span>: [
+    { <span class="k">"id"</span>: "f62ff690b", <span class="k">"severity"</span>: <span class="fail">"fail"</span>, <span class="k">"kind"</span>: <span class="s">"n_plus_1"</span>,
+      <span class="k">"title"</span>: "calls to items#get grow as 1·n with n = length of
+               the list items#all returns; cost breaks its limit at n = 100" },
+    { <span class="k">"id"</span>: "fad47d743", <span class="k">"severity"</span>: <span class="fail">"fail"</span>, <span class="k">"kind"</span>: <span class="s">"over_budget"</span>,
+      <span class="k">"title"</span>: "handle uses 129 cost, the limit is 100" },
+    { <span class="k">"id"</span>: "fe035e3e3", <span class="k">"severity"</span>: <span class="warn">"warn"</span>, <span class="k">"kind"</span>: <span class="s">"redundant_calls"</span>,
+      <span class="k">"title"</span>: "items#get: 13 of 50 calls repeat earlier calls
+               with the same arguments" },
+    …
+  ],
+  <span class="k">"next"</span>: [ "appfuzz explain rff6825faed" ]
+}</code></pre>
+<pre role="tabpanel" id="sp-4" aria-labelledby="st-4" hidden><code><span class="p">$</span> appfuzz explain rff6825faed
+{
+  <span class="k">"status"</span>: 200,
+  <span class="k">"calls"</span>: { <span class="k">"bench:web/items#all"</span>: 1, <span class="k">"bench:web/items#get"</span>: 128 },
+  <span class="k">"vs_stored_runs"</span>: {
+    <span class="k">"runs"</span>: 1863,
+    <span class="k">"unusual"</span>: [
+      "host_calls is 64.5× the median",
+      "virtual_ms is 64.34× the median",
+      "fuel is 56.53× the median"
+    ]
+  },
+  <span class="k">"findings"</span>: [
+    { <span class="k">"severity"</span>: <span class="fail">"fail"</span>, <span class="k">"kind"</span>: <span class="s">"over_budget"</span>,
+      <span class="k">"title"</span>: "handle uses 129 cost, the limit is 100" },
+    { <span class="k">"severity"</span>: <span class="warn">"warn"</span>, <span class="k">"kind"</span>: <span class="s">"chatty"</span>,
+      <span class="k">"title"</span>: "items#get is called for each element items#all
+               returned (128 calls for 128 elements)" }
+  ]
+}</code></pre>
+<pre role="tabpanel" id="sp-5" aria-labelledby="st-5" hidden><code><span class="p">$</span> appfuzz confirm f62ff690b
+{
+  <span class="k">"finding"</span>: { <span class="k">"kind"</span>: <span class="s">"n_plus_1"</span>, <span class="k">"run"</span>: "rff6825faed" },
+  <span class="k">"replays"</span>: 3,
+  <span class="k">"identical"</span>: 3,
+  <span class="k">"deterministic"</span>: true,
+  <span class="k">"confirmed"</span>: <span class="ok">true</span>,
+  <span class="k">"case"</span>: ".appfuzz/cases/f62ff690b.json",
+  <span class="k">"spec"</span>: {
+    <span class="k">"plan"</span>: {
+      <span class="k">"bench:web/items#all"</span>: { <span class="k">"return"</span>: [
+        { <span class="k">"id"</span>: 83, <span class="k">"name"</span>: "tundra pine #1", <span class="k">"owner"</span>: "north delta" },
+        { <span class="k">"id"</span>: 84, <span class="k">"name"</span>: "tundra pine #2", <span class="k">"owner"</span>: "north delta" },
+        …
+      ] }
+    }
+  }
+}</code></pre>
+    </div>
+  </div>
+</section>
+
+<section id="languages" class="frame sec">
+  <div class="sec-head">
+    <h2>Same bug, three languages, same finding.</h2>
+    <p>appfuzz never reads your source. It runs the compiled component, so it doesn't care what you wrote it in. One n+1 loop, written three times, reviewed with the same limits.</p>
+  </div>
+
+  <div class="langs">
+    <div class="lang-code">
+      <div class="tabs" role="tablist" aria-label="Language">
+        <button role="tab" id="tab-rs" aria-controls="panel-rs" aria-selected="true">Rust</button>
+        <button role="tab" id="tab-ts" aria-controls="panel-ts" aria-selected="false" tabindex="-1">TypeScript</button>
+        <button role="tab" id="tab-py" aria-controls="panel-py" aria-selected="false" tabindex="-1">Python</button>
+      </div>
+      <div role="tabpanel" id="panel-rs" aria-labelledby="tab-rs">
+<pre class="code"><code><span class="kw">for</span> it <span class="kw">in</span> items::all() {
+    <span class="kw">if let</span> Ok(full) = items::get(it.id) {
+        out += &amp;format!(<span class="str">"&lt;li&gt;{}&lt;/li&gt;"</span>, esc(&amp;full.owner));
+    }
+}</code></pre>
+        <p class="facts"><b>65 KB</b> component. cargo, wasm32-wasip2. About 11,800 runs a second on 24 threads.</p>
+      </div>
+      <div role="tabpanel" id="panel-ts" aria-labelledby="tab-ts" hidden>
+<pre class="code"><code><span class="kw">for</span> (<span class="kw">const</span> it <span class="kw">of</span> all()) {
+  <span class="kw">try</span> {
+    <span class="kw">const</span> full = get(it.id);
+    out += <span class="str">`&lt;li&gt;${esc(full.owner)}&lt;/li&gt;`</span>;
+  } <span class="kw">catch</span> {}
+}</code></pre>
+        <p class="facts"><b>12 MB</b> component, the JS engine included. About 1,850 runs a second. Also found: a 10 KB name makes <code>esc</code> so slow the request never finishes.</p>
+      </div>
+      <div role="tabpanel" id="panel-py" aria-labelledby="tab-py" hidden>
+<pre class="code"><code><span class="kw">for</span> it <span class="kw">in</span> items.all():
+    <span class="kw">try</span>:
+        full = items.get(it.id)
+        out += <span class="str">f"&lt;li&gt;{escape(full.owner)}&lt;/li&gt;"</span>
+    <span class="kw">except</span> Err:
+        <span class="kw">pass</span></code></pre>
+        <p class="facts"><b>18 MB</b> component, the interpreter included. About 1,750 runs a second. Also found: the runtime imports file system and network access the app never uses.</p>
+      </div>
+    </div>
+    <div class="lang-out">
+      <p class="out-label">appfuzz review, the same in all three</p>
+      <p class="verdict"><b>fail</b> <span class="kind">n_plus_1</span> calls to items#get grow as 1·n with n = length of the list items#all returns; cost breaks its limit at n = 100</p>
+      <p class="verdict"><b>fail</b> <span class="kind">over_budget</span> handle uses 129 cost, the limit is 100</p>
+      <p class="verdict warn"><b>warn</b> <span class="kind">chatty</span> items#get is called for each element items#all returned</p>
+      <p class="verdict warn"><b>warn</b> <span class="kind">redundant_calls</span> items#get: 13 of 50 calls repeat earlier calls with the same arguments</p>
+    </div>
+  </div>
+</section>
+
+<section class="frame sec">
+  <div class="sec-head">
+    <h2>More bugs that pass a quick read.</h2>
+    <p>From the 26 test apps appfuzz runs on every commit. Each has one planted bug, and appfuzz must find it and nothing else. Findings word for word.</p>
+  </div>
+  <div class="ex-list">
+    <div class="ex">
+      <h3>Assumes the database answers</h3>
+<pre class="code"><code><span class="kw">let</span> it = items::get(id).unwrap();</code></pre>
+      <p class="verdict"><b>fail</b> crash when items#get returns err: called `Result::unwrap()` on an `Err` value</p>
+    </div>
+    <div class="ex">
+      <h3>A helpful error page</h3>
+<pre class="code"><code>Err(e) =&gt; format!(
+    <span class="str">"items.get({id}) failed in shard 7: {}"</span>,
+    esc(&amp;e),
+)</code></pre>
+      <p class="verdict warn"><b>warn</b> handle shows internal error details in its output: the error text items#get returned</p>
+    </div>
+    <div class="ex">
+      <h3>Retries until it works</h3>
+<pre class="code"><code><span class="kw">match</span> store::save(<span class="str">"visits"</span>, <span class="str">"1"</span>) {
+    Ok(id) =&gt; <span class="kw">break</span> id,
+    Err(_) <span class="kw">if</span> tries &lt; <span class="n">50</span> =&gt; tries += <span class="n">1</span>,
+    Err(_) =&gt; <span class="kw">break</span> <span class="n">0</span>,
+}</code></pre>
+      <p class="verdict warn"><b>warn</b> store#save is called 50 more times in a row after it failed</p>
+    </div>
+    <div class="ex">
+      <h3>Usage can't go over 100 %. Can it?</h3>
+<pre class="code"><code><span class="p">$</span> appfuzz check value_range .usage 0 100</code></pre>
+      <p class="verdict"><b>fail</b> .usage is 200, outside 0–100. Counterexample saved, with the backend data that causes it.</p>
+    </div>
+  </div>
+</section>
+
+<section id="agents" class="frame sec split">
+  <div>
+    <h2>Built for the agent that wrote the app.</h2>
+    <p class="lead">Marketing builds a dashboard, Sales a calculator. An agent writes each in an afternoon, and nobody has time to read them. The same agent can run appfuzz on its own work.</p>
+  </div>
+  <dl class="facts-list">
+    <div><dt>JSON everywhere</dt><dd>Every command prints one JSON document.</dd></div>
+    <div><dt>Always a next step</dt><dd>Each output lists the commands worth running next, ids filled in.</dd></div>
+    <div><dt>Suspicions become tests</dt><dd><code>check</code> turns "this can't go over 100" into a search for a counterexample.</dd></div>
+    <div><dt>Same input, same result</dt><dd>Time and the backend are simulated. Every run replays exactly.</dd></div>
+  </dl>
+</section>
+
+<section id="limits" class="frame sec split">
+  <div>
+    <h2>What it won't do.</h2>
+    <p class="lead">A pass means the search found nothing. That's evidence, not proof.</p>
+  </div>
+  <dl class="facts-list">
+    <div><dt>Catch malicious apps</dt><dd>Not yet. It finds careless code, not hidden backdoors.</dd></div>
+    <div><dt>Know your business rules</dt><dd>It can't tell that <code>create</code> writes, or that a field is personal data.</dd></div>
+    <div><dt>Test sequences of requests</dt><dd>Each run is one request. Double submits are out of reach for now.</dd></div>
+    <div><dt>See inside interpreters</dt><dd>TypeScript and Python apps are measured just as well from outside, but the search is less guided and runs are slower.</dd></div>
+  </dl>
+</section>
+
+<section id="start" class="frame start">
+  <h2>Try it on your app.</h2>
+  <div class="term">
+    <div class="term-bar"><span>your app</span></div>
+<pre><code><span class="p">$</span> cargo install --path crates/appfuzz
+<span class="p">$</span> appfuzz --wasm my_app.wasm inspect
+<span class="p">$</span> appfuzz --wasm my_app.wasm review</code></pre>
+  </div>
+  <p>Open source under the MIT license. Written in Rust on wasmtime. Phase 1 of 3 is done.</p>
+</section>
+
+</main>
+
+<footer>
+  <div class="frame foot-in">
+    <span class="logo"><span class="mark" aria-hidden="true"></span>appfuzz</span>
+    <span>Automatic review for WebAssembly apps.</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Copy button.
+  document.querySelectorAll('.copy').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var t = document.getElementById(b.dataset.copy).textContent.replace(/^\$\s*/, '');
+      (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(function () {
+        b.textContent = 'Copied';
+        setTimeout(function () { b.textContent = 'Copy'; }, 1500);
+      }, function () {});
+    });
+  });
+
+  // Hero bars grow from zero, once on load and on replay.
+  var bars = document.getElementById('bars');
+  var replay = document.getElementById('replay-bars');
+  function grow() {
+    if (reduce) return;
+    bars.classList.remove('go');
+    void bars.offsetWidth;
+    bars.classList.add('go');
+  }
+  if (reduce) { replay.hidden = true; } else { bars.classList.add('anim'); }
+  replay.addEventListener('click', grow);
+  setTimeout(grow, 300);
+
+  // Tab groups: each [role=tablist] controls its own panels.
+  document.querySelectorAll('[role=tablist]').forEach(function (list) {
+    var tabs = Array.prototype.slice.call(list.querySelectorAll('[role=tab]'));
+    var vertical = list.getAttribute('aria-orientation') === 'vertical';
+    function select(tab) {
+      tabs.forEach(function (t) {
+        var on = t === tab;
+        t.setAttribute('aria-selected', on);
+        t.tabIndex = on ? 0 : -1;
+        document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+      });
+      if (tab.id === 'ht-db') grow();
+    }
+    tabs.forEach(function (t, k) {
+      t.addEventListener('click', function () { select(t); });
+      t.addEventListener('keydown', function (e) {
+        var fwd = vertical ? 'ArrowDown' : 'ArrowRight', back = vertical ? 'ArrowUp' : 'ArrowLeft';
+        var d = e.key === fwd ? 1 : e.key === back ? -1 : 0;
+        if (!d) return;
+        e.preventDefault();
+        var nt = tabs[(k + d + tabs.length) % tabs.length];
+        select(nt); nt.focus();
+      });
+    });
+  });
+})();
+</script>
+
+</body>
+</html>

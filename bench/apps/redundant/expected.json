@@ -1,0 +1,16 @@
+{
+  "app": "redundant",
+  "bug": "loads the same setting once per item",
+  "expect": [
+    {
+      "kind": "redundant_calls",
+      "min": "warn"
+    }
+  ],
+  "allow": [
+    "n_plus_1",
+    "over_budget",
+    "serial_chain",
+    "slow_host_sensitivity"
+  ]
+}

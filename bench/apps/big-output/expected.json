@@ -1,0 +1,17 @@
+{
+  "app": "big-output",
+  "bug": "renders ?rows rows, up to a million",
+  "expect": [
+    {
+      "kind": "big_output",
+      "min": "warn"
+    }
+  ],
+  "allow": [
+    "input_amplification",
+    "output_amplification",
+    "over_budget",
+    "hang",
+    "cpu_blowup"
+  ]
+}

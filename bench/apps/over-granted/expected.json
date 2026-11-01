@@ -1,0 +1,11 @@
+{
+  "app": "over-granted",
+  "bug": "is granted the store but never uses it",
+  "expect": [
+    {
+      "kind": "unused_grant",
+      "min": "info"
+    }
+  ],
+  "allow": []
+}

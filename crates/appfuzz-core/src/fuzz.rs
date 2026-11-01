@@ -1,0 +1,1342 @@
+//! The fuzz suite: one engine, every per-run detector on every run.
+//!
+//! A corpus of inputs (request + host plan + clock + seed). An input is
+//! kept when its run shows new behaviour (features: call sites reached,
+//! host-call order, result shapes, call-count buckets, output tags, URLs,
+//! outcome, panic location) or a new maximum of a resource (calls per host
+//! function, fuel, memory, output bytes, bytes sent to the host, virtual
+//! time, cost, call depth). Stages mutate a parent from the corpus; a
+//! scheduler favours the stages that keep finding things.
+//!
+//! One worker per thread, each with its own random generator: it picks a
+//! parent and a stage from the shared state, then mutates, runs, detects
+//! and extracts features on its own, and takes the lock again only to
+//! admit the result. With one job a campaign is deterministic; with more,
+//! the order of admissions depends on timing (each run still replays).
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use wasmtime::component::Type;
+
+use crate::detect::{Finding, panic_text, per_run};
+use crate::harness::{App, field, fn_key_eq, set_clock_fields};
+use crate::check::Property;
+use crate::metamorphic;
+use crate::par::{self, Runner};
+use crate::plan::{FnPlan, Plan, Response};
+use crate::probe::EDGE_TIMES;
+use crate::record::{OutcomeKind, RunRecord, RunSpec};
+use crate::scale::{self, compare_constants, dictionary, request_knobs, steady};
+use crate::statics::Statics;
+use crate::urls;
+use crate::value::GenOpts;
+use crate::wit::ImportKind;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    /// The example request, and corpus entries from earlier campaigns.
+    Seed,
+    /// Follow links and forms in the app's own output.
+    Crawl,
+    /// Change one request field (numbers, strings, `[key, value]` lists).
+    Request,
+    /// Change what one host function returns (from its WIT type).
+    HostValues,
+    /// Make a host function return a long list.
+    GrowList,
+    /// Make a request field big (number or length).
+    GrowInput,
+    /// Make one host call fail (`err`, `none`, or a trap).
+    Fault,
+    /// Duplicate, drop or reorder the elements of one host result.
+    Permute,
+    /// Another clock or seed.
+    Env,
+    /// Request of one entry with the host plan of another.
+    Splice,
+    /// Pair checks of a new kept run (`metamorphic`); never picked.
+    Check,
+}
+
+/// Longest list the permute stage hands back.
+const MAX_PERMUTED: usize = 64;
+
+const STAGES: [Stage; 9] =
+    [Stage::Crawl, Stage::Request, Stage::HostValues, Stage::GrowList, Stage::GrowInput, Stage::Fault, Stage::Permute, Stage::Env, Stage::Splice];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Entry {
+    pub spec: RunSpec,
+    pub run: String,
+    pub stage: Stage,
+    /// Why it was kept: `features 4` or `max calls …`.
+    pub reasons: Vec<String>,
+    #[serde(skip)]
+    record: Option<Arc<RunRecord>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Corpus {
+    pub component: String,
+    pub entries: Vec<Entry>,
+}
+
+impl Corpus {
+    pub fn path(state: &std::path::Path, component: &str) -> std::path::PathBuf {
+        state.join("corpus").join(format!("{component}.json"))
+    }
+    pub fn load(state: &std::path::Path, component: &str) -> Corpus {
+        std::fs::read(Self::path(state, component))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or(Corpus { component: component.to_string(), entries: vec![] })
+    }
+    pub fn save(&self, state: &std::path::Path) -> anyhow::Result<()> {
+        let p = Self::path(state, &self.component);
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        std::fs::write(p, serde_json::to_vec(self)?)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Until {
+    /// Run the whole budget.
+    Budget,
+    /// Stop at the first finding not seen before.
+    NewFinding,
+    /// Stop when nothing new was kept for `plateau` runs.
+    Plateau,
+}
+
+#[derive(Debug, Clone)]
+pub struct FuzzOpts {
+    pub runs: Option<u64>,
+    pub time: Option<Duration>,
+    pub until: Until,
+    pub seed: u64,
+    /// Runs without a new corpus entry that count as a plateau.
+    pub plateau: u64,
+    pub max_corpus: usize,
+    pub dict_limit: usize,
+    /// Seed with the request keys and modes `amplify` would find.
+    pub discover: bool,
+    /// Checked on every run like a detector (`check_failed`).
+    pub property: Option<Property>,
+    /// Stop at the first new finding of this kind.
+    pub stop_on: Option<String>,
+}
+
+impl Default for FuzzOpts {
+    fn default() -> Self {
+        FuzzOpts { runs: None, time: Some(Duration::from_secs(60)), until: Until::Budget, seed: 1, plateau: 2000, max_corpus: 300, dict_limit: 200, discover: true, property: None, stop_on: None }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct StageStat {
+    pub runs: u64,
+    pub kept: u64,
+    pub findings: u64,
+    /// Runs whose input did not fit the types (wasted).
+    pub invalid: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Maximum {
+    pub metric: String,
+    pub value: u64,
+    pub run: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FuzzReport {
+    pub runs: u64,
+    /// Runs spent finding request keys and modes before fuzzing.
+    pub discovery_runs: u64,
+    /// Request keys the app reads (mutated more often).
+    pub keys: Vec<String>,
+    /// Modes found up front (seeded into the corpus).
+    pub modes: Vec<String>,
+    pub elapsed_ms: u64,
+    pub stopped: String,
+    pub corpus: usize,
+    pub kept: u64,
+    pub features: usize,
+    pub stages: BTreeMap<Stage, StageStat>,
+    pub maxima: Vec<Maximum>,
+    /// Findings this campaign saw for the first time.
+    pub findings: Vec<Finding>,
+    pub last_new_at_run: u64,
+    pub jobs: usize,
+}
+
+static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<([a-zA-Z][a-zA-Z0-9-]*)\b([^>]*)>").unwrap());
+static ATTR_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"([a-zA-Z_:@][-a-zA-Z0-9_:.@]*)\s*(?:=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?"#).unwrap());
+static INPUT_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"<(?:input|select|textarea|button)\b[^>]*\bname\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))"#).unwrap());
+static PANIC_AT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"panicked at ([^\s:]+:\d+)").unwrap());
+
+/// Shape of a value, two levels deep: `ok([..])`, `err(s)`, `[]`.
+fn shape(v: &Value, depth: u32) -> String {
+    match v {
+        Value::Null => "null".into(),
+        Value::Bool(_) => "b".into(),
+        Value::Number(_) => "n".into(),
+        Value::String(s) if s.is_empty() => "\"\"".into(),
+        Value::String(_) => "s".into(),
+        Value::Array(a) if a.is_empty() => "[]".into(),
+        Value::Array(_) => "[..]".into(),
+        Value::Object(o) if o.len() == 1 && depth > 0 => {
+            let (k, x) = o.iter().next().expect("one");
+            match k.as_str() {
+                "ok" | "err" | "some" => format!("{k}({})", shape(x, depth - 1)),
+                _ => "{..}".into(),
+            }
+        }
+        Value::Object(_) => "{..}".into(),
+    }
+}
+
+fn bucket(n: u32) -> u32 {
+    match n {
+        0..=3 => n,
+        4..=7 => 4,
+        8..=15 => 8,
+        16..=31 => 16,
+        32..=127 => 32,
+        _ => 128,
+    }
+}
+
+/// What a run did, as a set of features.
+pub fn features(r: &RunRecord, st: &Statics, app: &App) -> BTreeSet<String> {
+    let mut f = BTreeSet::new();
+    f.insert(format!("outcome:{:?}", r.outcome.kind));
+    if let Some(p) = panic_text(&r.stderr).and_then(|p| PANIC_AT.captures(&p).map(|c| c[1].to_string())) {
+        f.insert(format!("panic:{p}"));
+    }
+    let mut prev = String::from("^");
+    for e in &r.events {
+        match st.app_frame(&e.stack) {
+            Some(fr) => f.insert(format!("site:{}:{:x}", fr.module, fr.offset.unwrap_or(0))),
+            None => f.insert(format!("call:{}", e.func)),
+        };
+        if prev != e.func {
+            f.insert(format!("seq:{prev}>{}", e.func));
+            prev = e.func.clone();
+        }
+        let res = match (&e.result, &e.trap) {
+            (_, Some(_)) => "trap".to_string(),
+            (Some(v), _) => shape(v, 2),
+            (None, _) => "-".into(),
+        };
+        f.insert(format!("res:{}:{res}", e.func));
+    }
+    for (func, n) in r.call_counts() {
+        f.insert(format!("count:{func}:{}", bucket(n)));
+    }
+    let out = app.manifest.entry.as_ref().filter(|e| fn_key_eq(&e.export, &r.spec.export)).map(|e| &e.output);
+    if let Some(result) = &r.result {
+        let body = out.and_then(|o| o.body.as_deref()).and_then(|p| field(result, p));
+        match body {
+            Some(Value::String(b)) => {
+                for t in TAG.captures_iter(b).take(500) {
+                    let name = t[1].to_ascii_lowercase();
+                    for a in ATTR_NAME.captures_iter(&t[2]) {
+                        f.insert(format!("attr:{name}.{}", a[1].to_ascii_lowercase()));
+                    }
+                    f.insert(format!("tag:{name}"));
+                }
+            }
+            _ => {
+                f.insert(format!("ret:{}", shape(result, 2)));
+            }
+        }
+        if let Some(s) = out.and_then(|o| o.status.as_deref()).and_then(|p| field(result, p)) {
+            f.insert(format!("status:{s}"));
+        }
+    }
+    for u in urls::extract_output(r, &app.manifest).into_iter().take(100) {
+        f.insert(format!("url:{} {}", u.method, u.pattern));
+    }
+    if r.totals.clock_reads > 0 {
+        f.insert("clock".into());
+    }
+    if r.totals.random_bytes > 0 {
+        f.insert("random".into());
+    }
+    f
+}
+
+/// Resource measures of a run; the corpus keeps a new maximum of any.
+pub fn metrics(r: &RunRecord) -> Vec<(String, u64)> {
+    let mut m: Vec<(String, u64)> = r.call_counts().into_iter().map(|(f, n)| (format!("calls {f}"), n as u64)).collect();
+    let arg_bytes: usize = r.events.iter().map(|e| serde_json::to_string(&e.args).map(|s| s.len()).unwrap_or(0)).sum();
+    let out_bytes = r.result.as_ref().map(|v| v.to_string().len()).unwrap_or(0);
+    let depth = r.events.iter().map(|e| e.stack.len()).max().unwrap_or(0);
+    m.extend([
+        ("fuel".to_string(), r.totals.fuel),
+        ("peak_memory".into(), r.totals.peak_memory),
+        ("output_bytes".into(), out_bytes as u64),
+        ("host_arg_bytes".into(), arg_bytes as u64),
+        ("virtual_ns".into(), r.totals.virtual_ns),
+        ("cost".into(), r.totals.cost),
+        ("call_depth".into(), depth as u64),
+    ]);
+    m
+}
+
+/// A new maximum must beat the old one by 5 % (and by at least 1).
+fn beats(new: u64, old: u64) -> bool {
+    new > old && new - old >= (old / 20).max(1)
+}
+
+/// What all workers share: the corpus and what it has covered.
+struct State {
+    corpus: Vec<Arc<Entry>>,
+    /// Times each corpus entry was picked as a parent.
+    picked: Vec<u32>,
+    features: BTreeSet<String>,
+    /// metric → (value, run id of the entry holding it).
+    maxima: BTreeMap<String, (u64, String)>,
+    stages: BTreeMap<Stage, StageStat>,
+    known: BTreeSet<String>,
+    new_findings: Vec<Finding>,
+    /// Runs admitted, and runs handed to a worker.
+    runs: u64,
+    started: u64,
+    kept: u64,
+    last_new: u64,
+    max_corpus: usize,
+    stopped: Option<&'static str>,
+    /// Call shapes whose runs had their pair checks.
+    checked: BTreeSet<String>,
+}
+
+/// A run and what the worker derived from it.
+struct Executed {
+    r: Arc<RunRecord>,
+    findings: Vec<Finding>,
+    features: BTreeSet<String>,
+    metrics: Vec<(String, u64)>,
+}
+
+/// The unlocked half of an evaluation: run, detectors, features.
+fn execute(app: &App, st: &Statics, spec: &RunSpec, prop: Option<&Property>) -> Executed {
+    let r = Arc::new(app.run(spec));
+    if matches!(r.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) {
+        return Executed { r, findings: vec![], features: BTreeSet::new(), metrics: vec![] };
+    }
+    let mut findings = per_run(&r, &app.manifest);
+    findings.extend(prop.and_then(|p| p.finding(&r, &app.manifest)));
+    let features = features(&r, st, app);
+    let metrics = if r.outcome.kind == OutcomeKind::Ok { metrics(&r) } else { vec![] };
+    Executed { r, findings, features, metrics }
+}
+
+fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl State {
+    /// Keeps a run if it is new in any way, and collects its findings.
+    /// Returns the run, whether it was kept, and the findings new in it.
+    fn admit(&mut self, spec: RunSpec, stage: Stage, ex: Executed) -> (Arc<RunRecord>, bool, Vec<Finding>) {
+        let Executed { r, findings, features: feats, metrics } = ex;
+        self.runs += 1;
+        let stat = self.stages.entry(stage).or_default();
+        stat.runs += 1;
+        if matches!(r.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) {
+            stat.invalid += 1;
+            return (r, false, vec![]);
+        }
+        let mut found: Vec<Finding> = Vec::new();
+        for f in findings {
+            if self.known.insert(f.id.clone()) {
+                found.push(f);
+            }
+        }
+        stat.findings += found.len() as u64;
+        let mut reasons = Vec::new();
+        let fresh = feats.iter().filter(|f| !self.features.contains(*f)).count();
+        if fresh > 0 {
+            reasons.push(format!("features {fresh}"));
+            self.features.extend(feats);
+        }
+        for (m, v) in metrics {
+            match self.maxima.get(&m) {
+                Some((old, _)) if !beats(v, *old) => {}
+                old => {
+                    if old.is_some() {
+                        reasons.push(format!("max {m} {v}"));
+                    }
+                    self.maxima.insert(m, (v, r.id.clone()));
+                }
+            }
+        }
+        // Check runs are artificial (pinned, slowed): never parents.
+        let keep = (!reasons.is_empty() && stage != Stage::Check) || stage == Stage::Seed;
+        if keep {
+            stat.kept += 1;
+            if stage != Stage::Seed {
+                self.kept += 1;
+                self.last_new = self.runs;
+            }
+            self.corpus.push(Arc::new(Entry { spec, run: r.id.clone(), stage, reasons, record: Some(r.clone()) }));
+            self.picked.push(0);
+            self.prune();
+        }
+        if !found.is_empty() {
+            self.last_new = self.runs;
+        }
+        self.new_findings.extend(found.iter().cloned());
+        (r, keep, found)
+    }
+
+    /// Drops the oldest entry that holds no maximum once the corpus is full.
+    fn prune(&mut self) {
+        if self.corpus.len() <= self.max_corpus {
+            return;
+        }
+        let holders: BTreeSet<&String> = self.maxima.values().map(|(_, r)| r).collect();
+        if let Some(i) = (1..self.corpus.len()).find(|&i| !holders.contains(&self.corpus[i].run)) {
+            self.corpus.remove(i);
+            self.picked.remove(i);
+        }
+    }
+
+    /// Why to stop, if it is time.
+    fn stop(&self, opts: &FuzzOpts, started: Instant) -> Option<&'static str> {
+        if let Some(s) = self.stopped {
+            return Some(s);
+        }
+        if opts.runs.is_some_and(|n| self.started >= n) {
+            return Some("runs");
+        }
+        if opts.time.is_some_and(|t| started.elapsed() >= t) {
+            return Some("time");
+        }
+        if let Some(k) = &opts.stop_on
+            && self.new_findings.iter().any(|f| f.kind == *k)
+        {
+            return Some("check_failed");
+        }
+        if opts.until == Until::NewFinding && !self.new_findings.is_empty() {
+            return Some("new_finding");
+        }
+        if opts.until == Until::Plateau && self.runs - self.last_new >= opts.plateau {
+            return Some("plateau");
+        }
+        None
+    }
+
+    fn pick_parent(&mut self, rng: &mut StdRng) -> usize {
+        let holders: Vec<usize> = {
+            let h: BTreeSet<&String> = self.maxima.values().map(|(_, r)| r).collect();
+            (0..self.corpus.len()).filter(|i| h.contains(&self.corpus[*i].run)).collect()
+        };
+        // Run time in ms, bucketed by powers of two: a 4 s input should not
+        // breed most of the campaign just because it holds a maximum.
+        let slow = |i: usize| self.corpus[i].record.as_ref().map_or(0, |r| 64 - (r.totals.wall_us / 1000).leading_zeros());
+        let i = if !holders.is_empty() && rng.random_bool(0.3) {
+            // Two random holders; keep the faster one.
+            let a = holders[rng.random_range(0..holders.len())];
+            let b = holders[rng.random_range(0..holders.len())];
+            if slow(a) <= slow(b) { a } else { b }
+        } else {
+            // Two random picks; keep the faster, then the less-picked one.
+            let a = rng.random_range(0..self.corpus.len());
+            let b = rng.random_range(0..self.corpus.len());
+            let cost = |i: usize| (slow(i), self.picked[i]);
+            if cost(a) <= cost(b) { a } else { b }
+        };
+        self.picked[i] += 1;
+        i
+    }
+
+    fn pick_stage(&self, rng: &mut StdRng) -> Stage {
+        let w: Vec<f64> = STAGES
+            .iter()
+            .map(|s| {
+                let st = self.stages.get(s).cloned().unwrap_or_default();
+                (1.0 + (st.kept + 3 * st.findings) as f64) / (5.0 + st.runs as f64) + 0.02
+            })
+            .collect();
+        let total: f64 = w.iter().sum();
+        let mut x = rng.random_range(0.0..total);
+        for (s, w) in STAGES.iter().zip(w) {
+            if x < w {
+                return *s;
+            }
+            x -= w;
+        }
+        Stage::Request
+    }
+}
+
+/// Makes inputs; one per worker, with its own random generator.
+struct Mutator<'a> {
+    app: &'a App,
+    words: &'a [String],
+    consts: &'a [i64],
+    keys: &'a [String],
+    /// Platform functions with their result type.
+    funcs: &'a [(String, Type)],
+    rng: StdRng,
+}
+
+impl Mutator<'_> {
+    fn pick<'b, T>(&mut self, items: &'b [T]) -> Option<&'b T> {
+        (!items.is_empty()).then(|| &items[self.rng.random_range(0..items.len())])
+    }
+
+    fn word(&mut self) -> String {
+        let w = self.words;
+        self.pick(w).cloned().unwrap_or_else(|| "x".into())
+    }
+
+    fn number(&mut self, old: Option<i64>) -> i64 {
+        const EDGES: [i64; 22] =
+            [0, 1, 2, 3, 7, 10, 31, 32, 63, 64, 100, 127, 128, 255, 256, 1000, 1024, 4096, 65535, 65536, 2_147_483_647, 4_294_967_295];
+        let c = self.consts;
+        match (self.rng.random_range(0..4u8), old) {
+            (0, Some(n)) => *self.pick(&[n + 1, n - 1, n * 2, n * 10, n / 2]).expect("non-empty"),
+            (1, _) if !c.is_empty() => {
+                let k = *self.pick(c).expect("non-empty");
+                *self.pick(&[k, k - 1, k + 1]).expect("non-empty")
+            }
+            (2, _) => self.rng.random_range(0..1000),
+            _ => *self.pick(&EDGES).expect("non-empty"),
+        }
+    }
+
+    fn text(&mut self) -> String {
+        const ODD: [&str; 13] = ["", "Zoë", "東京", "👩‍💻", "<b>x</b>", "\"'<>&", "../..", "%00", "2028-02-29", "-1", "a b", "\u{202e}x", "a\r\nb"];
+        match self.rng.random_range(0..7u8) {
+            0 | 1 => self.word(),
+            6 => crate::output::canary(self.rng.random_range(0..1u64 << 32)),
+            2 => {
+                let n = *self.pick(&scale::LENGTH_SIZES).expect("non-empty");
+                "a".repeat(n as usize)
+            }
+            3 => format!("{} {}", self.word(), self.word()),
+            4 => self.number(None).to_string(),
+            _ => self.pick(&ODD).expect("non-empty").to_string(),
+        }
+    }
+
+    /// Mutates one node of the request.
+    fn mutate_request(&mut self, args: &mut [Value]) -> bool {
+        let mut ptrs = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            nodes(a, format!("/{i}"), &mut ptrs);
+        }
+        let Some(p) = self.pick(&ptrs).cloned() else { return false };
+        let mut root = Value::Array(args.to_vec());
+        let Some(node) = root.pointer_mut(&p) else { return false };
+        let old = node.clone();
+        let new = match &old {
+            Value::Number(n) => {
+                let v = self.number(n.as_i64());
+                json!(if n.as_i64().is_some_and(|x| x >= 0) { v.max(0) } else { v })
+            }
+            Value::Bool(b) => json!(!b),
+            Value::String(s) if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) => {
+                json!(self.number(s.parse().ok()).max(0).to_string())
+            }
+            Value::String(_) => json!(self.text()),
+            Value::Array(a) if is_pairs(a) => {
+                let mut a = a.clone();
+                match self.rng.random_range(0..5u8) {
+                    0..=2 => {
+                        let k = self.word();
+                        let v = if self.rng.random_bool(0.5) { self.number(None).to_string() } else { self.text() };
+                        a.push(json!([k, v]));
+                    }
+                    3 if !a.is_empty() => {
+                        let i = self.rng.random_range(0..a.len());
+                        a.remove(i);
+                    }
+                    _ if !a.is_empty() => {
+                        let i = self.rng.random_range(0..a.len());
+                        let x = a[i].clone();
+                        a.push(x);
+                    }
+                    _ => return false,
+                }
+                Value::Array(a)
+            }
+            Value::Array(a) if !a.is_empty() => {
+                let mut a = a.clone();
+                let i = self.rng.random_range(0..a.len());
+                match self.rng.random_range(0..3u8) {
+                    0 => {
+                        a.remove(i);
+                    }
+                    1 => {
+                        let x = a[i].clone();
+                        a.push(x);
+                    }
+                    _ => a = a.iter().chain(a.iter()).cloned().collect(),
+                }
+                Value::Array(a)
+            }
+            _ => return false,
+        };
+        *node = new;
+        if let Value::Array(v) = root {
+            args.clone_from_slice(&v);
+        }
+        true
+    }
+
+    fn gen_opts(&mut self, base: GenOpts) -> GenOpts {
+        let mut o = base;
+        let p = 0.4;
+        if self.rng.random_bool(p) {
+            o.list_len = Some(*self.pick(&[0usize, 1, 2, 3, 5, 8]).expect("non-empty"));
+        }
+        if self.rng.random_bool(p) {
+            let w = self.word();
+            let modes = ["words", "empty", "long", "unicode", "html", "utf8-3", "utf8-3o", "canary"];
+            o.strings = Some(if self.rng.random_bool(0.3) { format!("={w}") } else { self.pick(&modes).expect("non-empty").to_string() });
+        }
+        if self.rng.random_bool(p) {
+            let c = self.consts;
+            o.numbers = match self.pick(c) {
+                Some(c) if self.rng.random_bool(0.5) => Some(format!("={c}")),
+                _ => Some(self.pick(&["small", "edge"]).expect("non-empty").to_string()),
+            };
+        }
+        if self.rng.random_bool(p) {
+            o.options = Some(self.pick(&["some", "none", "mixed"]).expect("non-empty").to_string());
+        }
+        if self.rng.random_bool(p) {
+            o.results = Some(self.pick(&["ok", "err", "mixed"]).expect("non-empty").to_string());
+        }
+        if self.rng.random_bool(p) {
+            o.seed = Some(self.rng.random_range(0..1_000_000));
+        }
+        o
+    }
+
+    fn current_opts(plan: &Plan, key: &str) -> GenOpts {
+        plan.0
+            .get(key)
+            .and_then(|p| p.response.generate.clone())
+            .or_else(|| plan.0.get("_defaults").and_then(|p| p.response.generate.clone()))
+            .unwrap_or_default()
+    }
+
+    fn set_generate(plan: &mut Plan, key: &str, opts: GenOpts) {
+        let fp = plan.0.entry(key.to_string()).or_default();
+        fp.response = Response { generate: Some(opts), latency_ms: fp.response.latency_ms, ..Default::default() };
+    }
+
+    /// Applies one stage to a copy of the parent (`other` is the second
+    /// parent of a splice). None if it does not apply.
+    fn mutate(&mut self, stage: Stage, parent: &Entry, other: Option<&Entry>) -> Option<RunSpec> {
+        let mut spec = parent.spec.clone();
+        let rec = parent.record.clone();
+        match stage {
+            Stage::Seed | Stage::Check => return None,
+            Stage::Request if !self.keys.is_empty() && self.rng.random_bool(0.4) => {
+                // A key the app is known to read, with a new value.
+                let k = self.pick(self.keys)?.clone();
+                let v = match self.rng.random_range(0..3u8) {
+                    0 => self.number(None).to_string(),
+                    1 => self.word(),
+                    _ => self.text(),
+                };
+                let (i, path) = scale::split_arg(&k);
+                scale::set_text(spec.args.get_mut(i)?, path, &v).ok()?;
+            }
+            Stage::Request => {
+                let n = 1 + self.rng.random_range(0..2u8);
+                let mut any = false;
+                for _ in 0..n {
+                    any |= self.mutate_request(&mut spec.args);
+                }
+                any.then_some(())?;
+            }
+            Stage::HostValues => {
+                let (key, _) = self.pick(self.funcs)?.clone();
+                let o = self.gen_opts(Self::current_opts(&spec.plan, &key));
+                Self::set_generate(&mut spec.plan, &key, o);
+            }
+            Stage::GrowList => {
+                let fs: Vec<_> = self.funcs.iter().filter(|(_, t)| has_list(t)).cloned().collect();
+                let (key, _) = self.pick(&fs)?.clone();
+                let mut o = Self::current_opts(&spec.plan, &key);
+                // Bigger lists are `amplify`'s job; here they would only slow runs.
+                o.list_len = Some(*self.pick(&[4usize, 8, 16, 32]).expect("non-empty"));
+                Self::set_generate(&mut spec.plan, &key, o);
+            }
+            Stage::GrowInput => {
+                let (knobs, _) = request_knobs(&spec.args);
+                let k = self.pick(&knobs)?.clone();
+                let sizes = scale::default_sizes(&k);
+                let n = *self.pick(&sizes[sizes.len() / 2..])?;
+                spec = scale::apply(self.app, &spec, &k, n).ok()?;
+            }
+            Stage::Fault => {
+                let r = rec?;
+                let e = self.pick(&r.events)?.clone();
+                let ty = self.funcs.iter().find(|(k, _)| *k == e.func).map(|(_, t)| t.clone())?;
+                let resp = match &ty {
+                    Type::Result(_) => Response { generate: Some(GenOpts { results: Some("err".into()), ..Default::default() }), ..Default::default() },
+                    Type::Option(_) => Response { generate: Some(GenOpts { options: Some("none".into()), ..Default::default() }), ..Default::default() },
+                    _ => Response { trap: Some("appfuzz: injected fault".into()), ..Default::default() },
+                };
+                spec.plan.0.entry(e.func.clone()).or_default().on_call.insert(e.call.to_string(), resp);
+            }
+            Stage::Permute => {
+                let r = rec?;
+                let with_list: Vec<_> = r.events.iter().filter(|e| e.result.as_ref().is_some_and(|v| first_list(v).is_some_and(|a| !a.is_empty()))).cloned().collect();
+                let e = self.pick(&with_list)?.clone();
+                let mut v = e.result.clone()?;
+                let a = first_list_mut(&mut v)?;
+                match self.rng.random_range(0..4u8) {
+                    0 => {
+                        let i = self.rng.random_range(0..a.len());
+                        let x = a[i].clone();
+                        a.insert(i, x);
+                    }
+                    1 => a.reverse(),
+                    // Doubling compounds over generations: cap it.
+                    2 if a.len() <= MAX_PERMUTED / 2 => {
+                        let c = a.clone();
+                        a.extend(c);
+                    }
+                    _ => {
+                        let i = self.rng.random_range(0..a.len());
+                        a.remove(i);
+                    }
+                }
+                a.truncate(MAX_PERMUTED);
+                spec.plan.0.entry(e.func.clone()).or_default().on_call.insert(e.call.to_string(), Response { ret: Some(v), ..Default::default() });
+            }
+            Stage::Env => {
+                if self.rng.random_bool(0.5) {
+                    let (t, _) = *self.pick(EDGE_TIMES)?;
+                    spec.now = t.to_string();
+                } else {
+                    let y = self.rng.random_range(2020..2040);
+                    let m = self.rng.random_range(1..=12);
+                    let d = self.rng.random_range(1..=28);
+                    let h = self.rng.random_range(0..24);
+                    let mi = self.rng.random_range(0..60);
+                    spec.now = format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:00");
+                }
+                if self.rng.random_bool(0.5) {
+                    spec.seed = self.rng.random_range(0..1_000_000);
+                }
+                let entry = self.app.manifest.entry.as_ref().filter(|e| fn_key_eq(&e.export, &spec.export));
+                if let (Some(e), Some(a)) = (entry, spec.args.first_mut()) {
+                    set_clock_fields(a, &e.fields, &spec.now);
+                }
+            }
+            Stage::Splice => {
+                let other = other?;
+                if self.rng.random_bool(0.5) {
+                    spec.plan = other.spec.plan.clone();
+                } else {
+                    spec.args = other.spec.args.clone();
+                }
+            }
+            Stage::Crawl => {
+                let r = rec?;
+                let refs: Vec<_> = urls::extract_output(&r, &self.app.manifest).into_iter().filter(|u| u.kind == "same_host").collect();
+                let u = self.pick(&refs)?.clone();
+                let inputs = r.result.as_ref().map(form_inputs).unwrap_or_default();
+                let words: Vec<String> = (0..inputs.len()).map(|_| if self.rng.random_bool(0.5) { self.number(None).to_string() } else { self.word() }).collect();
+                let req = spec.args.first_mut()?;
+                if !crawl_into(req, &self.app.manifest.entry.as_ref()?.fields, &u.url, &u.method, &inputs, &words) {
+                    return None;
+                }
+            }
+        }
+        Some(spec)
+    }
+}
+
+/// JSON pointers of every node worth mutating.
+fn nodes(v: &Value, ptr: String, out: &mut Vec<String>) {
+    match v {
+        Value::Object(o) => {
+            for (k, x) in o {
+                nodes(x, format!("{ptr}/{}", k.replace('~', "~0").replace('/', "~1")), out);
+            }
+        }
+        Value::Array(a) => {
+            out.push(ptr.clone());
+            if is_pairs(a) {
+                for (i, _) in a.iter().enumerate() {
+                    out.push(format!("{ptr}/{i}/1"));
+                }
+            } else {
+                for (i, x) in a.iter().enumerate() {
+                    nodes(x, format!("{ptr}/{i}"), out);
+                }
+            }
+        }
+        _ => out.push(ptr),
+    }
+}
+
+/// `[["k","v"], …]` (an empty list counts: query and form start empty).
+fn is_pairs(a: &[Value]) -> bool {
+    a.iter().all(|p| p.as_array().is_some_and(|p| p.len() == 2 && p[0].is_string()))
+}
+
+fn has_list(t: &Type) -> bool {
+    match t {
+        Type::List(_) => true,
+        Type::Option(o) => has_list(&o.ty()),
+        Type::Result(r) => r.ok().is_some_and(|t| has_list(&t)),
+        _ => false,
+    }
+}
+
+fn first_list(v: &Value) -> Option<&Vec<Value>> {
+    match v {
+        Value::Array(a) => Some(a),
+        Value::Object(o) if o.len() == 1 => o.values().next().and_then(first_list),
+        _ => None,
+    }
+}
+
+fn first_list_mut(v: &mut Value) -> Option<&mut Vec<Value>> {
+    match v {
+        Value::Array(a) => Some(a),
+        Value::Object(o) if o.len() == 1 => o.values_mut().next().and_then(first_list_mut),
+        _ => None,
+    }
+}
+
+/// Names of form inputs in a result's strings.
+pub(crate) fn form_inputs(v: &Value) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::String(s) => {
+                for c in INPUT_NAME.captures_iter(s) {
+                    if let Some(m) = c.get(1).or(c.get(2)).or(c.get(3)) {
+                        out.insert(m.as_str().to_string());
+                    }
+                }
+            }
+            Value::Array(a) => stack.extend(a),
+            Value::Object(o) => stack.extend(o.values()),
+            _ => {}
+        }
+    }
+    out.into_iter().take(20).collect()
+}
+
+/// Request fields by role: `http.path`, `http.query`, `http.method`,
+/// `http.form`; without roles, fields named `path`, `query`, `method`, `form`.
+fn role_path(fields: &BTreeMap<String, String>, req: &Value, role: &str) -> Option<String> {
+    fields
+        .iter()
+        .find(|(_, r)| r.as_str() == format!("http.{role}"))
+        .map(|(p, _)| p.clone())
+        .or_else(|| field(req, role).is_some().then(|| role.to_string()))
+}
+
+/// The functions a run calls, in order, repeats collapsed.
+fn call_shape(r: &RunRecord) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for e in &r.events {
+        if out.last() != Some(&e.func.as_str()) {
+            out.push(&e.func);
+        }
+    }
+    format!("{}\0{}", r.spec.export, out.join("\0"))
+}
+
+/// Seeds that trace data flow: every free string of the request (and a
+/// pair for each key the app reads) set to a canary; and every host
+/// function returning canary strings.
+fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type)]) -> Vec<RunSpec> {
+    let mut out = Vec::new();
+    let entry = app.manifest.entry.as_ref().filter(|e| fn_key_eq(&e.export, &base.export));
+    let fixed: Vec<&String> = entry
+        .map(|e| e.fields.iter().filter(|(_, r)| r.starts_with("clock.") || r.as_str() == "http.path" || r.as_str() == "http.method").map(|(p, _)| p).collect())
+        .unwrap_or_default();
+    let mut req = base.clone();
+    let mut n = 0u64;
+    if let Some(a) = req.args.first_mut() {
+        let mut ptrs = Vec::new();
+        nodes(a, String::new(), &mut ptrs);
+        let skip = |p: &str| {
+            let dotted = p.trim_start_matches('/').replace('/', ".");
+            fixed.iter().any(|f| dotted == **f || dotted.starts_with(&format!("{f}.")))
+                || ["path", "method"].contains(&dotted.as_str())
+        };
+        for p in ptrs {
+            if skip(&p) {
+                continue;
+            }
+            if let Some(v) = a.pointer_mut(&p)
+                && v.is_string()
+            {
+                n += 1;
+                *v = json!(crate::output::canary(n));
+            }
+        }
+        if let Some(q) = role_path(&entry.map(|e| e.fields.clone()).unwrap_or_default(), a, "query")
+            && let Some(Value::Array(pairs)) = crate::harness::field_mut(a, &q)
+        {
+            for k in keys {
+                if !pairs.iter().any(|p| p[0].as_str() == Some(k)) {
+                    n += 1;
+                    pairs.push(json!([k, crate::output::canary(n)]));
+                }
+            }
+        }
+    }
+    if n > 0 {
+        out.push(req);
+    }
+    let strings: Vec<&String> = funcs.iter().filter(|(_, t)| has_string(t)).map(|(k, _)| k).collect();
+    if !strings.is_empty() {
+        let mut s = base.clone();
+        for k in strings {
+            let o = Mutator::current_opts(&s.plan, k);
+            Mutator::set_generate(&mut s.plan, k, GenOpts { strings: Some("canary".into()), results: Some("ok".into()), options: Some("some".into()), list_len: Some(2), ..o });
+        }
+        out.push(s);
+    }
+    out
+}
+
+fn has_string(t: &Type) -> bool {
+    match t {
+        Type::String => true,
+        Type::List(l) => has_string(&l.ty()),
+        Type::Option(o) => has_string(&o.ty()),
+        Type::Result(r) => r.ok().is_some_and(|t| has_string(&t)),
+        Type::Record(r) => r.fields().any(|f| has_string(&f.ty)),
+        Type::Tuple(t) => t.types().any(|t| has_string(&t)),
+        _ => false,
+    }
+}
+
+/// Points the request at a URL the app linked to (and fills its form).
+pub(crate) fn crawl_into(req: &mut Value, fields: &BTreeMap<String, String>, url: &str, method: &str, inputs: &[String], values: &[String]) -> bool {
+    let full = if url.starts_with('/') { format!("http://app.invalid{url}") } else { url.to_string() };
+    let Ok(u) = url::Url::parse(&full) else { return false };
+    let mut changed = false;
+    if let Some(p) = role_path(fields, req, "path")
+        && let Some(slot) = crate::harness::field_mut(req, &p)
+        && slot.is_string()
+    {
+        *slot = json!(u.path());
+        changed = true;
+    }
+    if let Some(p) = role_path(fields, req, "query")
+        && let Some(slot) = crate::harness::field_mut(req, &p)
+        && slot.is_array()
+    {
+        *slot = Value::Array(u.query_pairs().map(|(k, v)| json!([k, v])).collect());
+        changed = true;
+    }
+    if let Some(p) = role_path(fields, req, "method")
+        && let Some(slot) = crate::harness::field_mut(req, &p)
+        && slot.is_string()
+    {
+        *slot = json!(method);
+        changed = true;
+    }
+    if method != "GET"
+        && let Some(p) = role_path(fields, req, "form")
+        && let Some(slot) = crate::harness::field_mut(req, &p)
+        && slot.is_array()
+    {
+        *slot = Value::Array(inputs.iter().zip(values).map(|(k, v)| json!([k, v])).collect());
+        changed = true;
+    }
+    changed
+}
+
+/// Sees every run with whether it was kept and the findings new in it.
+pub type OnRun<'a> = &'a (dyn Fn(&RunRecord, bool, &[Finding]) + Sync);
+
+/// Runs a campaign. `on_run(record, kept, new_findings)` sees every run so
+/// the caller can store kept runs and finding runs.
+pub fn fuzz(
+    app: &App,
+    base: &RunSpec,
+    prior: Vec<Entry>,
+    known_findings: BTreeSet<String>,
+    opts: &FuzzOpts,
+    on_run: OnRun,
+) -> anyhow::Result<(FuzzReport, Corpus)> {
+    let st = Statics::parse(&app.bytes)?;
+    let words = dictionary(&st, opts.dict_limit);
+    let consts = compare_constants(&st, 32);
+    let funcs: Vec<(String, Type)> = app
+        .imports
+        .iter()
+        .filter(|i| i.kind == ImportKind::Platform)
+        .flat_map(|i| i.funcs.iter())
+        .filter_map(|f| f.ty.results().next().map(|t| (f.key.clone(), t)))
+        .collect();
+    let fuel = app.manifest.limits.fuel.saturating_mul(2);
+    let state = Mutex::new(State {
+        corpus: Vec::new(),
+        picked: Vec::new(),
+        features: BTreeSet::new(),
+        maxima: BTreeMap::new(),
+        stages: BTreeMap::new(),
+        known: known_findings,
+        new_findings: Vec::new(),
+        runs: 0,
+        started: 0,
+        kept: 0,
+        last_new: 0,
+        max_corpus: opts.max_corpus,
+        stopped: None,
+        checked: BTreeSet::new(),
+    });
+    let started = Instant::now();
+    let jobs = par::jobs();
+    // Seeds: the example request as is, on the happy path, and earlier entries.
+    let steady_base = RunSpec { plan: steady(&base.plan), fuel: base.fuel.min(fuel), ..base.clone() };
+    let mut seeds = vec![base.clone(), steady_base.clone()];
+    let discovery_runs = std::sync::atomic::AtomicU64::new(0);
+    let mut modes = Vec::new();
+    let mut keys = Vec::new();
+    if opts.discover {
+        let counted = |s: &RunSpec| {
+            discovery_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            app.run(s)
+        };
+        let d = scale::discover(app, &steady_base, opts.dict_limit, &counted)?;
+        keys = d.keys;
+        for c in d.contexts {
+            modes.push(c.label);
+            seeds.push(c.spec);
+        }
+    }
+    seeds.extend(flow_seeds(app, &steady_base, &keys, &funcs));
+    seeds.extend(prior.into_iter().filter(|e| e.spec.component == app.hash && e.spec.export == base.export).map(|e| e.spec));
+    // Seeds run at once and are admitted in order.
+    for s in &mut seeds {
+        s.fuel = s.fuel.min(fuel);
+    }
+    // Pair checks of a kept run, once per call shape.
+    let check = |r: &RunRecord| {
+        if r.outcome.kind != OutcomeKind::Ok {
+            return;
+        }
+        let vs = metamorphic::variants(app, r);
+        // Longer lists show more (a hash map's order, a duplicate).
+        let longest = r.events.iter().filter_map(|e| e.result.as_ref().and_then(crate::detect::list_in)).map(Vec::len).max().unwrap_or(0);
+        let key = format!("{}\0{:?}\0{}", call_shape(r), vs.iter().map(|v| (v.change, &v.func)).collect::<Vec<_>>(), usize::BITS - longest.min(8).leading_zeros());
+        if !lock(&state).checked.insert(key) {
+            return;
+        }
+        for v in vs {
+            {
+                let mut s = lock(&state);
+                if s.stop(opts, started).is_some() {
+                    return;
+                }
+                s.started += 1;
+            }
+            let mut ex = execute(app, &st, &v.spec, opts.property.as_ref());
+            ex.findings.retain(|f| !metamorphic::expected(&v, f));
+            ex.findings.extend(metamorphic::compare(app, r, &v, &ex.r));
+            let (vr, keep, found) = lock(&state).admit(v.spec, Stage::Check, ex);
+            on_run(&vr, keep, &found);
+        }
+    };
+    let done = par::map(&seeds, |s| execute(app, &st, s, opts.property.as_ref()));
+    let mut kept_seeds = Vec::new();
+    for (spec, ex) in seeds.into_iter().zip(done) {
+        let (r, keep, found) = lock(&state).admit(spec, Stage::Seed, ex);
+        on_run(&r, keep, &found);
+        kept_seeds.push(r);
+    }
+    par::map(&kept_seeds, |r| check(r));
+    if lock(&state).corpus.is_empty() {
+        anyhow::bail!("the seed request does not run; check it with `appfuzz run`");
+    }
+    let worker = |i: usize| {
+        let mut m = Mutator { app, words: &words, consts: &consts, keys: &keys, funcs: &funcs, rng: StdRng::seed_from_u64(opts.seed.wrapping_add(i as u64 * 0x9e37_79b9_7f4a_7c15)) };
+        loop {
+            let (stage, parent, other) = {
+                let mut s = lock(&state);
+                if let Some(why) = s.stop(opts, started) {
+                    s.stopped = Some(why);
+                    return;
+                }
+                s.started += 1;
+                let p = s.pick_parent(&mut m.rng);
+                let stage = s.pick_stage(&mut m.rng);
+                let o = m.rng.random_range(0..s.corpus.len());
+                (stage, s.corpus[p].clone(), (o != p).then(|| s.corpus[o].clone()))
+            };
+            let Some(mut spec) = m.mutate(stage, &parent, other.as_deref()) else {
+                let mut s = lock(&state);
+                s.started -= 1;
+                s.stages.entry(stage).or_default();
+                continue;
+            };
+            // Sometimes stack a second, request-side change (havoc).
+            if m.rng.random_bool(0.2) {
+                m.mutate_request(&mut spec.args);
+            }
+            spec.fuel = spec.fuel.min(fuel);
+            let ex = execute(app, &st, &spec, opts.property.as_ref());
+            let (r, keep, found) = lock(&state).admit(spec, stage, ex);
+            on_run(&r, keep, &found);
+            if keep {
+                check(&r);
+            }
+        }
+    };
+    std::thread::scope(|sc| {
+        for i in 0..jobs {
+            let w = &worker;
+            sc.spawn(move || w(i));
+        }
+    });
+    let fz = state.into_inner().unwrap_or_else(|e| e.into_inner());
+    let mut maxima: Vec<Maximum> = fz.maxima.iter().map(|(m, (v, r))| Maximum { metric: m.clone(), value: *v, run: r.clone() }).collect();
+    maxima.sort_by(|a, b| a.metric.cmp(&b.metric));
+    let report = FuzzReport {
+        runs: fz.runs,
+        discovery_runs: discovery_runs.into_inner(),
+        keys,
+        modes,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        stopped: fz.stopped.unwrap_or("time").into(),
+        corpus: fz.corpus.len(),
+        kept: fz.kept,
+        features: fz.features.len(),
+        stages: fz.stages,
+        maxima,
+        findings: fz.new_findings,
+        last_new_at_run: fz.last_new,
+        jobs,
+    };
+    let entries = fz.corpus.into_iter().map(Arc::unwrap_or_clone).collect();
+    Ok((report, Corpus { component: app.hash.clone(), entries }))
+}
+
+/// Shrinks a spec while `keeps` holds for its run: drops plan entries and
+/// rules, shortens lists and strings, lowers numbers, resets clock and
+/// seed. Returns the smallest spec found and the runs it took.
+/// `base` is the example request: fields move back to it.
+pub fn minimise(
+    app: &App,
+    spec: &RunSpec,
+    base: &[Value],
+    keeps: &(dyn Fn(&RunRecord) -> bool + Sync),
+    max_runs: u32,
+    run: Runner,
+) -> (RunSpec, u32) {
+    // Candidates are tried a chunk at a time on all threads; the first one
+    // that keeps the finding (in order) wins, as if tried one by one.
+    let mut cur = spec.clone();
+    let mut runs = 0;
+    'outer: loop {
+        let cands: Vec<RunSpec> = shrinks(app, &cur, base).into_iter().filter(|c| *c != cur).collect();
+        for chunk in cands.chunks(par::jobs().max(1)) {
+            let chunk = &chunk[..chunk.len().min((max_runs - runs) as usize)];
+            if chunk.is_empty() {
+                break 'outer;
+            }
+            runs += chunk.len() as u32;
+            let ok = par::map(chunk, |c| keeps(&run(c)));
+            if let Some(i) = ok.iter().position(|k| *k) {
+                cur = chunk[i].clone();
+                continue 'outer;
+            }
+        }
+        break;
+    }
+    (cur, runs)
+}
+
+/// Smaller variants of a spec, biggest steps first.
+fn shrinks(app: &App, s: &RunSpec, base: &[Value]) -> Vec<RunSpec> {
+    let mut out = Vec::new();
+    let start = app.manifest.start_time();
+    if s.now != start {
+        let mut c = s.clone();
+        c.now = start.clone();
+        let entry = app.manifest.entry.as_ref().filter(|e| fn_key_eq(&e.export, &s.export));
+        if let (Some(e), Some(a)) = (entry, c.args.first_mut()) {
+            set_clock_fields(a, &e.fields, &start);
+        }
+        out.push(c);
+    }
+    if s.seed != 1 {
+        out.push(RunSpec { seed: 1, ..s.clone() });
+    }
+    for k in s.plan.0.keys() {
+        let mut c = s.clone();
+        c.plan.0.remove(k);
+        out.push(c);
+    }
+    for (k, fp) in &s.plan.0 {
+        let with = |f: &dyn Fn(&mut FnPlan)| {
+            let mut c = s.clone();
+            f(c.plan.0.get_mut(k).expect("key"));
+            c
+        };
+        for n in fp.on_call.keys() {
+            out.push(with(&|p| {
+                p.on_call.remove(n);
+            }));
+        }
+        for i in 0..fp.rules.len() {
+            out.push(with(&|p| {
+                p.rules.remove(i);
+            }));
+        }
+        if let Some(g) = &fp.response.generate {
+            if let Some(n) = g.list_len.filter(|n| *n > 0) {
+                out.push(with(&|p| p.response.generate.as_mut().expect("generate").list_len = Some(n / 2)));
+            }
+            if g.strings.is_some() {
+                out.push(with(&|p| p.response.generate.as_mut().expect("generate").strings = None));
+            }
+            if g.numbers.is_some() {
+                out.push(with(&|p| p.response.generate.as_mut().expect("generate").numbers = None));
+            }
+            if g.seed.is_some() {
+                out.push(with(&|p| p.response.generate.as_mut().expect("generate").seed = None));
+            }
+        }
+        // Host results given as values: halve lists, then drop single
+        // elements (a duplicate may sit in the second half).
+        let rets = fp.response.ret.iter().map(|v| (None, v)).chain(fp.on_call.iter().filter_map(|(n, r)| r.ret.as_ref().map(|v| (Some(n.clone()), v))));
+        for (call, v) in rets {
+            let Some(len) = first_list(v).map(Vec::len).filter(|n| *n > 1) else { continue };
+            let edit = |f: &dyn Fn(&mut Vec<Value>)| {
+                with(&|p| {
+                    let r = match &call {
+                        None => p.response.ret.as_mut(),
+                        Some(n) => p.on_call.get_mut(n).and_then(|r| r.ret.as_mut()),
+                    };
+                    if let Some(a) = r.and_then(first_list_mut) {
+                        f(a);
+                    }
+                })
+            };
+            out.push(edit(&|a| a.truncate(len / 2)));
+            for i in 0..len.min(16) {
+                out.push(edit(&|a| {
+                    a.remove(i);
+                }));
+            }
+        }
+    }
+    let mut ptrs = Vec::new();
+    for (i, a) in s.args.iter().enumerate() {
+        nodes(a, format!("/{i}"), &mut ptrs);
+    }
+    let root = Value::Array(s.args.clone());
+    let base_root = Value::Array(base.to_vec());
+    let clock: BTreeSet<String> = app
+        .manifest
+        .entry
+        .iter()
+        .flat_map(|e| e.fields.keys())
+        .map(|k| format!("/0/{}", k.replace('.', "/")))
+        .collect();
+    for p in ptrs {
+        let Some(node) = root.pointer(&p) else { continue };
+        if clock.contains(&p) {
+            continue;
+        }
+        let mut variants: Vec<Value> = Vec::new();
+        // Back to the example request's value.
+        if let Some(b) = base_root.pointer(&p)
+            && b != node
+        {
+            variants.push(b.clone());
+        }
+        variants.extend(match node {
+            Value::Array(a) if !a.is_empty() => {
+                let mut v = vec![Value::Array(a[..a.len() / 2].to_vec())];
+                v.extend((0..a.len().min(8)).map(|i| {
+                    let mut b = a.clone();
+                    b.remove(i);
+                    Value::Array(b)
+                }));
+                v
+            }
+            Value::String(t) => match t.parse::<u64>() {
+                Ok(n) if n > 1 => vec![json!((n / 2).to_string()), json!("1")],
+                Ok(_) => vec![],
+                // Only long text is cut: short text is a word that matters.
+                Err(_) if t.chars().count() > 16 => vec![json!(t.chars().take(t.chars().count() / 2).collect::<String>())],
+                Err(_) => vec![],
+            },
+            Value::Number(n) => match n.as_u64() {
+                Some(n) if n > 1 => vec![json!(n / 2), json!(n - 1), json!(1)],
+                _ => vec![],
+            },
+            _ => vec![],
+        });
+        for v in variants {
+            let mut r = root.clone();
+            if let Some(slot) = r.pointer_mut(&p) {
+                *slot = v;
+            }
+            if let Value::Array(args) = r {
+                out.push(RunSpec { args, ..s.clone() });
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shapes_and_buckets() {
+        assert_eq!(shape(&json!({"ok": []}), 2), "ok([])");
+        assert_eq!(shape(&json!({"err": "x"}), 2), "err(s)");
+        assert_eq!(bucket(5), 4);
+        assert_eq!(bucket(200), 128);
+        assert!(beats(106, 100) && !beats(104, 100) && beats(1, 0));
+    }
+
+    #[test]
+    fn crawls_into_request() {
+        let mut req = json!({"method": "GET", "path": "/", "query": [], "form": []});
+        let ok = crawl_into(&mut req, &BTreeMap::new(), "/book?day=2026-01-02&x=1", "POST", &["copies".into()], &["3".into()]);
+        assert!(ok);
+        assert_eq!(req["path"], "/book");
+        assert_eq!(req["query"], json!([["day", "2026-01-02"], ["x", "1"]]));
+        assert_eq!(req["method"], "POST");
+        assert_eq!(req["form"], json!([["copies", "3"]]));
+    }
+
+    #[test]
+    fn finds_form_inputs() {
+        let v = json!({"body": "<form><input name=\"copies\"><select name='room'></select></form>"});
+        assert_eq!(form_inputs(&v), vec!["copies".to_string(), "room".to_string()]);
+    }
+}

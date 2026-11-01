@@ -1,0 +1,13 @@
+{
+  "app": "loop-on-input",
+  "bug": "steps towards 100 by ?step, forever when it is 0 or negative",
+  "expect": [
+    {
+      "kind": "hang",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "over_budget"
+  ]
+}

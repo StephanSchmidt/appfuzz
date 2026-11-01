@@ -1,0 +1,16 @@
+{
+  "app": "retry-storm",
+  "bug": "retries a failing save fifty times",
+  "expect": [
+    {
+      "kind": "retry_storm",
+      "min": "warn"
+    }
+  ],
+  "allow": [
+    "redundant_calls",
+    "over_budget",
+    "serial_chain",
+    "slow_host_sensitivity"
+  ]
+}

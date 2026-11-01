@@ -1,0 +1,11 @@
+{
+  "app": "bad-status",
+  "bug": "passes ?code through as the HTTP status",
+  "expect": [
+    {
+      "kind": "invalid_response",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

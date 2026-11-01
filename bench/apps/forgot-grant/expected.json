@@ -1,0 +1,13 @@
+{
+  "app": "forgot-grant",
+  "bug": "sends mail without a grant for it",
+  "expect": [
+    {
+      "kind": "ungranted_import",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "ungranted_call"
+  ]
+}

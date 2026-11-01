@@ -1,0 +1,11 @@
+{
+  "app": "nondet",
+  "bug": "lists owners in hash-map order",
+  "expect": [
+    {
+      "kind": "nondeterminism",
+      "min": "info"
+    }
+  ],
+  "allow": []
+}

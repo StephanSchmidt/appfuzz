@@ -1,0 +1,13 @@
+{
+  "name": "ts-chatty",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc && jco componentize dist/app.js --wit ../../wit/web.wit --world-name items-app --disable all -o app.wasm"
+  },
+  "devDependencies": {
+    "@bytecodealliance/componentize-js": "^0.23.0",
+    "@bytecodealliance/jco": "^1.40.0",
+    "typescript": "^7.0.2"
+  }
+}
