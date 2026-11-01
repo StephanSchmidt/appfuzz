@@ -25,13 +25,13 @@ pub const DOCS: &[Doc] = &[
     Doc {
         path: "inspect",
         examples: &["appfuzz inspect", "appfuzz inspect --wit", "appfuzz --wasm app.wasm inspect"],
-        output: "exports, imports per interface with grants, ungranted imports, static findings",
+        output: "exports, imports per interface with grants and labels, ungranted imports, static findings, label_suggestions (a TOML guess from WIT names)",
         next: "`plan template` to script the host; `run` to see one request",
     },
     Doc {
         path: "plan template",
         examples: &["appfuzz plan template > plan.json"],
-        output: "a plan with every host function: signature, example value, empty rules",
+        output: "a plan with every host function: signature, example value, its labels from the manifest",
         next: "edit what the host returns, then `run --plan plan.json` (plans are optional: values are generated from WIT types)",
     },
     Doc {
@@ -236,6 +236,7 @@ pub const NOTES: &[&str] = &[
     "`last` stands for the latest stored run. Runs and findings are kept in --state (default .appfuzz) per component.",
     "Requests: the manifest's [entry] request; change it with --set (merged JSON), or give --request / --args. Host behaviour: --plan (file or inline JSON); unplanned results are generated from WIT types.",
     "Time is virtual: latency, sleeps and clock reads cost nothing real. --now sets the clock.",
+    "Labels in [functions.\"<key>\"] say what text means: params = { sql = \"sql\" } (sinks: sql, path, shell, url, html, regex; or pii, secret), result = { email = \"pii\" } (untrusted, html, pii, secret). With them appfuzz reports injections and leaks.",
     "Findings: fail > warn > info. `confirm` makes a finding reproducible and small; info findings are hints, not bugs.",
 ];
 

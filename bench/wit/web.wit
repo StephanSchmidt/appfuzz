@@ -35,6 +35,34 @@ interface mail {
     send: func(to: string, body: string) -> result<_, string>;
 }
 
+// Host functions with text that means something: SQL, paths, URLs, shell
+// commands, secrets and personal data. The manifests of the labelled apps
+// say so.
+interface db {
+    query: func(sql: string, args: list<string>) -> result<list<list<string>>, string>;
+}
+
+interface files {
+    read: func(path: string) -> result<string, string>;
+}
+
+interface http {
+    fetch: func(url: string, auth: string) -> result<string, string>;
+}
+
+interface sys {
+    run: func(cmd: string) -> result<string, string>;
+}
+
+interface config {
+    secret: func(name: string) -> string;
+}
+
+interface users {
+    record user { name: string, email: string, bio: string, bio-html: string }
+    current: func() -> user;
+}
+
 interface handler {
     use types.{request, response};
     handle: func(req: request) -> response;
@@ -51,5 +79,16 @@ world app {
 // they build against (componentize-js, componentize-py).
 world items-app {
     import items;
+    export handler;
+}
+
+// The labelled apps.
+world labelled-app {
+    import db;
+    import files;
+    import http;
+    import sys;
+    import config;
+    import users;
     export handler;
 }

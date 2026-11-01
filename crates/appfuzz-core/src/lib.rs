@@ -10,6 +10,7 @@ pub mod fuzz;
 pub mod par;
 pub mod growth;
 pub mod harness;
+pub mod labels;
 pub mod plan;
 pub mod probe;
 pub mod record;

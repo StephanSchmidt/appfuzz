@@ -1,0 +1,11 @@
+{
+  "app": "stored-sql",
+  "bug": "puts the user's name from the host into SQL text",
+  "expect": [
+    {
+      "kind": "sql_injection",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

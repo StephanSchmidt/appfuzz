@@ -70,7 +70,7 @@ request is then generated from the WIT types.
 5. **`unexplored`**: host call sites no run reached, with texts and
    numbers near them. Try those values with `run --set` or
    `sweep --values`, then `fuzz` again.
-6. **Your own suspicions**: turn them into a `check` (see §4).
+6. **Your own suspicions**: turn them into a `check` (see §5).
 
 ## 3. Host plans: telling appfuzz what the host returns
 
@@ -102,7 +102,55 @@ the function's `return`/`generate`/`trap` > `_defaults` > generated values.
 Results are WIT-shaped JSON: `{"ok": …}` or `{"err": …}` for results, and
 `null` or the value for options.
 
-## 4. Turning a suspicion into evidence
+## 4. Labels: telling appfuzz what text means
+
+appfuzz can't know that a parameter is SQL or that a field is an email
+address. Labels in the manifest tell it. `inspect` prints a guess from the
+WIT names under `label_suggestions`. Keep only what is true.
+
+```toml
+[functions."acme:web/db#query"]
+params = { sql = "sql" }                  # a sink
+
+[functions."acme:web/http#fetch"]
+params = { url = "url", auth = "secret" } # auth may receive secrets
+
+[functions."acme:web/config#secret"]
+result = "secret"                         # the whole result
+
+[functions."acme:web/users#current"]
+result = { email = "pii", bio-html = "html" }   # by field path
+```
+
+Parameter labels:
+
+| Label | Means | Finding when request or host text arrives with |
+|-------|-------|------------------------------------------------|
+| `sql` | SQL text | a quote intact: `sql_injection`; quotes doubled or backslashed by hand: `escaped_by_hand` (warn) |
+| `path` | a file path | `../` intact: `path_traversal` |
+| `shell` | a shell command | `;` or `$(` intact: `command_injection`; `'\''` quoting: `escaped_by_hand` |
+| `url` | a URL to fetch | control of the scheme or host: `ssrf` |
+| `html` | markup | `<i>` intact: `html_injection` |
+| `regex` | a regular expression | `(` intact: `regex_injection` (warn) |
+| `pii`, `secret` | may receive personal data or secrets | (no sink check) |
+
+Result labels, for the whole result or a field path (paths go through
+lists, options and `ok`):
+
+| Label | Means |
+|-------|-------|
+| `untrusted` | the default: text that must not reach sinks or HTML unescaped |
+| `html` | trusted markup: no `stored_reflection` or `html_injection` for it |
+| `pii` | personal data: `pii_leak` fail in logs, error pages and host parameters not labelled `pii`; warn in a URL or header; nothing in an ordinary page |
+| `secret` | `secret_leak` fail anywhere in the output, logs, or host parameters not labelled `secret` |
+
+Generated values at `pii` and `secret` paths are traceable markers
+(`p…@mail.example`, `sk_…`). With sink labels, canaries carry `../;$(x)`
+as well, and the fuzzer tries attack strings. A labelled function the app
+doesn't import is skipped; a labelled parameter or path it doesn't have is
+an error.
+
+## 5. Turning a suspicion into evidence
 
 | Suspicion | Command |
 |-----------|---------|
@@ -121,7 +169,7 @@ Results are WIT-shaped JSON: `{"ok": …}` or `{"err": …}` for results, and
 property, and shrinks that run to a counterexample. "holds" means no run
 broke it: that is evidence, not proof.
 
-## 5. Reading findings
+## 6. Reading findings
 
 Severity: **fail** (breaks a limit, crashes, unsafe output), **warn** (a bad
 pattern that will hurt), **info** (a hint; often fine, sometimes the key to
@@ -140,13 +188,15 @@ and `confirm <id>` makes it reproducible.
 | `duplicate_sensitivity`, `order_dependence`, `nondeterminism`, `error_ignored`, `continues_after_error` | the answer changes when it should not, or stays the same when it should change |
 | `invalid_response`, `broken_markup`, `inconsistent_response`, `leaky_error` | bad output: impossible status or headers, unbalanced HTML, an error page with status 200, internal error text |
 | `reflection`, `stored_reflection`, `input_passthrough` | request or host text reaches HTML unescaped, or reaches a host call unchanged |
+| `sql_injection`, `path_traversal`, `command_injection`, `ssrf`, `html_injection`, `regex_injection`, `escaped_by_hand` | request or host text reaches a labelled sink (§4) |
+| `pii_leak`, `secret_leak` | a labelled value reaches a place it must not (§4) |
 | `ungranted_import`, `ungranted_call`, `unused_grant` | imports versus the manifest's grants |
 | `check_failed` | a property from `check` broke |
 
 Findings are judged against the manifest's limits. If a limit is wrong,
 fix the manifest. Don't explain the finding away.
 
-## 6. Determinism and time
+## 7. Determinism and time
 
 Runs are pure. The same spec gives the same record: request, plan, `--now`,
 `--seed`, and the component hash. Time is virtual. Host latency, sleeps and
@@ -154,12 +204,12 @@ fuel advance a clock, so a 10-minute timeout is tested instantly and the
 date is whatever `--now` says. `replay <run>` checks this. `confirm`
 refuses findings it cannot reproduce.
 
-## 7. What appfuzz does not do (yet)
+## 8. What appfuzz does not do (yet)
 
 - Request sequences: the simulated host keeps no state between requests, so
   double submits and partial writes across requests are out of reach.
-- Labels (phase 2): it cannot know that a function writes, or that a field
-  is personal data, until the manifest says so.
+- Effects: it cannot know that a function writes until the manifest can
+  say so. Labels (§4) cover sinks, personal data and secrets only.
 - Malicious behaviour (phase 3): htmx and browser attacks, hidden triggers,
   and channels are separate from bad patterns. A clean review does not
   mean an app is benign.

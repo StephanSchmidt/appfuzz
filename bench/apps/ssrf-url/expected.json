@@ -1,0 +1,11 @@
+{
+  "app": "ssrf-url",
+  "bug": "fetches the URL in ?feed",
+  "expect": [
+    {
+      "kind": "ssrf",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

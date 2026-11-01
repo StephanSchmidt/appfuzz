@@ -525,13 +525,17 @@ impl Mutator<'_> {
         const ODD: [&str; 13] = ["", "Zoë", "東京", "👩‍💻", "<b>x</b>", "\"'<>&", "../..", "%00", "2028-02-29", "-1", "a b", "\u{202e}x", "a\r\nb"];
         match self.rng.random_range(0..7u8) {
             0 | 1 => self.word(),
-            6 => crate::output::canary(self.rng.random_range(0..1u64 << 32)),
+            6 => crate::output::canary_for(&self.app.manifest, self.rng.random_range(0..1u64 << 32)),
             2 => {
                 let n = *self.pick(&scale::LENGTH_SIZES).expect("non-empty");
                 "a".repeat(n as usize)
             }
             3 => format!("{} {}", self.word(), self.word()),
             4 => self.number(None).to_string(),
+            _ if self.app.manifest.has_sinks() && self.rng.random_bool(0.3) => {
+                const ATTACKS: [&str; 5] = ["' OR '1'='1", "../../etc/passwd", "; ls", "$(id)", "http://169.254.169.254/"];
+                self.pick(&ATTACKS).expect("non-empty").to_string()
+            }
             _ => self.pick(&ODD).expect("non-empty").to_string(),
         }
     }
@@ -609,7 +613,8 @@ impl Mutator<'_> {
         }
         if self.rng.random_bool(p) {
             let w = self.word();
-            let modes = ["words", "empty", "long", "unicode", "html", "utf8-3", "utf8-3o", "canary"];
+            let canary = if self.app.manifest.has_sinks() { "canary-sink" } else { "canary" };
+            let modes = ["words", "empty", "long", "unicode", "html", "utf8-3", "utf8-3o", canary];
             o.strings = Some(if self.rng.random_bool(0.3) { format!("={w}") } else { self.pick(&modes).expect("non-empty").to_string() });
         }
         if self.rng.random_bool(p) {
@@ -894,7 +899,7 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
                 && v.is_string()
             {
                 n += 1;
-                *v = json!(crate::output::canary(n));
+                *v = json!(crate::output::canary_for(&app.manifest, n));
             }
         }
         if let Some(q) = role_path(&entry.map(|e| e.fields.clone()).unwrap_or_default(), a, "query")
@@ -903,7 +908,7 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
             for k in keys {
                 if !pairs.iter().any(|p| p[0].as_str() == Some(k)) {
                     n += 1;
-                    pairs.push(json!([k, crate::output::canary(n)]));
+                    pairs.push(json!([k, crate::output::canary_for(&app.manifest, n)]));
                 }
             }
         }
@@ -912,18 +917,19 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
         out.push(req);
     }
     let strings: Vec<&String> = funcs.iter().filter(|(_, t)| has_string(t)).map(|(k, _)| k).collect();
+    let canary = if app.manifest.has_sinks() { "canary-sink" } else { "canary" };
     if !strings.is_empty() {
         let mut s = base.clone();
         for k in strings {
             let o = Mutator::current_opts(&s.plan, k);
-            Mutator::set_generate(&mut s.plan, k, GenOpts { strings: Some("canary".into()), results: Some("ok".into()), options: Some("some".into()), list_len: Some(2), ..o });
+            Mutator::set_generate(&mut s.plan, k, GenOpts { strings: Some(canary.into()), results: Some("ok".into()), options: Some("some".into()), list_len: Some(2), ..o });
         }
         out.push(s);
     }
     out
 }
 
-fn has_string(t: &Type) -> bool {
+pub(crate) fn has_string(t: &Type) -> bool {
     match t {
         Type::String => true,
         Type::List(l) => has_string(&l.ty()),

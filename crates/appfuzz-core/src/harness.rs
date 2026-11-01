@@ -40,6 +40,8 @@ struct Platform {
     granted: BTreeMap<String, bool>,
     cost: BTreeMap<String, u64>,
     latency_ms: BTreeMap<String, f64>,
+    /// `pii` and `secret` result paths, whose generated strings are marked.
+    marks: BTreeMap<String, Vec<(String, crate::labels::Label)>>,
 }
 
 pub struct App {
@@ -200,13 +202,23 @@ impl App {
             granted: BTreeMap::new(),
             cost: BTreeMap::new(),
             latency_ms: BTreeMap::new(),
+            marks: BTreeMap::new(),
         };
+        crate::labels::check_wit(&manifest, &imports)?;
         for iface in imports.iter().filter(|i| i.kind == ImportKind::Platform) {
             for f in &iface.funcs {
                 platform.granted.insert(f.key.clone(), iface.name.is_empty() || manifest.grants_import(&iface.name));
                 platform.cost.insert(f.key.clone(), manifest.cost_of(&f.key));
                 platform.latency_ms.insert(f.key.clone(), manifest.latency_ms_of(&f.key));
                 platform.funcs.insert(f.key.clone(), f.clone());
+                let marks: Vec<_> = manifest
+                    .result_labels(&f.key)
+                    .into_iter()
+                    .filter(|(_, l)| matches!(l, crate::labels::Label::Pii | crate::labels::Label::Secret))
+                    .collect();
+                if !marks.is_empty() {
+                    platform.marks.insert(f.key.clone(), marks);
+                }
             }
         }
 
@@ -567,7 +579,14 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
         Decision::Generate(opts) => {
             let seed = data.seed ^ blake3::hash(key.as_bytes()).as_bytes()[0] as u64 ^ ((call as u64) << 20);
             let mut g = Generator::new(seed, opts);
-            let vals: Vec<Val> = result_types.iter().map(|t| g.gen_val(t)).collect();
+            let mut vals: Vec<Val> = result_types.iter().map(|t| g.gen_val(t)).collect();
+            if let (Some(marks), [v], [t]) = (platform.marks.get(key), vals.as_mut_slice(), result_types.as_slice()) {
+                let mut j = val_to_json(v);
+                crate::labels::mark(&mut j, marks, seed);
+                if let Ok(x) = json_to_val(&j, t) {
+                    *v = x;
+                }
+            }
             event.result = Some(compact(match vals.as_slice() {
                 [] => Value::Null,
                 [one] => val_to_json(one),

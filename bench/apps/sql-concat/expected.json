@@ -1,0 +1,11 @@
+{
+  "app": "sql-concat",
+  "bug": "puts ?q into SQL text",
+  "expect": [
+    {
+      "kind": "sql_injection",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

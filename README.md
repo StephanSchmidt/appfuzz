@@ -51,10 +51,21 @@ same findings (`bench/lang`).
 
 ## Install
 
-From a clone of this repository:
+On Linux or macOS (x86_64 or arm64):
 
 ```sh
-cargo install --path crates/appfuzz
+curl -fsSL https://appfuzz.dev/install.sh | sh
+```
+
+The script ([website/install.sh](website/install.sh)) downloads the binary
+from the latest [GitHub release](https://github.com/StephanSchmidt/appfuzz/releases),
+checks its SHA-256 and puts it in `~/.local/bin`. Set `APPFUZZ_VERSION=v0.1.0`
+for a specific release or `APPFUZZ_INSTALL_DIR` for another directory.
+
+Or build it with Rust:
+
+```sh
+cargo install --git https://github.com/StephanSchmidt/appfuzz appfuzz
 ```
 
 Then, next to your component:
@@ -74,6 +85,8 @@ appfuzz --wasm my_app.wasm review     # everything; exit code 0 pass, 1 warn, 2 
   days).
 - **Security:** request fields and stored data in HTML output unescaped,
   internal error text shown to users, imports the platform didn't grant.
+  With labels: SQL, shell, path and HTML injection, SSRF, and leaked secrets
+  or personal data.
 - **Database:** n+1 queries, loops inside loops, calls that grow with a
   request field, repeated identical calls, retry storms.
 - **Wrong answers:** results that change with row order or duplicates,
@@ -96,7 +109,21 @@ result.
    scripts realistic data when you need it (`appfuzz plan template`).
 3. **Detectors run on every run:** call patterns, growth laws, output checks,
    data flow from request and backend to output.
-4. **`check`** turns your own suspicion ("usage never exceeds 100") into a
+4. **Labels** say what text means: this parameter is SQL, this field is an
+   email address, this result is a secret.
+
+   ```toml
+   [functions."acme:web/db#query"]
+   params = { sql = "sql" }
+
+   [functions."acme:web/users#current"]
+   result = { email = "pii" }
+   ```
+
+   Request and backend text that reaches the SQL with its quote intact is
+   `sql_injection`. An email address in the log is `pii_leak`. `inspect`
+   suggests labels from the WIT names.
+5. **`check`** turns your own suspicion ("usage never exceeds 100") into a
    search for a counterexample.
 
 Every command prints one JSON document with a `next` field, so an AI agent
@@ -108,8 +135,8 @@ reference for people too.
 - A pass means the search found nothing. That's evidence, not proof.
 - Each run is one request, and the simulated backend keeps no state between
   requests, so double submits are out of reach.
-- It doesn't know what your host functions mean (that `create` writes, or
-  that a field is personal data) until you tell it.
+- It doesn't know what your host functions mean until labels tell it, and
+  labels don't cover writes yet.
 - It doesn't look for malicious behaviour. A clean review doesn't mean an
   app is benign.
 - For interpreted languages (componentize-js, componentize-py), coverage
@@ -121,9 +148,9 @@ reference for people too.
 |------|------|
 | `crates/appfuzz-core` | engine: harness, simulated host, fuzzer, detectors |
 | `crates/appfuzz` | the CLI |
-| `bench/apps` | 26 small apps, each with one bad pattern (or none) and its expected findings |
+| `bench/apps` | 37 small apps, each with one bad pattern (or none) and its expected findings |
 | `bench/lang` | the same app in TypeScript and Python |
-| `website` | appfuzz.dev |
+| `website` | appfuzz.dev and its `install.sh` |
 
 `cargo test` runs the unit tests. The bench builds every app in
 `bench/apps` and checks that `review` finds exactly the expected findings:

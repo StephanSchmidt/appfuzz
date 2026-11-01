@@ -1,0 +1,6 @@
+{
+  "app": "trusted-html",
+  "bug": "renders the user's bio-html as is (labelled trusted) and the email in the page",
+  "expect": [],
+  "allow": []
+}

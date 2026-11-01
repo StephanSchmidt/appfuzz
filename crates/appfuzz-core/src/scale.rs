@@ -747,8 +747,8 @@ fn discover_keys(base: &RunSpec, list: &str, words: &[String], run: Runner) -> V
         .iter()
         .copied()
         .zip(par::map(&lens, |&len| {
-            let a = run(&with(&[(&filler(len, 'q'), "1")])).totals.fuel;
-            let b = run(&with(&[(&filler(len, 'x'), "1")])).totals.fuel;
+            let a = run(&with(&[(&filler(len, '\u{1}'), "1")])).totals.fuel;
+            let b = run(&with(&[(&filler(len, '\u{2}'), "1")])).totals.fuel;
             (a == b).then_some(a)
         }))
         .collect();

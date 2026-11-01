@@ -23,8 +23,8 @@ def app(name, what, code, expect, allow=(), grants=(ITEMS,), extra="", fuel="200
     APPS.append(dict(name=name, what=what, code=code, expect=expect, allow=list(allow), grants=list(grants), extra=extra, fuel=fuel, pending=pending))
 
 
-def handler(body):
-    return "include!(\"../../../prelude.rs\");\n\nimpl exports::bench::web::handler::Guest for A {\n    fn handle(req: Request) -> Response {\n" + textwrap.indent(textwrap.dedent(body).strip("\n"), " " * 8) + "\n    }\n}\n"
+def handler(body, prelude="prelude.rs"):
+    return f"include!(\"../../../{prelude}\");" + "\n\nimpl exports::bench::web::handler::Guest for A {\n    fn handle(req: Request) -> Response {\n" + textwrap.indent(textwrap.dedent(body).strip("\n"), " " * 8) + "\n    }\n}\n"
 
 
 # --- Crash -----------------------------------------------------------------
@@ -318,6 +318,120 @@ app("clean", "a well-behaved page: one read, sorted, escaped, bounded",
         }
         html(out + "</ul>")
     """), [])
+
+
+# --- Labels ----------------------------------------------------------------
+# These apps use the `labelled-app` world; their manifests label parameters
+# (sinks) and results (personal data, secrets, trusted HTML).
+
+DB, FILES, HTTP, SYS, CONFIG, USERS = (f"bench:web/{i}" for i in ("db", "files", "http", "sys", "config", "users"))
+
+LABELS = """
+[functions."bench:web/db#query"]
+params = { sql = "sql" }
+
+[functions."bench:web/files#read"]
+params = { path = "path" }
+
+[functions."bench:web/http#fetch"]
+params = { url = "url", auth = "secret" }
+
+[functions."bench:web/sys#run"]
+params = { cmd = "shell" }
+
+[functions."bench:web/config#secret"]
+result = "secret"
+
+[functions."bench:web/users#current"]
+result = { email = "pii", bio-html = "html" }
+"""
+
+
+def labelled(body):
+    return handler(body, prelude="prelude-labelled.rs")
+
+
+app("sql-concat", "puts ?q into SQL text",
+    labelled("""
+        let q = param(&req.query, "q").unwrap_or("");
+        let rows = db::query(&format!("SELECT name FROM items WHERE name = '{q}'"), &[]).unwrap_or_default();
+        html(format!("<p>{} rows</p>", rows.len()))
+    """), [("sql_injection", "fail")], grants=[DB], extra=LABELS)
+
+app("sql-hand-escaped", "doubles the quotes in ?q, then puts it into SQL text",
+    labelled("""
+        let q = param(&req.query, "q").unwrap_or("").replace('\\'', "''");
+        let rows = db::query(&format!("SELECT name FROM items WHERE name = '{q}'"), &[]).unwrap_or_default();
+        html(format!("<p>{} rows</p>", rows.len()))
+    """), [("escaped_by_hand", "warn")], grants=[DB], extra=LABELS)
+
+app("stored-sql", "puts the user's name from the host into SQL text",
+    labelled("""
+        let _ = &req;
+        let u = users::current();
+        let rows = db::query(&format!("SELECT * FROM orders WHERE owner = '{}'", u.name), &[]).unwrap_or_default();
+        html(format!("<p>{} orders for {}</p>", rows.len(), esc(&u.name)))
+    """), [("sql_injection", "fail")], grants=[DB, USERS], extra=LABELS)
+
+app("path-traversal", "reads the file named by ?doc",
+    labelled("""
+        let doc = param(&req.query, "doc").unwrap_or("index");
+        let text = files::read(&format!("docs/{doc}.md")).unwrap_or_default();
+        html(format!("<pre>{}</pre>", esc(&text)))
+    """), [("path_traversal", "fail")], grants=[FILES], extra=LABELS)
+
+app("ssrf-url", "fetches the URL in ?feed",
+    labelled("""
+        let feed = param(&req.query, "feed").unwrap_or("https://example.com/feed");
+        let text = http::fetch(feed, "").unwrap_or_default();
+        html(format!("<pre>{}</pre>", esc(&text)))
+    """), [("ssrf", "fail")], grants=[HTTP], extra=LABELS)
+
+app("shell-concat", "greps the log for ?q in a shell command",
+    labelled("""
+        let q = param(&req.query, "q").unwrap_or("error");
+        let out = sys::run(&format!("grep {q} /var/log/app.log")).unwrap_or_default();
+        html(format!("<pre>{}</pre>", esc(&out)))
+    """), [("command_injection", "fail")], grants=[SYS], extra=LABELS)
+
+app("secret-in-page", "prints the API key in a debug footer",
+    labelled("""
+        let _ = &req;
+        let key = config::secret("api-key");
+        html(format!("<p>Hello</p><footer>debug: key={}</footer>", esc(&key)))
+    """), [("secret_leak", "fail")], grants=[CONFIG], extra=LABELS)
+
+app("secret-in-url", "sends the API key in the URL instead of the auth parameter",
+    labelled("""
+        let _ = &req;
+        let key = config::secret("api-key");
+        let text = http::fetch(&format!("https://api.example.com/v1/items?key={key}"), "").unwrap_or_default();
+        html(format!("<pre>{}</pre>", esc(&text)))
+    """), [("secret_leak", "fail")], grants=[CONFIG, HTTP], extra=LABELS)
+
+app("pii-in-log", "logs the user's email address",
+    labelled("""
+        let _ = &req;
+        let u = users::current();
+        println!("page view by {}", u.email);
+        html(format!("<p>Hello {}</p>", esc(&u.name)))
+    """), [("pii_leak", "fail")], grants=[USERS], extra=LABELS)
+
+app("sql-params", "passes ?q as a query parameter, not in the SQL text",
+    labelled("""
+        let q = param(&req.query, "q").unwrap_or("");
+        let rows = db::query("SELECT name FROM items WHERE name = ?", &[q.to_string()]).unwrap_or_default();
+        html(format!("<p>{} rows for {}</p>", rows.len(), esc(q)))
+    """), [], grants=[DB], extra=LABELS)
+
+app("trusted-html", "renders the user's bio-html as is (labelled trusted) and the email in the page",
+    labelled("""
+        let _ = &req;
+        let u = users::current();
+        let key = config::secret("api-key");
+        let _ = http::fetch("https://api.example.com/v1/me", &key);
+        html(format!("<h1>{}</h1><p>{}</p><div>{}</div><p>{}</p>", esc(&u.name), esc(&u.email), u.bio_html, esc(&u.bio)))
+    """), [], grants=[USERS, CONFIG, HTTP], extra=LABELS)
 
 
 MANIFEST = """\

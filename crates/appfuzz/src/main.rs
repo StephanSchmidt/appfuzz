@@ -1206,6 +1206,9 @@ fn inspect(app: &App, with_wit: bool) -> Result<Value> {
                     if i.kind == ImportKind::Platform {
                         o["cost"] = json!(m.cost_of(&f.key));
                         o["latency_ms"] = json!(m.latency_ms_of(&f.key));
+                        if let Some(l) = labels_json(m, &f.key) {
+                            o["labels"] = l;
+                        }
                     }
                     o
                 })
@@ -1241,10 +1244,27 @@ fn inspect(app: &App, with_wit: bool) -> Result<Value> {
         "entry": m.entry.as_ref().map(|e| &e.export),
         "limits": m.limits,
     });
+    let mut guess = appfuzz_core::labels::suggest(&app.imports);
+    guess.retain(|k, _| m.function(k).is_none_or(|f| f.params.is_empty() && f.result.is_none()));
+    if !guess.is_empty() {
+        out["label_suggestions"] = json!({
+            "note": "a guess from WIT names, not checked: keep what is true, then add it to appfuzz.toml",
+            "toml": appfuzz_core::labels::suggest_toml(&guess),
+        });
+    }
     if with_wit {
         out["wit"] = json!(wit::wit_text(&app.bytes));
     }
     Ok(out)
+}
+
+/// A host function's labels from the manifest, as JSON.
+fn labels_json(m: &appfuzz_core::manifest::Manifest, key: &str) -> Option<Value> {
+    let f = m.function(key)?;
+    if f.params.is_empty() && f.result.is_none() {
+        return None;
+    }
+    Some(json!({"params": f.params, "result": f.result}))
 }
 
 fn plan_template(app: &App) -> Result<Value> {
@@ -1259,7 +1279,11 @@ fn plan_template(app: &App) -> Result<Value> {
                 [one] => g.gen_json(one),
                 many => Value::Array(many.iter().map(|t| g.gen_json(t)).collect()),
             };
-            plan.insert(f.key.clone(), json!({"_sig": f.signature(), "_example": example}));
+            let mut o = json!({"_sig": f.signature(), "_example": example});
+            if let Some(l) = labels_json(&app.manifest, &f.key) {
+                o["_labels"] = l;
+            }
+            plan.insert(f.key.clone(), o);
         }
     }
     Ok(Value::Object(plan))

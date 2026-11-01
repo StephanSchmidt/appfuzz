@@ -1,0 +1,11 @@
+{
+  "app": "shell-concat",
+  "bug": "greps the log for ?q in a shell command",
+  "expect": [
+    {
+      "kind": "command_injection",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

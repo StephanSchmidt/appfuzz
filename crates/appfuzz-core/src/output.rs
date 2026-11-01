@@ -148,7 +148,7 @@ fn host_errors(r: &RunRecord) -> Vec<(String, String)> {
     out
 }
 
-fn strings(v: &Value, out: &mut BTreeSet<String>) {
+pub(crate) fn strings(v: &Value, out: &mut BTreeSet<String>) {
     match v {
         Value::String(s) => {
             out.insert(s.clone());
@@ -262,13 +262,22 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     out
 }
 
-static CANARY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"cnry[0-9a-f]{4}\d+").unwrap());
+pub(crate) static CANARY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"cnry[0-9a-f]{4}\d+").unwrap());
 static CANARY_TAIL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(cnry[0-9a-f]{4}\d+)<i>").unwrap());
 
 /// Canary text for a request field or a host string: an id, then markup
 /// and quotes that must come out escaped.
 pub fn canary(n: u64) -> String {
     format!("cnry{:04x}{n}<i>'\"", (n.wrapping_mul(0x9e37) >> 3) & 0xffff)
+}
+
+/// What a sink canary adds: a path step, a command separator and a
+/// command substitution.
+pub const SINK_TAIL: &str = "../;$(x)";
+
+/// A canary with the sink tail when the manifest labels sinks.
+pub fn canary_for(m: &Manifest, n: u64) -> String {
+    if m.has_sinks() { format!("{}{SINK_TAIL}", canary(n)) } else { canary(n) }
 }
 
 /// Data flow by canaries: a canary from the request or from a host result
@@ -297,7 +306,12 @@ fn flow(r: &RunRecord, m: &Manifest, resp: &Response, body: &str) -> Vec<Finding
     if from_request.is_empty() && from_host.is_empty() {
         return out;
     }
+    // Strings an `html` result label marks as trusted markup.
+    let trusted = crate::labels::trusted_html(r, m);
     for c in CANARY.find_iter(body) {
+        if trusted.contains(c.as_str()) {
+            continue;
+        }
         let raw = body[c.end()..].starts_with("<i>");
         if !(raw && resp.html) {
             continue;
@@ -348,11 +362,11 @@ fn flow(r: &RunRecord, m: &Manifest, resp: &Response, body: &str) -> Vec<Finding
 }
 
 /// `@0.query.q` → `query.q` (the first argument is the request).
-fn strip_index(p: &str) -> String {
+pub(crate) fn strip_index(p: &str) -> String {
     p.strip_prefix("@0.").map(str::to_string).unwrap_or_else(|| p.to_string())
 }
 
-fn canary_paths(v: &Value, path: String, out: &mut BTreeSet<(String, String)>) {
+pub(crate) fn canary_paths(v: &Value, path: String, out: &mut BTreeSet<(String, String)>) {
     match v {
         Value::String(s) => {
             for c in CANARY.find_iter(s) {

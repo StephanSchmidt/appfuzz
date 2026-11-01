@@ -1,0 +1,11 @@
+{
+  "app": "secret-in-url",
+  "bug": "sends the API key in the URL instead of the auth parameter",
+  "expect": [
+    {
+      "kind": "secret_leak",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

@@ -1,0 +1,11 @@
+{
+  "app": "sql-hand-escaped",
+  "bug": "doubles the quotes in ?q, then puts it into SQL text",
+  "expect": [
+    {
+      "kind": "escaped_by_hand",
+      "min": "warn"
+    }
+  ],
+  "allow": []
+}

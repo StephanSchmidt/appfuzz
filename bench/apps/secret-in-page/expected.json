@@ -1,0 +1,11 @@
+{
+  "app": "secret-in-page",
+  "bug": "prints the API key in a debug footer",
+  "expect": [
+    {
+      "kind": "secret_leak",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

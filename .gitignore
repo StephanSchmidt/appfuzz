@@ -15,6 +15,7 @@
 !/bench/Cargo.toml
 !/bench/Cargo.lock
 !/bench/prelude.rs
+!/bench/prelude-labelled.rs
 !/bench/apps.py
 !/bench/apps/
 !/bench/wit/

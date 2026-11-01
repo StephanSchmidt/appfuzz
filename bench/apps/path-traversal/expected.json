@@ -1,0 +1,11 @@
+{
+  "app": "path-traversal",
+  "bug": "reads the file named by ?doc",
+  "expect": [
+    {
+      "kind": "path_traversal",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

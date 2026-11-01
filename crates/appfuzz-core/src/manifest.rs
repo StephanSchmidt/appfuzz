@@ -11,6 +11,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::labels::{Label, ResultLabels};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -159,6 +161,14 @@ pub struct FunctionSpec {
     /// Reserved for phase 2 labels (`read`, `write`, `identity`, …).
     #[serde(default)]
     pub effect: Option<String>,
+    /// Labels of parameters: a sink (`sql`, `path`, `shell`, `url`, `html`,
+    /// `regex`) or what they may receive (`pii`, `secret`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, Label>,
+    /// Labels of the result: `untrusted`, `html`, `pii`, `secret`, for the
+    /// whole result or by field path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<ResultLabels>,
 }
 
 fn de_bytes<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
@@ -206,6 +216,7 @@ impl Manifest {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut m: Manifest = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         m.dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        crate::labels::check_positions(&m).with_context(|| format!("in {}", path.display()))?;
         Ok(m)
     }
 
@@ -234,6 +245,21 @@ impl Manifest {
                 fn_key(i, f) == key
             }).map(|(_, v)| v)
         })
+    }
+
+    /// The label of a host function parameter.
+    pub fn param_label(&self, key: &str, param: &str) -> Option<Label> {
+        self.function(key).and_then(|f| f.params.get(param).copied())
+    }
+
+    /// The labelled result paths of a host function.
+    pub fn result_labels(&self, key: &str) -> Vec<(String, Label)> {
+        self.function(key).and_then(|f| f.result.as_ref()).map(ResultLabels::paths).unwrap_or_default()
+    }
+
+    /// Whether any parameter is labelled as a sink.
+    pub fn has_sinks(&self) -> bool {
+        self.functions.values().any(|f| f.params.values().any(|l| l.is_sink()))
     }
 
     pub fn cost_of(&self, key: &str) -> u64 {
@@ -308,5 +334,30 @@ mod tests {
         assert_eq!(m.cost_of("x:y/items-read#all"), 1);
         assert!(m.grants_import("x:y/items-read@0.1.0"));
         assert!(!m.grants_import("x:y/items-write@0.1.0"));
+    }
+
+    #[test]
+    fn parses_labels() {
+        let m: Manifest = toml::from_str(
+            r#"
+            [app]
+            wasm = "a.wasm"
+            [functions."x:y/db#query"]
+            params = { sql = "sql" }
+            [functions."x:y/users#current"]
+            result = { email = "pii", "bio-html" = "html" }
+            [functions."x:y/config#secret"]
+            result = "secret"
+            "#,
+        )
+        .unwrap();
+        crate::labels::check_positions(&m).unwrap();
+        assert_eq!(m.param_label("x:y/db#query", "sql"), Some(Label::Sql));
+        assert!(m.has_sinks());
+        assert_eq!(m.result_labels("x:y/config#secret"), vec![(String::new(), Label::Secret)]);
+        assert_eq!(m.result_labels("x:y/users#current").len(), 2);
+        let bad: Manifest = toml::from_str("[app]\nwasm = \"a\"\n[functions.\"x#f\"]\nresult = \"sql\"\n").unwrap();
+        assert!(crate::labels::check_positions(&bad).is_err());
+        assert!(toml::from_str::<Manifest>("[app]\nwasm = \"a\"\n[functions.\"x#f\"]\nparams = { a = \"nosql\" }\n").is_err());
     }
 }

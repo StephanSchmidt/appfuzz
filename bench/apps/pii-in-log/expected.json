@@ -1,0 +1,11 @@
+{
+  "app": "pii-in-log",
+  "bug": "logs the user's email address",
+  "expect": [
+    {
+      "kind": "pii_leak",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

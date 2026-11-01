@@ -1,0 +1,23 @@
+// Shared by the labelled bench apps: bindings and small helpers.
+wit_bindgen::generate!({ world: "labelled-app", path: "../../wit" });
+#[allow(unused_imports)]
+use bench::web::types::{Request, Response};
+#[allow(unused_imports)]
+use bench::web::{config, db, files, http, sys, users};
+struct A;
+export!(A);
+
+#[allow(dead_code)]
+fn param<'a>(q: &'a [(String, String)], k: &str) -> Option<&'a str> {
+    q.iter().find(|(x, _)| x == k).map(|(_, v)| v.as_str())
+}
+
+#[allow(dead_code)]
+fn html(body: String) -> Response {
+    Response { status: 200, body, headers: vec![("content-type".into(), "text/html".into())] }
+}
+
+#[allow(dead_code)]
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
+}

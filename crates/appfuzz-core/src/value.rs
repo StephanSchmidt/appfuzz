@@ -234,7 +234,8 @@ pub struct GenOpts {
     /// Kind of strings: `words` (default), `empty`, `long`, `unicode`, `html`,
     /// `utf8-2`/`utf8-3`/`utf8-4`/`utf8-3o` (40 chars of that byte width,
     /// `o`: after one ASCII byte), `=text` (always that text),
-    /// `canary` (unique markers), `edge` (a mix of the above).
+    /// `canary` (unique markers), `canary-sink` (markers that also carry
+    /// `../;$(x)`), `edge` (a mix of the above).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strings: Option<String>,
     /// Numbers: `small` (default), `edge` (0, 1, max, min), `=13` (always 13).
@@ -382,9 +383,10 @@ impl Generator {
             "long" => "x".repeat(10_000),
             "unicode" => self.pick(UNICODE).to_string(),
             "html" => self.pick(HTML).to_string(),
-            "canary" => {
+            "canary" | "canary-sink" => {
                 self.canary += 1;
-                format!("cnry{:04x}{}<i>'\"", self.rng.random_range(0..0xffffu32), self.canary)
+                let tail = if mode == "canary-sink" { crate::output::SINK_TAIL } else { "" };
+                format!("cnry{:04x}{}<i>'\"{tail}", self.rng.random_range(0..0xffffu32), self.canary)
             }
             _ => {
                 let a = self.pick(WORDS);

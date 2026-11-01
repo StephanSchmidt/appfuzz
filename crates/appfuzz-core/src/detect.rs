@@ -268,6 +268,7 @@ pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         }
     }
     out.extend(crate::output::check(r, m));
+    out.extend(crate::labels::check(r, m));
     if t.sleep_ns > 0 {
         out.push(Finding::new(
             "sleeps",
