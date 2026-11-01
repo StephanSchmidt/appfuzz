@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>appfuzz: fuzz WebAssembly apps instead of reviewing them</title>
-<meta name="description" content="appfuzz runs your WebAssembly app thousands of times against a simulated backend and finds the bugs a code review misses: crashes, XSS, n+1 queries that hammer your database. Rust, TypeScript, Python. One command, pass or fail.">
+<meta name="description" content="appfuzz runs your WebAssembly app thousands of times against a simulated backend and finds the bugs a code review misses: crashes, XSS, n+1 queries that hammer your database. Rust, Zig, TypeScript, Python. One command, pass or fail.">
 <link rel="canonical" href="https://appfuzz.dev/">
 <meta name="color-scheme" content="light">
 <meta name="theme-color" content="#ffffff">
@@ -52,6 +52,8 @@
       <a href="#finds">What it finds</a>
       <a href="#minute">Walkthrough</a>
       <a href="#languages">Languages</a>
+      <a href="#speed">Speed</a>
+      <a href="#appos">AppOS</a>
       <a href="#limits">Limits</a>
     </div>
     <a class="gh" href="https://github.com/StephanSchmidt/appfuzz" aria-label="appfuzz on GitHub">
@@ -113,7 +115,7 @@
 <span class="kw">let</span> short = &amp;first.name[..<span class="n">8</span>];</code></pre>
       <p class="verdict"><b>fail</b> <span class="kind">crash</span> when items#all returns empty list: index out of bounds: the len is 0 but the index is 0</p>
       <p class="verdict"><b>fail</b> <span class="kind">crash</span> when items#all returns 3-byte chars: end byte index 8 is not a char boundary; it is inside '日'</p>
-      <p class="foot">Two of the 26 test apps appfuzz must pass on every commit. The simulated backend tries empty lists, huge lists, errors and non-English text on every function the app imports.</p>
+      <p class="foot">Two of the 37 test apps appfuzz must pass on every commit. The simulated backend tries empty lists, huge lists, errors and non-English text on every function the app imports.</p>
     </div>
 
     <div role="tabpanel" id="hp-xss" aria-labelledby="ht-xss" class="card-body" hidden>
@@ -137,6 +139,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
     <p>Tested on components built from</p>
     <ul>
       <li><b>Rust</b> <span>cargo, wasm32-wasip2</span></li>
+      <li><b>Zig</b> <span>zig, wit-bindgen c</span></li>
       <li><b>TypeScript</b> <span>jco, componentize-js</span></li>
       <li><b>Python</b> <span>componentize-py</span></li>
     </ul>
@@ -282,14 +285,15 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 
 <section id="languages" class="frame sec">
   <div class="sec-head">
-    <h2>Same bug, three languages, same finding.</h2>
-    <p>appfuzz never reads your source. It runs the compiled component, so it doesn't care what you wrote it in. One n+1 loop, written three times, reviewed with the same limits.</p>
+    <h2>Same bug, four languages, same finding.</h2>
+    <p>appfuzz never reads your source. It runs the compiled component, so it doesn't care what you wrote it in. One n+1 loop, written four times, reviewed with the same limits.</p>
   </div>
 
   <div class="langs">
     <div class="lang-code">
       <div class="tabs" role="tablist" aria-label="Language">
         <button role="tab" id="tab-rs" aria-controls="panel-rs" aria-selected="true">Rust</button>
+        <button role="tab" id="tab-zig" aria-controls="panel-zig" aria-selected="false" tabindex="-1">Zig</button>
         <button role="tab" id="tab-ts" aria-controls="panel-ts" aria-selected="false" tabindex="-1">TypeScript</button>
         <button role="tab" id="tab-py" aria-controls="panel-py" aria-selected="false" tabindex="-1">Python</button>
       </div>
@@ -299,7 +303,19 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
         out += &amp;format!(<span class="str">"&lt;li&gt;{}&lt;/li&gt;"</span>, esc(&amp;full.owner));
     }
 }</code></pre>
-        <p class="facts"><b>65 KB</b> component. cargo, wasm32-wasip2. About 11,800 runs a second on 24 threads.</p>
+        <p class="facts"><b>65 KB</b> component. cargo, wasm32-wasip2. About 13,250 runs a second on 24 threads.</p>
+      </div>
+      <div role="tabpanel" id="panel-zig" aria-labelledby="tab-zig" hidden>
+<pre class="code"><code><span class="kw">for</span> (items) |it| {
+    <span class="kw">var</span> full: Item = <span class="kw">undefined</span>;
+    <span class="kw">var</span> err: Str = <span class="kw">undefined</span>;
+    <span class="kw">if</span> (!bench_web_items_get(it.id, &amp;full, &amp;err)) <span class="kw">continue</span>;
+    <span class="kw">defer</span> bench_web_items_item_free(&amp;full);
+    <span class="kw">try</span> out.appendSlice(gpa, <span class="str">"&lt;li&gt;"</span>);
+    <span class="kw">try</span> esc(&amp;out, gpa, slice(full.owner));
+    <span class="kw">try</span> out.appendSlice(gpa, <span class="str">"&lt;/li&gt;"</span>);
+}</code></pre>
+        <p class="facts"><b>114 KB</b> component. zig, wit-bindgen c, the WASI adapter. About 8,600 runs a second. Also found: libc imports file system access the app never uses.</p>
       </div>
       <div role="tabpanel" id="panel-ts" aria-labelledby="tab-ts" hidden>
 <pre class="code"><code><span class="kw">for</span> (<span class="kw">const</span> it <span class="kw">of</span> all()) {
@@ -308,7 +324,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
     out += <span class="str">`&lt;li&gt;${esc(full.owner)}&lt;/li&gt;`</span>;
   } <span class="kw">catch</span> {}
 }</code></pre>
-        <p class="facts"><b>12 MB</b> component, the JS engine included. About 1,850 runs a second. Also found: a 10 KB name makes <code>esc</code> so slow the request never finishes.</p>
+        <p class="facts"><b>12 MB</b> component, the JS engine included. About 1,900 runs a second. Also found: a 10 KB name makes <code>esc</code> so slow the request never finishes.</p>
       </div>
       <div role="tabpanel" id="panel-py" aria-labelledby="tab-py" hidden>
 <pre class="code"><code><span class="kw">for</span> it <span class="kw">in</span> items.all():
@@ -317,11 +333,11 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
         out += <span class="str">f"&lt;li&gt;{escape(full.owner)}&lt;/li&gt;"</span>
     <span class="kw">except</span> Err:
         <span class="kw">pass</span></code></pre>
-        <p class="facts"><b>18 MB</b> component, the interpreter included. About 1,750 runs a second. Also found: the runtime imports file system and network access the app never uses.</p>
+        <p class="facts"><b>18 MB</b> component, the interpreter included. About 1,940 runs a second. Also found: the runtime imports file system and network access the app never uses.</p>
       </div>
     </div>
     <div class="lang-out">
-      <p class="out-label">appfuzz review, the same in all three</p>
+      <p class="out-label">appfuzz review, the same in all four</p>
       <p class="verdict"><b>fail</b> <span class="kind">n_plus_1</span> calls to items#get grow as 1·n with n = length of the list items#all returns; cost breaks its limit at n = 100</p>
       <p class="verdict"><b>fail</b> <span class="kind">over_budget</span> handle uses 129 cost, the limit is 100</p>
       <p class="verdict warn"><b>warn</b> <span class="kind">chatty</span> items#get is called for each element items#all returned</p>
@@ -330,10 +346,21 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
   </div>
 </section>
 
+<section id="speed" class="frame sec split">
+  <div>
+    <p class="big"><span class="big-n">13,250</span><span class="big-u">requests a second</span></p>
+  </div>
+  <div>
+    <h2>Fast enough for every push.</h2>
+    <p class="lead">Every run is a whole request: a fresh sandbox, simulated host calls, every detector. Time is virtual, so a host that takes 200 ms costs nothing real. Thirty seconds of fuzzing is 400,000 requests to the n+1 app above.</p>
+    <p class="note">The chatty test app, Rust. <code>appfuzz fuzz --time 30s</code> from a fresh start on an AMD Ryzen 9 3900X, 12 cores, 24 threads.</p>
+  </div>
+</section>
+
 <section class="frame sec">
   <div class="sec-head">
     <h2>More bugs that pass a quick read.</h2>
-    <p>From the 26 test apps appfuzz runs on every commit. Each has one planted bug, and appfuzz must find it and nothing else. Findings word for word.</p>
+    <p>From the 37 test apps appfuzz runs on every commit. Each has one planted bug, and appfuzz must find it and nothing else. Findings word for word.</p>
   </div>
   <div class="ex-list">
     <div class="ex">
@@ -379,6 +406,35 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
   </dl>
 </section>
 
+<section id="sandbox" class="frame sec">
+  <div class="sec-head">
+    <h2>What the sandbox blocks, nobody has to review.</h2>
+    <p>Reviewing an app written by marketing usually means reading every line for what it might do: write to ORDERS, flood a server, delete files. Run as WebAssembly in a shell, the app can call only the imports the shell grants. If it can't write ORDERS, nobody has to check that it doesn't. The review shrinks to what is granted, and appfuzz tests that.</p>
+  </div>
+  <figure class="sbx">
+    <div class="sbx-scroll"><svg class="sbx-fig" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" role="img" aria-labelledby="sbx-title"><title id="sbx-title">An app written by marketing. As a native process it reaches orders, the network, the filesystem and processes. As WebAssembly in a shell it reaches only items.get; every other port is closed.</title><defs><marker id="sbx-m15151a" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#15151a"/></marker><marker id="sbx-m6a6a72" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#6a6a72"/></marker><marker id="sbx-m8a1d16" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8a1d16"/></marker><marker id="sbx-mb5271e" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#b5271e"/></marker><marker id="sbx-md93025" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#d93025"/></marker><marker id="sbx-me5534a" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#e5534a"/></marker><marker id="sbx-mffd23f" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#ffd23f"/></marker><marker id="sbx-mffffff" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#ffffff"/></marker></defs><rect width="1200" height="675" fill="#ffffff"/><rect x="16.0" y="16.0" width="576.0" height="643.0" rx="0" fill="#f6f6f2" stroke="#15151a" stroke-width="1.5"/><rect x="16.0" y="16.0" width="576.0" height="58.0" rx="0" fill="#d93025" stroke="#15151a" stroke-width="1.5"/><text x="38.0" y="53.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="800" text-anchor="start" fill="#ffffff" letter-spacing=".5">NATIVE PROCESS</text><text x="570.0" y="53.0" font-family="Archivo, system-ui, sans-serif" font-size="17" font-weight="600" text-anchor="end" fill="#ffffff" >reaches everything</text><rect x="36.0" y="296.0" width="200.0" height="128.0" rx="0" fill="#ffd23f" stroke="#15151a" stroke-width="2.5"/><text x="54.0" y="356.0" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="20" font-weight="700" text-anchor="start" fill="#15151a" >promo_banner</text><text x="54.0" y="380.0" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="500" text-anchor="start" fill="#15151a" fill-opacity=".75">native · uid www</text><rect x="404.0" y="92.0" width="172.0" height="96.0" rx="0" fill="#e5534a" stroke="none" stroke-width="0"/><g transform="translate(420 124.0) scale(1.0)" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="16" cy="7" rx="12" ry="4.5"/><path d="M4 7v18c0 2.5 5.4 4.5 12 4.5s12-2 12-4.5V7"/><path d="M4 16c0 2.5 5.4 4.5 12 4.5s12-2 12-4.5"/></g><text x="466.0" y="137.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="700" text-anchor="start" fill="#ffffff" >orders</text><text x="466.0" y="160.0" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="500" text-anchor="start" fill="#ffffff" fill-opacity=".9">read · write</text><path d="M236.0 318.0 L398.0 140.0" fill="none" stroke="#e5534a" stroke-width="5" stroke-linejoin="round" marker-end="url(#sbx-me5534a)"/><rect x="404.0" y="200.0" width="172.0" height="96.0" rx="0" fill="#d93025" stroke="none" stroke-width="0"/><g transform="translate(420 232.0) scale(1.0)" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="16" cy="16" r="13"/><ellipse cx="16" cy="16" rx="5.5" ry="13"/><path d="M3 16h26M5 9h22M5 23h22"/></g><text x="466.0" y="245.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="700" text-anchor="start" fill="#ffffff" >network</text><text x="466.0" y="268.0" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="500" text-anchor="start" fill="#ffffff" fill-opacity=".9">any host</text><path d="M236.0 339.0 L398.0 248.0" fill="none" stroke="#d93025" stroke-width="5" stroke-linejoin="round" marker-end="url(#sbx-md93025)"/><rect x="404.0" y="308.0" width="172.0" height="96.0" rx="0" fill="#b5271e" stroke="none" stroke-width="0"/><g transform="translate(420 340.0) scale(1.0)" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h9l3 3h14v16H3z"/></g><text x="466.0" y="353.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="700" text-anchor="start" fill="#ffffff" >filesystem</text><text x="466.0" y="376.0" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="500" text-anchor="start" fill="#ffffff" fill-opacity=".9">all of /data</text><path d="M236.0 360.0 L398.0 356.0" fill="none" stroke="#b5271e" stroke-width="5" stroke-linejoin="round" marker-end="url(#sbx-mb5271e)"/><rect x="404.0" y="416.0" width="172.0" height="96.0" rx="0" fill="#8a1d16" stroke="none" stroke-width="0"/><g transform="translate(420 448.0) scale(1.0)" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="16" height="16" rx="2"/><path d="M12 3v5M20 3v5M12 24v5M20 24v5M3 12h5M3 20h5M24 12h5M24 20h5"/></g><text x="466.0" y="461.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="700" text-anchor="start" fill="#ffffff" >processes</text><text x="466.0" y="484.0" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="500" text-anchor="start" fill="#ffffff" fill-opacity=".9">no limit</text><path d="M236.0 381.0 L398.0 464.0" fill="none" stroke="#8a1d16" stroke-width="5" stroke-linejoin="round" marker-end="url(#sbx-m8a1d16)"/><rect x="404.0" y="524.0" width="172.0" height="96.0" rx="0" fill="#15151a" stroke="none" stroke-width="0"/><g transform="translate(420 556.0) scale(1.0)" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M11 8h17M11 16h17M11 24h17"/><circle cx="5" cy="8" r="1.6"/><circle cx="5" cy="16" r="1.6"/><circle cx="5" cy="24" r="1.6"/></g><text x="466.0" y="569.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="700" text-anchor="start" fill="#ffffff" >items</text><text x="466.0" y="592.0" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="500" text-anchor="start" fill="#c9c9cf" fill-opacity=".9">read · write</text><path d="M236.0 402.0 L398.0 572.0" fill="none" stroke="#15151a" stroke-width="5" stroke-linejoin="round" marker-end="url(#sbx-m15151a)"/><rect x="245.6" y="215.0" width="144.9" height="28.0" rx="0" fill="#e5534a" stroke="none" stroke-width="0"/><text x="318.0" y="234.0" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="15" font-weight="600" text-anchor="middle" fill="#ffffff" >UPDATE orders</text><rect x="264.1" y="279.5" width="107.7" height="28.0" rx="0" fill="#d93025" stroke="none" stroke-width="0"/><text x="318.0" y="298.5" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="15" font-weight="600" text-anchor="middle" fill="#ffffff" >10k req/s</text><rect x="250.2" y="344.0" width="135.6" height="28.0" rx="0" fill="#b5271e" stroke="none" stroke-width="0"/><text x="318.0" y="363.0" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="15" font-weight="600" text-anchor="middle" fill="#ffffff" >rm -rf /data</text><rect x="264.1" y="408.5" width="107.7" height="28.0" rx="0" fill="#8a1d16" stroke="none" stroke-width="0"/><text x="318.0" y="427.5" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="15" font-weight="600" text-anchor="middle" fill="#ffffff" >fork() ×∞</text><rect x="250.2" y="473.0" width="135.6" height="28.0" rx="0" fill="#15151a" stroke="none" stroke-width="0"/><text x="318.0" y="492.0" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="15" font-weight="600" text-anchor="middle" fill="#ffffff" >SELECT items</text><rect x="608.0" y="16.0" width="576.0" height="643.0" rx="0" fill="#f6f6f2" stroke="#15151a" stroke-width="1.5"/><rect x="608.0" y="16.0" width="576.0" height="58.0" rx="0" fill="#ffd23f" stroke="#15151a" stroke-width="1.5"/><text x="630.0" y="53.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="800" text-anchor="start" fill="#15151a" letter-spacing=".5">WASM IN A SHELL</text><text x="1162.0" y="53.0" font-family="Archivo, system-ui, sans-serif" font-size="17" font-weight="600" text-anchor="end" fill="#15151a" >reaches items.get</text><rect x="628.0" y="92.0" width="288.0" height="528.0" rx="0" fill="#15151a" stroke="none" stroke-width="0"/><rect x="652.0" y="196.0" width="196.0" height="128.0" rx="0" fill="#ffd23f" stroke="#15151a" stroke-width="2.5"/><text x="670.0" y="256.0" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="20" font-weight="700" text-anchor="start" fill="#15151a" >promo_banner</text><text x="670.0" y="280.0" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="500" text-anchor="start" fill="#15151a" fill-opacity=".75">same app, as .wasm</text><path d="M925.0 140.0 L994.0 140.0" fill="none" stroke="#6a6a72" stroke-width="3" stroke-linejoin="round" stroke-dasharray="6 6"/><rect x="996.0" y="92.0" width="172.0" height="96.0" rx="0" fill="#e3e3de" stroke="none" stroke-width="0"/><g transform="translate(1012 124.0) scale(1.0)" fill="none" stroke="#3a3a42" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="16" cy="7" rx="12" ry="4.5"/><path d="M4 7v18c0 2.5 5.4 4.5 12 4.5s12-2 12-4.5V7"/><path d="M4 16c0 2.5 5.4 4.5 12 4.5s12-2 12-4.5"/></g><text x="1058.0" y="137.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="700" text-anchor="start" fill="#3a3a42" >orders</text><text x="1058.0" y="160.0" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="500" text-anchor="start" fill="#6a6a72" fill-opacity=".9">not granted</text><circle cx="916" cy="140" r="14" fill="#d93025" stroke="#ffffff" stroke-width="2.5"/><path d="M910.12 134.12L921.88 145.88M921.88 134.12L910.12 145.88" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/><path d="M925.0 248.0 L994.0 248.0" fill="none" stroke="#6a6a72" stroke-width="3" stroke-linejoin="round" stroke-dasharray="6 6"/><rect x="996.0" y="200.0" width="172.0" height="96.0" rx="0" fill="#e3e3de" stroke="none" stroke-width="0"/><g transform="translate(1012 232.0) scale(1.0)" fill="none" stroke="#3a3a42" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="16" cy="16" r="13"/><ellipse cx="16" cy="16" rx="5.5" ry="13"/><path d="M3 16h26M5 9h22M5 23h22"/></g><text x="1058.0" y="245.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="700" text-anchor="start" fill="#3a3a42" >network</text><text x="1058.0" y="268.0" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="500" text-anchor="start" fill="#6a6a72" fill-opacity=".9">not granted</text><circle cx="916" cy="248" r="14" fill="#d93025" stroke="#ffffff" stroke-width="2.5"/><path d="M910.12 242.12L921.88 253.88M921.88 242.12L910.12 253.88" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/><path d="M925.0 356.0 L994.0 356.0" fill="none" stroke="#6a6a72" stroke-width="3" stroke-linejoin="round" stroke-dasharray="6 6"/><rect x="996.0" y="308.0" width="172.0" height="96.0" rx="0" fill="#e3e3de" stroke="none" stroke-width="0"/><g transform="translate(1012 340.0) scale(1.0)" fill="none" stroke="#3a3a42" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h9l3 3h14v16H3z"/></g><text x="1058.0" y="353.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="700" text-anchor="start" fill="#3a3a42" >filesystem</text><text x="1058.0" y="376.0" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="500" text-anchor="start" fill="#6a6a72" fill-opacity=".9">not granted</text><circle cx="916" cy="356" r="14" fill="#d93025" stroke="#ffffff" stroke-width="2.5"/><path d="M910.12 350.12L921.88 361.88M921.88 350.12L910.12 361.88" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/><path d="M925.0 464.0 L994.0 464.0" fill="none" stroke="#6a6a72" stroke-width="3" stroke-linejoin="round" stroke-dasharray="6 6"/><rect x="996.0" y="416.0" width="172.0" height="96.0" rx="0" fill="#e3e3de" stroke="none" stroke-width="0"/><g transform="translate(1012 448.0) scale(1.0)" fill="none" stroke="#3a3a42" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="16" height="16" rx="2"/><path d="M12 3v5M20 3v5M12 24v5M20 24v5M3 12h5M3 20h5M24 12h5M24 20h5"/></g><text x="1058.0" y="461.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="700" text-anchor="start" fill="#3a3a42" >processes</text><text x="1058.0" y="484.0" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="500" text-anchor="start" fill="#6a6a72" fill-opacity=".9">not granted</text><circle cx="916" cy="464" r="14" fill="#d93025" stroke="#ffffff" stroke-width="2.5"/><path d="M910.12 458.12L921.88 469.88M921.88 458.12L910.12 469.88" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/><path d="M750.0 324.0 L750.0 572.0 L902.0 572.0" fill="none" stroke="#ffd23f" stroke-width="5" stroke-linejoin="round" marker-end="url(#sbx-mffd23f)"/><rect x="907.0" y="562.0" width="18.0" height="20.0" rx="0" fill="#ffd23f" stroke="#15151a" stroke-width="2.5"/><path d="M925.0 572.0 L990.0 572.0" fill="none" stroke="#15151a" stroke-width="5" stroke-linejoin="round" marker-end="url(#sbx-m15151a)"/><rect x="996.0" y="524.0" width="172.0" height="96.0" rx="0" fill="#15151a" stroke="none" stroke-width="0"/><g transform="translate(1012 556.0) scale(1.0)" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M11 8h17M11 16h17M11 24h17"/><circle cx="5" cy="8" r="1.6"/><circle cx="5" cy="16" r="1.6"/><circle cx="5" cy="24" r="1.6"/></g><text x="1058.0" y="569.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="700" text-anchor="start" fill="#ffffff" >items</text><text x="1058.0" y="592.0" font-family="Archivo, system-ui, sans-serif" font-size="15" font-weight="500" text-anchor="start" fill="#ffd23f" fill-opacity=".9">granted</text><text x="766.0" y="560.0" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="15" font-weight="600" text-anchor="start" fill="#ffd23f" >items.get</text><text x="648.0" y="128.0" font-family="Archivo, system-ui, sans-serif" font-size="21" font-weight="800" text-anchor="start" fill="#ffffff" >WASM shell</text><text x="648.0" y="152.0" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="15" font-weight="500" text-anchor="start" fill="#c9c9cf" >wasmtime · 64 MiB · metered</text></svg></div>
+  </figure>
+  <div class="sbx-notes">
+    <div><h3>Not granted</h3><p>orders.update, sockets, files, processes. The app can't call them, so there is nothing to review.</p></div>
+    <div><h3>Granted</h3><p>items.get. appfuzz fuzzes every call the app makes through it: n+1 queries, crashes, odd values.</p></div>
+    <div><h3>Limited</h3><p>CPU, memory, cost and latency have budgets in the manifest. appfuzz measures the app against them before it ships.</p></div>
+  </div>
+</section>
+
+<section id="appos" class="frame sec split">
+  <div>
+    <h2>The app review in AppOS.</h2>
+    <p class="lead">AppOS lets marketing ship to production the way apps ship to your phone. Engineering owns the shell. Each app runs in a WebAssembly sandbox and does only what its manifest grants. appfuzz is the automatic app review: it checks every app before it runs, pass or fail, with no human bottleneck.</p>
+    <p class="more"><a href="appos/">The AppOS architecture slides</a></p>
+  </div>
+  <dl class="facts-list">
+    <div><dt>Manifest</dt><dd>Marketing and engineering agree on what an app may call. appfuzz reads the same grants and flags any import outside them.</dd></div>
+    <div><dt>App review</dt><dd>Before deploy, appfuzz fuzzes the app against simulated host functions: crashes, n+1 queries, injections, leaks.</dd></div>
+    <div><dt>Sandbox</dt><dd>In production every request has a budget for I/O, time, CPU and memory. appfuzz measures the app against the same budgets first.</dd></div>
+    <div><dt>Code review</dt><dd>Engineering reviews the manifest. appfuzz reviews the code.</dd></div>
+  </dl>
+</section>
+
 <section id="limits" class="frame sec split">
   <div>
     <h2>What it won't do.</h2>
@@ -386,7 +442,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
   </div>
   <dl class="facts-list">
     <div><dt>Catch malicious apps</dt><dd>Not yet. It finds careless code, not hidden backdoors.</dd></div>
-    <div><dt>Know your business rules</dt><dd>It can't tell that <code>create</code> writes, or that a field is personal data.</dd></div>
+    <div><dt>Know your business rules</dt><dd>It can't tell that <code>create</code> writes. Labels in the manifest say which text is SQL, a secret or personal data.</dd></div>
     <div><dt>Test sequences of requests</dt><dd>Each run is one request. Double submits are out of reach for now.</dd></div>
     <div><dt>See inside interpreters</dt><dd>TypeScript and Python apps are measured just as well from outside, but the search is less guided and runs are slower.</dd></div>
   </dl>

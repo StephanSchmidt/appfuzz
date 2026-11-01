@@ -9,9 +9,10 @@ world `items-app`) and reviewed with the same manifest limits.
 | `../apps/chatty` | Rust | cargo, wasm32-wasip2 | 65 KB |
 | `ts-chatty` | TypeScript | jco + componentize-js (StarlingMonkey) | 12 MB |
 | `py-chatty` | Python | componentize-py 0.25 | 18 MB |
+| `zig-chatty` | Zig | zig 0.17 + wit-bindgen c + preview1 adapter | 114 KB |
 
-Fuzz speed on a 24-thread machine (`fuzz --time 5s`): Rust about 11,800
-runs/s, TypeScript about 1,850, Python about 1,750.
+Fuzz speed on an AMD Ryzen 9 3900X, 24 threads (`fuzz --time 30s`, fresh
+state): Rust 13,250 runs/s, Zig 8,600, TypeScript 1,900, Python 1,940.
 
 Build:
 
@@ -20,13 +21,14 @@ cd ts-chatty && npm install && npx jco componentize src/app.ts \
     --wit ../../wit/web.wit --world-name items-app --disable all -o app.wasm
 cd py-chatty && uvx componentize-py -d ../../wit/web.wit -w items-app \
     componentize app -o app.wasm
+zig-chatty/build.sh
 ```
 
 Then `appfuzz review` in each directory.
 
 ## What review finds
 
-All three: `n_plus_1` (calls to items#get grow as 1·n, cost breaks its limit
+All four: `n_plus_1` (calls to items#get grow as 1·n, cost breaks its limit
 at n = 100), `over_budget` (129 cost), `chatty`, `redundant_calls`,
 `serial_chain`, with the same titles.
 
@@ -39,6 +41,11 @@ Per language:
 - **Python** also fails `ungranted_import` eight times: the
   componentize-py runtime imports `wasi:filesystem` and `wasi:sockets`
   whatever the app uses.
+- **Zig** also fails `ungranted_import` twice: wasi-libc and the preview1
+  adapter import `wasi:filesystem`. Zig's default WebAssembly stack is
+  16 MB; with it, every fresh instance maps 17 MB and runs drop to 3,700/s.
+  `build.sh` sets 1 MB, as Rust does. The rest of the gap to Rust is the
+  adapter, a second module in every instance.
 - **Worlds:** componentize-js and componentize-py import every interface of
   the world they are built against, so build against a world with only the
   imports the app uses (`items-app`), or appfuzz reports the rest as

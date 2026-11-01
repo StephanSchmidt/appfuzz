@@ -9,7 +9,7 @@ database query per row. One command gives a verdict and an exit code for CI.
 
 It never reads your source. It runs the compiled
 [component](https://component-model.bytecodealliance.org/), so it works for
-any language that builds one. It's tested with Rust, TypeScript and Python.
+any language that builds one. It's tested with Rust, Zig, TypeScript and Python.
 
 Website: https://appfuzz.dev
 
@@ -46,7 +46,7 @@ $ appfuzz review --time 10s
 }
 ```
 
-Output shortened. The same loop written in TypeScript and Python gets the
+Output shortened. The same loop written in Zig, TypeScript and Python gets the
 same findings (`bench/lang`).
 
 ## Install
@@ -149,7 +149,7 @@ reference for people too.
 | `crates/appfuzz-core` | engine: harness, simulated host, fuzzer, detectors |
 | `crates/appfuzz` | the CLI |
 | `bench/apps` | 37 small apps, each with one bad pattern (or none) and its expected findings |
-| `bench/lang` | the same app in TypeScript and Python |
+| `bench/lang` | the same app in Zig, TypeScript and Python |
 | `website` | appfuzz.dev and its `install.sh` |
 
 `cargo test` runs the unit tests. The bench builds every app in
