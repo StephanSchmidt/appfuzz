@@ -150,6 +150,7 @@ h1 { font-size: clamp(46px, 7.4vw, 96px); }
   color: var(--ink);
 }
 .verdict + .verdict { margin-top: 8px; }
+.when { margin: 14px 0 8px; font-size: 13px; color: var(--mute); }
 .verdict b { color: var(--red); font-weight: 600; margin-right: 6px; }
 .verdict .kind { font-weight: 600; margin-right: 6px; }
 .verdict.warn { border-left-color: var(--amber); background: #fbf4e6; }
