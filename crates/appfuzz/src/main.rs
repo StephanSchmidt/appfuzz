@@ -806,7 +806,7 @@ fn run(cli: Cli) -> Result<Value> {
                 anyhow::bail!("no stored runs of this component; run `review` first");
             }
             let mut env = appfuzz_core::envelope::Envelope::build(&runs, &app.manifest);
-            env.unreached = dig::unexplored(&app, &store)?["sites"]
+            env.unreached = dig::unexplored(&app, &store)?.0["sites"]
                 .as_array()
                 .into_iter()
                 .flatten()
@@ -1040,7 +1040,12 @@ fn run(cli: Cli) -> Result<Value> {
             let app = App::load(load_manifest(&cli)?)?;
             dig::explain(&app, &store, &store.load(run)?)
         }
-        Cmd::Unexplored => dig::unexplored(&App::load(load_manifest(&cli)?)?, &store),
+        Cmd::Unexplored => {
+            let app = App::load(load_manifest(&cli)?)?;
+            let (mut v, found) = dig::unexplored(&app, &store)?;
+            v["findings"] = record_findings(&cli, &app, found)?;
+            Ok(v)
+        }
         Cmd::Wasi => dig::wasi(&App::load(load_manifest(&cli)?)?, &store),
         Cmd::Runs => {
             let runs: Vec<Value> = store
@@ -1204,6 +1209,10 @@ fn finding_json(f: &Finding) -> Value {
     }
     if let Some(c) = &f.confirmed {
         o["case"] = json!(c);
+    }
+    // A finding without a run (statics) points at the code instead.
+    if let Some(l) = f.detail.get("look") {
+        o["look"] = l.clone();
     }
     o
 }

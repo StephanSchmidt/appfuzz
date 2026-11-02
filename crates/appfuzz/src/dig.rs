@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use appfuzz_core::check::Property;
 use appfuzz_core::detect::{self, Finding};
+use appfuzz_core::dormant;
 use appfuzz_core::fuzz;
 use appfuzz_core::harness::{App, field, field_mut};
 use appfuzz_core::output::response;
@@ -398,70 +399,60 @@ pub fn explain(app: &App, store: &RunStore, r: &RunRecord) -> Result<Value> {
 /// Host call sites in the code that no stored run reached, with the
 /// constants the surrounding function compares with or uses: the inputs
 /// that may lead there.
-pub fn unexplored(app: &App, store: &RunStore) -> Result<Value> {
+/// Also the `dormant_code` findings, for the caller to record.
+pub fn unexplored(app: &App, store: &RunStore) -> Result<(Value, Vec<Finding>)> {
     let st = Statics::parse(&app.bytes)?;
     let runs: Vec<RunRecord> = store.all()?.into_iter().filter(|r| r.spec.component == app.hash).collect();
-    let mut reached: BTreeSet<(String, u32, String)> = BTreeSet::new();
-    for r in &runs {
-        for e in &r.events {
-            for f in &e.stack {
-                reached.insert((f.module.clone(), f.func, e.func.clone()));
-            }
-        }
-    }
+    let hit = dormant::reached(&runs);
+    let funcs: BTreeSet<(String, u32)> = runs.iter().flat_map(|r| r.events.iter().flat_map(|e| e.stack.iter().map(|f| (f.module.clone(), f.func)))).collect();
+    let all = dormant::sites(&st);
     let mut sites = Vec::new();
-    let mut total = 0;
-    for m in &st.modules {
+    for s in all.iter().filter(|s| !dormant::is_reached(s, &hit, &funcs)) {
+        let Some(m) = st.module(&s.module) else { continue };
         let callers = m.callers();
-        for imp in &m.imports {
-            let (Some(fi), Some(h)) = (imp.func, &imp.host) else { continue };
-            for (c, off) in callers.get(&fi).into_iter().flatten() {
-                total += 1;
-                if reached.contains(&(m.id.clone(), *c, h.clone())) {
-                    continue;
-                }
-                // Constants of the function and of its callers (two levels):
-                // the condition that leads to a call is often one level up.
-                let mut texts: Vec<String> = Vec::new();
-                let mut numbers: Vec<i64> = Vec::new();
-                let mut via = Vec::new();
-                let mut level = vec![*c];
-                for depth in 0..3 {
-                    let mut next = Vec::new();
-                    for g in &level {
-                        if let Some(f) = m.func(*g) {
-                            for (_, t) in f.text_consts.iter().take(8) {
-                                if !texts.contains(t) {
-                                    texts.push(t.clone());
-                                }
-                            }
-                            for n in f.cmp_consts.iter().copied().filter(|n| !(-1..=1).contains(n) && n.unsigned_abs() < 1 << 24).take(12) {
-                                if !numbers.contains(&n) {
-                                    numbers.push(n);
-                                }
-                            }
+        // Constants of the function and of its callers (two levels):
+        // the condition that leads to a call is often one level up.
+        let mut texts: Vec<String> = Vec::new();
+        let mut numbers: Vec<i64> = Vec::new();
+        let mut via = Vec::new();
+        let mut level = vec![s.func];
+        for depth in 0..3 {
+            let mut next = Vec::new();
+            for g in &level {
+                if let Some(f) = m.func(*g) {
+                    for (_, t) in f.text_consts.iter().take(8) {
+                        if !texts.contains(t) {
+                            texts.push(t.clone());
                         }
-                        if depth > 0 {
-                            via.push(m.label(*g));
-                        }
-                        next.extend(callers.get(g).into_iter().flatten().map(|(x, _)| *x).filter(|x| !level.contains(x)));
                     }
-                    next.sort();
-                    next.dedup();
-                    next.truncate(4);
-                    level = next;
+                    for n in f.cmp_consts.iter().copied().filter(|n| !(-1..=1).contains(n) && n.unsigned_abs() < 1 << 24).take(12) {
+                        if !numbers.contains(&n) {
+                            numbers.push(n);
+                        }
+                    }
                 }
-                sites.push(json!({
-                    "host": h, "module": m.id, "func": c, "name": m.label(*c), "at": format!("{off:x}"),
-                    "called_via": via, "texts": texts, "compares_with": numbers,
-                }));
+                if depth > 0 {
+                    via.push(m.label(*g));
+                }
+                next.extend(callers.get(g).into_iter().flatten().map(|(x, _)| *x).filter(|x| !level.contains(x)));
             }
+            next.sort();
+            next.dedup();
+            next.truncate(4);
+            level = next;
         }
+        let mut o = dormant::site_json(m, s);
+        o["function_runs"] = json!(funcs.contains(&(s.module.clone(), s.func)));
+        o["called_via"] = json!(via);
+        o["texts"] = json!(texts);
+        o["compares_with"] = json!(numbers);
+        sites.push(o);
     }
-    Ok(json!({
-        "runs_used": runs.len(), "static_sites": total, "unreached": sites.len(), "sites": sites,
-        "note": "a site counts as reached when a stored run called that host function from that function; wrappers shared by many sites hide which one",
-    }))
+    let found = dormant::find(&st, &runs);
+    Ok((json!({
+        "runs_used": runs.len(), "static_sites": all.len(), "unreached": sites.len(), "sites": sites,
+        "note": "a site is a call instruction; it counts as reached when it is on the stack of a host call in a stored run. Small wrappers around one host function are looked through (via)",
+    }), found))
 }
 
 /// WASI the component imports, what the manifest grants, and what the

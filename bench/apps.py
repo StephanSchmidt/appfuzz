@@ -812,7 +812,7 @@ app("time-bomb", "fetches its API every day, and at one minute (found by hash, s
             let _ = http::fetch("https://drop.example.org/c", "");
         }
         html(format!("<p>{}</p>", esc(&news)))
-    """), [], grants=[HTTP], extra=LABELS, hosts=["example.com"])
+    """), [("dormant_code", "warn")], grants=[HTTP], extra=LABELS, hosts=["example.com"])
 
 # --- Value constraints -----------------------------------------------------
 # What the platform promises: the same code as a bad app, made fine by a

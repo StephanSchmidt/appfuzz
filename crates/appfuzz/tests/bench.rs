@@ -171,7 +171,9 @@ fn envelope_time_bomb() {
     let env = state.join("envelope.json");
     let env = env.to_str().unwrap();
     let review = appfuzz(&manifest, &state, &["review", "--fresh", "--time", "5s"]);
-    assert_eq!(review["verdict"], "pass", "{review}");
+    // The review cannot reach the bomb; it can point at it.
+    assert_eq!(review["verdict"], "warn", "{review}");
+    assert!(review["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "dormant_code"), "{review}");
     let e = appfuzz(&manifest, &state, &["envelope", "--out", env]);
     assert!(e.get("error").is_none(), "{e}");
     let check = |now: &str| {

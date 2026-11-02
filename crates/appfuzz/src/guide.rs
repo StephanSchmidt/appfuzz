@@ -197,7 +197,7 @@ pub const DOCS: &[Doc] = &[
     Doc {
         path: "unexplored",
         examples: &["appfuzz unexplored"],
-        output: "host call sites no stored run reached, with texts and numbers of the function and its callers",
+        output: "host call instructions no stored run reached, with texts and numbers of the function and its callers; `dormant_code` findings where nearby code compares with odd large constants, hash constants or times",
         next: "`run --set` or `sweep --values` with the hinted values; `fuzz` again",
     },
     Doc { path: "wasi", examples: &["appfuzz wasi"], output: "WASI imports with grants; clock, random, sleep and output use in stored runs", next: "`inspect` for platform imports" },
@@ -391,6 +391,11 @@ pub fn next(path: &str, out: &Value) -> Vec<String> {
         "unexplored" if out["unreached"].as_u64().unwrap_or(0) > 0 => {
             n.push("appfuzz run --set '<request with a hinted value>'".into());
             n.push("appfuzz sweep -f <field> --values <hinted values>".into());
+            for f in out["findings"].as_array().into_iter().flatten().filter(|f| f["kind"] == "dormant_code").take(2) {
+                if let Some(l) = f["look"].as_str() {
+                    n.push(l.to_string());
+                }
+            }
         }
         "wasm loops" => n.push("appfuzz amplify".into()),
         "envelope" => n.push("appfuzz envelope check last".into()),

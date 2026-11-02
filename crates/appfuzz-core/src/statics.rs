@@ -77,6 +77,46 @@ pub struct FuncInfo {
     /// Integer constants the code compares against (`x == 13`).
     #[serde(skip)]
     pub cmp_consts: Vec<i64>,
+    /// Constants of known hash and checksum functions (`FNV-1a`, …).
+    #[serde(skip)]
+    pub magic: Vec<&'static str>,
+}
+
+/// Constants that give away a hash or checksum: a trigger that compares a
+/// hash of its input hides the value it waits for. SipHash (Rust's
+/// HashMap) is left out on purpose.
+pub const MAGIC: &[(u64, &str)] = &[
+    (0xcbf29ce484222325, "FNV-1a"),
+    (0x100000001b3, "FNV-1a"),
+    (0x811c9dc5, "FNV-1a"),
+    (0x01000193, "FNV-1a"),
+    (0xcc9e2d51, "MurmurHash3"),
+    (0x1b873593, "MurmurHash3"),
+    (0x85ebca6b, "MurmurHash3"),
+    (0xc2b2ae35, "MurmurHash3"),
+    (0xff51afd7ed558ccd, "MurmurHash3"),
+    (0xc4ceb9fe1a85ec53, "MurmurHash3"),
+    (0x5bd1e995, "MurmurHash2"),
+    (0xc6a4a7935bd1e995, "MurmurHash2"),
+    (0x9e3779b1, "xxHash"),
+    (0x85ebca77, "xxHash"),
+    (0x9e3779b185ebca87, "xxHash"),
+    (0xc2b2ae3d27d4eb4f, "xxHash"),
+    (0x428a2f98, "SHA-256"),
+    (0x6a09e667, "SHA-256"),
+    (0xbb67ae85, "SHA-256"),
+    (0x6a09e667f3bcc908, "SHA-512"),
+    (0x67452301, "MD5/SHA-1"),
+    (0xefcdab89, "MD5/SHA-1"),
+    (0xd76aa478, "MD5"),
+    (0x5a827999, "SHA-1"),
+    (0xedb88320, "CRC-32"),
+    (0x04c11db7, "CRC-32"),
+    (0x82f63b78, "CRC-32C"),
+];
+
+fn magic_of(v: u64) -> Option<&'static str> {
+    MAGIC.iter().find(|(c, _)| *c == v).map(|(_, n)| *n)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -349,6 +389,7 @@ fn scan_body(index: u32, body: &FunctionBody<'_>) -> Result<FuncInfo> {
         instructions: 0,
         text_consts: vec![],
         cmp_consts: vec![],
+        magic: vec![],
     };
     // The integer constant pushed by the previous instruction.
     let mut pending: Option<i64> = None;
@@ -366,10 +407,18 @@ fn scan_body(index: u32, body: &FunctionBody<'_>) -> Result<FuncInfo> {
         {
             f.cmp_consts.push(c);
         }
-        match &op {
-            Operator::I32Const { value } => pending = Some(*value as i64),
-            Operator::I64Const { value } => pending = Some(*value),
-            _ => {}
+        let konst = match &op {
+            Operator::I32Const { value } => Some((*value as i64, *value as u32 as u64)),
+            Operator::I64Const { value } => Some((*value, *value as u64)),
+            _ => None,
+        };
+        if let Some((v, bits)) = konst {
+            pending = Some(v);
+            if let Some(n) = magic_of(bits)
+                && !f.magic.contains(&n)
+            {
+                f.magic.push(n);
+            }
         }
         match op {
             Operator::Block { .. } | Operator::If { .. } | Operator::TryTable { .. } => stack.push(None),

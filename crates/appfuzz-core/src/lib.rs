@@ -9,6 +9,7 @@ pub mod constraints;
 pub mod metamorphic;
 pub mod output;
 pub mod detect;
+pub mod dormant;
 pub mod dest;
 pub mod effects;
 pub mod envelope;
