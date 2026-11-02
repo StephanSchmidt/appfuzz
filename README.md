@@ -2,10 +2,14 @@
 
 No more code reviews. Fuzz instead.
 
-appfuzz runs a WebAssembly app thousands of times against a simulated
-backend and reports what a review would miss: crashes on empty lists and
-Unicode, user input that reaches the HTML unescaped, loops that send one
-database query per row. One command gives a verdict and an exit code for CI.
+Agents write code faster than anyone can review it, and soon not only
+engineers will ask them to. Reading every diff doesn't scale; running the
+code does. appfuzz runs a WebAssembly app thousands of times against a
+simulated backend and reports what a reviewer would miss: crashes on empty
+lists and Unicode, user input that reaches the HTML unescaped, loops that
+send one database query per row. One command gives a verdict and an exit
+code for CI, so code ships when it passes, not when a senior engineer finds
+the time to read it.
 
 It never reads your source. It runs the compiled
 [component](https://component-model.bytecodealliance.org/), so it works for
@@ -136,6 +140,25 @@ result.
 Every command prints one JSON document with a `next` field, so an AI agent
 can drive it. [AGENTS.md](AGENTS.md) is the guide for that, and it's a good
 reference for people too.
+
+## Where it fits: AppOS
+
+appfuzz is the review step of [AppOS](https://appfuzz.dev/appos/), an
+architecture for web apps that people outside engineering build with
+agents. The site is a shell run by the platform team, and every feature is
+an app: a WebAssembly component the shell runs in a sandbox. It works like a
+phone: the sandbox limits what an app can reach, its manifest grants
+permissions, and a review decides what goes live. Sandboxes and permissions
+are known techniques. The review was the missing piece.
+
+The shell writes each app's `appfuzz.toml`, because only the platform knows
+what its host functions cost, which ones change data, and which business
+rules they keep. An app can't loosen its own review.
+
+[Roomer](https://github.com/StephanSchmidt/roomer-appos) is the full demo: a
+pod-booking site with four apps, a `make` that reviews them, and a shell
+that refuses a version that fails. Its README has an exercise: an agent
+adds a feature, and the review refuses it.
 
 ## Limits
 
