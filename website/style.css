@@ -337,3 +337,11 @@ footer { border-top: 1px solid var(--rule); }
   .strip li b { font-size: 22px; }
   .foot-in { flex-direction: column; align-items: flex-start; gap: 8px; }
 }
+
+/* Tab panels stacked in one grid cell: the box is as tall as its tallest
+   panel, so switching tabs never moves the page. */
+.stack { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; }
+.stack > * { grid-column: 1; min-width: 0; }
+.stack > :not([role=tabpanel]) { grid-row: 1; }
+.stack > [role=tabpanel] { grid-row: 2; }
+.stack > [role=tabpanel][hidden] { display: block; visibility: hidden; }

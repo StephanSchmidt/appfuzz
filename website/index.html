@@ -78,7 +78,7 @@
     <p class="then">Then run <code>appfuzz review</code> next to your <code>.wasm</code>.</p>
   </div>
 
-  <figure class="card" id="hero-card">
+  <figure class="card stack" id="hero-card">
     <div class="card-tabs" role="tablist" aria-label="Example finding">
       <button role="tab" id="ht-db" aria-controls="hp-db" aria-selected="false" tabindex="-1">Database</button>
       <button role="tab" id="ht-crash" aria-controls="hp-crash" aria-selected="false" tabindex="-1">Crash</button>
@@ -197,7 +197,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
       <li><button role="tab" id="st-5" aria-controls="sp-5" aria-selected="false" tabindex="-1"><code>appfuzz confirm</code><span>Replayed three times, identical. Saved as a case you can rerun.</span></button></li>
     </ol>
 
-    <div class="term">
+    <div class="term stack">
       <div class="term-bar"><span>~/bench/apps/chatty</span></div>
 <pre role="tabpanel" id="sp-1" aria-labelledby="st-1"><code><span class="p">$</span> appfuzz inspect
 {
@@ -291,7 +291,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
   </div>
 
   <div class="langs">
-    <div class="lang-code">
+    <div class="lang-code stack">
       <div class="tabs" role="tablist" aria-label="Language">
         <button role="tab" id="tab-rs" aria-controls="panel-rs" aria-selected="true">Rust</button>
         <button role="tab" id="tab-zig" aria-controls="panel-zig" aria-selected="false" tabindex="-1">Zig</button>
