@@ -11,6 +11,7 @@ pub mod output;
 pub mod detect;
 pub mod dest;
 pub mod effects;
+pub mod envelope;
 pub mod fuzz;
 pub mod par;
 pub mod payload;

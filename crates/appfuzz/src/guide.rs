@@ -183,6 +183,18 @@ pub const DOCS: &[Doc] = &[
         next: "`timeline <run>`; `diff <typical run> <run>`",
     },
     Doc {
+        path: "envelope",
+        examples: &["appfuzz envelope", "appfuzz envelope --out shipped/envelope.json"],
+        output: "envelope.json from every stored run: per host function the most calls, call sites and destinations; output destinations; scripts; the most fuel, cost, latency and memory; call sites no run reached",
+        next: "ship envelope.json with the app; `envelope check <trace>` on production traces",
+    },
+    Doc {
+        path: "envelope check",
+        examples: &["appfuzz envelope check last", "appfuzz envelope check trace.json --envelope shipped/envelope.json"],
+        output: "outside_envelope findings for a trace (a stored run or a JSON trace) and a verdict; exit code 0 pass, 1 warn, 2 fail",
+        next: "a new destination or call site: `provenance <run> --call <n>`; `unexplored` for the code behind it",
+    },
+    Doc {
         path: "unexplored",
         examples: &["appfuzz unexplored"],
         output: "host call sites no stored run reached, with texts and numbers of the function and its callers",
@@ -381,11 +393,19 @@ pub fn next(path: &str, out: &Value) -> Vec<String> {
             n.push("appfuzz sweep -f <field> --values <hinted values>".into());
         }
         "wasm loops" => n.push("appfuzz amplify".into()),
+        "envelope" => n.push("appfuzz envelope check last".into()),
+        "envelope check" if out["verdict"] != "pass" => {
+            n.push("appfuzz unexplored".into());
+            if out["trace"].as_str().is_some_and(|t| t != "trace") {
+                n.push(format!("appfuzz explain {}", out["trace"].as_str().unwrap_or_default()));
+            }
+        }
         _ => {}
     }
     if let Some(f) = fid
         && worst.is_some_and(|w| w["case"].is_null())
         && path != "confirm"
+        && path != "envelope check"
     {
         n.insert(0, format!("appfuzz confirm {f}"));
     }

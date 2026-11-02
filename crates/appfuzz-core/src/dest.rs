@@ -60,25 +60,29 @@ pub struct Dest {
     pub written: String,
 }
 
+/// Any URL with a host of its own, granted or not.
+pub fn absolute(url: &str) -> Option<Dest> {
+    let u = normalize(url);
+    let (kind, host, _) = classify(&u);
+    if !matches!(kind.as_str(), "external" | "protocol_relative" | "backslash" | "ip") {
+        return None;
+    }
+    let host = host?.to_ascii_lowercase();
+    let bare = host.trim_start_matches('[').trim_end_matches(']').to_string();
+    let class = if is_internal(&bare) { Class::Internal } else { Class::OffHost };
+    let abs = if kind == "external" || kind == "ip" { u.clone() } else { format!("https:{}", u.replace('\\', "/")) };
+    let port = url::Url::parse(&abs).ok().and_then(|p| p.port_or_known_default()).map(|p| format!(":{p}")).unwrap_or_default();
+    let written = written_host(&u);
+    Some(Dest { url: u, class, endpoint: format!("{bare}{port}"), target: bare, written })
+}
+
 /// Where a URL goes, if it leaves the app.
 pub fn destination(url: &str, m: &Manifest) -> Option<Dest> {
     let u = normalize(url);
-    let (kind, host, _) = classify(&u);
-    match kind.as_str() {
+    match classify(&u).0.as_str() {
         "external" | "protocol_relative" | "backslash" | "ip" => {
-            let host = host?.to_ascii_lowercase();
-            let bare = host.trim_start_matches('[').trim_end_matches(']').to_string();
-            let class = if is_internal(&bare) {
-                Class::Internal
-            } else if granted(&bare, &m.grants.hosts) {
-                return None;
-            } else {
-                Class::OffHost
-            };
-            let abs = if kind == "external" || kind == "ip" { u.clone() } else { format!("https:{}", u.replace('\\', "/")) };
-            let port = url::Url::parse(&abs).ok().and_then(|p| p.port_or_known_default()).map(|p| format!(":{p}")).unwrap_or_default();
-            let written = written_host(&u);
-            Some(Dest { url: u, class, endpoint: format!("{bare}{port}"), target: bare, written })
+            let d = absolute(&u)?;
+            (d.class == Class::Internal || !granted(&d.target, &m.grants.hosts)).then_some(d)
         }
         "same_host" => {
             let base = m.app.base.as_deref()?.trim_end_matches('/');
@@ -152,7 +156,8 @@ pub fn origin(r: &RunRecord, d: &Dest, before: Option<u32>) -> Origin {
     let ts: Vec<String> = [&d.target, &d.written].iter().filter(|t| !t.is_empty()).map(|t| t.to_ascii_lowercase()).collect();
     let hit = |s: &String| {
         let s = s.to_ascii_lowercase();
-        ts.iter().any(|t| s.contains(t.as_str()) || t.contains(s.as_str()))
+        // The input holds the target, or at least half of it.
+        ts.iter().any(|t| s.contains(t.as_str()) || t.contains(s.as_str()) && s.len() * 2 >= t.len())
     };
     let mut req = Vec::new();
     r.spec.args.iter().for_each(|a| strings(a, &mut req));
@@ -173,7 +178,7 @@ pub fn origin(r: &RunRecord, d: &Dest, before: Option<u32>) -> Origin {
 
 /// Destinations in a host argument: absolute URLs anywhere in the text,
 /// and the whole value when it has the shape of a URL or host.
-fn in_arg(s: &str, whole: bool) -> Vec<String> {
+pub fn in_arg(s: &str, whole: bool) -> Vec<String> {
     let mut out: Vec<String> = urls::text_urls(s);
     let t = s.trim();
     if (whole || url_like(t)) && !t.contains(char::is_whitespace) && !out.iter().any(|u| u == t) {

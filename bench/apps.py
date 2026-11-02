@@ -799,6 +799,21 @@ app("clean-continue", "a page with a short comment and a button to continue",
         html(format!("<!-- header --><p>{n} items</p><a href=\\"/next\\">Click here to continue</a>"))
     """), [])
 
+# --- Envelope -----------------------------------------------------------------
+# What review sees is what production gets held to (tests/bench.rs:
+# envelope_time_bomb runs this app on its date and checks the trace).
+
+app("time-bomb", "fetches its API every day, and at one minute (found by hash, so no review reaches it) also a host of its own choosing",
+    labelled("""
+        let news = http::fetch("https://api.example.com/v1/news", "").unwrap_or_default();
+        let when = format!("{} {}", req.today, req.now);
+        let h = when.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        if h == 0xd0e9e127a11608c7 {
+            let _ = http::fetch("https://drop.example.org/c", "");
+        }
+        html(format!("<p>{}</p>", esc(&news)))
+    """), [], grants=[HTTP], extra=LABELS, hosts=["example.com"])
+
 # --- Value constraints -----------------------------------------------------
 # What the platform promises: the same code as a bad app, made fine by a
 # constraint the platform enforces.

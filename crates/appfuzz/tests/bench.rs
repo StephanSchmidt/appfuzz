@@ -151,3 +151,40 @@ fn bench() {
     }
     report(&results);
 }
+
+fn appfuzz(manifest: &Path, state: &Path, args: &[&str]) -> Value {
+    let out = Command::new(env!("CARGO_BIN_EXE_appfuzz")).arg("-m").arg(manifest).arg("--state").arg(state).args(args).output().expect("running appfuzz");
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("no JSON from appfuzz {args:?} ({e}): {}", String::from_utf8_lossy(&out.stderr)))
+}
+
+/// What review saw is what production is held to: the time bomb passes
+/// review (its minute is behind a hash), and its trace on that minute
+/// leaves the envelope.
+#[test]
+#[ignore = "slow: builds and reviews a bench app"]
+fn envelope_time_bomb() {
+    let bench = root().join("bench");
+    let status = Command::new("cargo").args(["build", "--release", "--target", "wasm32-wasip2"]).current_dir(&bench).status().expect("cargo");
+    assert!(status.success());
+    let manifest = bench.join("apps/time-bomb/appfuzz.toml");
+    let state = state_dir("envelope-time-bomb");
+    let env = state.join("envelope.json");
+    let env = env.to_str().unwrap();
+    let review = appfuzz(&manifest, &state, &["review", "--fresh", "--time", "5s"]);
+    assert_eq!(review["verdict"], "pass", "{review}");
+    let e = appfuzz(&manifest, &state, &["envelope", "--out", env]);
+    assert!(e.get("error").is_none(), "{e}");
+    let check = |now: &str| {
+        let run = appfuzz(&manifest, &state, &["run", "--now", now]);
+        let id = run["run"].as_str().expect("run id").to_string();
+        appfuzz(&manifest, &state, &["envelope", "check", &id, "--envelope", env])
+    };
+    let day = check("2026-11-03T10:00:00");
+    assert_eq!(day["verdict"], "pass", "{day}");
+    let bomb = check("2027-06-15T03:17:00");
+    assert_eq!(bomb["verdict"], "fail", "{bomb}");
+    let f = &bomb["findings"][0];
+    assert_eq!((f["kind"].as_str(), f["detail"]["destination"].as_str()), (Some("outside_envelope"), Some("drop.example.org:443")), "{bomb}");
+    println!("ok   envelope_time_bomb: review passes, the trace at the bomb's minute leaves the envelope");
+    let _ = std::fs::remove_dir_all(&state);
+}

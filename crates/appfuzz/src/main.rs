@@ -314,6 +314,19 @@ enum Cmd {
         #[arg(long, default_value = "info")]
         min: String,
     },
+    /// What the reviewed app was seen to do, for a platform to enforce.
+    ///
+    /// Writes envelope.json from every stored run of this component: per
+    /// host function the most calls, call sites and destinations; the
+    /// destinations the output fires requests to; scripts; the most fuel,
+    /// cost, latency and memory. `envelope check` holds a trace to it.
+    Envelope {
+        #[command(subcommand)]
+        cmd: Option<EnvelopeCmd>,
+        /// Where to write the envelope.
+        #[arg(long, default_value = "envelope.json")]
+        out: PathBuf,
+    },
     /// Static views of the code: functions, call graph, loops, strings.
     Wasm {
         #[command(subcommand)]
@@ -352,6 +365,20 @@ enum ProbeCmd {
         export: Option<String>,
         #[command(flatten)]
         spec: SpecArgs,
+    },
+}
+
+#[derive(Subcommand)]
+enum EnvelopeCmd {
+    /// A trace against the envelope: outside_envelope findings, exit code 0/1/2.
+    ///
+    /// The trace is a stored run (`last`, an id) or a JSON file: a run
+    /// record, or {export, args, events: [{func, args, result, stack}],
+    /// result, stdout, stderr, totals} (see ENVELOPE.md).
+    Check {
+        trace: String,
+        #[arg(long, default_value = "envelope.json")]
+        envelope: PathBuf,
     },
 }
 
@@ -505,7 +532,7 @@ fn main() {
         let n = guide::next(&path, &Value::Object(o.clone()));
         o.insert("next".into(), json!(n));
     }
-    let code = if path == "review" { out["exit_code"].as_i64().unwrap_or(0) as i32 } else { 0 };
+    let code = if path == "review" || path == "envelope check" { out["exit_code"].as_i64().unwrap_or(0) as i32 } else { 0 };
     let out = if full { out } else { shorten(out) };
     println!("{}", serde_json::to_string_pretty(&out).expect("json"));
     std::process::exit(code);
@@ -518,7 +545,9 @@ fn commands(c: &clap::Command, prefix: &str) -> Vec<(String, String)> {
         .flat_map(|s| {
             let path = if prefix.is_empty() { s.get_name().to_string() } else { format!("{prefix} {}", s.get_name()) };
             if s.has_subcommands() {
-                commands(s, &path)
+                // A command that also runs without a subcommand is one too.
+                let own = (!s.is_subcommand_required_set()).then(|| (path.clone(), s.get_about().map(|a| a.to_string()).unwrap_or_default()));
+                own.into_iter().chain(commands(s, &path)).collect()
             } else {
                 vec![(path, s.get_about().map(|a| a.to_string()).unwrap_or_default())]
             }
@@ -769,6 +798,61 @@ fn run(cli: Cli) -> Result<Value> {
                 .map(|p| json!({"now": p.now, "what": p.what, "outcome": p.outcome, "run": p.run}))
                 .collect();
             Ok(json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, &app, found)?}))
+        }
+        Cmd::Envelope { cmd: None, out } => {
+            let app = App::load(load_manifest(&cli)?)?;
+            let runs: Vec<RunRecord> = store.all()?.into_iter().filter(|r| r.spec.component == app.hash).collect();
+            if runs.is_empty() {
+                anyhow::bail!("no stored runs of this component; run `review` first");
+            }
+            let mut env = appfuzz_core::envelope::Envelope::build(&runs, &app.manifest);
+            env.unreached = dig::unexplored(&app, &store)?["sites"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|s| json!({"host": s["host"], "module": s["module"], "func": s["func"], "name": s["name"], "at": s["at"]}))
+                .collect();
+            std::fs::write(out, serde_json::to_string_pretty(&env)? + "\n").with_context(|| format!("writing {}", out.display()))?;
+            let functions: Vec<Value> = env
+                .functions
+                .iter()
+                .map(|(f, x)| json!({"func": f, "max_calls": x.max_calls, "sites": x.sites.len(), "destinations": x.destinations, "destinations_from_input": x.destinations_from_input}))
+                .collect();
+            Ok(json!({
+                "envelope": out, "runs": env.runs, "functions": functions, "output": env.output, "budget": env.budget,
+                "unreached": env.unreached.len(),
+            }))
+        }
+        Cmd::Envelope { cmd: Some(EnvelopeCmd::Check { trace, envelope }), .. } => {
+            let m = load_manifest(&cli)?;
+            let env: appfuzz_core::envelope::Envelope = serde_json::from_str(&std::fs::read_to_string(envelope).with_context(|| format!("reading {}", envelope.display()))?)
+                .with_context(|| format!("parsing {}", envelope.display()))?;
+            let r = match store.load(trace) {
+                Ok(r) => r,
+                Err(_) => {
+                    let v = parse_json_arg(trace)?;
+                    match serde_json::from_value::<RunRecord>(v.clone()) {
+                        Ok(r) => r,
+                        Err(_) => serde_json::from_value::<appfuzz_core::envelope::Trace>(v).context("not a trace")?.to_record(),
+                    }
+                }
+            };
+            let mut findings = env.check(&r, &m);
+            findings.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.kind.cmp(&b.kind)));
+            let worst = findings.iter().map(|f| f.severity).max();
+            let (verdict, code) = match worst {
+                Some(Severity::Fail) => ("fail", 2),
+                Some(Severity::Warn) => ("warn", 1),
+                _ => ("pass", 0),
+            };
+            let mut o = json!({
+                "trace": r.id, "verdict": verdict, "exit_code": code, "calls": r.events.len(),
+                "findings": findings.iter().map(|f| { let mut o = finding_json(f); o["detail"] = f.detail.clone(); o }).collect::<Vec<_>>(),
+            });
+            if !r.spec.component.is_empty() && r.spec.component != env.component {
+                o["note"] = json!("the trace comes from another build of the component than the envelope");
+            }
+            Ok(o)
         }
         Cmd::Urls { run, domains } => {
             let m = load_manifest(&cli)?;

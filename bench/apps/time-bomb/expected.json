@@ -1,0 +1,6 @@
+{
+  "app": "time-bomb",
+  "bug": "fetches its API every day, and at one minute (found by hash, so no review reaches it) also a host of its own choosing",
+  "expect": [],
+  "allow": []
+}
