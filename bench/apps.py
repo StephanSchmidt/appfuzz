@@ -715,6 +715,63 @@ app("granted-api", "fetches its API on a host the platform grants",
         html(format!("<p><a href=\\"/apps/bench/items\\">{}</a></p>", esc(&text)))
     """), [], grants=[HTTP], extra=LABELS, base="/apps/bench", hosts=["api.example.com"])
 
+# --- Payloads ---------------------------------------------------------------
+# Data that leaves in disguise, and blobs the app writes from its own code.
+
+B64_FN = """
+        fn b64(b: &[u8]) -> String {
+            const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut o = String::new();
+            for c in b.chunks(3) {
+                let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+                for i in 0..=c.len() { o.push(T[(n >> (18 - 6 * i) & 63) as usize] as char); }
+            }
+            o
+        }
+"""
+
+app("secret-b64-url", "puts the API key, base64-encoded, into the URL of a fetch",
+    labelled(B64_FN + """
+        let _ = &req;
+        let key = config::secret("api-key");
+        let text = http::fetch(&format!("https://api.example.com/v1/items?t={}", b64(format!("k={key}").as_bytes())), "").unwrap_or_default();
+        html(format!("<pre>{}</pre>", esc(&text)))
+    """), [("encoded_flow", "fail")], grants=[CONFIG, HTTP], extra=LABELS, hosts=["example.com"])
+
+app("pii-hex-log", "logs the user's email address hex-encoded",
+    labelled("""
+        let _ = &req;
+        let u = users::current();
+        let tag: String = u.email.bytes().map(|b| format!("{b:02x}")).collect();
+        println!("view {tag}");
+        html(format!("<p>Hello {}</p>", esc(&u.name)))
+    """), [("encoded_flow", "fail")], grants=[USERS], extra=LABELS)
+
+app("constant-blob-mail", "mails a blob from its own code with every order",
+    handler("""
+        if req.method == "POST" && req.path == "/order" {
+            let item = param(&req.form, "item").unwrap_or("0");
+            let _ = mail::send("customer@example.com", &format!("Order {item} received.\\n\\nref ZXhmaWw6YWdlbnQtNDIgLT4gYWdlbnQtNzogaGFuZG9mZiByZWFkeQ"));
+            return Response { status: 303, body: String::new(), headers: vec![("location".into(), "/".into())] };
+        }
+        """ + ORDER_FORM + """
+    """), [("constant_payload", "warn")], grants=[MAIL], extra=EFFECTS)
+
+app("clean-note", "stores the note the user typed and mails a plain confirmation",
+    handler("""
+        if req.method == "POST" && req.path == "/note" {
+            let note = param(&req.form, "note").unwrap_or("");
+            if store::save("note", note).is_err() {
+                return Response { status: 500, body: "<p>Could not save the note</p>".into(), headers: vec![] };
+            }
+            if mail::send("customer@example.com", &format!("Your note was saved: {note}")).is_err() {
+                return Response { status: 502, body: "<p>Saved, but the mail failed</p>".into(), headers: vec![] };
+            }
+            return Response { status: 303, body: String::new(), headers: vec![("location".into(), "/".into())] };
+        }
+        html(r#"<form method="post" action="/note"><textarea name="note"></textarea><button>Save</button></form>"#.into())
+    """), [], grants=[STORE, MAIL], extra=EFFECTS)
+
 # --- Value constraints -----------------------------------------------------
 # What the platform promises: the same code as a bad app, made fine by a
 # constraint the platform enforces.

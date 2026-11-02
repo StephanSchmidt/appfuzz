@@ -78,7 +78,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "clean_note"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "clean_writes"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "constant_blob_mail"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",
@@ -354,6 +368,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pii_hex_log"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "pii_in_log"
 version = "0.1.0"
 dependencies = [
@@ -460,6 +481,13 @@ dependencies = [
 
 [[package]]
 name = "score_percent"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "secret_b64_url"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",

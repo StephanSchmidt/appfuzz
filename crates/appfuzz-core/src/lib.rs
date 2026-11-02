@@ -12,6 +12,7 @@ pub mod dest;
 pub mod effects;
 pub mod fuzz;
 pub mod par;
+pub mod payload;
 pub mod growth;
 pub mod harness;
 pub mod identity;

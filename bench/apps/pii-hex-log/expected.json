@@ -1,0 +1,11 @@
+{
+  "app": "pii-hex-log",
+  "bug": "logs the user's email address hex-encoded",
+  "expect": [
+    {
+      "kind": "encoded_flow",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

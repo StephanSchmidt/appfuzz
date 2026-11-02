@@ -194,7 +194,8 @@ impl App {
         Self::load(Manifest::for_wasm(wasm))
     }
 
-    pub fn from_bytes(manifest: Manifest, bytes: Vec<u8>) -> Result<Self> {
+    pub fn from_bytes(mut manifest: Manifest, bytes: Vec<u8>) -> Result<Self> {
+        manifest.binary = crate::manifest::Binary::of(&bytes);
         let engine = pooled_engine(manifest.limits.memory.saturating_mul(4))?;
         let component = Component::new(&engine, &bytes).map_err(anyhow::Error::from).context("not a WebAssembly component (appfuzz runs components only)")?;
         let hash = component_hash(&bytes);

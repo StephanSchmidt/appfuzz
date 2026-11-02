@@ -281,6 +281,7 @@ pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     out.extend(crate::identity::check(r, m));
     out.extend(crate::markup::check(r, m));
     out.extend(crate::dest::check(r, m));
+    out.extend(crate::payload::check(r, m));
     if t.sleep_ns > 0 {
         out.push(Finding::new(
             "sleeps",

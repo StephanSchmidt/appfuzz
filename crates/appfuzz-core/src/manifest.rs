@@ -33,6 +33,35 @@ pub struct Manifest {
     /// Where the manifest was loaded from; relative paths resolve against it.
     #[serde(skip)]
     pub dir: PathBuf,
+    /// Printable strings of the component, set when the app is loaded.
+    #[serde(skip)]
+    pub binary: Binary,
+}
+
+/// The component's printable strings, joined with NUL: what the app could
+/// have written into its output without being given it.
+#[derive(Clone, Default)]
+pub struct Binary(pub std::sync::Arc<String>);
+
+impl Binary {
+    pub fn of(bytes: &[u8]) -> Self {
+        let mut s = String::new();
+        for (_, t) in crate::statics::strings_in(bytes, 0, 8) {
+            s.push_str(&t);
+            s.push('\0');
+        }
+        Binary(std::sync::Arc::new(s))
+    }
+
+    pub fn contains(&self, t: &str) -> bool {
+        self.0.contains(t)
+    }
+}
+
+impl std::fmt::Debug for Binary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Binary({} bytes)", self.0.len())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +319,7 @@ impl Manifest {
             functions: BTreeMap::new(),
             web: None,
             dir: PathBuf::new(),
+            binary: Binary::default(),
         }
     }
 

@@ -1,0 +1,6 @@
+{
+  "app": "clean-note",
+  "bug": "stores the note the user typed and mails a plain confirmation",
+  "expect": [],
+  "allow": []
+}

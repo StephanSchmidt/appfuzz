@@ -1,0 +1,11 @@
+{
+  "app": "constant-blob-mail",
+  "bug": "mails a blob from its own code with every order",
+  "expect": [
+    {
+      "kind": "constant_payload",
+      "min": "warn"
+    }
+  ],
+  "allow": []
+}

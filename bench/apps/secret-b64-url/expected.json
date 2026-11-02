@@ -1,0 +1,11 @@
+{
+  "app": "secret-b64-url",
+  "bug": "puts the API key, base64-encoded, into the URL of a fetch",
+  "expect": [
+    {
+      "kind": "encoded_flow",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

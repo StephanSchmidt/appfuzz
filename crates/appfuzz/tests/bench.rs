@@ -91,8 +91,11 @@ fn state_dir(name: &str) -> PathBuf {
 
 fn report(results: &[(String, Vec<String>)]) {
     let bad: Vec<&(String, Vec<String>)> = results.iter().filter(|(_, p)| !p.is_empty()).collect();
-    for (name, problems) in results {
-        println!("{} {name}", if problems.is_empty() { "ok  " } else { "FAIL" });
+    if !bad.is_empty() {
+        println!("\nfailed:");
+    }
+    for (name, problems) in &bad {
+        println!("FAIL {name}");
         for p in problems {
             println!("       {p}");
         }
@@ -110,7 +113,7 @@ fn bench() {
     let only = std::env::var("BENCH_ONLY").ok();
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(bench.join("apps")).unwrap().map(|e| e.unwrap().path()).collect();
     dirs.sort();
-    let mut results = Vec::new();
+    let mut apps = Vec::new();
     for d in dirs {
         let name = d.file_name().unwrap().to_string_lossy().to_string();
         if only.as_ref().is_some_and(|o| !o.split(',').any(|x| x == name)) {
@@ -121,8 +124,30 @@ fn bench() {
             println!("skip {name}: {p}");
             continue;
         }
-        let (problems, _) = check(&d.join("appfuzz.toml"), &expected, &state_dir(&name));
-        results.push((name, problems));
+        apps.push((name, d, expected));
+    }
+    // One line per app as it finishes, so a long run shows where it is.
+    let start = std::time::Instant::now();
+    let mut results = Vec::new();
+    let mut failed = 0;
+    for (i, (name, d, expected)) in apps.iter().enumerate() {
+        let t = std::time::Instant::now();
+        let (problems, _) = check(&d.join("appfuzz.toml"), expected, &state_dir(name));
+        failed += usize::from(!problems.is_empty());
+        let w = apps.len().to_string().len();
+        println!(
+            "[{:>w$}/{}] {} {name} ({:.1}s, {:.0}s total{})",
+            i + 1,
+            apps.len(),
+            if problems.is_empty() { "ok  " } else { "FAIL" },
+            t.elapsed().as_secs_f64(),
+            start.elapsed().as_secs_f64(),
+            if failed > 0 { format!(", {failed} failed") } else { String::new() }
+        );
+        for p in &problems {
+            println!("       {p}");
+        }
+        results.push((name.clone(), problems));
     }
     report(&results);
 }
