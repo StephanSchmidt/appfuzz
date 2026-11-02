@@ -14,6 +14,7 @@ blake3.workspace = true
 rustc-demangle.workspace = true
 rand.workspace = true
 regex.workspace = true
+regex-syntax.workspace = true
 aho-corasick.workspace = true
 memchr.workspace = true
 psl.workspace = true

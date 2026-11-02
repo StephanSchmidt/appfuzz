@@ -15,7 +15,7 @@
 //! the order of admissions depends on timing (each run still replays).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use rand::rngs::StdRng;
@@ -81,6 +81,10 @@ pub struct Entry {
     pub reasons: Vec<String>,
     #[serde(skip)]
     record: Option<Arc<RunRecord>>,
+    /// Same-host links and form inputs of the record, for crawling;
+    /// worked out on first use.
+    #[serde(skip)]
+    links: OnceLock<(Vec<urls::UrlRef>, Vec<String>)>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -282,8 +286,8 @@ pub fn features(r: &RunRecord, st: &Statics, app: &App) -> BTreeSet<String> {
 /// Resource measures of a run; the corpus keeps a new maximum of any.
 pub fn metrics(r: &RunRecord) -> Vec<(String, u64)> {
     let mut m: Vec<(String, u64)> = r.call_counts().into_iter().map(|(f, n)| (format!("calls {f}"), n as u64)).collect();
-    let arg_bytes: usize = r.events.iter().map(|e| serde_json::to_string(&e.args).map(|s| s.len()).unwrap_or(0)).sum();
-    let out_bytes = r.result.as_ref().map(|v| v.to_string().len()).unwrap_or(0);
+    let arg_bytes: usize = r.events.iter().map(|e| crate::value::json_len(&e.args)).sum();
+    let out_bytes = r.result.as_ref().map(crate::value::json_len).unwrap_or(0);
     let depth = r.events.iter().map(|e| e.stack.len()).max().unwrap_or(0);
     m.extend([
         ("fuel".to_string(), r.totals.fuel),
@@ -393,7 +397,7 @@ impl State {
                 self.kept += 1;
                 self.last_new = self.runs;
             }
-            self.corpus.push(Arc::new(Entry { spec, run: r.id.clone(), stage, reasons, record: Some(r.clone()) }));
+            self.corpus.push(Arc::new(Entry { spec, run: r.id.clone(), stage, reasons, record: Some(r.clone()), links: OnceLock::new() }));
             self.picked.push(0);
             self.prune();
         }
@@ -782,12 +786,14 @@ impl Mutator<'_> {
             }
             Stage::Crawl => {
                 let r = rec?;
-                let refs: Vec<_> = urls::extract_output(&r, &self.app.manifest).into_iter().filter(|u| u.kind == "same_host").collect();
-                let u = self.pick(&refs)?.clone();
-                let inputs = r.result.as_ref().map(form_inputs).unwrap_or_default();
+                let (refs, inputs) = parent.links.get_or_init(|| {
+                    let refs = urls::extract_output(&r, &self.app.manifest).into_iter().filter(|u| u.kind == "same_host").collect();
+                    (refs, r.result.as_ref().map(form_inputs).unwrap_or_default())
+                });
+                let u = self.pick(refs)?.clone();
                 let words: Vec<String> = (0..inputs.len()).map(|_| if self.rng.random_bool(0.5) { self.number(None).to_string() } else { self.word() }).collect();
                 let req = spec.args.first_mut()?;
-                if !crawl_into(req, &self.app.manifest.entry.as_ref()?.fields, &u.url, &u.method, &inputs, &words) {
+                if !crawl_into(req, &self.app.manifest.entry.as_ref()?.fields, &u.url, &u.method, inputs, &words) {
                     return None;
                 }
             }

@@ -26,7 +26,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use crate::manifest::{Manifest, fn_key};
 use crate::plan::{Decision, Plan};
 use crate::record::{Frame, HostCall, Outcome, OutcomeKind, RunRecord, RunSpec, Totals, module_id};
-use crate::value::{Generator, json_to_val, val_to_json};
+use crate::value::{Generator, json_to_val, val_to_json, val_to_json_with};
 use crate::wasi::{CountingRng, MonotonicClock, Ready, VirtualClock, WallClock, format_datetime, parse_datetime};
 use crate::wit::{self, FuncInfo, ImportKind, Interface};
 
@@ -590,7 +590,9 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
             match vals {
                 Ok(vals) => {
                     event.result = Some(compact(v));
-                    results.clone_from_slice(&vals);
+                    for (r, v) in results.iter_mut().zip(vals) {
+                        *r = v;
+                    }
                     Ok(())
                 }
                 Err(e) => {
@@ -619,12 +621,14 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
                     *v = x;
                 }
             }
-            event.result = Some(compact(match vals.as_slice() {
+            event.result = Some(match vals.as_slice() {
                 [] => Value::Null,
-                [one] => val_to_json(one),
-                many => Value::Array(many.iter().map(val_to_json).collect()),
-            }));
-            results.clone_from_slice(&vals);
+                [one] => val_to_json_with(one, &recorded),
+                many => Value::Array(many.iter().map(|v| val_to_json_with(v, &recorded)).collect()),
+            });
+            for (r, v) in results.iter_mut().zip(vals) {
+                *r = v;
+            }
             Ok(())
         }
     };
@@ -638,15 +642,39 @@ const MAX_RECORDED_STRING: usize = 1024;
 /// A host-call value as recorded: long strings keep their first 256
 /// characters and a `…[N bytes]` marker. The app gets the full value; the
 /// record stays small (32 results × 10 kB strings × 200 calls is 200 MB).
+/// A quick hash of a long string, eight bytes at a time.
+fn hash32(b: &[u8]) -> u32 {
+    const K: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut h = b.len() as u64;
+    let (chunks, rest) = b.as_chunks::<8>();
+    for c in chunks {
+        h = (h ^ u64::from_le_bytes(*c)).wrapping_mul(K).rotate_left(29);
+    }
+    for &x in rest {
+        h = (h ^ x as u64).wrapping_mul(K).rotate_left(29);
+    }
+    h ^= h >> 32;
+    h = h.wrapping_mul(K);
+    (h >> 32) as u32
+}
+
+/// A long string as recorded. The hash keeps strings that differ after the
+/// cut apart.
+fn cut(s: &str) -> String {
+    let n = s.len();
+    let end = s.char_indices().nth(256).map_or(n, |(i, _)| i);
+    format!("{}…[{n} bytes #{:08x}]", &s[..end], hash32(s.as_bytes()))
+}
+
+/// A string of a host-call value as recorded.
+fn recorded(s: &str) -> Value {
+    Value::String(if s.len() > MAX_RECORDED_STRING { cut(s) } else { s.to_string() })
+}
+
 fn compact(mut v: Value) -> Value {
     fn walk(v: &mut Value) {
         match v {
-            Value::String(s) if s.len() > MAX_RECORDED_STRING => {
-                // The hash keeps strings that differ after the cut apart.
-                let n = s.len();
-                let h = s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
-                *s = format!("{}…[{n} bytes #{:08x}]", s.chars().take(256).collect::<String>(), h as u32);
-            }
+            Value::String(s) if s.len() > MAX_RECORDED_STRING => *s = cut(s),
             Value::Array(a) => a.iter_mut().for_each(walk),
             Value::Object(o) => o.values_mut().for_each(walk),
             _ => {}

@@ -17,7 +17,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use wasmtime::component::{Type, Val};
 
+/// The length of `v` as compact JSON, without building the text.
+pub fn json_len<T: Serialize + ?Sized>(v: &T) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 += b.len();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut c = Count(0);
+    let _ = serde_json::to_writer(&mut c, v);
+    c.0
+}
+
 pub fn val_to_json(v: &Val) -> Value {
+    val_to_json_with(v, &|s| json!(s))
+}
+
+/// `val_to_json` with strings converted by `text`.
+pub fn val_to_json_with(v: &Val, text: &impl Fn(&str) -> Value) -> Value {
+    let conv = |v: &Val| val_to_json_with(v, text);
     match v {
         Val::Bool(b) => json!(b),
         Val::S8(n) => json!(n),
@@ -31,21 +54,21 @@ pub fn val_to_json(v: &Val) -> Value {
         Val::Float32(f) => float_json(*f as f64),
         Val::Float64(f) => float_json(*f),
         Val::Char(c) => json!(c.to_string()),
-        Val::String(s) => json!(s),
+        Val::String(s) => text(s),
         Val::List(items) | Val::Tuple(items) | Val::FixedLengthList(items) => {
-            Value::Array(items.iter().map(val_to_json).collect())
+            Value::Array(items.iter().map(conv).collect())
         }
-        Val::Map(pairs) => Value::Array(pairs.iter().map(|(k, v)| json!([val_to_json(k), val_to_json(v)])).collect()),
+        Val::Map(pairs) => Value::Array(pairs.iter().map(|(k, v)| json!([conv(k), conv(v)])).collect()),
         Val::Record(fields) => {
-            Value::Object(fields.iter().map(|(k, v)| (k.clone(), val_to_json(v))).collect::<Map<_, _>>())
+            Value::Object(fields.iter().map(|(k, v)| (k.clone(), conv(v))).collect::<Map<_, _>>())
         }
         Val::Variant(case, None) => json!(case),
-        Val::Variant(case, Some(p)) => json!({ case: val_to_json(p) }),
+        Val::Variant(case, Some(p)) => json!({ case: conv(p) }),
         Val::Enum(case) => json!(case),
         Val::Option(None) => Value::Null,
-        Val::Option(Some(v)) => json!({ "some": val_to_json(v) }),
-        Val::Result(Ok(v)) => json!({ "ok": v.as_ref().map(|v| val_to_json(v)).unwrap_or(Value::Null) }),
-        Val::Result(Err(v)) => json!({ "err": v.as_ref().map(|v| val_to_json(v)).unwrap_or(Value::Null) }),
+        Val::Option(Some(v)) => json!({ "some": conv(v) }),
+        Val::Result(Ok(v)) => json!({ "ok": v.as_ref().map(|v| conv(v)).unwrap_or(Value::Null) }),
+        Val::Result(Err(v)) => json!({ "err": v.as_ref().map(|v| conv(v)).unwrap_or(Value::Null) }),
         Val::Flags(names) => json!(names),
         Val::Resource(_) => json!("<resource>"),
         Val::Future(_) => json!("<future>"),

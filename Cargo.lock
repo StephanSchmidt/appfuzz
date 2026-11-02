@@ -108,6 +108,7 @@ dependencies = [
  "rand",
  "rayon",
  "regex",
+ "regex-syntax",
  "rustc-demangle",
  "serde",
  "serde_json",

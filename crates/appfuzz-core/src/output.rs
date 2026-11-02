@@ -88,20 +88,55 @@ const RAW: &[&str] = &["script", "style", "textarea", "title"];
 
 /// The first markup problem in an HTML body or fragment: an element left
 /// open, an end tag without a start, or end tags in the wrong order.
+/// A tag as `TAG` matches it.
+struct Tag<'a> {
+    end: usize,
+    close: bool,
+    name: &'a str,
+    self_closing: bool,
+}
+
+/// The next match of `TAG` at or after `from`, without the regex engine:
+/// `markup_problem` runs on every response.
+fn next_tag(s: &str, from: usize) -> Option<Tag<'_>> {
+    let b = s.as_bytes();
+    let word = |i: usize| s[i..].chars().next().is_some_and(regex_syntax::is_word_character);
+    let word_before = |i: usize| s[..i].chars().next_back().is_some_and(regex_syntax::is_word_character);
+    let mut at = from;
+    while let Some(lt) = memchr::memchr(b'<', &b[at..]).map(|i| at + i) {
+        at = lt + 1;
+        let close = b.get(lt + 1) == Some(&b'/');
+        let start = lt + 1 + close as usize;
+        if !b.get(start).is_some_and(u8::is_ascii_alphabetic) {
+            continue;
+        }
+        let mut stop = start + 1;
+        while b.get(stop).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'-') {
+            stop += 1;
+        }
+        // `\b` after the name; the regex backtracks to a shorter name.
+        let Some(end_name) = (start + 1..=stop).rev().find(|&e| word_before(e) != word(e)) else { continue };
+        let Some(gt) = memchr::memchr(b'>', &b[end_name..]).map(|i| end_name + i) else { continue };
+        let self_closing = gt > end_name && b[gt - 1] == b'/';
+        return Some(Tag { end: gt + 1, close, name: &s[start..end_name], self_closing });
+    }
+    None
+}
+
 pub fn markup_problem(body: &str) -> Option<String> {
     let body = COMMENT.replace_all(body, "");
     let lower = body.to_ascii_lowercase();
     let mut stack: Vec<String> = Vec::new();
     let mut pos = 0;
-    while let Some(c) = TAG.captures_at(&body, pos) {
-        pos = c.get(0).map_or(body.len(), |m| m.end());
-        let close = !c[1].is_empty();
-        let name = c[2].to_ascii_lowercase();
+    while let Some(t) = next_tag(&body, pos) {
+        pos = t.end;
+        let close = t.close;
+        let name = t.name.to_ascii_lowercase();
         if VOID.contains(&name.as_str()) {
             continue;
         }
         if !close {
-            if c[3].is_empty() {
+            if !t.self_closing {
                 if RAW.contains(&name.as_str()) {
                     // Text up to the end tag, whatever it looks like.
                     match lower[pos..].find(&format!("</{name}")) {
@@ -428,6 +463,31 @@ pub fn word_bag(body: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scanner finds what the regex finds, on random markup.
+    #[test]
+    fn tag_scanner_matches_regex() {
+        use rand::{RngExt, SeedableRng};
+        let alphabet = ['<', '/', '>', 'a', 'B', '1', '-', '_', ' ', 'é', '\u{301}', '=', '"', '\n'];
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        for _ in 0..200_000 {
+            let n = rng.random_range(0..24);
+            let s: String = (0..n).map(|_| alphabet[rng.random_range(0..alphabet.len())]).collect();
+            let mut want = Vec::new();
+            let mut pos = 0;
+            while let Some(c) = TAG.captures_at(&s, pos) {
+                pos = c.get(0).unwrap().end();
+                want.push((pos, !c[1].is_empty(), c[2].to_string(), !c[3].is_empty()));
+            }
+            let mut got = Vec::new();
+            let mut pos = 0;
+            while let Some(t) = next_tag(&s, pos) {
+                pos = t.end;
+                got.push((pos, t.close, t.name.to_string(), t.self_closing));
+            }
+            assert_eq!(got, want, "{s:?}");
+        }
+    }
 
     #[test]
     fn markup() {

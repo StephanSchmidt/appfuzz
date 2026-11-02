@@ -145,18 +145,20 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
 
     // Redundant calls: same function, same arguments.
-    let mut same: BTreeMap<(String, String), u32> = BTreeMap::new();
-    for e in &r.events {
-        *same.entry((e.func.clone(), Value::Object(e.args.clone()).to_string())).or_default() += 1;
+    // Arguments as JSON, once per call: the key here, the size below.
+    let arg_text: Vec<String> = r.events.iter().map(|e| serde_json::to_string(&e.args).unwrap_or_default()).collect();
+    let mut same: BTreeMap<(&str, &str), u32> = BTreeMap::new();
+    for (e, a) in r.events.iter().zip(&arg_text) {
+        *same.entry((e.func.as_str(), a.as_str())).or_default() += 1;
     }
-    let mut redundant: BTreeMap<&str, (u32, u32, String)> = BTreeMap::new();
-    for ((f, args), n) in &same {
-        if *n > 1 {
-            let x = redundant.entry(f).or_insert((0, 0, args.clone()));
+    let mut redundant: BTreeMap<&str, (u32, u32, &str)> = BTreeMap::new();
+    for (&(f, args), &n) in &same {
+        if n > 1 {
+            let x = redundant.entry(f).or_insert((0, 0, args));
             x.0 += n - 1;
-            if *n > x.1 {
-                x.1 = *n;
-                x.2 = args.clone();
+            if n > x.1 {
+                x.1 = n;
+                x.2 = args;
             }
         }
     }
@@ -169,7 +171,7 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                 &format!("{ex}\0{f}"),
                 Severity::Warn,
                 format!("{f}: {extra} of {total} calls repeat earlier calls with the same arguments"),
-                json!({"func": f, "calls": total, "repeated": extra, "worst_args": serde_json::from_str::<Value>(&args).unwrap_or(Value::Null), "worst_count": worst}),
+                json!({"func": f, "calls": total, "repeated": extra, "worst_args": serde_json::from_str::<Value>(args).unwrap_or(Value::Null), "worst_count": worst}),
                 run,
             ));
         }
@@ -210,8 +212,8 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         }
     }
 
-    for e in &r.events {
-        let size = Value::Object(e.args.clone()).to_string().len();
+    for (e, a) in r.events.iter().zip(&arg_text) {
+        let size = a.len();
         if size > PAYLOAD_MAX {
             out.push(Finding::new(
                 "big_payload",
@@ -234,7 +236,7 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             ));
         }
     }
-    let out_bytes = r.result.as_ref().map(|v| v.to_string().len()).unwrap_or(0);
+    let out_bytes = r.result.as_ref().map(crate::value::json_len).unwrap_or(0);
     if out_bytes > OUTPUT_MAX {
         out.push(Finding::new(
             "big_output",
