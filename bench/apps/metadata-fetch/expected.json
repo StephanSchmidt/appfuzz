@@ -1,0 +1,11 @@
+{
+  "app": "metadata-fetch",
+  "bug": "fetches the cloud metadata service for credentials",
+  "expect": [
+    {
+      "kind": "unexpected_destination",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

@@ -19,8 +19,9 @@ ITEMS, STORE, MAIL = "bench:web/items", "bench:web/store", "bench:web/mail"
 APPS = []
 
 
-def app(name, what, code, expect, allow=(), grants=(ITEMS,), extra="", fuel="200_000_000", pending=None, entry=""):
-    APPS.append(dict(name=name, what=what, code=code, expect=expect, allow=list(allow), grants=list(grants), extra=extra, fuel=fuel, pending=pending, entry=entry))
+def app(name, what, code, expect, allow=(), grants=(ITEMS,), extra="", fuel="200_000_000", pending=None, entry="", base=None, hosts=()):
+    APPS.append(dict(name=name, what=what, code=code, expect=expect, allow=list(allow), grants=list(grants), extra=extra, fuel=fuel, pending=pending, entry=entry,
+                     base=base, hosts=list(hosts)))
 
 
 def handler(body, prelude="prelude.rs"):
@@ -392,7 +393,7 @@ app("ssrf-url", "fetches the URL in ?feed",
         let feed = param(&req.query, "feed").unwrap_or("https://example.com/feed");
         let text = http::fetch(feed, "").unwrap_or_default();
         html(format!("<pre>{}</pre>", esc(&text)))
-    """), [("ssrf", "fail")], grants=[HTTP], extra=LABELS)
+    """), [("ssrf", "fail")], grants=[HTTP], extra=LABELS, hosts=["example.com"])
 
 app("shell-concat", "greps the log for ?q in a shell command",
     labelled("""
@@ -414,7 +415,7 @@ app("secret-in-url", "sends the API key in the URL instead of the auth parameter
         let key = config::secret("api-key");
         let text = http::fetch(&format!("https://api.example.com/v1/items?key={key}"), "").unwrap_or_default();
         html(format!("<pre>{}</pre>", esc(&text)))
-    """), [("secret_leak", "fail")], grants=[CONFIG, HTTP], extra=LABELS)
+    """), [("secret_leak", "fail")], grants=[CONFIG, HTTP], extra=LABELS, hosts=["example.com"])
 
 app("pii-in-log", "logs the user's email address",
     labelled("""
@@ -438,7 +439,7 @@ app("trusted-html", "renders the user's bio-html as is (labelled trusted) and th
         let key = config::secret("api-key");
         let _ = http::fetch("https://api.example.com/v1/me", &key);
         html(format!("<h1>{}</h1><p>{}</p><div>{}</div><p>{}</p>", esc(&u.name), esc(&u.email), u.bio_html, esc(&u.bio)))
-    """), [], grants=[USERS, CONFIG, HTTP], extra=LABELS)
+    """), [], grants=[USERS, CONFIG, HTTP], extra=LABELS, hosts=["example.com"])
 
 app("orders-for-query-user", "lists the orders of the user named in ?user",
     labelled("""
@@ -655,7 +656,7 @@ app("frame-offhost", "a Turbo frame that loads its content from another host",
         let _ = &req;
         let n = items::all().len();
         html(format!("<p>{n} items</p><turbo-frame id=\\"news\\" src=\\"https://feed.example.net/news\\"></turbo-frame>"))
-    """), [("unsafe_action", "fail")], entry=SAFE_BODY)
+    """), [("unsafe_action", "fail"), ("unexpected_destination", "fail")], entry=SAFE_BODY)
 
 app("data-endpoint", "a data attribute, written in entities, that a script polls: an admin route",
     handler("""
@@ -670,6 +671,49 @@ app("data-local", "data attributes and an image on its own host, nothing that fi
         let n = items::all().len();
         html(format!("<p>{n} items</p><img src=\\"/logo.png\\" alt=\\"\\"><div data-more=\\"/items?page=2\\" data-label=\\"More\\"></div>"))
     """), [], entry=SAFE_BODY)
+
+# --- Destinations -------------------------------------------------------------
+# Targets nobody asked for: written into the app, not taken from the request
+# or the host.
+
+app("beacon-pixel", "a 1x1 image on another host that reports every page view",
+    handler("""
+        let n = items::all().len();
+        html(format!("<p>{n} items</p><img src=\\"https://t.example.net/p.gif?path={}\\" width=\\"1\\" height=\\"1\\" alt=\\"\\">", req.path.len()))
+    """), [("unexpected_destination", "fail")])
+
+app("metadata-fetch", "fetches the cloud metadata service for credentials",
+    labelled("""
+        let _ = &req;
+        let creds = http::fetch("http://169.254.169.254/latest/meta-data/iam/security-credentials/", "").unwrap_or_default();
+        html(format!("<p>ready{}</p>", if creds.is_empty() { "" } else { "." }))
+    """), [("unexpected_destination", "fail")], grants=[HTTP], extra=LABELS)
+
+app("other-app-route", "a script that posts to another app's route on the same host",
+    handler("""
+        let _ = &req;
+        let n = items::all().len();
+        html(format!("<p>{n} items</p><script>fetch('/apps/billing/api/export', {{method: 'POST'}})</script>"))
+    """), [("unexpected_destination", "fail")], base="/apps/bench")
+
+app("port-probe", "tries internal ports one after another",
+    labelled("""
+        let _ = &req;
+        let mut open = 0;
+        for port in [22, 5432, 6379, 9200, 8500] {
+            if http::fetch(&format!("http://127.0.0.1:{port}/"), "").is_ok() {
+                open += 1;
+            }
+        }
+        html(format!("<p>{open}</p>"))
+    """), [("unexpected_destination", "fail"), ("probing", "fail")], grants=[HTTP], extra=LABELS)
+
+app("granted-api", "fetches its API on a host the platform grants",
+    labelled("""
+        let _ = &req;
+        let text = http::fetch("https://api.example.com/v1/items", "").unwrap_or_default();
+        html(format!("<p><a href=\\"/apps/bench/items\\">{}</a></p>", esc(&text)))
+    """), [], grants=[HTTP], extra=LABELS, base="/apps/bench", hosts=["api.example.com"])
 
 # --- Value constraints -----------------------------------------------------
 # What the platform promises: the same code as a bad app, made fine by a
@@ -701,7 +745,7 @@ MANIFEST = """\
 [app]
 wasm = "../../target/wasm32-wasip2/release/{crate}.wasm"
 name = "{name}"
-
+{base}
 [entry]
 export = "bench:web/handler#handle"
 request = {{ method = "GET", path = "/", query = [], form = [], today = "", now = "" }}
@@ -712,7 +756,7 @@ now = "2026-11-02T10:00:00"
 [grants]
 imports = [{grants}]
 wasi = ["wasi:cli", "wasi:clocks", "wasi:io", "wasi:random"]
-
+{hosts}
 [limits]
 fuel = {fuel}
 memory = "64MiB"
@@ -746,6 +790,8 @@ def main():
             f.write(f"//! Bench app `{a['name']}`: {a['what']}.\n\n" + a["code"])
         with open(os.path.join(d, "appfuzz.toml"), "w") as f:
             f.write(MANIFEST.format(name=a["name"], what=a["what"], crate=crate, fuel=a["fuel"], extra=a["extra"], entry=a["entry"],
+                                    base=f'base = "{a["base"]}"\n' if a["base"] else "",
+                                    hosts="hosts = [" + ", ".join(f'"{h}"' for h in a["hosts"]) + "]\n" if a["hosts"] else "",
                                     grants=", ".join(f'"{g}"' for g in a["grants"])))
         exp = {"app": a["name"], "bug": a["what"], "expect": [{"kind": k, "min": s} for k, s in a["expect"]], "allow": a["allow"]}
         if a["pending"]:

@@ -47,6 +47,10 @@ pub struct AppSection {
     /// The label vocabulary the manifest is written in (`LABELS.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<String>,
+    /// The path the platform serves the app under (`/apps/roomer`). A path
+    /// on the same host outside it belongs to another app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 /// What a host function does to the world.
@@ -126,6 +130,10 @@ pub struct Grants {
     /// WASI interface prefixes the app may import, e.g. `wasi:clocks`.
     #[serde(default)]
     pub wasi: Option<Vec<String>>,
+    /// Hosts the app may name as destinations: `api.example.com`, or
+    /// `example.com` for it and its subdomains.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,7 +283,7 @@ impl Manifest {
     /// A manifest for a bare `.wasm` without `appfuzz.toml`.
     pub fn for_wasm(wasm: &Path) -> Self {
         Manifest {
-            app: AppSection { wasm: wasm.to_path_buf(), name: None, description: None, labels: None },
+            app: AppSection { wasm: wasm.to_path_buf(), name: None, description: None, labels: None, base: None },
             entry: None,
             grants: Grants::default(),
             limits: Limits::default(),

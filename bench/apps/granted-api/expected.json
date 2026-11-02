@@ -1,0 +1,6 @@
+{
+  "app": "granted-api",
+  "bug": "fetches its API on a host the platform grants",
+  "expect": [],
+  "allow": []
+}

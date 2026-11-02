@@ -1,0 +1,15 @@
+{
+  "app": "port-probe",
+  "bug": "tries internal ports one after another",
+  "expect": [
+    {
+      "kind": "unexpected_destination",
+      "min": "fail"
+    },
+    {
+      "kind": "probing",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

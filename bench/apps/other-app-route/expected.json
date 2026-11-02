@@ -1,0 +1,11 @@
+{
+  "app": "other-app-route",
+  "bug": "a script that posts to another app's route on the same host",
+  "expect": [
+    {
+      "kind": "unexpected_destination",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

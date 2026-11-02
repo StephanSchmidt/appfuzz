@@ -5,6 +5,10 @@
     {
       "kind": "unsafe_action",
       "min": "fail"
+    },
+    {
+      "kind": "unexpected_destination",
+      "min": "fail"
     }
   ],
   "allow": []

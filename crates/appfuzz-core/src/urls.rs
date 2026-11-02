@@ -304,6 +304,11 @@ fn css_urls(css: &str, tag: &str, out: &mut Vec<Found>) {
     }
 }
 
+/// Absolute URLs in plain text.
+pub fn text_urls(s: &str) -> Vec<String> {
+    TEXT_URL.find_iter(s).map(|m| m.as_str().trim_end_matches(['.', ',', ')', ';']).to_string()).collect()
+}
+
 fn from_text(s: &str, source: &str, out: &mut Vec<Found>) {
     for m in TEXT_URL.find_iter(s) {
         out.push(Found::new(m.as_str().trim_end_matches(['.', ',', ')', ';']), "GET", source, "text", ""));

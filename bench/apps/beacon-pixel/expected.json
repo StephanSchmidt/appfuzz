@@ -1,0 +1,11 @@
+{
+  "app": "beacon-pixel",
+  "bug": "a 1x1 image on another host that reports every page view",
+  "expect": [
+    {
+      "kind": "unexpected_destination",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

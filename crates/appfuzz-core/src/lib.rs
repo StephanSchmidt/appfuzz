@@ -8,6 +8,7 @@ pub mod constraints;
 pub mod metamorphic;
 pub mod output;
 pub mod detect;
+pub mod dest;
 pub mod effects;
 pub mod fuzz;
 pub mod par;

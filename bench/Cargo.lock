@@ -30,6 +30,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon_pixel"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "big_output"
 version = "0.1.0"
 dependencies = [
@@ -174,6 +181,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "granted_api"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -256,6 +270,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "metadata_fetch"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "nested_fanout"
 version = "0.1.0"
 dependencies = [
@@ -298,6 +319,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "other_app_route"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "over_granted"
 version = "0.1.0"
 dependencies = [
@@ -327,6 +355,13 @@ dependencies = [
 
 [[package]]
 name = "pii_in_log"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "port_probe"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",
