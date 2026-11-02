@@ -129,13 +129,22 @@ What the platform allows in the export's result, by field path (as in
 
 | Label | Means | Finding |
 |-------|-------|---------|
-| `html:no-scripts` | no script may run from this markup | `script_in_output` (fail): a `<script>`, `<object>`, `<embed>`, an `on…` handler, `hx-on`, `hx-vars`, `hx-vals` with `js:`, an iframe `srcdoc`, or a `javascript:` (or HTML `data:`) URL, read with entities decoded |
-| `html:safe` | `html:no-scripts`, and no request the user didn't ask for | also `unsafe_action` (fail): a meta refresh, a form or htmx action to another host, an htmx action to a sensitive route, an htmx request that fires by itself (`hx-trigger` `load`, `revealed`, `intersect`, `every`) |
+| `html:no-scripts` | no script may run from this markup | `script_in_output` (fail): a `<script>`, `<object>`, `<embed>`, an iframe `srcdoc`, an event handler of any framework (a name like `on…`, `@…`, `…on:…`, `(…)`), a `js:` value, or a `javascript:` (or HTML `data:`) URL in any attribute, read with entities decoded; (warn) a value that looks like code (`f(…)`, `=>`) in an attribute of no standard meaning |
+| `html:safe` | `html:no-scripts`, and no request the user didn't ask for | also `unsafe_action` (fail): a meta refresh; a form, a load (`src`, CSS `url()`, a stylesheet) or a URL in an attribute of no standard meaning to another host or to a sensitive route; such a URL on an element that says it fires by itself (a word like `load`, `every`, `init`, `intersect`, `poll` in another attribute or in the attribute's name) |
 | `url:local` | a path on the app's own host | `open_redirect` (fail) when request text makes it point elsewhere (`//host`, `/\host`, a scheme); `non_local_url` (warn) when the app points elsewhere by itself |
 
 `sensitive_paths = ["/admin"]` in `[entry]` lists the routes no `html:safe`
 markup may send a request to, the route and everything below it. Ordinary
 links (`<a href>`) are allowed anywhere: the user clicks them.
+
+appfuzz knows no framework. Standard HTML attributes count by their
+meaning (`href` a link, `action` a form, `src` a load). Every other
+attribute, `data-*` and the attributes of htmx, Alpine, Turbo and the
+like, counts by the shape of its value: text that looks like a URL (a
+scheme, `//`, a path, a host) is a request some code may make. So are
+URLs in string literals of inline scripts and JSON, in CSS, in pieces
+of several attributes, and in response headers. Entities, `%` and `\x`
+escapes are undone first.
 
 ```toml
 [entry]

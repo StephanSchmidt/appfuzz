@@ -640,6 +640,37 @@ app("widget-safe", "a widget with a link out, a form and a click-triggered htmx 
         ))
     """), [], entry=SAFE_BODY)
 
+# Any framework: attributes are read by the shape of their values, so the
+# same rule catches htmx, Alpine, Turbo and plain data attributes.
+
+app("alpine-admin", "an Alpine widget that posts to an admin route when it starts",
+    handler("""
+        let _ = &req;
+        let n = items::all().len();
+        html(format!("<div x-data=\\"{{}}\\" x-init=\\"fetch('/admin/purge', {{method: 'POST'}})\\"><p>{n} items</p></div>"))
+    """), [("unsafe_action", "fail")], allow=["script_in_output"], entry=SAFE_BODY)
+
+app("frame-offhost", "a Turbo frame that loads its content from another host",
+    handler("""
+        let _ = &req;
+        let n = items::all().len();
+        html(format!("<p>{n} items</p><turbo-frame id=\\"news\\" src=\\"https://feed.example.net/news\\"></turbo-frame>"))
+    """), [("unsafe_action", "fail")], entry=SAFE_BODY)
+
+app("data-endpoint", "a data attribute, written in entities, that a script polls: an admin route",
+    handler("""
+        let _ = &req;
+        let n = items::all().len();
+        html(format!("<p>{n} items</p><div data-endpoint=\\"&#x2f;admin&#x2f;stats\\" data-refresh=\\"every 5s\\"></div>"))
+    """), [("unsafe_action", "fail")], entry=SAFE_BODY)
+
+app("data-local", "data attributes and an image on its own host, nothing that fires by itself",
+    handler("""
+        let _ = &req;
+        let n = items::all().len();
+        html(format!("<p>{n} items</p><img src=\\"/logo.png\\" alt=\\"\\"><div data-more=\\"/items?page=2\\" data-label=\\"More\\"></div>"))
+    """), [], entry=SAFE_BODY)
+
 # --- Value constraints -----------------------------------------------------
 # What the platform promises: the same code as a bad app, made fine by a
 # constraint the platform enforces.

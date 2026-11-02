@@ -1,0 +1,6 @@
+{
+  "app": "data-local",
+  "bug": "data attributes and an image on its own host, nothing that fires by itself",
+  "expect": [],
+  "allow": []
+}

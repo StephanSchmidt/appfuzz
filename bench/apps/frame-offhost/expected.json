@@ -1,0 +1,11 @@
+{
+  "app": "frame-offhost",
+  "bug": "a Turbo frame that loads its content from another host",
+  "expect": [
+    {
+      "kind": "unsafe_action",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

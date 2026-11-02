@@ -1,0 +1,13 @@
+{
+  "app": "alpine-admin",
+  "bug": "an Alpine widget that posts to an admin route when it starts",
+  "expect": [
+    {
+      "kind": "unsafe_action",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "script_in_output"
+  ]
+}

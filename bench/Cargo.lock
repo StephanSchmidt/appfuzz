@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "alpine_admin"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -65,6 +72,20 @@ dependencies = [
 
 [[package]]
 name = "clean_writes"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "data_endpoint"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "data_local"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",
@@ -140,6 +161,13 @@ dependencies = [
 
 [[package]]
 name = "form_fanout"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "frame_offhost"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",

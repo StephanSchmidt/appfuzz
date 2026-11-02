@@ -125,7 +125,7 @@ pub const DOCS: &[Doc] = &[
     Doc {
         path: "urls",
         examples: &["appfuzz urls", "appfuzz urls --domains", "appfuzz urls --run last"],
-        output: "URLs in the output (links, forms, scripts, styles, htmx) and the registrable domains behind them",
+        output: "URLs in the output (links, forms, loads, scripts, styles, any attribute whose value looks like a URL) and the registrable domains behind them",
         next: "unexpected domains: `provenance` of where they came from",
     },
     Doc {
