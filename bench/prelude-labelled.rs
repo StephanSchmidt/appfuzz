@@ -3,7 +3,7 @@ wit_bindgen::generate!({ world: "labelled-app", path: "../../wit" });
 #[allow(unused_imports)]
 use bench::web::types::{Request, Response};
 #[allow(unused_imports)]
-use bench::web::{config, db, files, http, sys, users};
+use bench::web::{config, db, files, http, orders, sys, users};
 struct A;
 export!(A);
 

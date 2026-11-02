@@ -1,0 +1,11 @@
+{
+  "app": "widget-loads-admin",
+  "bug": "a widget that calls an admin route by itself on load",
+  "expect": [
+    {
+      "kind": "unsafe_action",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

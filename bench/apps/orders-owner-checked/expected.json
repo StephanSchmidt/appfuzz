@@ -1,0 +1,6 @@
+{
+  "app": "orders-owner-checked",
+  "bug": "shows the caller's own orders, and an order only to its owner",
+  "expect": [],
+  "allow": []
+}

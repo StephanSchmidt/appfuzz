@@ -1,0 +1,11 @@
+[package]
+name = "orders_for_query_user"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen.workspace = true

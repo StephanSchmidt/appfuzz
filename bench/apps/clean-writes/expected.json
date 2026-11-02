@@ -1,0 +1,6 @@
+{
+  "app": "clean-writes",
+  "bug": "writes only on POST, once, and reports a failed mail",
+  "expect": [],
+  "allow": []
+}

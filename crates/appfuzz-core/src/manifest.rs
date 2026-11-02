@@ -44,6 +44,35 @@ pub struct AppSection {
     /// Untrusted text from the app author.
     #[serde(default)]
     pub description: Option<String>,
+    /// The label vocabulary the manifest is written in (`LABELS.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<String>,
+}
+
+/// What a host function does to the world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effect {
+    Read,
+    Write,
+    Delete,
+    External,
+}
+
+impl Effect {
+    pub fn name(self) -> &'static str {
+        match self {
+            Effect::Read => "read",
+            Effect::Write => "write",
+            Effect::Delete => "delete",
+            Effect::External => "external",
+        }
+    }
+
+    /// Changes something: a write, a delete, or an act outside the platform.
+    pub fn changes(self) -> bool {
+        self != Effect::Read
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +92,17 @@ pub struct Entry {
     /// Virtual wall clock at the start of a run, `YYYY-MM-DDTHH:MM:SS`.
     #[serde(default)]
     pub now: Option<String>,
+    /// Labels of the export's result by field path: what the platform
+    /// allows there (`html:no-scripts`, `html:safe`, `url:local`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub result: BTreeMap<String, crate::markup::OutputLabel>,
+    /// Routes no `html:safe` markup may send a request to (`/admin`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensitive_paths: Vec<String>,
+    /// What the platform lets through in request fields, by path
+    /// (`range:1..31`, `len:..100`, `enum:a,b`, `format:date`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub values: BTreeMap<String, crate::constraints::Constraint>,
 }
 
 /// Where to find things in the export's result. Paths are dot-separated
@@ -158,9 +198,21 @@ pub struct FunctionSpec {
     pub cost: Option<u64>,
     #[serde(default)]
     pub latency_ms: Option<f64>,
-    /// Reserved for phase 2 labels (`read`, `write`, `identity`, …).
-    #[serde(default)]
-    pub effect: Option<String>,
+    /// What a call does: `read`, `write`, `delete` or `external` (acts
+    /// outside the platform: sends mail, charges a card).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<Effect>,
+    /// The same call twice is harmless (a write that sets, not adds).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idempotent: bool,
+    /// This function does at once what `<fn>` does for one: calling `<fn>`
+    /// in a loop is then an n+1 fail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_of: Option<String>,
+    /// What the host promises about its result, by path (`range:0..100`,
+    /// `len:..50`, `enum:a,b`, `format:date`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub values: BTreeMap<String, crate::constraints::Constraint>,
     /// Labels of parameters: a sink (`sql`, `path`, `shell`, `url`, `html`,
     /// `regex`) or what they may receive (`pii`, `secret`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -223,7 +275,7 @@ impl Manifest {
     /// A manifest for a bare `.wasm` without `appfuzz.toml`.
     pub fn for_wasm(wasm: &Path) -> Self {
         Manifest {
-            app: AppSection { wasm: wasm.to_path_buf(), name: None, description: None },
+            app: AppSection { wasm: wasm.to_path_buf(), name: None, description: None, labels: None },
             entry: None,
             grants: Grants::default(),
             limits: Limits::default(),
@@ -257,9 +309,39 @@ impl Manifest {
         self.function(key).and_then(|f| f.result.as_ref()).map(ResultLabels::paths).unwrap_or_default()
     }
 
+    /// Whether the export's result has labels.
+    pub fn has_output_labels(&self) -> bool {
+        self.entry.as_ref().is_some_and(|e| !e.result.is_empty())
+    }
+
     /// Whether any parameter is labelled as a sink.
     pub fn has_sinks(&self) -> bool {
         self.functions.values().any(|f| f.params.values().any(|l| l.is_sink()))
+    }
+
+    pub fn effect_of(&self, key: &str) -> Option<Effect> {
+        self.function(key).and_then(|f| f.effect)
+    }
+
+    /// A call that changes something and may not be repeated.
+    pub fn unrepeatable(&self, key: &str) -> bool {
+        self.function(key).is_some_and(|f| f.effect.is_some_and(Effect::changes) && !f.idempotent)
+    }
+
+    /// A function the manifest names as the batch version of `key`.
+    pub fn batch_for(&self, key: &str) -> Option<String> {
+        self.functions
+            .iter()
+            .find(|(_, f)| {
+                f.batch_of.as_deref().is_some_and(|b| {
+                    let (i, n) = b.split_once('#').unwrap_or(("", b));
+                    fn_key(i, n) == key
+                })
+            })
+            .map(|(k, _)| {
+                let (i, n) = k.split_once('#').unwrap_or(("", k));
+                fn_key(i, n)
+            })
     }
 
     pub fn cost_of(&self, key: &str) -> u64 {
@@ -359,5 +441,41 @@ mod tests {
         let bad: Manifest = toml::from_str("[app]\nwasm = \"a\"\n[functions.\"x#f\"]\nresult = \"sql\"\n").unwrap();
         assert!(crate::labels::check_positions(&bad).is_err());
         assert!(toml::from_str::<Manifest>("[app]\nwasm = \"a\"\n[functions.\"x#f\"]\nparams = { a = \"nosql\" }\n").is_err());
+    }
+
+    #[test]
+    fn parses_phase2_labels() {
+        let m: Manifest = toml::from_str(
+            r#"
+            [app]
+            wasm = "a.wasm"
+            labels = "1"
+            [entry]
+            export = "h"
+            result = { body = "html:safe", "headers.location" = "url:local" }
+            sensitive_paths = ["/admin"]
+            values = { "query.days" = "range:1..31" }
+            fields = { user = "identity" }
+            [functions."x:y/store#save"]
+            effect = "write"
+            idempotent = true
+            [functions."x:y/orders#for-user"]
+            params = { user-id = "user-id" }
+            result = { owner = "owner" }
+            values = { total = "range:0.." }
+            "#,
+        )
+        .unwrap();
+        crate::labels::check_positions(&m).unwrap();
+        assert_eq!(m.effect_of("x:y/store#save"), Some(Effect::Write));
+        assert!(!m.unrepeatable("x:y/store#save"));
+        assert!(m.has_output_labels());
+        assert_eq!(m.param_label("x:y/orders#for-user", "user-id"), Some(Label::UserId));
+        let mut v2 = m.clone();
+        v2.app.labels = Some("2".into());
+        assert!(crate::labels::check_positions(&v2).is_err());
+        let bad = "[app]\nwasm = \"a\"\n[functions.\"x#f\"]\nidempotent = true\n";
+        assert!(crate::labels::check_positions(&toml::from_str(bad).unwrap()).is_err());
+        assert!(toml::from_str::<Manifest>("[app]\nwasm = \"a\"\n[entry]\nexport = \"h\"\nvalues = { a = \"range:x..\" }\n").is_err());
     }
 }

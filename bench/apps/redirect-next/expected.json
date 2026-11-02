@@ -1,0 +1,14 @@
+{
+  "app": "redirect-next",
+  "bug": "redirects to ?next without checking it",
+  "expect": [
+    {
+      "kind": "open_redirect",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "input_passthrough",
+    "invalid_response"
+  ]
+}

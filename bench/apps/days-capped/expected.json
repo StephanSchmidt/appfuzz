@@ -1,0 +1,8 @@
+{
+  "app": "days-capped",
+  "bug": "reads one day per ?days, which the platform caps at 31 (31 serial calls are still slow on a slow host)",
+  "expect": [],
+  "allow": [
+    "slow_host_sensitivity"
+  ]
+}

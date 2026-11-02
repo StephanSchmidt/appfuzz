@@ -38,8 +38,8 @@ pub struct UrlRef {
     pub contains: Vec<String>,
 }
 
-static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<([a-zA-Z][a-zA-Z0-9-]*)\b((?:[^>\x22']|\x22[^\x22]*\x22|'[^']*')*)>").unwrap());
-static ATTR: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<([a-zA-Z][a-zA-Z0-9-]*)\b((?:[^>\x22']|\x22[^\x22]*\x22|'[^']*')*)>").unwrap());
+pub(crate) static ATTR: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"([a-zA-Z_:@][-a-zA-Z0-9_:.@]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"#).unwrap()
 });
 static TEXT_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\b(?:https?|ftp|wss?)://[^\s"'<>\\]+"#).unwrap());

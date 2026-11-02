@@ -1,0 +1,11 @@
+{
+  "app": "write-on-get",
+  "bug": "counts page views with a store write on GET",
+  "expect": [
+    {
+      "kind": "write_on_safe_method",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

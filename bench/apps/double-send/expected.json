@@ -1,0 +1,15 @@
+{
+  "app": "double-send",
+  "bug": "sends the order confirmation twice (once per code path)",
+  "expect": [
+    {
+      "kind": "repeated_write",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "partial_write",
+    "error_ignored",
+    "continues_after_error"
+  ]
+}

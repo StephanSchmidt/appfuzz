@@ -1244,8 +1244,10 @@ fn inspect(app: &App, with_wit: bool) -> Result<Value> {
         "entry": m.entry.as_ref().map(|e| &e.export),
         "limits": m.limits,
     });
-    let mut guess = appfuzz_core::labels::suggest(&app.imports);
-    guess.retain(|k, _| m.function(k).is_none_or(|f| f.params.is_empty() && f.result.is_none()));
+    let guess: appfuzz_core::labels::Suggestions = appfuzz_core::labels::suggest(&app.imports)
+        .into_iter()
+        .filter_map(|(k, s)| s.without(m.function(&k)).map(|s| (k, s)))
+        .collect();
     if !guess.is_empty() {
         out["label_suggestions"] = json!({
             "note": "a guess from WIT names, not checked: keep what is true, then add it to appfuzz.toml",
@@ -1261,10 +1263,27 @@ fn inspect(app: &App, with_wit: bool) -> Result<Value> {
 /// A host function's labels from the manifest, as JSON.
 fn labels_json(m: &appfuzz_core::manifest::Manifest, key: &str) -> Option<Value> {
     let f = m.function(key)?;
-    if f.params.is_empty() && f.result.is_none() {
+    if f.params.is_empty() && f.result.is_none() && f.effect.is_none() && f.batch_of.is_none() && f.values.is_empty() {
         return None;
     }
-    Some(json!({"params": f.params, "result": f.result}))
+    let mut o = json!({});
+    if !f.params.is_empty() {
+        o["params"] = json!(f.params);
+    }
+    if let Some(r) = &f.result {
+        o["result"] = json!(r);
+    }
+    if let Some(e) = f.effect {
+        o["effect"] = json!(e);
+        o["idempotent"] = json!(f.idempotent);
+    }
+    if let Some(b) = &f.batch_of {
+        o["batch_of"] = json!(b);
+    }
+    if !f.values.is_empty() {
+        o["values"] = json!(f.values);
+    }
+    Some(o)
 }
 
 fn plan_template(app: &App) -> Result<Value> {

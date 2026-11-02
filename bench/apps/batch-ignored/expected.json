@@ -1,0 +1,17 @@
+{
+  "app": "batch-ignored",
+  "bug": "fetches each item on its own although items#get-many exists",
+  "expect": [
+    {
+      "kind": "n_plus_1",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "over_budget",
+    "serial_chain",
+    "chatty",
+    "redundant_calls",
+    "slow_host_sensitivity"
+  ]
+}

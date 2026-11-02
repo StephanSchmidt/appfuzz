@@ -536,6 +536,11 @@ impl Mutator<'_> {
                 const ATTACKS: [&str; 5] = ["' OR '1'='1", "../../etc/passwd", "; ls", "$(id)", "http://169.254.169.254/"];
                 self.pick(&ATTACKS).expect("non-empty").to_string()
             }
+            _ if self.app.manifest.has_output_labels() && self.rng.random_bool(0.4) => {
+                const ATTACKS: [&str; 6] =
+                    ["//evil.example/", "https://evil.example/", "/\\evil.example", "javascript:alert(1)", "<img src=x onerror=alert(1)>", "\" onmouseover=\"alert(1)"];
+                self.pick(&ATTACKS).expect("non-empty").to_string()
+            }
             _ => self.pick(&ODD).expect("non-empty").to_string(),
         }
     }
@@ -672,6 +677,10 @@ impl Mutator<'_> {
                 let mut any = false;
                 for _ in 0..n {
                     any |= self.mutate_request(&mut spec.args);
+                }
+                // Mostly requests the platform lets through.
+                if self.rng.random_bool(0.85) {
+                    crate::constraints::conform_request(&mut spec.args, &self.app.manifest, self.rng.random());
                 }
                 any.then_some(())?;
             }
@@ -853,7 +862,7 @@ pub(crate) fn form_inputs(v: &Value) -> Vec<String> {
 
 /// Request fields by role: `http.path`, `http.query`, `http.method`,
 /// `http.form`; without roles, fields named `path`, `query`, `method`, `form`.
-fn role_path(fields: &BTreeMap<String, String>, req: &Value, role: &str) -> Option<String> {
+pub(crate) fn role_path(fields: &BTreeMap<String, String>, req: &Value, role: &str) -> Option<String> {
     fields
         .iter()
         .find(|(_, r)| r.as_str() == format!("http.{role}"))

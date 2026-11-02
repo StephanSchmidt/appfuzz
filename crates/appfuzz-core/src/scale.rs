@@ -127,6 +127,8 @@ pub fn apply(app: &App, base: &RunSpec, knob: &Knob, n: u64) -> Result<RunSpec> 
             } else {
                 set_field(req, path, n, len)?;
             }
+            // The platform lets no other value through.
+            crate::constraints::conform_request(&mut spec.args, &app.manifest, spec.seed);
         }
     }
     Ok(spec)
@@ -409,24 +411,34 @@ fn findings(app: &App, knob: &Knob, points: &[Point], growth: &[Growth]) -> Vec<
         }
         // A request field is the requester's to choose: any break counts.
         let input = !matches!(knob, Knob::HostList(_));
+        // Labels: a change in a loop, or a loop where a batch call exists.
+        let effect = app.manifest.effect_of(f).filter(|e| e.changes());
+        let batch = app.manifest.batch_for(f);
         let sev = if g.law.class == Class::Capped {
             // The app bounds it: a hint, not an n+1.
             Severity::Info
-        } else if g.law.class.superlinear() || budget_break.as_ref().is_some_and(|(b, _)| input || *b <= 100) {
+        } else if g.law.class.superlinear() || budget_break.as_ref().is_some_and(|(b, _)| input || *b <= 100) || effect.is_some() || batch.is_some() {
             Severity::Fail
         } else {
             Severity::Warn
         };
         let mut title = format!("calls to {f} grow as {} with n = {}", g.law.text, knob.describe());
+        if let Some(e) = effect {
+            title.push_str(&format!(" (effect {}: one change per element)", e.name()));
+        }
         if let Some((b, m)) = &budget_break {
             title.push_str(&format!("; {m} breaks its limit at n = {b}"));
+        }
+        if let Some(b) = &batch {
+            title.push_str(&format!("; {b} does it in one call"));
         }
         out.push(Finding::new(
             kind,
             &format!("{ex}\0{knob:?}\0{f}"),
             sev,
             title,
-            json!({"knob": knob, "func": f, "law": g.law.text, "class": g.law.class, "breaks_at": budget_break, "worst_run": worst}),
+            json!({"knob": knob, "func": f, "law": g.law.text, "class": g.law.class, "breaks_at": budget_break, "worst_run": worst,
+                   "effect": effect.map(|e| e.name()), "batch": batch}),
             worst,
         ));
     }

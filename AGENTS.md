@@ -104,8 +104,10 @@ Results are WIT-shaped JSON: `{"ok": …}` or `{"err": …}` for results, and
 
 ## 4. Labels: telling appfuzz what text means
 
-appfuzz can't know that a parameter is SQL or that a field is an email
-address. Labels in the manifest tell it. `inspect` prints a guess from the
+appfuzz can't know that a parameter is SQL, that a field is an email
+address, or that a function writes. Labels in the manifest tell it.
+[LABELS.md](LABELS.md) is the full, versioned vocabulary; this section is
+the short form. `inspect` prints a guess from the
 WIT names under `label_suggestions`. Keep only what is true.
 
 ```toml
@@ -133,6 +135,7 @@ Parameter labels:
 | `html` | markup | `<i>` intact: `html_injection` |
 | `regex` | a regular expression | `(` intact: `regex_injection` (warn) |
 | `pii`, `secret` | may receive personal data or secrets | (no sink check) |
+| `user-id` | names a user | a value that is not the caller: `foreign_user_access` |
 
 Result labels, for the whole result or a field path (paths go through
 lists, options and `ok`):
@@ -143,6 +146,37 @@ lists, options and `ok`):
 | `html` | trusted markup: no `stored_reflection` or `html_injection` for it |
 | `pii` | personal data: `pii_leak` fail in logs, error pages and host parameters not labelled `pii`; warn in a URL or header; nothing in an ordinary page |
 | `secret` | `secret_leak` fail anywhere in the output, logs, or host parameters not labelled `secret` |
+| `identity` | the caller's user id |
+| `owner` | who the record holding this field belongs to: `missing_owner_check` when another user's record shows |
+
+Identity labels say who the caller is and who owns what: `identity` on
+a result path (`users#current`, `result = { id = "identity" }`) or as a
+request field role, `user-id` on a parameter, `owner` on a result path.
+
+Output labels say what the platform allows in the response:
+`[entry] result = { body = "html:safe", "headers.location" = "url:local" }`,
+with `sensitive_paths = ["/admin"]`. `html:no-scripts` allows no script,
+`html:safe` also allows no request the user didn't ask for, and `url:local`
+allows only paths on the app's own host.
+
+Value constraints say what the platform promises: `values = { score =
+"range:0..100" }` on a host function (results), `[entry] values = {
+"query.days" = "range:1..31" }` (requests the platform lets through). Also
+`len:a..b`, `enum:x,y`, `format:date|time|datetime|email|int`. Generated
+values keep to them, so a finding is about a value that can happen.
+
+Effects say what a call does, `effect = "read" | "write" | "delete" |
+"external"` (external: mail, payments, messages). `idempotent = true` says
+a change may be repeated. `batch_of = "acme:web/items#get"` names the
+function that fetches many at once.
+
+```toml
+[functions."acme:web/store#save"]
+effect = "write"
+
+[functions."acme:web/items#get-many"]
+batch_of = "acme:web/items#get"
+```
 
 Generated values at `pii` and `secret` paths are traceable markers
 (`p…@mail.example`, `sk_…`). With sink labels, canaries carry `../;$(x)`
@@ -190,6 +224,9 @@ and `confirm <id>` makes it reproducible.
 | `reflection`, `stored_reflection`, `input_passthrough` | request or host text reaches HTML unescaped, or reaches a host call unchanged |
 | `sql_injection`, `path_traversal`, `command_injection`, `ssrf`, `html_injection`, `regex_injection`, `escaped_by_hand` | request or host text reaches a labelled sink (§4) |
 | `pii_leak`, `secret_leak` | a labelled value reaches a place it must not (§4) |
+| `script_in_output`, `unsafe_action`, `open_redirect`, `non_local_url` | the response breaks an output label: a script, a request the user didn't ask for, a URL off the app (§4 output labels) |
+| `foreign_user_access`, `missing_owner_check` | a user id that is not the caller's goes to a host call; another user's record shows in a page (§4 identity) |
+| `write_on_safe_method`, `repeated_write`, `partial_write` | a change on GET, the same change twice, a change that stays when a later one fails (§4 effects) |
 | `ungranted_import`, `ungranted_call`, `unused_grant` | imports versus the manifest's grants |
 | `check_failed` | a property from `check` broke |
 
@@ -208,8 +245,9 @@ refuses findings it cannot reproduce.
 
 - Request sequences: the simulated host keeps no state between requests, so
   double submits and partial writes across requests are out of reach.
-- Effects: it cannot know that a function writes until the manifest can
-  say so. Labels (§4) cover sinks, personal data and secrets only.
+- Effects across requests: `effect` labels (§4) catch changes on GET and
+  repeated changes inside one request. Idempotency across requests is out
+  of reach.
 - Malicious behaviour (phase 3): htmx and browser attacks, hidden triggers,
   and channels are separate from bad patterns. A clean review does not
   mean an app is benign.

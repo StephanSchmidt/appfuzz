@@ -1,0 +1,13 @@
+{
+  "app": "orders-for-query-user",
+  "bug": "lists the orders of the user named in ?user",
+  "expect": [
+    {
+      "kind": "foreign_user_access",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "missing_owner_check"
+  ]
+}

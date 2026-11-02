@@ -1,0 +1,11 @@
+{
+  "app": "inline-handler",
+  "bug": "puts an onclick handler into a page the platform allows no scripts in",
+  "expect": [
+    {
+      "kind": "script_in_output",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

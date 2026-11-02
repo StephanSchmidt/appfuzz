@@ -59,8 +59,15 @@ interface config {
 }
 
 interface users {
-    record user { name: string, email: string, bio: string, bio-html: string }
+    record user { id: string, name: string, email: string, bio: string, bio-html: string }
     current: func() -> user;
+}
+
+// Records that belong to a user.
+interface orders {
+    record order { id: u64, owner: string, item: string, total: u32 }
+    for-user: func(user-id: string) -> list<order>;
+    get: func(id: u64) -> result<order, string>;
 }
 
 interface handler {
@@ -90,5 +97,6 @@ world labelled-app {
     import sys;
     import config;
     import users;
+    import orders;
     export handler;
 }

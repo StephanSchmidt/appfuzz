@@ -2,14 +2,18 @@
 //! functions and measures what they do.
 
 pub mod manifest;
+pub mod markup;
 pub mod check;
+pub mod constraints;
 pub mod metamorphic;
 pub mod output;
 pub mod detect;
+pub mod effects;
 pub mod fuzz;
 pub mod par;
 pub mod growth;
 pub mod harness;
+pub mod identity;
 pub mod labels;
 pub mod plan;
 pub mod probe;

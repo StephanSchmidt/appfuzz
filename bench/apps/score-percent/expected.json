@@ -1,0 +1,6 @@
+{
+  "app": "score-percent",
+  "bug": "draws score as a percentage bar and panics above 100, which the host never returns",
+  "expect": [],
+  "allow": []
+}

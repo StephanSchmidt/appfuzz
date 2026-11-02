@@ -180,6 +180,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
     </article>
   </div>
   <p class="aside">Also for ops: CPU and memory that grow faster than the input, slow call chains, busy waiting, one slow dependency that blows the latency budget.</p>
+  <p class="aside">With labels in the manifest: SQL, shell and path injection, SSRF, open redirects, leaked secrets and personal data, writes on GET, the same write twice, other users' records on the page, scripts in a widget that must have none. <a href="https://github.com/StephanSchmidt/appfuzz/blob/main/LABELS.md">The label list</a>.</p>
 </section>
 
 <section id="minute" class="frame sec">
@@ -423,7 +424,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
   </div>
   <dl class="facts-list">
     <div><dt>Catch malicious apps</dt><dd>Not yet. It finds careless code, not hidden backdoors.</dd></div>
-    <div><dt>Know your business rules</dt><dd>It can't tell that <code>create</code> writes. Labels in the manifest say which text is SQL, a secret or personal data.</dd></div>
+    <div><dt>Know your business rules</dt><dd>It can't tell that <code>create</code> writes or that a field is an email address. Labels in the manifest tell it: SQL, secrets, personal data, writes, who owns a record.</dd></div>
     <div><dt>Test sequences of requests</dt><dd>Each run is one request. Double submits are out of reach for now.</dd></div>
     <div><dt>See inside interpreters</dt><dd>TypeScript and Python apps are measured just as well from outside, but the search is less guided and runs are slower.</dd></div>
   </dl>

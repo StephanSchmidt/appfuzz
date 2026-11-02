@@ -143,7 +143,8 @@ pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         }
     }
     for (f, (extra, worst, args)) in redundant {
-        if extra >= REDUNDANT_MIN {
+        // A repeated change is `repeated_write` (effects).
+        if extra >= REDUNDANT_MIN && !m.unrepeatable(f) {
             let total = r.events.iter().filter(|e| e.func == f).count();
             out.push(Finding::new(
                 "redundant_calls",
@@ -156,7 +157,7 @@ pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         }
     }
 
-    out.extend(chatty(r));
+    out.extend(chatty(r, m));
 
     // Retry storms: the same failing call made again and again.
     let mut i = 0;
@@ -168,13 +169,20 @@ pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                 j += 1;
             }
             let retries = (j - i - 1) as u32;
-            if retries >= RETRY_MIN && !duplicates_explain(&r.events[..i], &e.args, retries + 1) {
+            if retries >= RETRY_MIN && !duplicates_explain(&r.events[..i], &e.args, retries + 1) && !crate::effects::duplicate_host_data(&r.events, e.n) {
+                // A failed change may have happened anyway: each retry
+                // can make it again.
+                let write = m.unrepeatable(&e.func);
                 out.push(Finding::new(
                     "retry_storm",
                     &format!("{ex}\0{}", e.func),
-                    Severity::Warn,
-                    format!("{} is called {retries} more times in a row after it failed", e.func),
-                    json!({"func": e.func, "first_call": e.n, "retries": retries, "args": e.args}),
+                    if write { Severity::Fail } else { Severity::Warn },
+                    format!(
+                        "{} is called {retries} more times in a row after it failed{}",
+                        e.func,
+                        if write { "; it changes something and is not idempotent, so each retry may do it again" } else { "" }
+                    ),
+                    json!({"func": e.func, "first_call": e.n, "retries": retries, "args": e.args, "unrepeatable": write}),
                     run,
                 ));
             }
@@ -269,6 +277,9 @@ pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     out.extend(crate::output::check(r, m));
     out.extend(crate::labels::check(r, m));
+    out.extend(crate::effects::check(r, m));
+    out.extend(crate::identity::check(r, m));
+    out.extend(crate::markup::check(r, m));
     if t.sleep_ns > 0 {
         out.push(Finding::new(
             "sleeps",
@@ -279,11 +290,22 @@ pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             run,
         ));
     }
+    // A request the platform would reject never reaches the app.
+    let broken = crate::constraints::broken_request(&r.spec.args, m);
+    if !broken.is_empty() {
+        let why: Vec<Value> = broken.iter().map(|(p, c, v)| json!({"field": p, "constraint": c, "value": v})).collect();
+        for f in &mut out {
+            f.severity = Severity::Info;
+            if let Value::Object(d) = &mut f.detail {
+                d.insert("invalid_request".into(), json!(why));
+            }
+        }
+    }
     dedupe(out)
 }
 
 /// A function called once per element of a list another call returned.
-fn chatty(r: &RunRecord) -> Vec<Finding> {
+fn chatty(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut out = Vec::new();
     // Argument scalars per event, computed once.
     let arg_scalars: Vec<BTreeSet<String>> = r.events.iter().map(|e| e.args.values().flat_map(scalars).collect()).collect();
@@ -317,12 +339,14 @@ fn chatty(r: &RunRecord) -> Vec<Finding> {
         for (f, (elements, calls)) in per_func {
             if elements.len() >= 2 && elements.len() * 5 >= list.len() * 4 {
                 reported.insert(e.func.as_str());
+                let batch = m.batch_for(f);
+                let hint = batch.as_ref().map(|b| format!("; {b} does it in one call")).unwrap_or_default();
                 out.push(Finding::new(
                     "chatty",
                     &format!("{}\0{}\0{f}", r.spec.export, e.func),
                     Severity::Warn,
-                    format!("{f} is called for each element {} returned ({calls} calls for {} elements)", e.func, list.len()),
-                    json!({"list_from": e.func, "list_call": e.n, "elements": list.len(), "func": f, "calls": calls}),
+                    format!("{f} is called for each element {} returned ({calls} calls for {} elements){hint}", e.func, list.len()),
+                    json!({"list_from": e.func, "list_call": e.n, "elements": list.len(), "func": f, "calls": calls, "batch": batch}),
                     Some(&r.id),
                 ));
             }

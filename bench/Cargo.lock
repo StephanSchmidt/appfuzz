@@ -16,6 +16,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "batch_ignored"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "big_output"
 version = "0.1.0"
 dependencies = [
@@ -57,6 +64,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "clean_writes"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "days_capped"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "days_param"
 version = "0.1.0"
 dependencies = [
@@ -65,6 +86,13 @@ dependencies = [
 
 [[package]]
 name = "deep_recursion"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "double_send"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",
@@ -151,6 +179,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "inline_handler"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -214,6 +249,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "order_no_owner_check"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "orders_for_query_user"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "orders_owner_checked"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "over_granted"
 version = "0.1.0"
 dependencies = [
@@ -222,6 +278,13 @@ dependencies = [
 
 [[package]]
 name = "panic_in_body"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "partial_order"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",
@@ -277,6 +340,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "redirect_checked"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "redirect_next"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "redundant"
 version = "0.1.0"
 dependencies = [
@@ -299,6 +376,27 @@ dependencies = [
 
 [[package]]
 name = "retry_storm"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "retry_write"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "save_per_item"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "score_percent"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",
@@ -481,6 +579,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "widget_loads_admin"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "widget_safe"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.63.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -569,6 +681,13 @@ dependencies = [
  "serde_json",
  "unicode-ident",
  "wasmparser",
+]
+
+[[package]]
+name = "write_on_get"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
 ]
 
 [[package]]

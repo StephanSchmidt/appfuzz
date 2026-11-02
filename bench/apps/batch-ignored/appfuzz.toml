@@ -1,0 +1,39 @@
+# appfuzz bench app: batch-ignored (fetches each item on its own although items#get-many exists).
+[app]
+wasm = "../../target/wasm32-wasip2/release/batch_ignored.wasm"
+name = "batch-ignored"
+
+[entry]
+export = "bench:web/handler#handle"
+request = { method = "GET", path = "/", query = [], form = [], today = "", now = "" }
+fields = { today = "clock.date", now = "clock.time" }
+output = { status = "status", body = "body", headers = "headers", body_format = "html" }
+now = "2026-11-02T10:00:00"
+
+[grants]
+imports = ["bench:web/items"]
+wasi = ["wasi:cli", "wasi:clocks", "wasi:io", "wasi:random"]
+
+[limits]
+fuel = 200_000_000
+memory = "64MiB"
+cost_per_request = 100
+max_latency_ms = 200
+
+[functions."bench:web/items#all"]
+effect = "read"
+
+[functions."bench:web/items#get"]
+effect = "read"
+
+[functions."bench:web/items#get-many"]
+batch_of = "bench:web/items#get"
+
+[functions."bench:web/store#save"]
+effect = "write"
+
+[functions."bench:web/store#load"]
+effect = "read"
+
+[functions."bench:web/mail#send"]
+effect = "external"

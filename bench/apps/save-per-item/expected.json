@@ -1,0 +1,16 @@
+{
+  "app": "save-per-item",
+  "bug": "archives the items with one store write per item",
+  "expect": [
+    {
+      "kind": "n_plus_1",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "over_budget",
+    "serial_chain",
+    "chatty",
+    "slow_host_sensitivity"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "app": "redirect-checked",
+  "bug": "redirects to ?next only if it is a local path",
+  "expect": [],
+  "allow": [
+    "input_passthrough"
+  ]
+}

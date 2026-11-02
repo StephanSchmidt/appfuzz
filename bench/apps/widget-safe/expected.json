@@ -1,0 +1,6 @@
+{
+  "app": "widget-safe",
+  "bug": "a widget with a link out, a form and a click-triggered htmx request to itself",
+  "expect": [],
+  "allow": []
+}

@@ -42,6 +42,8 @@ struct Platform {
     latency_ms: BTreeMap<String, f64>,
     /// `pii` and `secret` result paths, whose generated strings are marked.
     marks: BTreeMap<String, Vec<(String, crate::labels::Label)>>,
+    /// Value constraints of host results.
+    constraints: BTreeMap<String, Vec<(String, crate::constraints::Constraint)>>,
 }
 
 pub struct App {
@@ -78,6 +80,8 @@ struct Host {
     modules: Vec<(wasmtime::Module, String)>,
     plan: Arc<Plan>,
     seed: u64,
+    /// The caller's id for generated `identity` and `owner` values.
+    identity: String,
     clock: VirtualClock,
     fuel_start: u64,
     ns_per_fuel: f64,
@@ -203,6 +207,7 @@ impl App {
             cost: BTreeMap::new(),
             latency_ms: BTreeMap::new(),
             marks: BTreeMap::new(),
+            constraints: BTreeMap::new(),
         };
         crate::labels::check_wit(&manifest, &imports)?;
         for iface in imports.iter().filter(|i| i.kind == ImportKind::Platform) {
@@ -214,10 +219,13 @@ impl App {
                 let marks: Vec<_> = manifest
                     .result_labels(&f.key)
                     .into_iter()
-                    .filter(|(_, l)| matches!(l, crate::labels::Label::Pii | crate::labels::Label::Secret))
+                    .filter(|(_, l)| matches!(l, crate::labels::Label::Pii | crate::labels::Label::Secret) || l.is_id())
                     .collect();
                 if !marks.is_empty() {
                     platform.marks.insert(f.key.clone(), marks);
+                }
+                if let Some(spec) = manifest.function(&f.key).filter(|s| !s.values.is_empty()) {
+                    platform.constraints.insert(f.key.clone(), spec.values.iter().map(|(p, c)| (p.clone(), c.clone())).collect());
                 }
             }
         }
@@ -405,6 +413,7 @@ impl App {
             modules: Vec::new(),
             plan: Arc::new(spec.plan.clone()),
             seed: spec.seed,
+            identity: crate::identity::caller(spec, &self.manifest),
             clock: clock.clone(),
             fuel_start: spec.fuel,
             ns_per_fuel: spec.ns_per_fuel,
@@ -551,7 +560,11 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
             data.host_trap = Some(msg.clone());
             Err(anyhow!("host trap from plan: {msg}"))
         }
-        Decision::Return(v) => {
+        Decision::Return(mut v) => {
+            // The host keeps its promises, whatever the plan says.
+            if let (Some(c), 1) = (platform.constraints.get(key), result_types.len()) {
+                crate::constraints::conform_at(&mut v, c, data.seed);
+            }
             let vals: Result<Vec<Val>> = match result_types.len() {
                 0 => Ok(vec![]),
                 1 => json_to_val(&v, &result_types[0]).map(|x| vec![x]),
@@ -582,7 +595,14 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
             let mut vals: Vec<Val> = result_types.iter().map(|t| g.gen_val(t)).collect();
             if let (Some(marks), [v], [t]) = (platform.marks.get(key), vals.as_mut_slice(), result_types.as_slice()) {
                 let mut j = val_to_json(v);
-                crate::labels::mark(&mut j, marks, seed);
+                crate::labels::mark(&mut j, marks, seed, &data.identity);
+                if let Ok(x) = json_to_val(&j, t) {
+                    *v = x;
+                }
+            }
+            if let (Some(c), [v], [t]) = (platform.constraints.get(key), vals.as_mut_slice(), result_types.as_slice()) {
+                let mut j = val_to_json(v);
+                crate::constraints::conform_at(&mut j, c, seed);
                 if let Ok(x) = json_to_val(&j, t) {
                     *v = x;
                 }

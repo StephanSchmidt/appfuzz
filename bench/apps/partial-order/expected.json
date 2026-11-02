@@ -1,0 +1,14 @@
+{
+  "app": "partial-order",
+  "bug": "saves the order, ignores a failed confirmation mail, says all is well",
+  "expect": [
+    {
+      "kind": "partial_write",
+      "min": "warn"
+    }
+  ],
+  "allow": [
+    "error_ignored",
+    "continues_after_error"
+  ]
+}

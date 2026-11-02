@@ -1,0 +1,11 @@
+{
+  "app": "order-no-owner-check",
+  "bug": "shows the order named in ?id without checking whose it is",
+  "expect": [
+    {
+      "kind": "missing_owner_check",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

@@ -87,6 +87,13 @@ appfuzz --wasm my_app.wasm review     # everything; exit code 0 pass, 1 warn, 2 
   internal error text shown to users, imports the platform didn't grant.
   With labels: SQL, shell, path and HTML injection, SSRF, and leaked secrets
   or personal data.
+- **Output rules:** with output labels, scripts in markup that must have
+  none, widgets that call routes by themselves, open redirects.
+- **Access:** with identity labels, user ids taken from the request and
+  other users' records shown in a page.
+- **Writes:** with effect labels, changes on GET requests, the same write
+  twice, retried writes, one write per row, and a write that stays when a
+  later one fails.
 - **Database:** n+1 queries, loops inside loops, calls that grow with a
   request field, repeated identical calls, retry storms.
 - **Wrong answers:** results that change with row order or duplicates,
@@ -135,8 +142,8 @@ reference for people too.
 - A pass means the search found nothing. That's evidence, not proof.
 - Each run is one request, and the simulated backend keeps no state between
   requests, so double submits are out of reach.
-- It doesn't know what your host functions mean until labels tell it, and
-  labels don't cover writes yet.
+- It doesn't know what your host functions mean until labels tell it
+  ([LABELS.md](LABELS.md)).
 - It doesn't look for malicious behaviour. A clean review doesn't mean an
   app is benign.
 - For interpreted languages (componentize-js, componentize-py), coverage

@@ -1,0 +1,11 @@
+{
+  "app": "retry-write",
+  "bug": "retries a failed store write five times",
+  "expect": [
+    {
+      "kind": "retry_storm",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

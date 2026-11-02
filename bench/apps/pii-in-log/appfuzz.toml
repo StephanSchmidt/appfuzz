@@ -36,4 +36,11 @@ params = { cmd = "shell" }
 result = "secret"
 
 [functions."bench:web/users#current"]
-result = { email = "pii", bio-html = "html" }
+result = { id = "identity", email = "pii", bio-html = "html" }
+
+[functions."bench:web/orders#for-user"]
+params = { user-id = "user-id" }
+result = { owner = "owner" }
+
+[functions."bench:web/orders#get"]
+result = { owner = "owner" }

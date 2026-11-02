@@ -236,7 +236,7 @@ pub const NOTES: &[&str] = &[
     "`last` stands for the latest stored run. Runs and findings are kept in --state (default .appfuzz) per component.",
     "Requests: the manifest's [entry] request; change it with --set (merged JSON), or give --request / --args. Host behaviour: --plan (file or inline JSON); unplanned results are generated from WIT types.",
     "Time is virtual: latency, sleeps and clock reads cost nothing real. --now sets the clock.",
-    "Labels in [functions.\"<key>\"] say what text means: params = { sql = \"sql\" } (sinks: sql, path, shell, url, html, regex; or pii, secret), result = { email = \"pii\" } (untrusted, html, pii, secret). With them appfuzz reports injections and leaks.",
+    "Labels in [functions.\"<key>\"] say what text means: params = { sql = \"sql\" } (sinks: sql, path, shell, url, html, regex; or pii, secret), result = { email = \"pii\" } (untrusted, html, pii, secret). [entry] result = { body = \"html:safe\", \"headers.location\" = \"url:local\" } (also html:no-scripts; sensitive_paths = [\"/admin\"]), values = { score = \"range:0..100\" } (also len:, enum:, format:; on results, or in [entry] for request fields), identity/owner on result paths and user-id on parameters (who the caller is, whose record it is), effect = \"write\" (read, write, delete, external), idempotent = true, batch_of = \"<fn>\". With them appfuzz reports injections, leaks, and writes on GET, repeated or partial. The vocabulary is LABELS.md.",
     "Findings: fail > warn > info. `confirm` makes a finding reproducible and small; info findings are hints, not bugs.",
 ];
 

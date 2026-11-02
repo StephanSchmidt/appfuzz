@@ -1,0 +1,22 @@
+# appfuzz bench app: redirect-checked (redirects to ?next only if it is a local path).
+[app]
+wasm = "../../target/wasm32-wasip2/release/redirect_checked.wasm"
+name = "redirect-checked"
+
+[entry]
+export = "bench:web/handler#handle"
+request = { method = "GET", path = "/", query = [], form = [], today = "", now = "" }
+fields = { today = "clock.date", now = "clock.time" }
+output = { status = "status", body = "body", headers = "headers", body_format = "html" }
+now = "2026-11-02T10:00:00"
+result = { "headers.location" = "url:local" }
+
+[grants]
+imports = []
+wasi = ["wasi:cli", "wasi:clocks", "wasi:io", "wasi:random"]
+
+[limits]
+fuel = 200_000_000
+memory = "64MiB"
+cost_per_request = 100
+max_latency_ms = 200

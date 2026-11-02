@@ -19,8 +19,8 @@ ITEMS, STORE, MAIL = "bench:web/items", "bench:web/store", "bench:web/mail"
 APPS = []
 
 
-def app(name, what, code, expect, allow=(), grants=(ITEMS,), extra="", fuel="200_000_000", pending=None):
-    APPS.append(dict(name=name, what=what, code=code, expect=expect, allow=list(allow), grants=list(grants), extra=extra, fuel=fuel, pending=pending))
+def app(name, what, code, expect, allow=(), grants=(ITEMS,), extra="", fuel="200_000_000", pending=None, entry=""):
+    APPS.append(dict(name=name, what=what, code=code, expect=expect, allow=list(allow), grants=list(grants), extra=extra, fuel=fuel, pending=pending, entry=entry))
 
 
 def handler(body, prelude="prelude.rs"):
@@ -324,7 +324,7 @@ app("clean", "a well-behaved page: one read, sorted, escaped, bounded",
 # These apps use the `labelled-app` world; their manifests label parameters
 # (sinks) and results (personal data, secrets, trusted HTML).
 
-DB, FILES, HTTP, SYS, CONFIG, USERS = (f"bench:web/{i}" for i in ("db", "files", "http", "sys", "config", "users"))
+DB, FILES, HTTP, SYS, CONFIG, USERS, ORDERS = (f"bench:web/{i}" for i in ("db", "files", "http", "sys", "config", "users", "orders"))
 
 LABELS = """
 [functions."bench:web/db#query"]
@@ -343,7 +343,14 @@ params = { cmd = "shell" }
 result = "secret"
 
 [functions."bench:web/users#current"]
-result = { email = "pii", bio-html = "html" }
+result = { id = "identity", email = "pii", bio-html = "html" }
+
+[functions."bench:web/orders#for-user"]
+params = { user-id = "user-id" }
+result = { owner = "owner" }
+
+[functions."bench:web/orders#get"]
+result = { owner = "owner" }
 """
 
 
@@ -433,6 +440,230 @@ app("trusted-html", "renders the user's bio-html as is (labelled trusted) and th
         html(format!("<h1>{}</h1><p>{}</p><div>{}</div><p>{}</p>", esc(&u.name), esc(&u.email), u.bio_html, esc(&u.bio)))
     """), [], grants=[USERS, CONFIG, HTTP], extra=LABELS)
 
+app("orders-for-query-user", "lists the orders of the user named in ?user",
+    labelled("""
+        let user = param(&req.query, "user").unwrap_or("");
+        let mut out = String::from("<ul>");
+        for o in orders::for_user(user) {
+            out += &format!("<li>{} ({})</li>", esc(&o.item), o.total);
+        }
+        html(out + "</ul>")
+    """), [("foreign_user_access", "fail")], allow=["missing_owner_check"], grants=[ORDERS], extra=LABELS)
+
+app("order-no-owner-check", "shows the order named in ?id without checking whose it is",
+    labelled("""
+        let id: u64 = param(&req.query, "id").and_then(|v| v.parse().ok()).unwrap_or(1);
+        match orders::get(id) {
+            Ok(o) => html(format!("<h1>Order {}</h1><p>{}</p>", o.id, esc(&o.item))),
+            Err(_) => Response { status: 404, body: "<p>No such order</p>".into(), headers: vec![] },
+        }
+    """), [("missing_owner_check", "fail")], grants=[ORDERS], extra=LABELS)
+
+app("orders-owner-checked", "shows the caller's own orders, and an order only to its owner",
+    labelled("""
+        let me = users::current();
+        if let Some(id) = param(&req.query, "id").and_then(|v| v.parse::<u64>().ok()) {
+            return match orders::get(id) {
+                Ok(o) if o.owner == me.id => html(format!("<h1>Order {}</h1><p>{}</p>", o.id, esc(&o.item))),
+                _ => Response { status: 404, body: "<p>No such order</p>".into(), headers: vec![] },
+            };
+        }
+        let mut out = String::from("<ul>");
+        for o in orders::for_user(&me.id).iter().filter(|o| o.owner == me.id) {
+            out += &format!("<li>{} ({})</li>", esc(&o.item), o.total);
+        }
+        html(out + "</ul>")
+    """), [], grants=[USERS, ORDERS], extra=LABELS)
+
+# --- Effects ---------------------------------------------------------------
+# These manifests say what the host functions do: read, write, external.
+
+EFFECTS = """
+[functions."bench:web/items#all"]
+effect = "read"
+
+[functions."bench:web/items#get"]
+effect = "read"
+
+[functions."bench:web/items#get-many"]
+batch_of = "bench:web/items#get"
+
+[functions."bench:web/store#save"]
+effect = "write"
+
+[functions."bench:web/store#load"]
+effect = "read"
+
+[functions."bench:web/mail#send"]
+effect = "external"
+"""
+
+ORDER_FORM = 'html(r#"<form method="post" action="/order"><input name="item" value="7"><button>Order</button></form>"#.into())'
+
+app("write-on-get", "counts page views with a store write on GET",
+    handler("""
+        let _ = &req;
+        let views: u64 = store::load("views").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let _ = store::save("views", &(views + 1).to_string());
+        html(format!("<p>{views} views</p>"))
+    """), [("write_on_safe_method", "fail")], grants=[STORE], extra=EFFECTS)
+
+app("save-per-item", "archives the items with one store write per item",
+    handler("""
+        if req.method == "POST" && req.path == "/archive" {
+            for it in items::all() {
+                let _ = store::save(&format!("archive/{}", it.id), &it.name);
+            }
+            return Response { status: 303, body: String::new(), headers: vec![("location".into(), "/".into())] };
+        }
+        html(r#"<form method="post" action="/archive"><button>Archive</button></form>"#.into())
+    """), [("n_plus_1", "fail")], allow=["over_budget", "serial_chain", "chatty", "slow_host_sensitivity"], grants=[ITEMS, STORE], extra=EFFECTS)
+
+app("batch-ignored", "fetches each item on its own although items#get-many exists",
+    handler("""
+        let _ = &req;
+        let mut out = String::from("<ul>");
+        for it in items::all() {
+            if let Ok(full) = items::get(it.id) {
+                out += &format!("<li>{}</li>", esc(&full.owner));
+            }
+        }
+        html(out + "</ul>")
+    """), [("n_plus_1", "fail")], allow=["over_budget", "serial_chain", "chatty", "redundant_calls", "slow_host_sensitivity"], extra=EFFECTS)
+
+app("double-send", "sends the order confirmation twice (once per code path)",
+    handler("""
+        if req.method == "POST" && req.path == "/order" {
+            let item = param(&req.form, "item").unwrap_or("0");
+            let saved = store::save(&format!("order/{item}"), item);
+            let _ = mail::send("customer@example.com", &format!("Order {item} received"));
+            if saved.is_ok() {
+                let _ = mail::send("customer@example.com", &format!("Order {item} received"));
+            }
+            return Response { status: 303, body: String::new(), headers: vec![("location".into(), "/".into())] };
+        }
+        """ + ORDER_FORM + """
+    """), [("repeated_write", "fail")], allow=["partial_write", "error_ignored", "continues_after_error"], grants=[STORE, MAIL], extra=EFFECTS)
+
+app("retry-write", "retries a failed store write five times",
+    handler("""
+        if req.method == "POST" && req.path == "/order" {
+            let item = param(&req.form, "item").unwrap_or("0");
+            let mut ok = false;
+            for _ in 0..5 {
+                if store::save(&format!("order/{item}"), item).is_ok() {
+                    ok = true;
+                    break;
+                }
+            }
+            let status = if ok { 303 } else { 503 };
+            return Response { status, body: String::new(), headers: vec![("location".into(), "/".into())] };
+        }
+        """ + ORDER_FORM + """
+    """), [("retry_storm", "fail")], grants=[STORE], extra=EFFECTS)
+
+app("partial-order", "saves the order, ignores a failed confirmation mail, says all is well",
+    handler("""
+        if req.method == "POST" && req.path == "/order" {
+            let item = param(&req.form, "item").unwrap_or("0");
+            if store::save(&format!("order/{item}"), item).is_err() {
+                return Response { status: 500, body: "<p>Could not save the order</p>".into(), headers: vec![] };
+            }
+            let _ = mail::send("customer@example.com", &format!("Order {item} received"));
+            return Response { status: 303, body: String::new(), headers: vec![("location".into(), "/".into())] };
+        }
+        """ + ORDER_FORM + """
+    """), [("partial_write", "warn")], allow=["error_ignored", "continues_after_error"], grants=[STORE, MAIL], extra=EFFECTS)
+
+app("clean-writes", "writes only on POST, once, and reports a failed mail",
+    handler("""
+        if req.method == "POST" && req.path == "/order" {
+            let item = param(&req.form, "item").unwrap_or("0");
+            if store::save(&format!("order/{item}"), item).is_err() {
+                return Response { status: 500, body: "<p>Could not save the order</p>".into(), headers: vec![] };
+            }
+            if mail::send("customer@example.com", &format!("Order {item} received")).is_err() {
+                return Response { status: 502, body: "<p>Order saved, but the confirmation mail failed</p>".into(), headers: vec![] };
+            }
+            return Response { status: 303, body: String::new(), headers: vec![("location".into(), "/".into())] };
+        }
+        """ + ORDER_FORM + """
+    """), [], grants=[STORE, MAIL], extra=EFFECTS)
+
+
+# --- Output labels ---------------------------------------------------------
+# The manifest says what the platform allows in the response.
+
+LOCAL_REDIRECT = 'result = { "headers.location" = "url:local" }\n'
+SAFE_BODY = 'result = { body = "html:safe" }\nsensitive_paths = ["/admin"]\n'
+NO_SCRIPTS = 'result = { body = "html:no-scripts" }\n'
+
+app("redirect-next", "redirects to ?next without checking it",
+    handler("""
+        let next = param(&req.query, "next").unwrap_or("/");
+        Response { status: 303, body: String::new(), headers: vec![("location".into(), next.into())] }
+    """), [("open_redirect", "fail")], allow=["input_passthrough", "invalid_response"], grants=[], entry=LOCAL_REDIRECT)
+
+app("redirect-checked", "redirects to ?next only if it is a local path",
+    handler("""
+        let next = param(&req.query, "next").unwrap_or("/");
+        let local = next.starts_with('/') && !next.starts_with("//") && !next.contains('\\\\') && !next.chars().any(|c| c.is_control());
+        let to = if local { next } else { "/" };
+        Response { status: 303, body: String::new(), headers: vec![("location".into(), to.into())] }
+    """), [], allow=["input_passthrough"], grants=[], entry=LOCAL_REDIRECT)
+
+app("inline-handler", "puts an onclick handler into a page the platform allows no scripts in",
+    handler("""
+        let _ = &req;
+        let mut out = String::from("<ul>");
+        for it in items::all().iter().take(20) {
+            out += &format!("<li>{}</li>", esc(&it.name));
+        }
+        html(out + "</ul><button onclick=\\"history.back()\\">Back</button>")
+    """), [("script_in_output", "fail")], entry=NO_SCRIPTS)
+
+app("widget-loads-admin", "a widget that calls an admin route by itself on load",
+    handler("""
+        let _ = &req;
+        let n = items::all().len();
+        html(format!("<div class=\\"widget\\"><p>{n} items</p><div hx-post=\\"/admin/reindex\\" hx-trigger=\\"load\\"></div></div>"))
+    """), [("unsafe_action", "fail")], entry=SAFE_BODY)
+
+app("widget-safe", "a widget with a link out, a form and a click-triggered htmx request to itself",
+    handler("""
+        let _ = &req;
+        let n = items::all().len();
+        html(format!(
+            "<div class=\\"widget\\"><p>{n} items</p><a href=\\"https://docs.example.com/\\">Help</a>\\
+             <form method=\\"post\\" action=\\"/refresh\\"><button>Refresh</button></form>\\
+             <button hx-get=\\"/items\\" hx-trigger=\\"click\\">More</button></div>"
+        ))
+    """), [], entry=SAFE_BODY)
+
+# --- Value constraints -----------------------------------------------------
+# What the platform promises: the same code as a bad app, made fine by a
+# constraint the platform enforces.
+
+app("days-capped", "reads one day per ?days, which the platform caps at 31 (31 serial calls are still slow on a slow host)",
+    handler("""
+        let days: u32 = param(&req.query, "days").and_then(|v| v.parse().ok()).unwrap_or(1);
+        let mut total = 0;
+        for d in 0..days {
+            total += items::for_day(&format!("{}+{d}", req.today)).len();
+        }
+        html(format!("<p>{total} entries in {days} days</p>"))
+    """), [], allow=["slow_host_sensitivity"], entry='values = { "query.days" = "range:1..31" }\n')
+
+app("score-percent", "draws score as a percentage bar and panics above 100, which the host never returns",
+    handler("""
+        let _ = &req;
+        let mut out = String::from("<ul>");
+        for it in items::all().iter().take(20) {
+            assert!(it.score <= 100, "score over 100");
+            out += &format!("<li style=\\"width:{}%\\">{}</li>", it.score, esc(&it.name));
+        }
+        html(out + "</ul>")
+    """), [], extra='\n[functions."bench:web/items#all"]\nvalues = { score = "range:0..100" }\n')
 
 MANIFEST = """\
 # appfuzz bench app: {name} ({what}).
@@ -446,7 +677,7 @@ request = {{ method = "GET", path = "/", query = [], form = [], today = "", now 
 fields = {{ today = "clock.date", now = "clock.time" }}
 output = {{ status = "status", body = "body", headers = "headers", body_format = "html" }}
 now = "2026-11-02T10:00:00"
-
+{entry}
 [grants]
 imports = [{grants}]
 wasi = ["wasi:cli", "wasi:clocks", "wasi:io", "wasi:random"]
@@ -483,7 +714,7 @@ def main():
         with open(os.path.join(d, "src", "lib.rs"), "w") as f:
             f.write(f"//! Bench app `{a['name']}`: {a['what']}.\n\n" + a["code"])
         with open(os.path.join(d, "appfuzz.toml"), "w") as f:
-            f.write(MANIFEST.format(name=a["name"], what=a["what"], crate=crate, fuel=a["fuel"], extra=a["extra"],
+            f.write(MANIFEST.format(name=a["name"], what=a["what"], crate=crate, fuel=a["fuel"], extra=a["extra"], entry=a["entry"],
                                     grants=", ".join(f'"{g}"' for g in a["grants"])))
         exp = {"app": a["name"], "bug": a["what"], "expect": [{"kind": k, "min": s} for k, s in a["expect"]], "allow": a["allow"]}
         if a["pending"]:
