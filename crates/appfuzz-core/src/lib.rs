@@ -1,6 +1,7 @@
 //! appfuzz-core: runs WebAssembly components against scripted, simulated host
 //! functions and measures what they do.
 
+pub mod agents;
 pub mod manifest;
 pub mod markup;
 pub mod check;

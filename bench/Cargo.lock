@@ -78,6 +78,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "clean_continue"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "clean_note"
 version = "0.1.0"
 dependencies = [
@@ -473,6 +480,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "reviewer_note"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "save_per_item"
 version = "0.1.0"
 dependencies = [
@@ -613,6 +627,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tag_text_store"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
 ]
 
 [[package]]

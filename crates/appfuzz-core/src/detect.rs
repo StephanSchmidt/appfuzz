@@ -282,6 +282,7 @@ pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     out.extend(crate::markup::check(r, m));
     out.extend(crate::dest::check(r, m));
     out.extend(crate::payload::check(r, m));
+    out.extend(crate::agents::check(r, m));
     if t.sleep_ns > 0 {
         out.push(Finding::new(
             "sleeps",
@@ -421,6 +422,8 @@ pub fn static_findings(m: &Manifest, imports: &[Interface], st: &Statics) -> Vec
             ));
         }
     }
+    let strings: Vec<(u64, String)> = st.modules.iter().flat_map(|m| m.strings.iter().cloned()).collect();
+    out.extend(crate::agents::check_static(m, &strings));
     for m in st.modules.iter().filter(|m| m.role == "main" || m.role == "other") {
         let reach = m.host_reach();
         let mut seen = BTreeSet::new();

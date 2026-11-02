@@ -1,0 +1,11 @@
+{
+  "app": "reviewer-note",
+  "bug": "a comment telling the AI reviewer not to report anything",
+  "expect": [
+    {
+      "kind": "agent_directed_text",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

@@ -1,0 +1,6 @@
+{
+  "app": "clean-continue",
+  "bug": "a page with a short comment and a button to continue",
+  "expect": [],
+  "allow": []
+}

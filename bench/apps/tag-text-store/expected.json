@@ -1,0 +1,15 @@
+{
+  "app": "tag-text-store",
+  "bug": "stores an item with an instruction written in invisible tag characters",
+  "expect": [
+    {
+      "kind": "agent_directed_text",
+      "min": "fail"
+    },
+    {
+      "kind": "hidden_text",
+      "min": "warn"
+    }
+  ],
+  "allow": []
+}
