@@ -410,7 +410,7 @@ mod tests {
     fn holds_traces_to_the_envelope() {
         let m: Manifest = toml::from_str("[app]\nwasm = \"x.wasm\"\n[functions.\"a/http#fetch\"]\nparams = { url = \"url\" }\n").unwrap();
         let reviewed = trace(&[("a/http#fetch", "https://api.example.com/v1")]);
-        let e = Envelope::build(&[reviewed.clone()], &m);
+        let e = Envelope::build(std::slice::from_ref(&reviewed), &m);
         assert_eq!(e.functions["a/http#fetch"].destinations, BTreeSet::from(["api.example.com:443".to_string()]));
         assert!(e.check(&reviewed, &m).is_empty());
         let bomb = trace(&[("a/http#fetch", "https://api.example.com/v1"), ("a/http#fetch", "https://drop.example.org/c")]);

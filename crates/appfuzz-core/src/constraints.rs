@@ -162,7 +162,7 @@ fn format_ok(f: Format, s: &str) -> bool {
         Format::Time => time(s),
         Format::DateTime => s.split_once('T').is_some_and(|(d, t)| date(d) && time(t)),
         Format::Email => s.split_once('@').is_some_and(|(a, b)| !a.is_empty() && b.contains('.') && !s.contains(char::is_whitespace)),
-        Format::Int => !s.is_empty() && s.trim_start_matches('-').bytes().all(|b| b.is_ascii_digit()) && s.trim_start_matches('-').len() > 0,
+        Format::Int => !s.is_empty() && s.trim_start_matches('-').bytes().all(|b| b.is_ascii_digit()) && !s.trim_start_matches('-').is_empty(),
     }
 }
 
@@ -225,11 +225,11 @@ pub fn conform_at(v: &mut Value, constraints: &[(String, Constraint)], seed: u64
 }
 
 fn conform_node(v: &mut Value, segs: &[&str], c: &Constraint, seed: u64, n: &mut u64) {
-    if segs.is_empty() {
-        if let (Constraint::Len(..), Value::Array(_)) = (c, &v) {
-            *v = c.conform(v, seed);
-            return;
-        }
+    if segs.is_empty()
+        && let (Constraint::Len(..), Value::Array(_)) = (c, &v)
+    {
+        *v = c.conform(v, seed);
+        return;
     }
     match v {
         Value::Array(a) => a.iter_mut().for_each(|x| conform_node(x, segs, c, seed, n)),

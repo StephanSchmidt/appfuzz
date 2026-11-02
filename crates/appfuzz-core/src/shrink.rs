@@ -292,11 +292,14 @@ type Edit = Box<dyn Fn(&mut Response)>;
 /// generated, finer edits, single values.
 const TIERS: usize = 4;
 
+/// An edit with its tier and the number it steps down.
+type Step = (usize, Edit, Option<(String, u64)>);
+
 /// Smaller variants of one response, each with its tier and the number
 /// it steps down (`at` names the response).
-fn response_edits(r: &Response, at: &str, lows: &Lows) -> Vec<(usize, Edit, Option<(String, u64)>)> {
+fn response_edits(r: &Response, at: &str, lows: &Lows) -> Vec<Step> {
     let mut edits: Vec<(usize, Edit)> = Vec::new();
-    let mut steps: Vec<(usize, Edit, Option<(String, u64)>)> = Vec::new();
+    let mut steps: Vec<Step> = Vec::new();
     let out = &mut edits;
     if let Some(v) = &r.ret {
         // A literal list whose content does not matter: generated
@@ -343,7 +346,8 @@ fn response_edits(r: &Response, at: &str, lows: &Lows) -> Vec<(usize, Edit, Opti
                 steps.push((2, f, Some((key.clone(), m))));
             }
         }
-        let fields: [(bool, fn(&mut GenOpts)); 5] = [
+        type Clear = fn(&mut GenOpts);
+        let fields: [(bool, Clear); 5] = [
             (g.strings.is_some(), |g| g.strings = None),
             (g.numbers.is_some(), |g| g.numbers = None),
             (g.results.is_some(), |g| g.results = None),
