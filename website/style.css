@@ -275,10 +275,10 @@ main > .sec:first-child { border-top: 0; }
 /* Agents and limits */
 .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 64px; }
 .lead { color: var(--ink2); font-size: 17px; margin: 22px 0 0; max-width: 30em; }
-.big { margin: 0 0 28px; display: flex; flex-direction: column; align-items: flex-start; }
-.big-n { font: 800 clamp(88px, 13vw, 168px)/.85 var(--sans); font-stretch: 62%; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
-.big-u { font: 500 15px/1 var(--mono); color: var(--ink2); margin-top: 14px; }
-.big-n::after { content: ""; display: block; height: 10px; background: var(--hi); margin-top: 10px; }
+.speed-n { margin: 0; font: 900 clamp(112px, 27vw, 330px)/.82 var(--sans); font-stretch: 62%; font-variation-settings: "wdth" 62; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }
+.speed-n span { background: linear-gradient(transparent 58%, var(--hi) 58%, var(--hi) 90%, transparent 90%); padding: 0 .04em; }
+.speed-u { margin: .9em 0 0; font: 700 clamp(26px, 3.6vw, 44px)/1.1 var(--sans); letter-spacing: -.01em; max-width: 24em; }
+.speed-body { margin-top: 64px; padding-top: 32px; border-top: 1px solid var(--ink); }
 .note { margin: 18px 0 0; font-size: 14px; color: var(--ink2); }
 .more { margin: 22px 0 0; font-weight: 600; }
 .more a { text-underline-offset: 4px; }

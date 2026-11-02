@@ -67,7 +67,7 @@
 
 <header class="frame hero">
   <div class="hero-text">
-    <p class="tag"><span>Phase 1</span> Open source, early, works today</p>
+    <p class="tag"><span>Open source</span> For WebAssembly components</p>
     <h1>No more code reviews. Fuzz&nbsp;instead.</h1>
     <p class="sub">appfuzz runs your WebAssembly app thousands of times against a simulated backend and finds what a review misses: crashes on empty lists and Unicode, user input in your HTML unescaped, loops that send one database query per row. Pass or fail, in CI.</p>
     <p class="install-label">Install on Linux or macOS</p>
@@ -285,8 +285,8 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 
 <section id="languages" class="frame sec">
   <div class="sec-head">
-    <h2>Same bug, four languages, same finding.</h2>
-    <p>appfuzz never reads your source. It runs the compiled component, so it doesn't care what you wrote it in. One n+1 loop, written four times, reviewed with the same limits.</p>
+    <h2>Same bug, two languages, same finding.</h2>
+    <p>appfuzz never reads your source. It runs the compiled component, so it doesn't care what you wrote it in. One n+1 loop, written twice, reviewed with the same limits.</p>
   </div>
 
   <div class="langs">
@@ -294,8 +294,6 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
       <div class="tabs" role="tablist" aria-label="Language">
         <button role="tab" id="tab-rs" aria-controls="panel-rs" aria-selected="true">Rust</button>
         <button role="tab" id="tab-zig" aria-controls="panel-zig" aria-selected="false" tabindex="-1">Zig</button>
-        <button role="tab" id="tab-ts" aria-controls="panel-ts" aria-selected="false" tabindex="-1">TypeScript</button>
-        <button role="tab" id="tab-py" aria-controls="panel-py" aria-selected="false" tabindex="-1">Python</button>
       </div>
       <div role="tabpanel" id="panel-rs" aria-labelledby="tab-rs">
 <pre class="code"><code><span class="kw">for</span> it <span class="kw">in</span> items::all() {
@@ -317,27 +315,9 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 }</code></pre>
         <p class="facts"><b>114 KB</b> component. zig, wit-bindgen c, the WASI adapter. About 8,600 runs a second. Also found: libc imports file system access the app never uses.</p>
       </div>
-      <div role="tabpanel" id="panel-ts" aria-labelledby="tab-ts" hidden>
-<pre class="code"><code><span class="kw">for</span> (<span class="kw">const</span> it <span class="kw">of</span> all()) {
-  <span class="kw">try</span> {
-    <span class="kw">const</span> full = get(it.id);
-    out += <span class="str">`&lt;li&gt;${esc(full.owner)}&lt;/li&gt;`</span>;
-  } <span class="kw">catch</span> {}
-}</code></pre>
-        <p class="facts"><b>12 MB</b> component, the JS engine included. About 1,900 runs a second. Also found: a 10 KB name makes <code>esc</code> so slow the request never finishes.</p>
-      </div>
-      <div role="tabpanel" id="panel-py" aria-labelledby="tab-py" hidden>
-<pre class="code"><code><span class="kw">for</span> it <span class="kw">in</span> items.all():
-    <span class="kw">try</span>:
-        full = items.get(it.id)
-        out += <span class="str">f"&lt;li&gt;{escape(full.owner)}&lt;/li&gt;"</span>
-    <span class="kw">except</span> Err:
-        <span class="kw">pass</span></code></pre>
-        <p class="facts"><b>18 MB</b> component, the interpreter included. About 1,940 runs a second. Also found: the runtime imports file system and network access the app never uses.</p>
-      </div>
     </div>
     <div class="lang-out">
-      <p class="out-label">appfuzz review, the same in all four</p>
+      <p class="out-label">appfuzz review, the same in both</p>
       <p class="verdict"><b>fail</b> <span class="kind">n_plus_1</span> calls to items#get grow as 1·n with n = length of the list items#all returns; cost breaks its limit at n = 100</p>
       <p class="verdict"><b>fail</b> <span class="kind">over_budget</span> handle uses 129 cost, the limit is 100</p>
       <p class="verdict warn"><b>warn</b> <span class="kind">chatty</span> items#get is called for each element items#all returned</p>
@@ -346,14 +326,15 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
   </div>
 </section>
 
-<section id="speed" class="frame sec split">
-  <div>
-    <p class="big"><span class="big-n">13,250</span><span class="big-u">requests a second</span></p>
-  </div>
-  <div>
+<section id="speed" class="frame sec speed">
+  <p class="speed-n"><span>13,250</span></p>
+  <p class="speed-u">fresh sandboxes a second. On one desktop CPU.</p>
+  <div class="split speed-body">
     <h2>Fast enough for every push.</h2>
-    <p class="lead">Every run is a whole request: a fresh sandbox, simulated host calls, every detector. Time is virtual, so a host that takes 200 ms costs nothing real. Thirty seconds of fuzzing is 400,000 requests to the n+1 app above.</p>
-    <p class="note">The chatty test app, Rust. <code>appfuzz fuzz --time 30s</code> from a fresh start on an AMD Ryzen 9 3900X, 12 cores, 24 threads.</p>
+    <div>
+      <p class="lead">Every run is a whole request: a fresh sandbox, simulated host calls, every detector. Time is virtual, so a host that takes 200 ms costs nothing real. Thirty seconds of fuzzing is 400,000 requests to the n+1 app above.</p>
+      <p class="note">The chatty test app, Rust. <code>appfuzz fuzz --time 30s</code> from a fresh start on an AMD Ryzen 9 3900X, 12 cores, 24 threads.</p>
+    </div>
   </div>
 </section>
 
@@ -456,7 +437,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 <span class="p">$</span> appfuzz --wasm my_app.wasm inspect
 <span class="p">$</span> appfuzz --wasm my_app.wasm review</code></pre>
   </div>
-  <p>Open source under the MIT license. Written in Rust on wasmtime. Phase 1 of 3 is done.</p>
+  <p>Open source under the MIT license. Written in Rust on wasmtime.</p>
 </section>
 
 </main>
