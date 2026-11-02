@@ -54,7 +54,7 @@ pub fn check(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, words: &[St
     let keeps = |r: &RunRecord| prop.broken(r, &app.manifest).is_some();
     let runner = |s: &RunSpec| app.run(s);
     let default = app.default_args(app.export(&orig.spec.export)?, &orig.spec.now)?;
-    let (spec, shrink_runs) = fuzz::minimise(app, &orig.spec, &default, &keeps, max_runs, &runner);
+    let (spec, shrink_runs) = appfuzz_core::shrink::minimise(app, &orig.spec, &default, &keeps, max_runs, &runner);
     let min = app.run(&spec);
     store.save(&min)?;
     let (why, detail) = prop.broken(&min, &app.manifest).or_else(|| prop.broken(&orig, &app.manifest)).unwrap_or_default();
@@ -64,7 +64,8 @@ pub fn check(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, words: &[St
     Ok(json!({
         "property": prop.text, "holds": false, "searched": searched,
         "counterexample": {
-            "run": min.id, "original_run": orig.id, "shrink_runs": shrink_runs, "why": why, "detail": detail,
+            "run": min.id, "original_run": orig.id, "shrink_runs": shrink_runs,
+            "size_before": appfuzz_core::shrink::size(&orig.spec), "size_after": appfuzz_core::shrink::size(&spec), "why": why, "detail": detail,
             "request_changes": changed, "plan": spec.plan, "now": spec.now, "seed": spec.seed,
             // Generated values are not in the plan: what the host returned.
             "host_results": min.events.iter().map(|e| json!({"n": e.n, "func": e.func, "result": e.result})).collect::<Vec<_>>(),

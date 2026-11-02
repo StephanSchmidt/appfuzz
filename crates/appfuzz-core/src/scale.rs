@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, anyhow, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use wasmtime::component::Type;
 
@@ -19,7 +19,7 @@ use crate::statics::Statics;
 use crate::value::{GenOpts, Generator, json_to_val};
 use crate::wit::ImportKind;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "target", rename_all = "snake_case")]
 pub enum Knob {
     /// Length of the list a host function returns.
@@ -654,6 +654,16 @@ const MAX_PAIRS: usize = 10;
 /// Interaction from which calls count as nested (N × M).
 const NESTED_MIN: f64 = 0.5;
 
+/// A finding of a knob turned in a mode (`query.view=week`): its own id,
+/// and the mode in the title and detail.
+pub fn in_context(f: Finding, label: &str) -> Finding {
+    let mut detail = f.detail;
+    if let Value::Object(d) = &mut detail {
+        d.insert("context".into(), json!(label));
+    }
+    Finding::new(&f.kind, &format!("{}\0{label}", f.id), f.severity, format!("{} (with {label})", f.title), detail, f.run.as_deref())
+}
+
 /// Pairs of knobs that each drive up calls to the same function, turned
 /// together: one call per pair of elements is a loop inside a loop.
 fn nested(app: &App, base: &RunSpec, reports: &[ScaleReport], only: Option<&str>, run: Runner) -> (Vec<Nested>, Vec<Finding>) {
@@ -1052,11 +1062,7 @@ pub fn amplify(
     for ((c, _), r) in jobs.iter().zip(scaled) {
         let Some(mut r) = r else { continue };
         if let Some(c) = c {
-            r.findings = r
-                .findings
-                .into_iter()
-                .map(|f| Finding::new(&f.kind, &format!("{}\0{}", f.id, c.label), f.severity, format!("{} (with {})", f.title, c.label), f.detail, f.run.as_deref()))
-                .collect();
+            r.findings = r.findings.into_iter().map(|f| in_context(f, &c.label)).collect();
             r.context = Some(c.label.clone());
         }
         reports.push(r);

@@ -12,7 +12,7 @@
 //! - one host function 10× slower → over the latency limit:
 //!   `slow_host_sensitivity`
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::detect::{Finding, Severity, list_in, ms};
@@ -30,7 +30,7 @@ const SLOW_FACTOR: f64 = 10.0;
 /// Latency of a "slow" call when the function has none.
 const SLOW_MIN_MS: f64 = 20.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Change {
     Reverse,

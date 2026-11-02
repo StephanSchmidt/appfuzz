@@ -29,8 +29,8 @@ use crate::detect::{Finding, panic_text, per_run};
 use crate::harness::{App, field, fn_key_eq, set_clock_fields};
 use crate::check::Property;
 use crate::metamorphic;
-use crate::par::{self, Runner};
-use crate::plan::{FnPlan, Plan, Response};
+use crate::par;
+use crate::plan::{Plan, Response};
 use crate::probe::EDGE_TIMES;
 use crate::record::{OutcomeKind, RunRecord, RunSpec};
 use crate::scale::{self, compare_constants, dictionary, request_knobs, steady};
@@ -786,7 +786,7 @@ impl Mutator<'_> {
 }
 
 /// JSON pointers of every node worth mutating.
-fn nodes(v: &Value, ptr: String, out: &mut Vec<String>) {
+pub(crate) fn nodes(v: &Value, ptr: String, out: &mut Vec<String>) {
     match v {
         Value::Object(o) => {
             for (k, x) in o {
@@ -823,7 +823,7 @@ fn has_list(t: &Type) -> bool {
     }
 }
 
-fn first_list(v: &Value) -> Option<&Vec<Value>> {
+pub(crate) fn first_list(v: &Value) -> Option<&Vec<Value>> {
     match v {
         Value::Array(a) => Some(a),
         Value::Object(o) if o.len() == 1 => o.values().next().and_then(first_list),
@@ -831,7 +831,7 @@ fn first_list(v: &Value) -> Option<&Vec<Value>> {
     }
 }
 
-fn first_list_mut(v: &mut Value) -> Option<&mut Vec<Value>> {
+pub(crate) fn first_list_mut(v: &mut Value) -> Option<&mut Vec<Value>> {
     match v {
         Value::Array(a) => Some(a),
         Value::Object(o) if o.len() == 1 => o.values_mut().next().and_then(first_list_mut),
@@ -1152,177 +1152,6 @@ pub fn fuzz(
     };
     let entries = fz.corpus.into_iter().map(Arc::unwrap_or_clone).collect();
     Ok((report, Corpus { component: app.hash.clone(), entries }))
-}
-
-/// Shrinks a spec while `keeps` holds for its run: drops plan entries and
-/// rules, shortens lists and strings, lowers numbers, resets clock and
-/// seed. Returns the smallest spec found and the runs it took.
-/// `base` is the example request: fields move back to it.
-pub fn minimise(
-    app: &App,
-    spec: &RunSpec,
-    base: &[Value],
-    keeps: &(dyn Fn(&RunRecord) -> bool + Sync),
-    max_runs: u32,
-    run: Runner,
-) -> (RunSpec, u32) {
-    // Candidates are tried a chunk at a time on all threads; the first one
-    // that keeps the finding (in order) wins, as if tried one by one.
-    let mut cur = spec.clone();
-    let mut runs = 0;
-    'outer: loop {
-        let cands: Vec<RunSpec> = shrinks(app, &cur, base).into_iter().filter(|c| *c != cur).collect();
-        for chunk in cands.chunks(par::jobs().max(1)) {
-            let chunk = &chunk[..chunk.len().min((max_runs - runs) as usize)];
-            if chunk.is_empty() {
-                break 'outer;
-            }
-            runs += chunk.len() as u32;
-            let ok = par::map(chunk, |c| keeps(&run(c)));
-            if let Some(i) = ok.iter().position(|k| *k) {
-                cur = chunk[i].clone();
-                continue 'outer;
-            }
-        }
-        break;
-    }
-    (cur, runs)
-}
-
-/// Smaller variants of a spec, biggest steps first.
-fn shrinks(app: &App, s: &RunSpec, base: &[Value]) -> Vec<RunSpec> {
-    let mut out = Vec::new();
-    let start = app.manifest.start_time();
-    if s.now != start {
-        let mut c = s.clone();
-        c.now = start.clone();
-        let entry = app.manifest.entry.as_ref().filter(|e| fn_key_eq(&e.export, &s.export));
-        if let (Some(e), Some(a)) = (entry, c.args.first_mut()) {
-            set_clock_fields(a, &e.fields, &start);
-        }
-        out.push(c);
-    }
-    if s.seed != 1 {
-        out.push(RunSpec { seed: 1, ..s.clone() });
-    }
-    for k in s.plan.0.keys() {
-        let mut c = s.clone();
-        c.plan.0.remove(k);
-        out.push(c);
-    }
-    for (k, fp) in &s.plan.0 {
-        let with = |f: &dyn Fn(&mut FnPlan)| {
-            let mut c = s.clone();
-            f(c.plan.0.get_mut(k).expect("key"));
-            c
-        };
-        for n in fp.on_call.keys() {
-            out.push(with(&|p| {
-                p.on_call.remove(n);
-            }));
-        }
-        for i in 0..fp.rules.len() {
-            out.push(with(&|p| {
-                p.rules.remove(i);
-            }));
-        }
-        if let Some(g) = &fp.response.generate {
-            if let Some(n) = g.list_len.filter(|n| *n > 0) {
-                out.push(with(&|p| p.response.generate.as_mut().expect("generate").list_len = Some(n / 2)));
-            }
-            if g.strings.is_some() {
-                out.push(with(&|p| p.response.generate.as_mut().expect("generate").strings = None));
-            }
-            if g.numbers.is_some() {
-                out.push(with(&|p| p.response.generate.as_mut().expect("generate").numbers = None));
-            }
-            if g.seed.is_some() {
-                out.push(with(&|p| p.response.generate.as_mut().expect("generate").seed = None));
-            }
-        }
-        // Host results given as values: halve lists, then drop single
-        // elements (a duplicate may sit in the second half).
-        let rets = fp.response.ret.iter().map(|v| (None, v)).chain(fp.on_call.iter().filter_map(|(n, r)| r.ret.as_ref().map(|v| (Some(n.clone()), v))));
-        for (call, v) in rets {
-            let Some(len) = first_list(v).map(Vec::len).filter(|n| *n > 1) else { continue };
-            let edit = |f: &dyn Fn(&mut Vec<Value>)| {
-                with(&|p| {
-                    let r = match &call {
-                        None => p.response.ret.as_mut(),
-                        Some(n) => p.on_call.get_mut(n).and_then(|r| r.ret.as_mut()),
-                    };
-                    if let Some(a) = r.and_then(first_list_mut) {
-                        f(a);
-                    }
-                })
-            };
-            out.push(edit(&|a| a.truncate(len / 2)));
-            for i in 0..len.min(16) {
-                out.push(edit(&|a| {
-                    a.remove(i);
-                }));
-            }
-        }
-    }
-    let mut ptrs = Vec::new();
-    for (i, a) in s.args.iter().enumerate() {
-        nodes(a, format!("/{i}"), &mut ptrs);
-    }
-    let root = Value::Array(s.args.clone());
-    let base_root = Value::Array(base.to_vec());
-    let clock: BTreeSet<String> = app
-        .manifest
-        .entry
-        .iter()
-        .flat_map(|e| e.fields.keys())
-        .map(|k| format!("/0/{}", k.replace('.', "/")))
-        .collect();
-    for p in ptrs {
-        let Some(node) = root.pointer(&p) else { continue };
-        if clock.contains(&p) {
-            continue;
-        }
-        let mut variants: Vec<Value> = Vec::new();
-        // Back to the example request's value.
-        if let Some(b) = base_root.pointer(&p)
-            && b != node
-        {
-            variants.push(b.clone());
-        }
-        variants.extend(match node {
-            Value::Array(a) if !a.is_empty() => {
-                let mut v = vec![Value::Array(a[..a.len() / 2].to_vec())];
-                v.extend((0..a.len().min(8)).map(|i| {
-                    let mut b = a.clone();
-                    b.remove(i);
-                    Value::Array(b)
-                }));
-                v
-            }
-            Value::String(t) => match t.parse::<u64>() {
-                Ok(n) if n > 1 => vec![json!((n / 2).to_string()), json!("1")],
-                Ok(_) => vec![],
-                // Only long text is cut: short text is a word that matters.
-                Err(_) if t.chars().count() > 16 => vec![json!(t.chars().take(t.chars().count() / 2).collect::<String>())],
-                Err(_) => vec![],
-            },
-            Value::Number(n) => match n.as_u64() {
-                Some(n) if n > 1 => vec![json!(n / 2), json!(n - 1), json!(1)],
-                _ => vec![],
-            },
-            _ => vec![],
-        });
-        for v in variants {
-            let mut r = root.clone();
-            if let Some(slot) = r.pointer_mut(&p) {
-                *slot = v;
-            }
-            if let Value::Array(args) = r {
-                out.push(RunSpec { args, ..s.clone() });
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]

@@ -27,6 +27,12 @@ fn rank(s: &str) -> u8 {
     }
 }
 
+/// Bytes a confirmed case may keep: request and plan, and the plan alone
+/// (where unshrunk host data shows; a request may need long text at its
+/// boundary).
+const MAX_CASE: u64 = 8192;
+const MAX_PLAN: u64 = 2048;
+
 /// Runs `review` and compares with the expectation; the problems found.
 fn check(manifest: &Path, expected: &Value, state: &Path) -> (Vec<String>, Value) {
     let time = std::env::var("BENCH_TIME").unwrap_or_else(|_| "5s".into());
@@ -60,6 +66,15 @@ fn check(manifest: &Path, expected: &Value, state: &Path) -> (Vec<String>, Value
         let k = f["kind"].as_str().unwrap_or_default();
         if rank(f["severity"].as_str().unwrap_or_default()) >= 1 && !allowed.contains(&k) {
             problems.push(format!("unexpected {} {k}: {}", f["severity"], f["title"]));
+        }
+    }
+    // Cases must be small enough to read.
+    for s in review["steps"].as_array().into_iter().flatten() {
+        if s["size_after"].as_u64().is_some_and(|n| n > MAX_CASE) || s["plan_size"].as_u64().is_some_and(|n| n > MAX_PLAN) {
+            problems.push(format!(
+                "{} left a case of {} bytes, plan {} (from {}; limits {MAX_CASE}, plan {MAX_PLAN})",
+                s["step"], s["size_after"], s["plan_size"], s["size_before"]
+            ));
         }
     }
     for s in review["steps"].as_array().into_iter().flatten().filter(|s| s.get("error").is_some()) {

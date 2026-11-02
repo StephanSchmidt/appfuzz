@@ -47,7 +47,13 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
         match out {
             Ok(v) => {
                 let ids: Vec<String> = v["findings"].as_array().into_iter().flatten().filter_map(|f| f["id"].as_str().map(str::to_string)).collect();
-                steps.push(json!({"step": name, "ms": ms, "findings": ids.len()}));
+                let mut st = json!({"step": name, "ms": ms, "findings": ids.len()});
+                for k in ["shrink_runs", "size_before", "size_after", "plan_size"] {
+                    if let Some(x) = v.get(k) {
+                        st[k] = x.clone();
+                    }
+                }
+                steps.push(st);
                 seen.extend(ids);
                 Some(v)
             }
@@ -78,7 +84,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
     let mut not_reproducible = BTreeSet::new();
     let mut confirmed = 0;
     for f in todo.iter().take(o.confirm) {
-        if let Some(v) = step(&format!("confirm {}", f.id), &["confirm", &f.id, "--max-runs", "200"], &mut seen) {
+        if let Some(v) = step(&format!("confirm {}", f.id), &["confirm", &f.id, "--max-runs", "500"], &mut seen) {
             if v["confirmed"] == json!(true) {
                 confirmed += 1;
             } else {

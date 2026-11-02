@@ -848,31 +848,68 @@ fn run(cli: Cli) -> Result<Value> {
                 out["why"] = json!("replays differ; see `appfuzz replay`");
                 return Ok(out);
             }
-            let (spec, shrink_runs) = if per_run {
+            use appfuzz_core::shrink::{self, Across};
+            let runner = |s: &RunSpec| app.run(s);
+            let base = app.default_args(app.export(&orig.spec.export)?, &orig.spec.now)?;
+            // A finding from comparing runs shrinks by rerunning the
+            // comparison, from the run it compared.
+            let across = if per_run { None } else { Across::of(&f) };
+            let start = match across.as_ref().and_then(|a| a.start_run(&f)) {
+                Some(id) if id != orig.id => store.load(id).ok().map(|r| r.spec),
+                _ => Some(orig.spec.clone()),
+            };
+            let across = across.zip(start).filter(|(a, s)| a.shows(&app, &f.id, s, &runner).is_some());
+            let (from, spec, shrink_runs, min) = if per_run {
                 let id = f.id.clone();
                 let keeps = |r: &RunRecord| detect::per_run(r, &app.manifest).iter().any(|x| x.id == id);
-                let runner = |s: &RunSpec| app.run(s);
-                let base = app.default_args(app.export(&orig.spec.export)?, &orig.spec.now)?;
-                appfuzz_core::fuzz::minimise(&app, &orig.spec, &base, &keeps, *max_runs, &runner)
+                let (spec, n) = shrink::minimise(&app, &orig.spec, &base, &keeps, *max_runs, &runner);
+                let min = app.run(&spec);
+                store.save(&min)?;
+                (orig.spec.clone(), spec, n, min.id)
+            } else if let Some((a, start)) = &across {
+                let per = a.runs_per_test();
+                let (spec, n) = shrink::shrink(&app, start, &base, &|c| a.shows(&app, &f.id, c, &runner).is_some(), (*max_runs / per).max(1));
+                // Once more, keeping the runs: the finding's run is one of them.
+                let saving = |s: &RunSpec| {
+                    let r = app.run(s);
+                    let _ = store.save(&r);
+                    r
+                };
+                let shown = a.shows(&app, &f.id, &spec, &saving);
+                let run = shown.and_then(|x| x.run).unwrap_or_else(|| orig.id.clone());
+                (start.clone(), spec, n * per, run)
             } else {
-                (orig.spec.clone(), 0)
+                (orig.spec.clone(), orig.spec.clone(), 0, orig.id.clone())
             };
-            let min = app.run(&spec);
-            store.save(&min)?;
             let dir = cli.state.join("cases");
             std::fs::create_dir_all(&dir)?;
             let path = dir.join(format!("{}.json", f.id));
             f.confirmed = Some(path.display().to_string());
+            let reproduce = across.as_ref().map(|(a, _)| a.describe());
+            let note = if per_run {
+                "minimised: the finding still shows in this run"
+            } else if across.is_some() {
+                "minimised: comparing runs from this spec as `reproduce` says still shows the finding"
+            } else {
+                "found by an analysis across runs; the run is replayed, not minimised"
+            };
+            let (size_before, size_after) = (shrink::size(&from), shrink::size(&spec));
             let case = json!({
-                "finding": f, "per_run": per_run, "spec": spec, "original_run": orig.id, "run": min.id,
-                "note": if per_run { "minimised: the finding still shows in this run" } else { "found by an analysis across runs; the run is replayed, not minimised" },
+                "finding": f, "per_run": per_run, "spec": spec, "reproduce": reproduce, "original_run": orig.id, "run": min,
+                "size_before": size_before, "size_after": size_after, "plan_size": shrink::plan_size(&spec), "note": note,
             });
             std::fs::write(&path, serde_json::to_vec_pretty(&case)?)?;
             fstore.update(&f)?;
             out["confirmed"] = json!(true);
             out["case"] = json!(path);
-            out["minimised_run"] = json!(min.id);
+            out["minimised_run"] = json!(min);
             out["shrink_runs"] = json!(shrink_runs);
+            out["size_before"] = json!(size_before);
+            out["size_after"] = json!(size_after);
+            out["plan_size"] = json!(shrink::plan_size(&spec));
+            if let Some(r) = reproduce {
+                out["reproduce"] = r;
+            }
             out["spec"] = json!({"args": spec.args, "plan": spec.plan, "now": spec.now, "seed": spec.seed});
             Ok(out)
         }

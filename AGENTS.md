@@ -66,7 +66,10 @@ request is then generated from the WIT types.
    you need.
 4. For each fail or warn finding: **`explain <run>`**, then the drill-down
    commands below. `confirm <id>` makes it reproducible and small and
-   writes a case file.
+   writes a case file. Lists shrink to `generate: {list_len: N}` with
+   the smallest N that still shows the finding: the boundary. A finding
+   from comparing runs (n+1, growth, a slow host, duplicates) shrinks
+   too; the case's `reproduce` names the scale knob or the variant.
 5. **`unexplored`**: host call sites no run reached, with texts and
    numbers near them. Try those values with `run --set` or
    `sweep --values`, then `fuzz` again.

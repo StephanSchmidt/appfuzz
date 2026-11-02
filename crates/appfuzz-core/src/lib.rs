@@ -19,6 +19,7 @@ pub mod plan;
 pub mod probe;
 pub mod record;
 pub mod scale;
+pub mod shrink;
 pub mod statics;
 pub mod urls;
 pub mod store;
