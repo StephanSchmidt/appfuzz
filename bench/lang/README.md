@@ -12,7 +12,9 @@ world `items-app`) and reviewed with the same manifest limits.
 | `zig-chatty` | Zig | zig 0.17 + wit-bindgen c + preview1 adapter | 114 KB |
 
 Fuzz speed on an AMD Ryzen 9 3900X, 24 threads (`fuzz --time 30s`, fresh
-state): Rust 13,250 runs/s, Zig 8,600, TypeScript 1,900, Python 1,940.
+state): Rust 17,900 to 26,500 runs/s over five runs, Zig 9,500 to 9,900 over three.
+The count depends on what the search tries: huge lists take longer. TypeScript
+1,900 and Python 1,940 are from one earlier run each.
 
 Build:
 

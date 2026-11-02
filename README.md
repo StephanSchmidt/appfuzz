@@ -38,7 +38,7 @@ $ appfuzz review --time 10s
   "verdict": "fail",
   "exit_code": 2,
   "counts": { "fail": 2, "warn": 3, "info": 1, "confirmed": 5 },
-  "coverage": { "fuzz_runs": 180488, "unreached_call_sites": 0 },
+  "coverage": { "fuzz_runs": 176115, "unreached_call_sites": 0 },
   "findings": [
     { "severity": "fail", "kind": "n_plus_1",
       "title": "calls to bench:web/items#get grow as 1·n with n = length of the list bench:web/items#all returns; cost breaks its limit at n = 100" },

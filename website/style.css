@@ -280,6 +280,7 @@ main > .sec:first-child { border-top: 0; }
 .speed-n span { background: linear-gradient(transparent 58%, var(--hi) 58%, var(--hi) 90%, transparent 90%); padding: 0 .04em; }
 .speed-pre { margin: 0 0 .25em; font: 700 clamp(26px, 3.6vw, 44px)/1.1 var(--sans); letter-spacing: -.01em; }
 .speed-u { margin: .9em 0 0; font: 700 clamp(26px, 3.6vw, 44px)/1.1 var(--sans); letter-spacing: -.01em; max-width: 24em; }
+.speed-cpu { margin: .6em 0 0; font-size: 15px; color: var(--mute); }
 .speed-body { margin-top: 64px; padding-top: 32px; border-top: 1px solid var(--ink); }
 .note { margin: 18px 0 0; font-size: 14px; color: var(--ink2); }
 .more { margin: 22px 0 0; font-weight: 600; }
