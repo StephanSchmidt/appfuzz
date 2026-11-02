@@ -80,12 +80,12 @@
 
   <figure class="card" id="hero-card">
     <div class="card-tabs" role="tablist" aria-label="Example finding">
-      <button role="tab" id="ht-db" aria-controls="hp-db" aria-selected="true">Database</button>
+      <button role="tab" id="ht-db" aria-controls="hp-db" aria-selected="false" tabindex="-1">Database</button>
       <button role="tab" id="ht-crash" aria-controls="hp-crash" aria-selected="false" tabindex="-1">Crash</button>
-      <button role="tab" id="ht-xss" aria-controls="hp-xss" aria-selected="false" tabindex="-1">Security</button>
+      <button role="tab" id="ht-xss" aria-controls="hp-xss" aria-selected="true">Security</button>
     </div>
 
-    <div role="tabpanel" id="hp-db" aria-labelledby="ht-db" class="card-body">
+    <div role="tabpanel" id="hp-db" aria-labelledby="ht-db" class="card-body" hidden>
       <div class="card-head">
         <div>
           <h2 class="card-title">One page view, as the table grows</h2>
@@ -118,7 +118,7 @@
       <p class="foot">Two of the 37 test apps appfuzz must pass on every commit. The simulated backend tries empty lists, huge lists, errors and non-English text on every function the app imports.</p>
     </div>
 
-    <div role="tabpanel" id="hp-xss" aria-labelledby="ht-xss" class="card-body" hidden>
+    <div role="tabpanel" id="hp-xss" aria-labelledby="ht-xss" class="card-body">
       <div class="card-head">
         <div>
           <h2 class="card-title">A search box</h2>
@@ -496,7 +496,6 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
   }
   if (reduce) { replay.hidden = true; } else { bars.classList.add('anim'); }
   replay.addEventListener('click', grow);
-  setTimeout(grow, 300);
 
   // Tab groups: each [role=tablist] controls its own panels.
   document.querySelectorAll('[role=tablist]').forEach(function (list) {
