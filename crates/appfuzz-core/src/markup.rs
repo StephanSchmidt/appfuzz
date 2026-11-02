@@ -82,7 +82,7 @@ fn is_handler(k: &str) -> bool {
 /// Ways the markup can run a script.
 pub fn scripts(html: &str) -> Vec<Hit> {
     let mut out = Vec::new();
-    for t in elements(html) {
+    for t in elements(html).iter() {
         if ACTIVE_TAGS.contains(&t.name.as_str()) {
             out.push(hit(format!("a <{}> element", t.name), &t.raw, Severity::Fail));
             continue;
@@ -127,7 +127,7 @@ pub fn unsafe_actions(html: &str, sensitive: &[String]) -> Vec<Hit> {
         let path = u.split(['?', '#']).next().unwrap_or(u);
         sensitive.iter().find(|s| path == s.as_str() || path.starts_with(&format!("{}/", s.trim_end_matches('/'))))
     };
-    for t in elements(html) {
+    for t in elements(html).iter() {
         if t.name == "meta" && t.get("http-equiv").is_some_and(|h| h.eq_ignore_ascii_case("refresh")) {
             out.push(hit("a meta refresh (the page moves on by itself)".into(), &t.raw, Severity::Fail));
         }

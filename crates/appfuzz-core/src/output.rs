@@ -233,7 +233,14 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let errs = host_errors(r);
     // In HTML only the text counts: a short error text like `progress`
     // (generated from a string in the binary) is in `<progress>` too.
-    let text = if resp.html { visible_text(body) } else { body.to_string() };
+    // Most runs have no error texts: skip the scan of the whole body.
+    let text = if errs.is_empty() {
+        String::new()
+    } else if resp.html {
+        visible_text(body)
+    } else {
+        body.to_string()
+    };
     let shown: Vec<&(String, String)> =
         errs.iter().filter(|(_, t)| text.contains(t.as_str()) && !other.iter().any(|o| o.contains(t.as_str()))).collect();
     if let Some((f, t)) = shown.first() {

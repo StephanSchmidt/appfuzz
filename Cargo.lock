@@ -99,9 +99,11 @@ dependencies = [
 name = "appfuzz-core"
 version = "0.2.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "async-trait",
  "blake3",
+ "memchr",
  "psl",
  "rand",
  "rayon",

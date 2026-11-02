@@ -2,7 +2,9 @@
 //! read the way a browser would read it, and the domains behind them.
 //! No judgement: the agent checks the list against code and docs.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -91,7 +93,29 @@ impl Element {
     }
 }
 
-pub(crate) fn elements(html: &str) -> Vec<Element> {
+thread_local! {
+    // The last markup parsed on this thread: several checks of one run read
+    // the same body. Keyed by content, so it is never stale.
+    static ELEMENTS: RefCell<(String, Rc<Vec<Element>>)> = RefCell::default();
+    static FOUND: RefCell<(String, Rc<Vec<Found>>)> = RefCell::default();
+}
+
+/// Looks up `html` in a one-entry cache, or computes and keeps it.
+fn memo<T>(cache: &'static std::thread::LocalKey<RefCell<(String, Rc<T>)>>, html: &str, f: impl FnOnce(&str) -> T) -> Rc<T> {
+    if let Some(v) = cache.with_borrow(|(k, v)| (k == html).then(|| v.clone())) {
+        return v;
+    }
+    let v = Rc::new(f(html));
+    cache.set((html.to_string(), v.clone()));
+    v
+}
+
+/// The elements of a piece of markup, parsed once per thread and text.
+pub(crate) fn elements(html: &str) -> Rc<Vec<Element>> {
+    memo(&ELEMENTS, html, parse_elements)
+}
+
+fn parse_elements(html: &str) -> Vec<Element> {
     // Script and style bodies are not markup.
     let html = BLOCK.replace_all(html, |c: &regex::Captures| format!("<{}{}>", &c[1], &c[2]));
     TAG.captures_iter(&html)
@@ -211,8 +235,12 @@ fn fires_by_itself(el: &Element, k: &str) -> bool {
 
 /// Every URL in markup, as a browser and an unknown framework could use it.
 pub fn in_html(html: &str) -> Vec<Found> {
+    memo(&FOUND, html, find_in_html).as_ref().clone()
+}
+
+fn find_in_html(html: &str) -> Vec<Found> {
     let mut out = Vec::new();
-    for el in elements(html) {
+    for el in elements(html).iter() {
         let tag = el.raw.as_str();
         let form_method = |a: &str, default: &str| el.get(a).map(|m| m.to_ascii_uppercase()).unwrap_or(default.into());
         let mut pieces: Vec<&str> = Vec::new();
@@ -255,7 +283,7 @@ pub fn in_html(html: &str) -> Vec<Found> {
                 continue;
             }
             // No standard meaning: a framework or a script may fetch it.
-            let trigger = if fires_by_itself(&el, k) { "auto" } else { "unknown" };
+            let trigger = if fires_by_itself(el, k) { "auto" } else { "unknown" };
             let method = method_in_name(k).unwrap_or_else(|| "GET".into());
             for t in texts_in(v) {
                 if url_like(&t) {
@@ -273,7 +301,7 @@ pub fn in_html(html: &str) -> Vec<Found> {
             // rather than a word like `load`.
             let fragment = pieces.iter().any(|p| !url_like(p) && p.contains(['/', '.', ':']));
             if fragment && url_like(&joined) && joined.contains('/') && !pieces.contains(&joined.as_str()) {
-                out.push(Found::new(&joined, "GET", "joined", if fires_by_itself(&el, "") { "auto" } else { "unknown" }, tag));
+                out.push(Found::new(&joined, "GET", "joined", if fires_by_itself(el, "") { "auto" } else { "unknown" }, tag));
             }
         }
     }

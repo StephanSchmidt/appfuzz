@@ -66,6 +66,24 @@ pub const SERIAL_MIN: u32 = 10;
 
 /// Everything one run shows on its own.
 pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
+    let mut out = per_run_fast(r, m);
+    out.extend(per_run_text(r, m));
+    out
+}
+
+/// The checks that read every byte of the output, the logs and the host
+/// arguments for text the app's own code wrote: destinations, encoded
+/// payloads, text aimed at agents. That text follows the code paths, so
+/// the fuzzer runs these only on runs that reach new code.
+pub fn per_run_text(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
+    let mut out = crate::dest::check(r, m);
+    out.extend(crate::payload::check(r, m));
+    out.extend(crate::agents::check(r, m));
+    out
+}
+
+/// Every check of `per_run` but the text checks.
+pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut out = Vec::new();
     let run = Some(r.id.as_str());
     let ex = &r.spec.export;
@@ -280,9 +298,6 @@ pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     out.extend(crate::effects::check(r, m));
     out.extend(crate::identity::check(r, m));
     out.extend(crate::markup::check(r, m));
-    out.extend(crate::dest::check(r, m));
-    out.extend(crate::payload::check(r, m));
-    out.extend(crate::agents::check(r, m));
     if t.sleep_ns > 0 {
         out.push(Finding::new(
             "sleeps",

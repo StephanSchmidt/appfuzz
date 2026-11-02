@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use wasmtime::component::Type;
 
-use crate::detect::{Finding, panic_text, per_run};
+use crate::detect::{Finding, panic_text, per_run_fast, per_run_text};
 use crate::harness::{App, field, fn_key_eq, set_clock_fields};
 use crate::check::Property;
 use crate::metamorphic;
@@ -338,7 +338,7 @@ fn execute(app: &App, st: &Statics, spec: &RunSpec, prop: Option<&Property>) -> 
     if matches!(r.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) {
         return Executed { r, findings: vec![], features: BTreeSet::new(), metrics: vec![] };
     }
-    let mut findings = per_run(&r, &app.manifest);
+    let mut findings = per_run_fast(&r, &app.manifest);
     findings.extend(prop.and_then(|p| p.finding(&r, &app.manifest)));
     let features = features(&r, st, app);
     let metrics = if r.outcome.kind == OutcomeKind::Ok { metrics(&r) } else { vec![] };
@@ -402,6 +402,17 @@ impl State {
         }
         self.new_findings.extend(found.iter().cloned());
         (r, keep, found)
+    }
+
+    /// Findings of the text checks for a kept run: the ones new so far.
+    fn merge(&mut self, stage: Stage, findings: Vec<Finding>) -> Vec<Finding> {
+        let found: Vec<Finding> = findings.into_iter().filter(|f| self.known.insert(f.id.clone())).collect();
+        self.stages.entry(stage).or_default().findings += found.len() as u64;
+        if !found.is_empty() {
+            self.last_new = self.runs;
+        }
+        self.new_findings.extend(found.iter().cloned());
+        found
     }
 
     /// Drops the oldest entry that holds no maximum once the corpus is full.
@@ -1083,7 +1094,10 @@ pub fn fuzz(
     let done = par::map(&seeds, |s| execute(app, &st, s, opts.property.as_ref()));
     let mut kept_seeds = Vec::new();
     for (spec, ex) in seeds.into_iter().zip(done) {
-        let (r, keep, found) = lock(&state).admit(spec, Stage::Seed, ex);
+        let (r, keep, mut found) = lock(&state).admit(spec, Stage::Seed, ex);
+        if keep {
+            found.extend(lock(&state).merge(Stage::Seed, per_run_text(&r, &app.manifest)));
+        }
         on_run(&r, keep, &found);
         kept_seeds.push(r);
     }
@@ -1118,7 +1132,12 @@ pub fn fuzz(
             }
             spec.fuel = spec.fuel.min(fuel);
             let ex = execute(app, &st, &spec, opts.property.as_ref());
-            let (r, keep, found) = lock(&state).admit(spec, stage, ex);
+            let (r, keep, mut found) = lock(&state).admit(spec, stage, ex);
+            if keep {
+                // Outside the lock: the text checks read every byte.
+                let text = per_run_text(&r, &app.manifest);
+                found.extend(lock(&state).merge(stage, text));
+            }
             on_run(&r, keep, &found);
             if keep {
                 check(&r);
