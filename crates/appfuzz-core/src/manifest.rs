@@ -250,6 +250,11 @@ pub struct FunctionSpec {
     /// `len:..50`, `enum:a,b`, `format:date`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, crate::constraints::Constraint>,
+    /// What the host always answers for some arguments, whatever a plan or
+    /// the fuzzer says: the platform's own rules (`create` fails for an
+    /// hour outside 8..16). Same shape as plan rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<crate::plan::Rule>,
     /// Labels of parameters: a sink (`sql`, `path`, `shell`, `url`, `html`,
     /// `regex`) or what they may receive (`pii`, `secret`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

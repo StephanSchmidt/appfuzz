@@ -45,7 +45,7 @@ pub struct Response {
 }
 
 impl Response {
-    fn decides(&self) -> bool {
+    pub fn decides(&self) -> bool {
         self.ret.is_some() || self.generate.is_some() || self.trap.is_some()
     }
 }
@@ -200,6 +200,26 @@ impl Plan {
     }
 }
 
+/// Checks a rule's matchers (a bad regex is an error).
+pub fn check_rule(r: &Rule) -> Result<()> {
+    r.when.values().try_for_each(matcher_ok)
+}
+
+/// The first of the manifest's rules for a function that matches the
+/// arguments. These are the platform's promises: they come before any plan.
+pub fn resolve_rules(rules: &[Rule], args: &[(String, Value)], fn_latency: Option<f64>) -> Option<Resolved> {
+    let (i, rule) = rules.iter().enumerate().find(|(_, r)| r.when.iter().all(|(param, m)| arg(args, param).is_some_and(|a| matches(m, a))))?;
+    let r = &rule.response;
+    let decision = if let Some(msg) = &r.trap {
+        Decision::Trap(msg.clone())
+    } else if let Some(v) = &r.ret {
+        Decision::Return(v.clone())
+    } else {
+        Decision::Generate(r.generate.clone()?)
+    };
+    Some(Resolved { decision, latency_ms: r.latency_ms.or(fn_latency), cost: None, source: format!("manifest rule {i}") })
+}
+
 fn arg<'a>(args: &'a [(String, Value)], param: &str) -> Option<&'a Value> {
     if let Ok(i) = param.parse::<usize>() {
         return args.get(i).map(|(_, v)| v);
@@ -280,6 +300,21 @@ mod tests {
             }"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn manifest_rules() {
+        let rules: Vec<Rule> = serde_json::from_value(json!([
+            {"when": {"hour": {"not": {"range": [8, 16]}}}, "return": {"err": "closed"}},
+            {"when": {"subject": {"regex": "^\\s*$"}}, "trap": "empty"}
+        ]))
+        .unwrap();
+        let args = |h: u64, s: &str| vec![("hour".to_string(), json!(h)), ("subject".to_string(), json!(s))];
+        let r = resolve_rules(&rules, &args(20, "x"), None).unwrap();
+        assert_eq!(r.decision, Decision::Return(json!({"err": "closed"})));
+        assert_eq!(r.source, "manifest rule 0");
+        assert_eq!(resolve_rules(&rules, &args(9, " "), None).unwrap().decision, Decision::Trap("empty".into()));
+        assert!(resolve_rules(&rules, &args(9, "x"), None).is_none());
     }
 
     #[test]

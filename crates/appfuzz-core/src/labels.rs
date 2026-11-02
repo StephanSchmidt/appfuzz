@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -144,7 +144,7 @@ pub fn check_positions(m: &Manifest) -> Result<()> {
 /// does not import are skipped (a platform labels all of its functions).
 pub fn check_wit(m: &Manifest, imports: &[Interface]) -> Result<()> {
     for (k, spec) in &m.functions {
-        if spec.params.is_empty() && spec.result.is_none() && spec.values.is_empty() {
+        if spec.params.is_empty() && spec.result.is_none() && spec.values.is_empty() && spec.rules.is_empty() {
             continue;
         }
         let Some(f) = imports.iter().flat_map(|i| &i.funcs).find(|f| f.key == strip_key(k)) else { continue };
@@ -165,6 +165,19 @@ pub fn check_wit(m: &Manifest, imports: &[Interface]) -> Result<()> {
                     f.signature(),
                     if l.is_id() { "id" } else { "text" }
                 );
+            }
+        }
+        for (i, r) in spec.rules.iter().enumerate() {
+            crate::plan::check_rule(r).with_context(|| format!("[functions.\"{k}\"] rule {i}"))?;
+            if !r.response.decides() {
+                bail!("[functions.\"{k}\"] rule {i} needs a `return`, `generate` or `trap`");
+            }
+            for p in r.when.keys() {
+                let named = f.ty.params().any(|(n, _)| n == p || n.replace('-', "_") == *p);
+                let indexed = p.parse::<usize>().is_ok_and(|n| n < f.ty.params().count());
+                if !named && !indexed {
+                    bail!("[functions.\"{k}\"] rule {i} matches the parameter {p}, but {} has no such parameter", f.signature());
+                }
             }
         }
         for p in spec.values.keys() {

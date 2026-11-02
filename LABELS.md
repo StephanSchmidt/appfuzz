@@ -184,6 +184,28 @@ values = { "query.days" = "range:1..31", "query.sort" = "enum:name,date" }
 values = { score = "range:0..100", name = "len:1..80" }
 ```
 
+## Rules: `rules = [ { when = {…}, return = … } ]`
+
+What the host always answers for some arguments: the platform's own
+business rules. A rule has the shape of a plan rule (`when` with
+matchers, then `return`, `generate` or `trap`), but it comes before
+every plan and before the fuzzer: the host keeps its promises. The first
+matching rule decides; calls no rule matches are planned or generated as
+usual. A finding then is about what the real platform would do, not
+about a value it never returns.
+
+```toml
+[functions."acme:web/bookings#create"]
+rules = [
+  { when = { hour = { not = { range = [8, 16] } } }, return = { err = "closed" } },
+  { when = { subject = { regex = "^\\s*$" } }, return = { err = "subject is required" } },
+]
+```
+
+Matchers: a plain value (equal), `{ regex = "…" }`, `{ range = [lo, hi] }`,
+`{ contains = "…" }`, `{ any = true }`, `{ not = <matcher> }`. A rule that
+names a parameter the function doesn't have is an error.
+
 ## Request fields: `[entry] fields = { <path> = "<role>" }`
 
 | Role | Means |

@@ -231,8 +231,11 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     r.spec.args.iter().for_each(|a| strings(a, &mut other));
     r.events.iter().filter_map(|e| e.result.as_ref()).filter(|v| v.get("err").is_none()).for_each(|v| strings(v, &mut other));
     let errs = host_errors(r);
+    // In HTML only the text counts: a short error text like `progress`
+    // (generated from a string in the binary) is in `<progress>` too.
+    let text = if resp.html { visible_text(body) } else { body.to_string() };
     let shown: Vec<&(String, String)> =
-        errs.iter().filter(|(_, t)| body.contains(t.as_str()) && !other.iter().any(|o| o.contains(t.as_str()))).collect();
+        errs.iter().filter(|(_, t)| text.contains(t.as_str()) && !other.iter().any(|o| o.contains(t.as_str()))).collect();
     if let Some((f, t)) = shown.first() {
         leaks.push(format!("the error text {f} returned ({:?})", t.chars().take(60).collect::<String>()));
     }
@@ -390,10 +393,25 @@ fn dedupe(v: Vec<Finding>) -> Vec<Finding> {
     v.into_iter().filter(|f| seen.insert(f.id.clone())).collect()
 }
 
+static TAGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]*>").unwrap());
+
+/// The text of an HTML body without its tags, and with attribute values
+/// kept (a `title` or `value` shows text too).
+fn visible_text(body: &str) -> String {
+    static VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap());
+    let mut out = TAGS.replace_all(body, " ").into_owned();
+    for tag in TAGS.find_iter(body) {
+        for c in VALUE.captures_iter(tag.as_str()) {
+            out.push(' ');
+            out.push_str(c.get(1).or(c.get(2)).map_or("", |m| m.as_str()));
+        }
+    }
+    out
+}
+
 /// The visible text of a body as a bag of words, for order-insensitive
 /// comparison.
 pub fn word_bag(body: &str) -> Vec<String> {
-    static TAGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]*>").unwrap());
     let text = TAGS.replace_all(body, " ");
     let mut w: Vec<String> = text.split_whitespace().map(str::to_string).collect();
     w.sort();
@@ -413,6 +431,13 @@ mod tests {
         assert_eq!(markup_problem("<div>x").as_deref(), Some("<div> is never closed"));
         assert_eq!(markup_problem("x</div>").as_deref(), Some("</div> without an open <div>"));
         assert_eq!(markup_problem("<!-- <div> --><b>x</b>"), None);
+    }
+
+    #[test]
+    fn text_without_tags() {
+        let t = visible_text(r#"<progress value="2" max="9"></progress><p title='Name is required'>ok</p>"#);
+        assert!(!t.contains("progress"));
+        assert!(t.contains("Name is required") && t.contains("ok"));
     }
 
     #[test]

@@ -44,6 +44,8 @@ struct Platform {
     marks: BTreeMap<String, Vec<(String, crate::labels::Label)>>,
     /// Value constraints of host results.
     constraints: BTreeMap<String, Vec<(String, crate::constraints::Constraint)>>,
+    /// The manifest's rules: what the host always answers for some arguments.
+    rules: BTreeMap<String, Vec<crate::plan::Rule>>,
 }
 
 pub struct App {
@@ -209,6 +211,7 @@ impl App {
             latency_ms: BTreeMap::new(),
             marks: BTreeMap::new(),
             constraints: BTreeMap::new(),
+            rules: BTreeMap::new(),
         };
         crate::labels::check_wit(&manifest, &imports)?;
         for iface in imports.iter().filter(|i| i.kind == ImportKind::Platform) {
@@ -224,6 +227,9 @@ impl App {
                     .collect();
                 if !marks.is_empty() {
                     platform.marks.insert(f.key.clone(), marks);
+                }
+                if let Some(spec) = manifest.function(&f.key).filter(|s| !s.rules.is_empty()) {
+                    platform.rules.insert(f.key.clone(), spec.rules.clone());
                 }
                 if let Some(spec) = manifest.function(&f.key).filter(|s| !s.values.is_empty()) {
                     platform.constraints.insert(f.key.clone(), spec.values.iter().map(|(p, c)| (p.clone(), c.clone())).collect());
@@ -528,7 +534,12 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     };
     let names = info.param_names();
     let args: Vec<(String, Value)> = names.iter().cloned().zip(params.iter().map(val_to_json)).collect();
-    let resolved = data.plan.resolve(key, call, &args);
+    // The platform's rules come first: the host keeps its promises, whatever
+    // the plan or the fuzzer says.
+    let resolved = match platform.rules.get(key) {
+        Some(rules) => crate::plan::resolve_rules(rules, &args, None).unwrap_or_else(|| data.plan.resolve(key, call, &args)),
+        None => data.plan.resolve(key, call, &args),
+    };
     let latency_ms = resolved.latency_ms.unwrap_or_else(|| platform.latency_ms.get(key).copied().unwrap_or(1.0));
     let latency_ns = (latency_ms * 1_000_000.0) as u64;
     let cost = resolved.cost.unwrap_or_else(|| platform.cost.get(key).copied().unwrap_or(1));

@@ -168,6 +168,11 @@ Value constraints say what the platform promises: `values = { score =
 `len:a..b`, `enum:x,y`, `format:date|time|datetime|email|int`. Generated
 values keep to them, so a finding is about a value that can happen.
 
+Rules say what the host always answers for some arguments, the
+platform's business rules: `rules = [{ when = { hour = { not = { range =
+[8, 16] } } }, return = { err = "closed" } }]`. They come before plans
+and the fuzzer, so findings are about what the real platform would do.
+
 Effects say what a call does, `effect = "read" | "write" | "delete" |
 "external"` (external: mail, payments, messages). `idempotent = true` says
 a change may be repeated. `batch_of = "acme:web/items#get"` names the
