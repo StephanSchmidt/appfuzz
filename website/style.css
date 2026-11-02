@@ -65,7 +65,7 @@ h3 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: -.005em; }
 .gh:hover .gh-text { text-decoration: underline; text-underline-offset: 4px; }
 .stars { display: inline-flex; align-items: center; gap: 4px; font: 500 13px/1 var(--mono); border: 1px solid var(--rule); background: var(--soft); padding: 5px 7px; }
 .stars[hidden] { display: none; }
-.stars svg { color: var(--amber); }
+.stars svg { color: var(--red); }
 .stars b { font-weight: 600; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .go { background: var(--ink); color: #fff; text-decoration: none; font-size: 15px; font-weight: 600; padding: 9px 16px; }
@@ -278,6 +278,7 @@ main > .sec:first-child { border-top: 0; }
 .lead { color: var(--ink2); font-size: 17px; margin: 22px 0 0; max-width: 30em; }
 .speed-n { margin: 0; font: 900 clamp(112px, 27vw, 330px)/.82 var(--sans); font-stretch: 62%; font-variation-settings: "wdth" 62; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }
 .speed-n span { background: linear-gradient(transparent 58%, var(--hi) 58%, var(--hi) 90%, transparent 90%); padding: 0 .04em; }
+.speed-pre { margin: 0 0 .25em; font: 700 clamp(26px, 3.6vw, 44px)/1.1 var(--sans); letter-spacing: -.01em; }
 .speed-u { margin: .9em 0 0; font: 700 clamp(26px, 3.6vw, 44px)/1.1 var(--sans); letter-spacing: -.01em; max-width: 24em; }
 .speed-body { margin-top: 64px; padding-top: 32px; border-top: 1px solid var(--ink); }
 .note { margin: 18px 0 0; font-size: 14px; color: var(--ink2); }
