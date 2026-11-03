@@ -60,13 +60,7 @@ same findings (`bench/lang`).
 
 ## Install
 
-On Linux or macOS (x86_64 or arm64), with Homebrew:
-
-```sh
-brew install stephanschmidt/appfuzz/appfuzz
-```
-
-Or with the install script:
+On Linux or macOS (x86_64 or arm64):
 
 ```sh
 curl -fsSL https://appfuzz.dev/install.sh | sh
@@ -76,6 +70,8 @@ The script ([website/install.sh](website/install.sh)) downloads the binary
 from the latest [GitHub release](https://github.com/StephanSchmidt/appfuzz/releases),
 checks its SHA-256 and puts it in `~/.local/bin`. Set `APPFUZZ_VERSION=v0.1.0`
 for a specific release or `APPFUZZ_INSTALL_DIR` for another directory.
+
+Or with Homebrew: `brew install stephanschmidt/appfuzz/appfuzz`
 
 Or build it with Rust:
 
