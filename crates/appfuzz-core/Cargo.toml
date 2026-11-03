@@ -29,6 +29,8 @@ wasm-encoder.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 wit-component.workspace = true
+cel.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 wat = "1.262"

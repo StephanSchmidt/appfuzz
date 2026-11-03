@@ -322,15 +322,23 @@ pub fn fn_key(interface: &str, func: &str) -> String {
 impl Manifest {
     /// Identity of the effective platform contract, independent of its location.
     /// Bump the execution schema when simulation/detector semantics change.
+    /// Acceptance checks are requirements, not contract: editing one keeps runs and corpora.
     pub fn fingerprint(&self) -> String {
         let mut v = serde_json::to_value(self).expect("manifest serializes");
         v["app"]["wasm"] = Value::Null;
+        v["acceptance"] = Value::Null;
         let mut h = blake3::Hasher::new();
         h.update(b"appfuzz-execution-v3");
         h.update(env!("CARGO_PKG_VERSION").as_bytes());
         h.update(include_bytes!("../../../Cargo.lock"));
         h.update(&serde_json::to_vec(&v).expect("manifest serializes"));
         h.finalize().to_hex().to_string()
+    }
+
+    /// Identity of the `[acceptance]` suite; reviews and envelopes are bound to it.
+    pub fn requirements_fingerprint(&self) -> String {
+        let v = serde_json::to_vec(&self.acceptance).expect("acceptance serializes");
+        blake3::hash(&[b"appfuzz-requirements-v1".as_slice(), &v].concat()).to_hex().to_string()
     }
 
     pub fn state_key(&self, component: &str) -> String {

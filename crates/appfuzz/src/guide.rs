@@ -158,8 +158,9 @@ pub const DOCS: &[Doc] = &[
             "appfuzz check not_contains 'panicked|undefined'",
             "appfuzz check max virtual_ms 200",
             "appfuzz check no_crash --set '{\"path\": \"/admin\"}'",
+            "appfuzz check assert 'size(rows) == size(items)' --let rows='select .row' --let items=host.items#all.result",
         ],
-        output: "holds (no run broke it: evidence, not proof), or a shrunk counterexample: why, request changes, plan, host results",
+        output: "holds (no run broke it: evidence, not proof), or a shrunk counterexample: why, request changes, plan, host results; for assert the failing conjunct and its values",
         next: "`explain <counterexample run>`; `diff <original run> <counterexample run>`",
     },
     Doc {
@@ -185,6 +186,18 @@ pub const DOCS: &[Doc] = &[
         examples: &["appfuzz profile last", "appfuzz profile r5166a18fdb --top 30"],
         output: "estimated fuel attribution at host boundaries; not a function-level CPU profile",
         next: "`wasm loops`; `wasm disasm <func>`",
+    },
+    Doc {
+        path: "eval",
+        examples: &["appfuzz eval last 'size(rows)' --let rows='select .row'", "appfuzz eval last 'total == sum(prices)' --let total=out.json.total --let prices=host.items#all.result"],
+        output: "each binding's value (or why it is undefined), the expression's value, and the verdict a saved assert would give on this run",
+        next: "save it as an `[acceptance.checks.NAME]` with `let` and `assert`; `check assert ...` to search for a counterexample",
+    },
+    Doc {
+        path: "bindings",
+        examples: &["appfuzz bindings", "appfuzz bindings --run last"],
+        output: "binding paths for `let`: request fields, host functions with signatures, output, run-wide sources, functions, with example values from a run",
+        next: "`eval last '<expr>' --let name=path` to try one",
     },
     Doc {
         path: "explain",

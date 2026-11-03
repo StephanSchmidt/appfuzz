@@ -32,6 +32,9 @@ pub struct Session {
     pub id: String,
     pub component: String,
     pub contract: String,
+    /// The acceptance suite this review judged; empty for sessions written before it existed.
+    #[serde(default)]
+    pub requirements: String,
     pub complete: bool,
     pub verdict: String,
     pub runs: Vec<String>,
@@ -167,6 +170,8 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
             continue;
         };
         match crate::acceptance::replay(&app, &store, path, false) {
+            // The requirement changed since this case was made: the current check decides.
+            Ok(v) if v["superseded"] == true => {}
             Ok(v) if v["status"] == "complete" && v["reproduced"] == true => {
                 let repeated: Vec<appfuzz_core::detect::Finding> = serde_json::from_value(v["findings"].clone())?;
                 findings.add(&repeated)?;
@@ -302,6 +307,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
         id: id.clone(),
         component: app.hash.clone(),
         contract: app.contract.clone(),
+        requirements: app.manifest.requirements_fingerprint(),
         complete,
         verdict: verdict.into(),
         runs: runs.iter().map(|r| r.id.clone()).collect(),

@@ -274,6 +274,9 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             if session.component != app.hash || session.contract != app.contract {
                 bail!("review belongs to a different build or platform contract");
             }
+            if session.requirements != app.manifest.requirements_fingerprint() {
+                bail!("the [acceptance] suite changed since this review; run review again");
+            }
             let session_store = RunStore::new(&cli.state.join("review-runs").join(&review_id));
             let runs: Vec<RunRecord> = session.runs.iter().map(|id| session_store.load(id)).collect::<Result<_>>()?;
             if runs.is_empty() || runs.iter().any(|r| r.spec.component != app.hash || r.spec.contract != app.contract) {
@@ -304,7 +307,9 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let env: appfuzz_core::envelope::Envelope =
                 serde_json::from_str(&std::fs::read_to_string(envelope).with_context(|| format!("reading {}", envelope.display()))?)
                     .with_context(|| format!("parsing {}", envelope.display()))?;
-            if env.version != appfuzz_core::envelope::VERSION || env.review.is_empty() || env.contract != m.fingerprint() {
+            if env.version != appfuzz_core::envelope::VERSION || env.review.is_empty() || env.contract != m.fingerprint()
+                || env.requirements != m.requirements_fingerprint()
+            {
                 bail!("envelope is not bound to an accepted review of this platform contract");
             }
             let hash = blake3_hex(&std::fs::read(m.wasm_path())?);
@@ -506,11 +511,20 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let runs: Vec<RunRecord> = store.all()?.into_iter().filter(|r| r.spec.component == hash && r.spec.contract == m.fingerprint()).collect();
             wasm_cmd::run(cmd, &bytes, &runs)
         }
-        Cmd::Check { property, runs, time, rng, max_runs, export, spec } => {
+        Cmd::Check { property, lets, assume, runs, time, rng, max_runs, export, spec } => {
             let app = load()?;
             let base = build_spec(app, export.as_deref(), spec)?;
             let opts = fuzz::FuzzOpts { runs: *runs, time: Some(parse_duration(time)?), seed: *rng, ..Default::default() };
-            dig::check(&cli, app, &store, &base, property, opts, *max_runs)
+            let prop = dig::property(app, &base.export, property, lets, assume.as_deref())?;
+            dig::check(&cli, app, &store, &base, prop, opts, *max_runs)
+        }
+        Cmd::Eval { run, expr, lets, assume } => {
+            let app = load()?;
+            dig::eval(app, &store.load(run)?, expr, lets, assume.as_deref())
+        }
+        Cmd::Bindings { run } => {
+            let app = load()?;
+            dig::bindings(app, store.load(run).ok())
         }
         Cmd::Sweep { field, r#gen, values, export, spec } => {
             let app = load()?;

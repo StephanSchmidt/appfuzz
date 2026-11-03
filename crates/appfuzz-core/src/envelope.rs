@@ -34,6 +34,9 @@ pub struct Envelope {
     /// blake3 of the component the runs were made with.
     pub component: String,
     pub contract: String,
+    /// The acceptance suite the review was judged against.
+    #[serde(default)]
+    pub requirements: String,
     pub review: String,
     pub acceptance: String,
     pub runs: usize,
@@ -221,6 +224,7 @@ impl Envelope {
         let mut e = Envelope { version: VERSION, margin: MARGIN, runs: runs.len(), ..Default::default() };
         e.component = runs.first().map(|r| r.spec.component.clone()).unwrap_or_default();
         e.contract = m.fingerprint();
+        e.requirements = m.requirements_fingerprint();
         for r in runs {
             for (f, n) in r.call_counts() {
                 let x = e.functions.entry(f.clone()).or_default();
@@ -351,7 +355,9 @@ impl Envelope {
     /// Every check on one trace, as `outside_envelope` findings.
     pub fn check(&self, r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         let mut v = Vec::new();
-        if self.version != VERSION || self.component.is_empty() || r.spec.component != self.component || r.spec.contract != self.contract || self.contract != m.fingerprint() {
+        if self.version != VERSION || self.component.is_empty() || r.spec.component != self.component || r.spec.contract != self.contract || self.contract != m.fingerprint()
+            || self.requirements != m.requirements_fingerprint()
+        {
             return vec![Finding::new("outside_envelope", "identity", Severity::Fail,
                 "trace, envelope and platform contract must identify the same build and configuration".into(),
                 json!({"what": "identity"}), Some(&r.id))];

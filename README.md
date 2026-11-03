@@ -492,8 +492,8 @@ functions keep their existing generation behavior.
 ## Saved acceptance checks
 
 Save the checks that matter in the platform-generated manifest. Suite version 1
-supports existing properties, fixed acceptance examples, and explicit relations
-between two runs. Every check records who supplied the requirement:
+supports existing properties, fixed acceptance examples, explicit relations
+between two runs, and asserts that relate the output to the input. Every check records who supplied the requirement:
 
 ```toml
 [acceptance]
@@ -526,7 +526,8 @@ appfuzz replay path/to/acceptance-case.json --against-current
 `origin` is required: `marketing` for intended app behavior, `platform` for a
 platform invariant. It is provenance, not an assertion that the requirement is
 correct. appfuzz never promotes observed behavior into an acceptance rule.
-Exactly one of `property`, `expect`, and `relation` is required. A property is an
+Exactly one of `property`, `expect`, `relation` and `assert` is required
+([asserts](#asserting-outputs-against-inputs)). A property is an
 argument array accepted by `check`, including `value_range`, `max_calls`,
 `no_crash`, `not_contains`, and resource `max` checks.
 
@@ -580,6 +581,79 @@ candidates per searching check (`--runs` can lower that), plus stored inputs and
 up to 200 shrink attempts. Relational candidates execute two requests. These
 checks are additional to the ordinary fuzz-time budget. Standalone `acceptance
 run` accepts `--runs` and `--shrink-runs` to change these bounds.
+
+### Asserting outputs against inputs
+
+`property` and `expect` look at the output alone. An `assert` check relates the
+output to what went in: the request, and what the host returned. Name each value
+with `let`, then write one expression over those names:
+
+```toml
+[acceptance.checks.total]
+origin = "marketing"
+description = "The total is the sum of the line items"
+let = { total = "out.json.total", prices = "host.items#all.result" }
+assert = "total == sum(prices.map(i, i.price))"
+
+[acceptance.checks.listing]
+origin = "marketing"
+let = { rows = "select .row", items = "host.items#all.result", days = "request.query.days" }
+assume = "days >= 1"
+assert = { every_item = "size(rows) == size(items)", no_more = "size(rows) <= 50" }
+```
+
+Expressions are [CEL](https://cel.dev). They see only the `let` names, never
+the app's text as code. A table of named asserts runs one check per property:
+`acceptance run listing` runs both, `acceptance run listing.no_more` runs one.
+Every name must be used; host functions, parameters and result paths are
+checked against the component's WIT before anything runs.
+
+| `let` path | Gives |
+|-----------|-------|
+| `request.<path>` | a request field; query and form by key: `request.query.days` |
+| `args.<i>.<path>` | an export argument, for exports without a request |
+| `host.<fn>.result.<path>` | the result of the one call (undefined when called 0 or several times) |
+| `host.<fn>.results`, `host.<fn>.calls`, `host.<fn>.args.<param>` | every result; every call with args; an argument of the one call |
+| `out.status`, `out.body`, `out.headers.<name>`, `out.json.<path>`, `out.result.<path>` | the response |
+| `select <selector>` | the texts a selector picks, as a list |
+| `calls`, `totals.<metric>`, `clock.now`, `logs`, `outcome` | the run itself |
+
+A trailing `?` makes a missing value `null` (`request.form.note?`). Besides
+standard CEL (`size`, `all`, `exists`, `map`, `filter`, string and math
+functions), appfuzz adds `sum`, `num` (a number out of text such as `"€1,200"`),
+`approx(a, b, tol)`, `is_ok`/`ok`/`is_err`/`err`/`some` for WIT results and
+options, `html_escaped(s)`, `in_domain(v, "range:1..31")`, `same_items(a, b)`,
+`date` and `time`.
+
+What it reports:
+
+- **broken** names the failing conjunct (`a && b` is judged part by part) with
+  its two sides, or the first list element that failed an `all()`. The
+  counterexample shrinks while the *same* conjunct fails.
+- **not_exercised** when a binding is undefined, `assume` rejected the run, or
+  the assert only held where every list it reads was empty. The reasons are
+  counted per check. When `assume` rejects nearly every run, a health warning
+  says so.
+- **error** when the expression itself fails on some input (an index out of
+  range, a type mismatch). Errors never count as passing: guard with `has()` or
+  `size()`, or scope the check with `assume`.
+- **weak_assert** (warn) when the assert still holds after its values are
+  perturbed (a number +1, a list missing its last item, two items swapped). An
+  assert like that restates the code or tests nothing.
+
+Try an expression on a stored run before saving it, and search for a
+counterexample without editing the manifest:
+
+```sh
+appfuzz bindings --run last
+appfuzz eval last 'size(rows)' --let rows='select .row'
+appfuzz check assert 'size(rows) == size(items)' --let rows='select .row' --let items=host.items#all.result
+```
+
+Acceptance checks are requirements, not platform contract: editing one keeps
+stored runs and corpora. Reviews and envelopes record which suite they judged, so
+an envelope built on an older suite is refused. A case whose check was edited or
+removed reports `superseded` on replay and no longer fails review.
 
 ## Request sequences
 

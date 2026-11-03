@@ -243,7 +243,7 @@ impl App {
                 for (path,domain) in &mut entry.input_values {domain.validate_input_type(&ty,path).with_context(||format!("input_values {path}"))?;}
         }
         crate::dataset::validate(&manifest.datasets)?;
-        if let Some(suite)=&manifest.acceptance {suite.validate(&manifest)?;}
+        if let Some(suite)=&manifest.acceptance {suite.validate(&manifest)?;suite.validate_wit(&manifest,&imports,&exports)?;}
         for spec in manifest.functions.values() {
             if spec.query.is_some() && spec.mutation.is_some() { bail!("a host function cannot have both query and mutation bindings"); }
             if let Some(m) = &spec.mutation {
