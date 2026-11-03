@@ -10,6 +10,7 @@ world `items-app`) and reviewed with the same manifest limits.
 | `ts-chatty` | TypeScript | jco + componentize-js (StarlingMonkey) | 12 MB |
 | `js-chatty` | JavaScript | jco + componentize-js (StarlingMonkey) | 12 MB |
 | `go-chatty` | Go | TinyGo 0.44 (wasip2) + wit-bindgen-go | 784 KB |
+| `cs-chatty` | C# | .NET 10 + componentize-dotnet (NativeAOT-LLVM) | 2.3 MB |
 | `py-chatty` | Python | componentize-py 0.25 | 18 MB |
 | `zig-chatty` | Zig | zig 0.17 + wit-bindgen c + preview1 adapter | 114 KB |
 
@@ -28,6 +29,7 @@ cd py-chatty && uvx componentize-py -d ../../wit/web.wit -w items-app \
 cd js-chatty && ../ts-chatty/node_modules/.bin/jco componentize app.js \
     --wit ../../wit/web.wit --world-name items-app --disable all -o app.wasm
 go-chatty/build.sh   # tinygo, go and wasm-tools on PATH
+cd cs-chatty && dotnet build -c Release   # .NET 10 SDK
 zig-chatty/build.sh
 ```
 
@@ -35,7 +37,7 @@ Then `appfuzz review` in each directory.
 
 ## What review finds
 
-All six: `n_plus_1` (calls to items#get grow as 1·n, cost breaks its limit
+All seven: `n_plus_1` (calls to items#get grow as 1·n, cost breaks its limit
 at n = 100), `over_budget` (129 cost), `chatty`, `redundant_calls`,
 `serial_chain`, with the same titles.
 
@@ -49,6 +51,9 @@ Per language:
 - **Go** also fails `ungranted_import` twice: the TinyGo runtime imports
   `wasi:filesystem`. It also goes over the fuel limit on long lists
   (`cpu_blowup`).
+- **C#** also fails `ungranted_import` twice: the .NET runtime imports
+  `wasi:filesystem`. It also warns `busy_wait`: the runtime reads the clock
+  52 times in one request.
 - **Python** also fails `ungranted_import` eight times: the
   componentize-py runtime imports `wasi:filesystem` and `wasi:sockets`
   whatever the app uses.

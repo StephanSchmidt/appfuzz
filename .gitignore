@@ -31,6 +31,8 @@ node_modules/
 /bench/lang/zig-chatty/gen/
 /bench/lang/go-chatty/gen/
 /bench/lang/go-chatty/wit/
+/bench/lang/cs-chatty/bin/
+/bench/lang/cs-chatty/obj/
 .appfuzz/
 __pycache__/
 *.wasm

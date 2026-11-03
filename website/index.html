@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>appfuzz: fuzz WebAssembly apps instead of reviewing them</title>
-<meta name="description" content="appfuzz runs your WebAssembly app thousands of times against a simulated backend and finds the bugs a code review misses: crashes, XSS, n+1 queries that hammer your database. Rust, Go, TypeScript, JavaScript, Python, Zig. One command, pass or fail.">
+<meta name="description" content="appfuzz runs your WebAssembly app thousands of times against a simulated backend and finds the bugs a code review misses: crashes, XSS, n+1 queries that hammer your database. Rust, Go, C#, TypeScript, JavaScript, Python, Zig. One command, pass or fail.">
 <link rel="canonical" href="https://appfuzz.dev/">
 <meta name="color-scheme" content="light">
 <meta name="theme-color" content="#ffffff">
@@ -145,6 +145,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
       <li><b>Zig</b> <span>zig, wit-bindgen c</span></li>
       <li><b>TypeScript</b> <span>jco, componentize-js</span></li>
       <li><b>Go</b> <span>TinyGo</span></li>
+      <li><b>C#</b> <span>componentize-dotnet</span></li>
       <li><b>JavaScript</b> <span>jco, componentize-js</span></li>
       <li><b>Python</b> <span>componentize-py</span></li>
     </ul>
@@ -377,6 +378,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
       <div class="tabs" role="tablist" aria-label="Language">
         <button role="tab" id="tab-rs" aria-controls="panel-rs" aria-selected="true">Rust</button>
         <button role="tab" id="tab-go" aria-controls="panel-go" aria-selected="false" tabindex="-1">Go</button>
+        <button role="tab" id="tab-cs" aria-controls="panel-cs" aria-selected="false" tabindex="-1">C#</button>
         <button role="tab" id="tab-ts" aria-controls="panel-ts" aria-selected="false" tabindex="-1">TypeScript</button>
         <button role="tab" id="tab-js" aria-controls="panel-js" aria-selected="false" tabindex="-1">JavaScript</button>
         <button role="tab" id="tab-py" aria-controls="panel-py" aria-selected="false" tabindex="-1">Python</button>
@@ -397,6 +399,15 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
     }
 }</code></pre>
         <p class="facts"><b>Go</b> TinyGo, wasip2, wit-bindgen-go. Also found: the runtime imports file system access the app never uses, and a long list runs the request over its CPU budget.</p>
+      </div>
+      <div role="tabpanel" id="panel-cs" aria-labelledby="tab-cs" hidden>
+<pre class="code"><code><span class="kw">foreach</span> (<span class="kw">var</span> it <span class="kw">in</span> IItemsImports.All()) {
+    <span class="kw">try</span> {
+        <span class="kw">var</span> full = IItemsImports.Get(it.id);
+        html += <span class="str">$"&lt;li&gt;{WebUtility.HtmlEncode(full.owner)}&lt;/li&gt;"</span>;
+    } <span class="kw">catch</span> (WitException&lt;<span class="kw">string</span>&gt;) {}
+}</code></pre>
+        <p class="facts"><b>C#</b> .NET 10, componentize-dotnet. Also found: the runtime imports file system access the app never uses, and reads the clock 52 times in one request.</p>
       </div>
       <div role="tabpanel" id="panel-ts" aria-labelledby="tab-ts" hidden>
 <pre class="code"><code>handle(_req: Request): Response {
@@ -441,7 +452,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
       </div>
     </div>
     <div class="lang-out">
-      <p class="out-label">appfuzz review, the same in all six</p>
+      <p class="out-label">appfuzz review, the same in all seven</p>
       <p class="verdict"><b>fail</b> <span class="kind">n_plus_1</span> calls to items#get grow as 1·n with n = length of the list items#all returns; cost breaks its limit at n = 100</p>
       <p class="verdict"><b>fail</b> <span class="kind">over_budget</span> handle uses 129 cost, the limit is 100</p>
       <p class="verdict warn"><b>warn</b> <span class="kind">chatty</span> items#get is called for each element items#all returned</p>
