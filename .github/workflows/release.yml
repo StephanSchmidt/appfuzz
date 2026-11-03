@@ -58,3 +58,30 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
+  # Point the Homebrew formula in StephanSchmidt/homebrew-appfuzz at this
+  # release. HOMEBREW_APPFUZZ_TOKEN: fine-grained token, contents read/write
+  # on that repo only.
+  update-tap:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          TOKEN: ${{ secrets.HOMEBREW_APPFUZZ_TOKEN }}
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          git clone "https://x-access-token:${TOKEN}@github.com/StephanSchmidt/homebrew-appfuzz.git" tap
+          .github/homebrew/render.sh "$version" dist > tap/appfuzz.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add appfuzz.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "appfuzz $version"
+          git push
