@@ -33,6 +33,10 @@ pub enum Format {
     Email,
     Int,
     Uuid,
+    /// An absolute http(s) URL, as the `url` crate parses it.
+    Url,
+    /// An HTTP token (a method or header name).
+    Token,
 }
 
 impl Constraint {
@@ -66,7 +70,9 @@ impl Constraint {
                 "email" => Format::Email,
                 "int" => Format::Int,
                 "uuid" => Format::Uuid,
-                _ => bail!("{s:?}: a format is one of date, time, datetime, email, int, uuid"),
+                "url" => Format::Url,
+                "token" => Format::Token,
+                _ => bail!("{s:?}: a format is one of date, time, datetime, email, int, uuid, url, token"),
             }),
             _ => bail!("{s:?}: a value constraint is range:a..b, len:a..b, enum:x,y or format:<f>"),
         })
@@ -167,6 +173,8 @@ pub(crate) fn format_ok(f: Format, s: &str) -> bool {
         Format::Email => s.split_once('@').is_some_and(|(a, b)| !a.is_empty() && b.contains('.') && !s.contains(char::is_whitespace)),
         Format::Int => { let digits=s.strip_prefix('-').unwrap_or(s); !digits.is_empty() && digits.bytes().all(|b|b.is_ascii_digit()) },
         Format::Uuid => uuid_ok(s),
+        Format::Url => url::Url::parse(s).is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some()),
+        Format::Token => !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)),
     }
 }
 
@@ -184,6 +192,8 @@ fn example(f: Format, seed: u64) -> String {
         Format::Email => format!("user{}@mail.example", seed % 1000),
         Format::Int => (seed % 1000).to_string(),
         Format::Uuid => format!("00000000-0000-4000-8000-{:012x}",seed & 0x0000_ffff_ffff_ffff),
+        Format::Url => format!("https://app.example/p{}", seed % 100),
+        Format::Token => ["GET", "HEAD", "POST", "PUT", "DELETE"][(seed % 5) as usize].to_string(),
     }
 }
 
@@ -204,6 +214,8 @@ impl fmt::Display for Constraint {
                     Format::Email => "email",
                     Format::Int => "int",
                     Format::Uuid => "uuid",
+                    Format::Url => "url",
+                    Format::Token => "token",
                 }
             ),
         }

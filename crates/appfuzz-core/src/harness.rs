@@ -8,7 +8,7 @@
 //! deterministic: virtual clocks, seeded randomness, captured output, no
 //! files, no network, sleeps that only advance virtual time.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,6 +30,10 @@ use crate::value::{Generator, json_to_val, val_to_json, val_to_json_with};
 use crate::wasi::{CountingRng, MonotonicClock, Ready, VirtualClock, WallClock, format_datetime, parse_datetime};
 use crate::wit::{self, FuncInfo, ImportKind, Interface};
 
+#[path = "harness_core.rs"]
+mod core;
+use core::CoreApp;
+
 const EPOCH_TICK: Duration = Duration::from_millis(10);
 const MAX_FRAMES: usize = 32;
 const OUTPUT_CAPACITY: usize = 1 << 20;
@@ -50,11 +54,21 @@ struct Platform {
     queries: BTreeMap<String, crate::dataset::Query>,
     mutations: BTreeMap<String, crate::dataset::Mutation>,
     datasets: BTreeMap<String, crate::dataset::Dataset>,
+    /// Plain modules on a witx platform: handles and their bindings.
+    handles: Option<core::HandleSpec>,
+    /// Functions the platform says never fail: injected failures are not delivered.
+    infallible: BTreeSet<String>,
+}
+
+/// How a run instantiates the app.
+enum Pre {
+    Component(InstancePre<Host>),
+    /// A plain module on a witx platform; a run calls `start`.
+    Core { pre: wasmtime::InstancePre<Host>, start: String },
 }
 
 pub struct App {
     pub engine: Engine,
-    pub component: Component,
     pub bytes: Vec<u8>,
     pub hash: String,
     pub contract: String,
@@ -62,7 +76,7 @@ pub struct App {
     pub manifest: Manifest,
     pub imports: Vec<Interface>,
     pub exports: Vec<FuncInfo>,
-    pre: InstancePre<Host>,
+    pre: Pre,
     platform: Arc<Platform>,
     ticker_stop: Arc<AtomicBool>,
     feedback_readers: Vec<String>,
@@ -82,6 +96,8 @@ impl Drop for App {
 
 struct Host {
     ctx: WasiCtx,
+    /// WASI preview 1, for plain modules.
+    p1: Option<wasmtime_wasi::p1::WasiP1Ctx>,
     table: ResourceTable,
     platform: Arc<Platform>,
     /// Module ids already computed in this run (hashing a module's
@@ -100,6 +116,12 @@ struct Host {
     plan_error: Option<String>,
     host_trap: Option<String>,
     limiter: Limiter,
+    /// The handles the host gave out in this run (plain modules).
+    handles: crate::handles::Handles,
+    /// The request argument, which the client-request handles hold.
+    request: Option<Value>,
+    /// The buffer length of the current read-style call.
+    read_limit: Option<usize>,
 }
 
 impl WasiView for Host {
@@ -217,10 +239,17 @@ impl App {
 
     fn from_bytes_engine(mut manifest: Manifest, bytes: Vec<u8>, engine: Engine) -> Result<Self> {
         manifest.binary = crate::manifest::Binary::of(&bytes);
-        let component = Component::new(&engine, &bytes).map_err(anyhow::Error::from).context("not a WebAssembly component (appfuzz runs components only)")?;
         let hash = component_hash(&bytes);
-        let imports = wit::imports(&engine, &component);
-        let exports = wit::exports(&engine, &component);
+        let (component, core, imports, exports) = if wasmparser::Parser::is_core_wasm(&bytes) {
+            let core = CoreApp::new(&engine, &manifest, &bytes)?;
+            let (imports, exports) = (core.imports.clone(), core.exports.clone());
+            (None, Some(core), imports, exports)
+        } else {
+            let component = Component::new(&engine, &bytes).map_err(anyhow::Error::from).context("not a WebAssembly component or module")?;
+            let imports = wit::imports(&engine, &component);
+            let exports = wit::exports(&engine, &component);
+            (Some(component), None, imports, exports)
+        };
 
         let mut platform = Platform {
             funcs: BTreeMap::new(),
@@ -234,6 +263,8 @@ impl App {
             queries: BTreeMap::new(),
             mutations: BTreeMap::new(),
             datasets: manifest.datasets.clone(),
+            handles: None,
+            infallible: BTreeSet::new(),
         };
         crate::labels::check_wit(&manifest, &imports)?;
         if let Some(entry)=&mut manifest.entry
@@ -259,6 +290,9 @@ impl App {
                 platform.cost.insert(f.key.clone(), manifest.cost_of(&f.key));
                 platform.latency_ms.insert(f.key.clone(), manifest.latency_ms_of(&f.key));
                 platform.funcs.insert(f.key.clone(), f.clone());
+                if manifest.function(&f.key).and_then(|s| s.fails) == Some(false) {
+                    platform.infallible.insert(f.key.clone());
+                }
                 if let Some(spec) = manifest.function(&f.key).filter(|s| !s.param_values.is_empty()) {
                     let params = f.ty.params().map(|(n,t)|(n.to_string(),t)).collect::<Vec<_>>();
                     let checks = crate::value_contract::HostChecks::compile(&params, &spec.param_values).with_context(||format!("{} param_values",f.key))?;
@@ -319,57 +353,24 @@ impl App {
             }
         }
 
-        let mut linker: Linker<Host> = Linker::new(&engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
-        linker.allow_shadowing(true);
-        // Sleeps return at once and advance virtual time. Defined under the
-        // version wasmtime-wasi provides, so semver matching routes older
-        // 0.2.x imports (componentize-py uses 0.2.9) here too; a definition
-        // under the import's own older name would not share the host's
-        // `pollable` resource type and fail to link.
-        if imports.iter().any(|i| i.name.starts_with("wasi:clocks/monotonic-clock@")) {
-            let mut inst = linker.instance(WASI_MONOTONIC_CLOCK)?;
-            inst.func_wrap("subscribe-duration", |mut store: StoreContextMut<'_, Host>, (d,): (u64,)| {
-                store.data().clock.with(|c| {
-                    c.sleep_ns += d;
-                    c.sleeps += 1;
-                });
-                Ok((ready(&mut store)?,))
-            })?;
-            inst.func_wrap("subscribe-instant", |mut store: StoreContextMut<'_, Host>, (when,): (u64,)| {
-                let now = store.data().clock.monotonic_now();
-                store.data().clock.with(|c| {
-                    c.sleep_ns += when.saturating_sub(now);
-                    c.sleeps += 1;
-                });
-                Ok((ready(&mut store)?,))
-            })?;
-        }
-        for iface in imports.iter().filter(|i| i.kind == ImportKind::Platform) {
-            if iface.name.is_empty() {
-                for f in &iface.funcs {
-                    let key = f.key.clone();
-                    linker.root().func_new(&f.name, move |store, _ty, params, results| intercept(store, &key, params, results).map_err(wasmtime::Error::from_anyhow))?;
+        if let Some(core) = &core {
+            let spec = core.handle_spec(&manifest, &platform.funcs)?;
+            // Handle bookkeeping is free unless the manifest prices it.
+            for key in spec.bindings.keys() {
+                let f = manifest.function(key);
+                if f.and_then(|f| f.cost).is_none() {
+                    platform.cost.insert(key.clone(), 0);
                 }
-                continue;
+                if f.and_then(|f| f.latency_ms).is_none() {
+                    platform.latency_ms.insert(key.clone(), 0.0);
+                }
             }
-            let mut inst = linker.instance(&iface.name)?;
-            for f in &iface.funcs {
-                let key = f.key.clone();
-                inst.func_new(&f.name, move |store, _ty, params, results| intercept(store, &key, params, results).map_err(wasmtime::Error::from_anyhow))?;
-            }
+            platform.handles = Some(spec);
         }
-        // Link as is first. `define_unknown_imports_as_traps` matches names
-        // exactly, so for an older WASI import (`wasi:cli/environment@0.2.9`)
-        // it adds an `@0.2.9` instance of traps that shadows wasmtime-wasi's
-        // semver-compatible 0.2.12 definition. Only stub when something is
-        // really missing (an import nobody provides, like wasi:http).
-        let pre = match linker.instantiate_pre(&component) {
-            Ok(pre) => pre,
-            Err(_) => {
-                linker.define_unknown_imports_as_traps(&component)?;
-                linker.instantiate_pre(&component).map_err(anyhow::Error::from).context("linking the component")?
-            }
+        let pre = match (component, core) {
+            (_, Some(core)) => Pre::Core { pre: core.link(&engine)?, start: core.start },
+            (Some(component), None) => Pre::Component(link_component(&engine, &component, &imports)?),
+            (None, None) => unreachable!("one of them"),
         };
 
         let ticker_stop = Arc::new(AtomicBool::new(false));
@@ -386,7 +387,7 @@ impl App {
 
         let contract = manifest.fingerprint();
         let state_key = manifest.state_key(&hash);
-        Ok(App { contract, state_key, engine, component, bytes, hash, manifest, imports, exports, pre, platform: Arc::new(platform), ticker_stop, feedback_readers:vec![] })
+        Ok(App { contract, state_key, engine, bytes, hash, manifest, imports, exports, pre, platform: Arc::new(platform), ticker_stop, feedback_readers:vec![] })
     }
 
     pub fn export(&self, name: &str) -> Result<&FuncInfo> {
@@ -519,17 +520,23 @@ impl App {
         let drawn = Arc::new(Mutex::new(0u64));
         let stdout = MemoryOutputPipe::new(OUTPUT_CAPACITY);
         let stderr = MemoryOutputPipe::new(OUTPUT_CAPACITY);
-        let ctx = WasiCtx::builder()
+        let mut builder = WasiCtx::builder();
+        builder
             .wall_clock(WallClock(clock.clone()))
             .monotonic_clock(MonotonicClock(clock.clone()))
             .secure_random(CountingRng::new(spec.seed, drawn.clone()))
             .insecure_random(CountingRng::new(spec.seed ^ 0x5eed, drawn.clone()))
             .insecure_random_seed(spec.seed as u128)
             .stdout(stdout.clone())
-            .stderr(stderr.clone())
-            .build();
+            .stderr(stderr.clone());
+        // Plain modules use WASI preview 1, made the same way.
+        let (ctx, p1) = match &self.pre {
+            Pre::Component(_) => (builder.build(), None),
+            Pre::Core { .. } => (WasiCtx::builder().build(), Some(builder.build_p1())),
+        };
         let host = Host {
             ctx,
+            p1,
             table: ResourceTable::new(),
             platform: self.platform.clone(),
             modules: Vec::new(),
@@ -545,6 +552,9 @@ impl App {
             plan_error: None,
             host_trap: None,
             limiter: Limiter { max: spec.memory, peak: 0, hit: false },
+            handles: Default::default(),
+            request: matches!(self.pre, Pre::Core { .. }).then(|| spec.args.first().cloned()).flatten(),
+            read_limit: None,
         };
         let mut store = Store::new(&self.engine, host);
         store.limiter(|h| &mut h.limiter);
@@ -553,13 +563,33 @@ impl App {
         store.set_epoch_deadline(ticks);
         store.epoch_deadline_trap();
 
-        let instance = self.pre.instantiate(&mut store).map_err(anyhow::Error::from).context("instantiating the component")?;
-        // Instantiation may run start code; measure from here.
-        let fuel_start = store.get_fuel()?;
-        store.data_mut().fuel_start = fuel_start;
-        let func = lookup_export(&instance, &mut store, &export)?;
-        let mut results = vec![Val::Bool(false); export.ty.results().len()];
-        let call = func.call(&mut store, &args, &mut results);
+        let mut instance = None;
+        let call = match &self.pre {
+            Pre::Component(pre) => {
+                let inst = pre.instantiate(&mut store).map_err(anyhow::Error::from).context("instantiating the component")?;
+                // Instantiation may run start code; measure from here.
+                let fuel_start = store.get_fuel()?;
+                store.data_mut().fuel_start = fuel_start;
+                let func = lookup_export(&inst, &mut store, &export)?;
+                let mut results = vec![Val::Bool(false); export.ty.results().len()];
+                let call = func.call(&mut store, &args, &mut results);
+                instance = Some(inst);
+                call.map(|()| results)
+            }
+            Pre::Core { pre, start } => {
+                let inst = pre.instantiate(&mut store).map_err(anyhow::Error::from).context("instantiating the module")?;
+                let fuel_start = store.get_fuel()?;
+                store.data_mut().fuel_start = fuel_start;
+                let func = inst.get_typed_func::<(), ()>(&mut store, start).map_err(anyhow::Error::from)?;
+                match func.call(&mut store, ()) {
+                    Ok(()) => Ok(vec![]),
+                    // `proc_exit(0)` ends a run normally.
+                    Err(e) if e.downcast_ref::<wasmtime_wasi::I32Exit>().is_some_and(|x| x.0 == 0) => Ok(vec![]),
+                    Err(e) => Err(e),
+                }
+            }
+        };
+        let fuel_start = store.data().fuel_start;
 
         let fuel_left = store.get_fuel().unwrap_or(0);
         let used = fuel_start.saturating_sub(fuel_left);
@@ -567,7 +597,9 @@ impl App {
         clock.with(|c| c.guest_ns = guest_ns);
 
         match call {
-            Ok(()) => {
+            // A plain module's result is the response it sent, if any.
+            Ok(_) if matches!(self.pre, Pre::Core { .. }) => record.result = store.data_mut().handles.response.take(),
+            Ok(results) => {
                 record.result = Some(match results.as_slice() {
                     [] => Value::Null,
                     [one] => val_to_json(one),
@@ -593,7 +625,7 @@ impl App {
             wall_us: 0,
         };
         record.events = std::mem::take(&mut data.events);
-        if !self.feedback_readers.is_empty() {
+        if let Some(instance) = instance.filter(|_| !self.feedback_readers.is_empty()) {
             store.set_fuel(10_000_000)?;
             store.set_epoch_deadline(100);
             for (module,name) in self.feedback_readers.iter().enumerate() {
@@ -607,6 +639,63 @@ impl App {
         record.stderr = String::from_utf8_lossy(&stderr.contents()).into_owned();
         Ok(())
     }
+}
+
+/// Links a component: wasmtime-wasi made deterministic, and every
+/// platform import routed to the interceptor.
+fn link_component(engine: &Engine, component: &Component, imports: &[Interface]) -> Result<InstancePre<Host>> {
+    let mut linker: Linker<Host> = Linker::new(engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+    linker.allow_shadowing(true);
+    // Sleeps return at once and advance virtual time. Defined under the
+    // version wasmtime-wasi provides, so semver matching routes older
+    // 0.2.x imports (componentize-py uses 0.2.9) here too; a definition
+    // under the import's own older name would not share the host's
+    // `pollable` resource type and fail to link.
+    if imports.iter().any(|i| i.name.starts_with("wasi:clocks/monotonic-clock@")) {
+        let mut inst = linker.instance(WASI_MONOTONIC_CLOCK)?;
+        inst.func_wrap("subscribe-duration", |mut store: StoreContextMut<'_, Host>, (d,): (u64,)| {
+            store.data().clock.with(|c| {
+                c.sleep_ns += d;
+                c.sleeps += 1;
+            });
+            Ok((ready(&mut store)?,))
+        })?;
+        inst.func_wrap("subscribe-instant", |mut store: StoreContextMut<'_, Host>, (when,): (u64,)| {
+            let now = store.data().clock.monotonic_now();
+            store.data().clock.with(|c| {
+                c.sleep_ns += when.saturating_sub(now);
+                c.sleeps += 1;
+            });
+            Ok((ready(&mut store)?,))
+        })?;
+    }
+    for iface in imports.iter().filter(|i| i.kind == ImportKind::Platform) {
+        if iface.name.is_empty() {
+            for f in &iface.funcs {
+                let key = f.key.clone();
+                linker.root().func_new(&f.name, move |store, _ty, params, results| intercept(store, &key, params, results).map_err(wasmtime::Error::from_anyhow))?;
+            }
+            continue;
+        }
+        let mut inst = linker.instance(&iface.name)?;
+        for f in &iface.funcs {
+            let key = f.key.clone();
+            inst.func_new(&f.name, move |store, _ty, params, results| intercept(store, &key, params, results).map_err(wasmtime::Error::from_anyhow))?;
+        }
+    }
+    // Link as is first. `define_unknown_imports_as_traps` matches names
+    // exactly, so for an older WASI import (`wasi:cli/environment@0.2.9`)
+    // it adds an `@0.2.9` instance of traps that shadows wasmtime-wasi's
+    // semver-compatible 0.2.12 definition. Only stub when something is
+    // really missing (an import nobody provides, like wasi:http).
+    Ok(match linker.instantiate_pre(component) {
+        Ok(pre) => pre,
+        Err(_) => {
+            linker.define_unknown_imports_as_traps(component)?;
+            linker.instantiate_pre(component).map_err(anyhow::Error::from).context("linking the component")?
+        }
+    })
 }
 
 pub fn component_hash(bytes: &[u8]) -> String {
@@ -673,6 +762,19 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     }
     // Dataset bindings are platform guarantees. Raw success mutations cannot
     // contradict the shared world. Explicit service failures remain injectable.
+    // A call the platform says never fails answers normally, whatever a
+    // plan or the fuzzer injected.
+    if platform.infallible.contains(key) && !resolved.source.starts_with("manifest rule") {
+        let injected = match &resolved.decision {
+            Decision::Trap(_) | Decision::CommitThenTrap(_) => true,
+            Decision::Return(v) => v.get("err").is_some(),
+            Decision::Generate(o) => o.results.as_deref() == Some("err"),
+        };
+        if injected {
+            resolved.decision = Decision::Generate(Default::default());
+            resolved.source = "platform: never fails".into();
+        }
+    }
     let failure = match &resolved.decision {
         Decision::CommitThenTrap(_) => false,
         Decision::Trap(_) => true,
@@ -695,6 +797,34 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
         resolved.decision = Decision::Return(response);
         resolved.source = format!("dataset mutation {}", mutation.dataset);
     }
+    let result_types: Vec<_> = ty.results().collect();
+    // Handles: an unknown one gets the platform's error; bound calls act on
+    // handle state. Manifest rules and plan failures still come first.
+    let mut bound = false;
+    if let Some(h) = &platform.handles
+        && !resolved.source.starts_with("manifest rule")
+        && !failure
+    {
+        let inputs = h.inputs.get(key).map(Vec::as_slice).unwrap_or_default();
+        let unknown = inputs.iter().any(|&i| args.get(i).and_then(|(_, v)| v.as_u64()).is_some_and(|id| !data.handles.valid(id as u32)));
+        let answer = if unknown {
+            Some(serde_json::json!({ "err": h.bad }))
+        } else if let Some(b) = h.bindings.get(key) {
+            let ctx = crate::handles::Ctx { kinds: &h.kinds, request: data.request.as_ref(), read_limit: data.read_limit, bad: &h.bad, absent: &h.absent };
+            Some(match data.handles.apply(b, &args, inputs, &ctx) {
+                Ok(parts) => core::shape(parts, result_types.first(), h.outs.get(key).copied().unwrap_or(0)),
+                Err(e) => serde_json::json!({ "err": e }),
+            })
+        } else {
+            None
+        };
+        if let Some(v) = answer {
+            resolved.decision = Decision::Return(v);
+            resolved.source = "handle".into();
+            bound = true;
+        }
+    }
+    let generated = matches!(resolved.decision, Decision::Generate(_));
     let latency_ms = resolved.latency_ms.unwrap_or_else(|| platform.latency_ms.get(key).copied().unwrap_or(1.0));
     let latency_ns = (latency_ms * 1_000_000.0) as u64;
     let cost = resolved.cost.unwrap_or_else(|| platform.cost.get(key).copied().unwrap_or(1));
@@ -721,7 +851,6 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
         stack,
     };
 
-    let result_types: Vec<_> = ty.results().collect();
     let outcome: Result<()> = match resolved.decision {
         Decision::CommitThenTrap(_) => unreachable!("resolved modeled mutation"),
         Decision::Trap(msg) => {
@@ -805,6 +934,21 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
             Ok(())
         }
     };
+    // Handles in an answer that no binding made: generated ones get fresh
+    // ids, ones a plan returned join the table.
+    if outcome.is_ok()
+        && !bound
+        && let Some(h) = &platform.handles
+        && let Some(outs) = h.outputs.get(key)
+        && let ([r], [t]) = (&mut *results, result_types.as_slice())
+    {
+        let mut j = val_to_json(r);
+        data.handles.adopt(&mut j, outs, generated, &h.kinds);
+        if let Ok(v) = json_to_val(&j, t) {
+            *r = v;
+            event.result = Some(compact(j));
+        }
+    }
     data.events.push(event);
     outcome
 }

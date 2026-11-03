@@ -171,6 +171,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let run = Some(r.id.as_str());
     let mut out = Vec::new();
     let resp = crate::output::response(r, m);
+    let no_pii = m.entry.as_ref().is_some_and(|e| e.no_pii && crate::harness::fn_key_eq(&e.export, ex));
     // Places: (name, text, label of the parameter, a write or external call).
     let mut places: Vec<(String, String, Option<Label>, bool)> = vec![
         ("the log (stdout)".into(), r.stdout.clone(), None, false),
@@ -197,7 +198,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             }
             let sev = match s.label {
                 Some(Label::Secret) => Severity::Fail,
-                Some(_) if place == "the response body" => Severity::Warn,
+                Some(_) if place == "the response body" && !no_pii => Severity::Warn,
                 Some(_) => Severity::Fail,
                 None if *effect => Severity::Warn,
                 None => continue,

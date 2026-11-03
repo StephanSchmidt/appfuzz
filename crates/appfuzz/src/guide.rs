@@ -33,6 +33,18 @@ pub const DOCS: &[Doc] = &[
         next: "`plan template` to script the host; `run` to see one request",
     },
     Doc {
+        path: "platform docs",
+        examples: &["appfuzz platform docs --platform fastly --fn send_v2", "appfuzz platform docs --capability bookings-write", "appfuzz platform docs --markdown HOST-API.md"],
+        output: "every host function: signature, description, parameters, errors, SDK call, effect, cost, value domains, labels and rules",
+        next: "write the app against it; declare the app's own semantics in appfuzz.toml (the platform's can only be tightened)",
+    },
+    Doc {
+        path: "platform check",
+        examples: &["appfuzz platform check --platform ./platform.toml"],
+        output: "errors (functions, interfaces or parameters platform.toml names that the types lack) and the functions without a description",
+        next: "fix the errors; describe the undescribed functions apps use",
+    },
+    Doc {
         path: "plan template",
         examples: &["appfuzz plan template > plan.json"],
         output: "a plan with every host function: signature, example value, its labels from the manifest",
@@ -270,7 +282,7 @@ pub const NOTES: &[&str] = &[
     "`last` stands for the latest stored run. Runs and findings are kept in --state (default .appfuzz) per component and effective platform contract/engine.",
     "Requests: the manifest's [entry] request; change it with --set (merged JSON), or give --request / --args. Host behaviour: --plan (file or inline JSON); unplanned results are generated from WIT types.",
     "Time is virtual: latency, sleeps and clock reads cost nothing real. --now sets the clock.",
-    "Labels in [functions.\"<key>\"] say what text means: params = { sql = \"sql\" } (sinks: sql, path, shell, url, html, regex; or pii, secret), result = { email = \"pii\" } (untrusted, html, pii, secret). [entry] result = { body = \"html:safe\", \"headers.location\" = \"url:local\" } (also html:no-scripts; sensitive_paths = [\"/admin\"]), values = { score = \"range:0..100\" } (also len:, enum:, format:; on results, or in [entry] for request fields), identity/owner on result paths and user-id on parameters (who the caller is, whose record it is), effect = \"write\" (read, write, delete, external), idempotent = true, batch_of = \"<fn>\". With them appfuzz reports injections, leaks, and writes on GET, repeated or partial. The vocabulary is LABELS.md.",
+    "Labels in [functions.\"<key>\"] say what text means: params = { sql = \"sql\" } (sinks: sql, path, shell, url, html, regex; or pii, secret), result = { email = \"pii\" } (untrusted, html, pii, secret). [entry] result = { body = \"html:safe\", \"headers.location\" = \"url:local\" } (also html:no-scripts; sensitive_paths = [\"/admin\"]; no_pii = true: no personal data anywhere in the output), values = { score = \"range:0..100\" } (also len:, enum:, format:; on results, or in [entry] for request fields), identity/owner on result paths and user-id on parameters (who the caller is, whose record it is), effect = \"write\" (read, write, delete, external), idempotent = true, batch_of = \"<fn>\". With them appfuzz reports injections, leaks, and writes on GET, repeated or partial. The vocabulary is LABELS.md.",
     "Findings: fail > warn > info; evidence is measured, policy_violation or heuristic; experimental checks are marked. `confirm` makes a finding reproducible and small; info findings are hints, not bugs.",
 ];
 

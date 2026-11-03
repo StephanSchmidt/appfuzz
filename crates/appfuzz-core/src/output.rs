@@ -209,6 +209,12 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut out = Vec::new();
     let ex = &r.spec.export;
     let run = Some(r.id.as_str());
+    // A plain module answers by sending a response; ending without one
+    // leaves the client waiting.
+    if r.outcome.kind == crate::record::OutcomeKind::Ok && r.result.is_none() && m.host.as_ref().is_some_and(|h| h.platform.start.is_some()) {
+        out.push(Finding::new("invalid_response", &format!("{ex}\0none"), Severity::Fail, format!("{ex} ends without sending a response"), json!({}), run));
+        return out;
+    }
     let resp = response(r, m);
     if let Some(s) = resp.status
         && !(100..=599).contains(&s)

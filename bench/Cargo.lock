@@ -419,6 +419,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pii_counted"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "pii_hex_log"
 version = "0.1.0"
 dependencies = [
@@ -427,6 +434,13 @@ dependencies = [
 
 [[package]]
 name = "pii_in_log"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
+name = "pii_in_result"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",

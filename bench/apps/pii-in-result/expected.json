@@ -1,0 +1,11 @@
+{
+  "app": "pii-in-result",
+  "bug": "shows the user's email on a page whose output may hold no personal data",
+  "expect": [
+    {
+      "kind": "pii_leak",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

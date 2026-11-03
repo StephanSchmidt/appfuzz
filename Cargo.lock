@@ -153,6 +153,7 @@ dependencies = [
  "wat",
  "wit-component 0.262.0",
  "wit-parser 0.262.0",
+ "witx",
 ]
 
 [[package]]
@@ -2784,6 +2785,7 @@ dependencies = [
  "wasm-encoder 0.262.0",
  "wasm-metadata 0.262.0",
  "wasmparser 0.262.0",
+ "wat",
  "wit-parser 0.262.0",
 ]
 

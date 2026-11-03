@@ -82,6 +82,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: PlanCmd,
     },
+    /// A platform's host API: reference for app authors, and checks.
+    Platform {
+        #[command(subcommand)]
+        cmd: PlatformCmd,
+    },
     /// Run an export once and summarize what it did.
     Run(RunArgs),
     /// Compatibility alias for `run --trace`.
@@ -440,6 +445,31 @@ pub(crate) enum EnvelopeCmd {
 }
 
 #[derive(Subcommand)]
+pub(crate) enum PlatformCmd {
+    /// The host API reference: signatures, descriptions, errors, rules, domains.
+    Docs {
+        /// The platform: a bundled name (`fastly`) or a platform.toml; default: [app] platform.
+        #[arg(long)]
+        platform: Option<String>,
+        /// Only this function (`module#name`, `interface#name`, or the bare name).
+        #[arg(long = "fn", visible_alias = "func")]
+        func: Option<String>,
+        /// Only the functions of this capability.
+        #[arg(long)]
+        capability: Option<String>,
+        /// Also write the reference as Markdown to this file (e.g. HOST-API.md).
+        #[arg(long)]
+        markdown: Option<PathBuf>,
+    },
+    /// Checks platform.toml against its WIT or witx; lists undescribed functions.
+    Check {
+        /// The platform: a bundled name (`fastly`) or a platform.toml; default: [app] platform.
+        #[arg(long)]
+        platform: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Clone)]
 pub(crate) enum PlanCmd {
     /// A plan with every host function, its signature and an example value.
     Template,

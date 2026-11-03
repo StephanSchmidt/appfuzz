@@ -1227,6 +1227,7 @@ pub fn fuzz(
         .iter()
         .filter(|i| i.kind == ImportKind::Platform)
         .flat_map(|i| i.funcs.iter())
+        .filter(|f| app.manifest.function(&f.key).and_then(|s| s.fails) != Some(false))
         .filter_map(|f| f.ty.results().next().map(|t| (f.key.clone(), t)))
         .collect();
     let fuel = app.manifest.limits.fuel.saturating_mul(2);
@@ -1325,7 +1326,7 @@ pub fn fuzz(
         anyhow::bail!("the seed request does not run; check it with `appfuzz run`");
     }
     let worker = |i: usize| {
-        let mut m = Mutator { app, words: &words, consts: &consts, keys: &keys, funcs: &funcs, rng: StdRng::seed_from_u64(opts.seed.wrapping_add(i as u64 * 0x9e37_79b9_7f4a_7c15)) };
+        let mut m = Mutator { app, words: &words, consts: &consts, keys: &keys, funcs: &funcs, rng: StdRng::seed_from_u64(opts.seed.wrapping_add((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))) };
         loop {
             let (stage, parent, other, fault) = {
                 let mut s = lock(&state);

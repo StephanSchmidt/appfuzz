@@ -50,6 +50,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             Ok(out)
         }
         Cmd::Plan { cmd: PlanCmd::Template } => plan_template(load()?),
+        Cmd::Platform { cmd } => platform(&cli, cmd),
         Cmd::Run(a) => {
             let app = load()?;
             let r = execute(app, &store, a)?;
@@ -569,6 +570,39 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 .map(|r| json!({"run": r.id, "export": r.spec.export, "outcome": r.outcome.kind, "host_calls": r.totals.host_calls, "fuel": r.totals.fuel}))
                 .collect();
             Ok(json!({"runs": runs}))
+        }
+    }
+}
+
+/// The platform a `platform` command means: `--platform`, else the manifest's.
+fn host_manifest(cli: &Cli, spec: Option<&str>) -> Result<appfuzz_core::host_manifest::HostManifest> {
+    use appfuzz_core::host_manifest::HostManifest;
+    match spec {
+        Some(p) => HostManifest::resolve(p, Path::new(".")),
+        None => {
+            let path = cli.manifest.clone().unwrap_or_else(|| PathBuf::from("appfuzz.toml"));
+            HostManifest::of_app(&path).context("no platform: pass --platform, or set [app] platform in the manifest")
+        }
+    }
+}
+
+fn platform(cli: &Cli, cmd: &PlatformCmd) -> Result<Value> {
+    use appfuzz_core::host_manifest as hm;
+    match cmd {
+        PlatformCmd::Docs { platform, func, capability, markdown } => {
+            let host = host_manifest(cli, platform.as_deref())?;
+            let types = host.types(&Default::default())?;
+            let mut d = hm::docs(&host, &types, func.as_deref(), capability.as_deref())?;
+            if let Some(path) = markdown {
+                std::fs::write(path, hm::docs_markdown(&d)).with_context(|| format!("writing {}", path.display()))?;
+                d["markdown"] = json!(path.display().to_string());
+            }
+            Ok(d)
+        }
+        PlatformCmd::Check { platform } => {
+            let host = host_manifest(cli, platform.as_deref())?;
+            let types = host.types(&Default::default())?;
+            Ok(hm::check(&host, &types))
         }
     }
 }

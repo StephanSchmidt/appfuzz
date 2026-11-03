@@ -427,6 +427,23 @@ app("pii-in-log", "logs the user's email address",
         html(format!("<p>Hello {}</p>", esc(&u.name)))
     """), [("pii_leak", "fail")], grants=[USERS], extra=LABELS)
 
+NO_PII = "no_pii = true\n"
+
+app("pii-in-result", "shows the user's email on a page whose output may hold no personal data",
+    labelled("""
+        let _ = &req;
+        let u = users::current();
+        html(format!("<p>Signed in as {}</p>", esc(&u.email)))
+    """), [("pii_leak", "fail")], grants=[USERS], extra=LABELS, entry=NO_PII)
+
+app("pii-counted", "reads the user's email but shows only whether it is set (clean twin of pii-in-result)",
+    labelled("""
+        let _ = &req;
+        let u = users::current();
+        let state = if u.email.contains('@') { "set" } else { "missing" };
+        html(format!("<p>Hello {}, your email is {state}</p>", esc(&u.name)))
+    """), [], grants=[USERS], extra=LABELS, entry=NO_PII)
+
 app("sql-params", "passes ?q as a query parameter, not in the SQL text",
     labelled("""
         let q = param(&req.query, "q").unwrap_or("");

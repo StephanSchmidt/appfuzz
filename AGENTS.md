@@ -166,7 +166,7 @@ lists, options and `ok`):
 |-------|-------|
 | `untrusted` | the default: text that must not reach sinks or HTML unescaped |
 | `html` | trusted markup: no `stored_reflection` or `html_injection` for it |
-| `pii` | personal data: `pii_leak` fail in logs, error pages and host parameters not labelled `pii`; warn in a URL or header; nothing in an ordinary page |
+| `pii` | personal data: `pii_leak` fail in logs, error pages and host parameters not labelled `pii`; warn in a URL or header; nothing in an ordinary page, unless `[entry] no_pii = true`: then fail anywhere in the export's output |
 | `secret` | `secret_leak` fail anywhere in the output, logs, or host parameters not labelled `secret` |
 | `identity` | the caller's user id |
 | `owner` | who the record holding this field belongs to: `missing_owner_check` when another user's record shows |

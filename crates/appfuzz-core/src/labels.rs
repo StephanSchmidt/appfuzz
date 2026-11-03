@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
+use aho_corasick::{AhoCorasick, AhoCorasickKind};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -471,80 +472,250 @@ static URL_ATTR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)\b(?:href|src|action|formaction)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*))"#).unwrap());
 
 fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
-    let mut traced = Vec::new();
+    let mut traced: Vec<Traced> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for e in &r.events {
         let Some(v) = &e.result else { continue };
         for (p, l) in m.result_labels(&e.func) {
             if matches!(l, Label::Pii | Label::Secret) {
                 for s in values_at(v, &p) {
-                    if s.chars().count() >= 4 && !traced.iter().any(|t: &Traced| t.value == s) {
+                    if s.chars().count() >= 4 && seen.insert(s.clone()) {
                         traced.push(Traced { value: s, label: l, func: e.func.clone(), path: p.clone() });
                     }
                 }
             }
         }
     }
+    drop(seen);
     if traced.is_empty() {
         return Vec::new();
     }
+    // A value the request itself carries is an echo, not a leak (`reflection` covers request text).
+    let mut req = Vec::new();
+    for a in &r.spec.args {
+        str_leaves(a, &mut req);
+    }
+    traced.retain(|t| !req.iter().any(|s| s.contains(t.value.as_str())));
+    if traced.is_empty() {
+        return Vec::new();
+    }
+    let find = Finder::new(&traced);
     let ex = &r.spec.export;
     let run = Some(r.id.as_str());
+    let entry = m.entry.as_ref().filter(|e| crate::harness::fn_key_eq(&e.export, ex));
+    let no_pii = entry.is_some_and(|e| e.no_pii);
     let resp = crate::output::response(r, m);
     let body = resp.body.as_deref().unwrap_or_default();
     let error_page = resp.status.is_some_and(|s| s >= 400);
-    let urls: Vec<&str> = URL_ATTR
-        .captures_iter(body)
-        .filter_map(|c| c.get(1).or(c.get(2)).or(c.get(3)).map(|x| x.as_str()))
-        .collect();
+
+    // One group per source (function, path) and place: a page with the emails of 37 people is one finding.
+    let mut first: std::collections::HashMap<(&str, &str), usize> = std::collections::HashMap::new();
+    let src: Vec<usize> = (0..traced.len()).map(|i| *first.entry((traced[i].func.as_str(), traced[i].path.as_str())).or_insert(i)).collect();
+    let mut groups: BTreeMap<(usize, String), Group> = BTreeMap::new();
+    let mut add = |i: usize, place: String, sev: Severity, extra: Value| {
+        let g = groups.entry((src[i], place)).or_insert_with(|| Group { severity: sev, values: Vec::new(), extra });
+        g.severity = g.severity.max(sev);
+        g.values.push(i);
+    };
+
+    for (name, text) in [("stdout", &r.stdout), ("stderr", &r.stderr)] {
+        for i in find.hits(text) {
+            add(i, format!("the log ({name})"), Severity::Fail, json!({}));
+        }
+    }
+    let mut texts = Vec::new();
+    for e in &r.events {
+        for (p, a) in &e.args {
+            texts.clear();
+            str_leaves(a, &mut texts);
+            let label = m.param_label(&e.func, p);
+            for i in find.hits_any(&texts) {
+                if label != Some(traced[i].label) {
+                    add(i, format!("the parameter {p} of {}", e.func), Severity::Fail, json!({"n": e.n}));
+                }
+            }
+        }
+    }
+    for (h, hv) in &resp.headers {
+        for i in find.hits(hv) {
+            let sev = if traced[i].label == Label::Secret || no_pii { Severity::Fail } else { Severity::Warn };
+            add(i, format!("the response header {h}"), sev, json!({}));
+        }
+    }
+    let body_hits = find.hits(body);
+    if !body_hits.is_empty() {
+        let in_urls: BTreeSet<usize> = URL_ATTR
+            .captures_iter(body)
+            .filter_map(|c| c.get(1).or(c.get(2)).or(c.get(3)).map(|x| x.as_str()))
+            .flat_map(|u| find.hits(u))
+            .collect();
+        for i in body_hits {
+            if traced[i].label == Label::Secret {
+                add(i, "the response body".into(), Severity::Fail, json!({}));
+            } else if error_page {
+                add(i, "an error page".into(), Severity::Fail, json!({"status": resp.status}));
+            } else if no_pii {
+                add(i, "the response body".into(), Severity::Fail, json!({"no_pii": true}));
+            } else if in_urls.contains(&i) {
+                add(i, "a URL in the page".into(), Severity::Warn, json!({}));
+            }
+        }
+    }
+    // The rest of the result: everything but the mapped body and headers, which are checked above.
+    if let Some(result) = &r.result {
+        let o = entry.map(|e| &e.output);
+        let skip: Vec<&str> = match o.and_then(|o| o.body.as_deref()) {
+            Some(b) => std::iter::once(b).chain(o.and_then(|o| o.headers.as_deref())).collect(),
+            None if result.is_string() => vec![""],
+            None => o.and_then(|o| o.headers.as_deref()).into_iter().collect(),
+        };
+        let mut path = String::new();
+        result_strings(result, &mut path, &skip, &mut |at, s| {
+            for i in find.hits(s) {
+                if traced[i].label == Label::Secret || no_pii {
+                    let extra = if no_pii && traced[i].label == Label::Pii { json!({"at": at, "no_pii": true}) } else { json!({"at": at}) };
+                    add(i, "the result".into(), Severity::Fail, extra);
+                }
+            }
+        });
+    }
+
     let mut out = Vec::new();
-    for t in &traced {
+    for ((src, place), mut g) in groups {
+        g.values.sort_unstable();
+        g.values.dedup();
+        let t = &traced[src];
         let what = if t.path.is_empty() { format!("{} returned", t.func) } else { format!("{} returned in {}", t.func, t.path) };
         let (kind, noun) = match t.label {
             Label::Secret => ("secret_leak", "the secret"),
             _ => ("pii_leak", "the personal data"),
         };
-        let mut push = |place: String, sev: Severity, extra: Value| {
-            let mut d = json!({"func": t.func, "path": t.path, "label": t.label.name(), "value": t.value, "place": place});
-            if let (Value::Object(d), Value::Object(x)) = (&mut d, extra) {
-                d.extend(x);
-            }
-            out.push(Finding::new(kind, &format!("{ex}\0{}\0{}\0{place}", t.func, t.path), sev, format!("{noun} {what} ends up in {place}"), d, run));
+        let first = &traced[g.values[0]].value;
+        let mut d = json!({"func": t.func, "path": t.path, "label": t.label.name(), "value": first, "place": place});
+        let title = if g.values.len() > 1 {
+            d["count"] = json!(g.values.len());
+            d["values"] = json!(g.values.iter().take(5).map(|&i| traced[i].value.as_str()).collect::<Vec<_>>());
+            format!("{noun} {what} ends up in {place}: {} different values", g.values.len())
+        } else {
+            format!("{noun} {what} ends up in {place}")
         };
-        let v = t.value.as_str();
-        for (name, text) in [("stdout", &r.stdout), ("stderr", &r.stderr)] {
-            if text.contains(v) {
-                push(format!("the log ({name})"), Severity::Fail, json!({}));
-            }
+        if let (Value::Object(d), Value::Object(x)) = (&mut d, g.extra) {
+            d.extend(x);
         }
-        for e in &r.events {
-            for (p, a) in &e.args {
-                if m.param_label(&e.func, p) == Some(t.label) {
-                    continue;
-                }
-                let mut texts = BTreeSet::new();
-                strings(a, &mut texts);
-                if texts.iter().any(|s| s.contains(v)) {
-                    push(format!("the parameter {p} of {}", e.func), Severity::Fail, json!({"n": e.n}));
-                }
-            }
-        }
-        for (h, hv) in &resp.headers {
-            if hv.contains(v) {
-                let sev = if t.label == Label::Secret { Severity::Fail } else { Severity::Warn };
-                push(format!("the response header {h}"), sev, json!({}));
-            }
-        }
-        if body.contains(v) {
-            if t.label == Label::Secret {
-                push("the response body".into(), Severity::Fail, json!({}));
-            } else if error_page {
-                push("an error page".into(), Severity::Fail, json!({"status": resp.status}));
-            } else if urls.iter().any(|u| u.contains(v)) {
-                push("a URL in the page".into(), Severity::Warn, json!({}));
-            }
-        }
+        out.push(Finding::new(kind, &format!("{ex}\0{}\0{}\0{place}", t.func, t.path), g.severity, title, d, run));
     }
     out
+}
+
+/// The values of one leak finding: where they come from, how bad.
+struct Group {
+    severity: Severity,
+    /// Indexes into the traced values; sorted and deduplicated before reporting.
+    values: Vec<usize>,
+    extra: Value,
+}
+
+/// Which traced values occur in a text. Starts with `str::contains` per
+/// value and switches to one Aho-Corasick pass per text once the searching
+/// done so far would have paid for building the automaton: a few values in
+/// short texts never build it, a page with a thousand people's emails does.
+struct Finder<'a> {
+    traced: &'a [Traced],
+    ac: std::cell::OnceCell<Option<AhoCorasick>>,
+    /// Estimated ns spent on per-value searches so far.
+    spent: std::cell::Cell<u64>,
+}
+
+impl<'a> Finder<'a> {
+    fn new(traced: &'a [Traced]) -> Self {
+        Finder { traced, ac: std::cell::OnceCell::new(), spent: std::cell::Cell::new(0) }
+    }
+
+    /// Estimated ns to build the automaton (measured: ~12 µs plus ~1.3 µs
+    /// per value for a contiguous NFA).
+    fn build_cost(&self) -> u64 {
+        12_000 + 1_300 * self.traced.len() as u64
+    }
+
+    fn automaton(&self) -> Option<&AhoCorasick> {
+        // A contiguous NFA: a DFA would scan a little faster but costs about three times as much to build.
+        self.ac
+            .get_or_init(|| AhoCorasick::builder().kind(Some(AhoCorasickKind::ContiguousNFA)).build(self.traced.iter().map(|t| t.value.as_str())).ok())
+            .as_ref()
+    }
+
+    /// Indexes of the values in `text`, ascending.
+    fn hits(&self, text: &str) -> Vec<usize> {
+        if text.len() < 4 {
+            return Vec::new();
+        }
+        let ac = match self.ac.get() {
+            Some(ac) => ac.as_ref(),
+            None => {
+                // `memmem` runs at several bytes per ns; each call has a fixed cost too.
+                let naive = self.traced.len() as u64 * (text.len() as u64 / 4 + 20);
+                let spent = self.spent.get() + naive;
+                self.spent.set(spent);
+                if spent > self.build_cost() { self.automaton() } else { None }
+            }
+        };
+        match ac {
+            Some(ac) => {
+                let mut v: Vec<usize> = ac.find_overlapping_iter(text).map(|m| m.pattern().as_usize()).collect();
+                v.sort_unstable();
+                v.dedup();
+                v
+            }
+            None => (0..self.traced.len()).filter(|&i| text.contains(self.traced[i].value.as_str())).collect(),
+        }
+    }
+
+    fn hits_any(&self, texts: &[&str]) -> Vec<usize> {
+        let mut v: Vec<usize> = texts.iter().flat_map(|t| self.hits(t)).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+}
+
+/// Every string in a JSON value, borrowed.
+fn str_leaves<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
+    match v {
+        Value::String(s) => out.push(s),
+        Value::Array(a) => a.iter().for_each(|x| str_leaves(x, out)),
+        Value::Object(o) => o.values().for_each(|x| str_leaves(x, out)),
+        _ => {}
+    }
+}
+
+/// Every string in the export's result with its path (`ok.items[3].email`),
+/// except below the paths in `skip` (`""` skips everything).
+fn result_strings(v: &Value, path: &mut String, skip: &[&str], f: &mut dyn FnMut(&str, &str)) {
+    if skip.contains(&path.as_str()) {
+        return;
+    }
+    let len = path.len();
+    match v {
+        Value::String(s) => f(path, s),
+        Value::Array(a) => {
+            for (i, x) in a.iter().enumerate() {
+                path.push_str(&format!("[{i}]"));
+                result_strings(x, path, skip, f);
+                path.truncate(len);
+            }
+        }
+        Value::Object(o) => {
+            for (k, x) in o {
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(k);
+                result_strings(x, path, skip, f);
+                path.truncate(len);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Labels guessed for one host function.
@@ -768,5 +939,109 @@ mod tests {
         assert_eq!(effect_guess("list-for-day"), Some(crate::manifest::Effect::Read));
         assert_eq!(effect_guess("send"), Some(crate::manifest::Effect::External));
         assert_eq!(effect_guess("frobnicate"), None);
+    }
+
+    fn pii_manifest(no_pii: bool, output: bool) -> Manifest {
+        let out = if output { "output = { status = \"status\", body = \"body\" }" } else { "" };
+        toml::from_str(&format!(
+            r#"
+            [app]
+            wasm = "a.wasm"
+            [entry]
+            export = "h"
+            {out}
+            no_pii = {no_pii}
+            [functions."x:y/users#all"]
+            result = {{ email = "pii" }}
+            "#
+        ))
+        .unwrap()
+    }
+
+    fn pii_run(request: Value, emails: &[&str], result: Value, stdout: &str) -> RunRecord {
+        use crate::record::{HostCall, Outcome, RunSpec, Totals};
+        let users: Vec<Value> = emails.iter().map(|e| json!({"name": "n", "email": e})).collect();
+        let call = HostCall {
+            n: 1,
+            func: "x:y/users#all".into(),
+            call: 1,
+            args: Default::default(),
+            value_checks: None,
+            result: Some(Value::Array(users)),
+            trap: None,
+            source: String::new(),
+            granted: true,
+            latency_ns: 0,
+            cost: 0,
+            fuel_before: 0,
+            t_ns: 0,
+            stack: vec![],
+        };
+        let spec = RunSpec {
+            component: String::new(),
+            contract: String::new(),
+            export: "h".into(),
+            args: vec![request],
+            plan: Default::default(),
+            now: String::new(),
+            seed: 0,
+            fuel: 0,
+            memory: 0,
+            ns_per_fuel: 0.0,
+        };
+        RunRecord {
+            id: "r1".into(),
+            spec,
+            outcome: Outcome { kind: crate::record::OutcomeKind::Ok, message: None, stack: vec![] },
+            result: Some(result),
+            totals: Totals::default(),
+            events: vec![call],
+            stdout: stdout.into(),
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn no_pii_fails_personal_data_in_the_page() {
+        let r = pii_run(json!({"query": []}), &["p1@mail.example"], json!({"status": 200, "body": "<p>p1@mail.example</p>"}), "");
+        assert!(leaks(&r, &pii_manifest(false, true)).is_empty(), "an ordinary page may show personal data");
+        let f = leaks(&r, &pii_manifest(true, true));
+        assert_eq!(f.len(), 1);
+        assert_eq!((f[0].kind.as_str(), f[0].severity), ("pii_leak", Severity::Fail));
+        assert_eq!(f[0].detail["place"], "the response body");
+    }
+
+    #[test]
+    fn many_people_are_one_finding() {
+        let emails: Vec<String> = (0..37).map(|i| format!("p{i:03}@mail.example")).collect();
+        let refs: Vec<&str> = emails.iter().map(String::as_str).collect();
+        let r = pii_run(json!({}), &refs, json!({"status": 200, "body": emails.join(", ")}), "");
+        let f = leaks(&r, &pii_manifest(true, true));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].detail["count"], 37);
+        assert!(f[0].title.contains("37 different values"), "{}", f[0].title);
+    }
+
+    #[test]
+    fn echoed_request_values_are_not_leaks() {
+        let r = pii_run(json!({"query": [["email", "p1@mail.example"]]}), &["p1@mail.example"], json!({"status": 200, "body": "p1@mail.example"}), "p1@mail.example");
+        assert!(leaks(&r, &pii_manifest(true, true)).is_empty());
+    }
+
+    #[test]
+    fn no_pii_checks_results_without_http() {
+        let r = pii_run(json!({}), &["p1@mail.example", "p2@mail.example"], json!({"ok": {"rows": [{"n": 1}, {"contact": "p2@mail.example"}]}}), "");
+        assert!(leaks(&r, &pii_manifest(false, false)).is_empty());
+        let f = leaks(&r, &pii_manifest(true, false));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].detail["place"], "the result");
+        assert_eq!(f[0].detail["at"], "ok.rows[1].contact");
+    }
+
+    #[test]
+    fn logs_fail_without_no_pii() {
+        let r = pii_run(json!({}), &["p1@mail.example"], json!({"status": 200, "body": "hi"}), "user p1@mail.example");
+        let f = leaks(&r, &pii_manifest(false, true));
+        assert_eq!((f.len(), f[0].detail["place"].as_str()), (1, Some("the log (stdout)")));
     }
 }
