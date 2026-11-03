@@ -677,12 +677,12 @@ fn carrier_types(engine: &Engine, wit: &str, sigs: &BTreeMap<String, Sig>) -> Re
 #[derive(Debug)]
 pub struct Fault(pub &'static str);
 
-fn mem<'a>(m: &'a [u8], addr: u64, len: usize) -> Result<&'a [u8], Fault> {
+fn mem(m: &[u8], addr: u64, len: usize) -> Result<&[u8], Fault> {
     let start = usize::try_from(addr).map_err(|_| Fault("inval"))?;
     m.get(start..start.checked_add(len).ok_or(Fault("inval"))?).ok_or(Fault("inval"))
 }
 
-fn mem_mut<'a>(m: &'a mut [u8], addr: u64, len: usize) -> Result<&'a mut [u8], Fault> {
+fn mem_mut(m: &mut [u8], addr: u64, len: usize) -> Result<&mut [u8], Fault> {
     let start = usize::try_from(addr).map_err(|_| Fault("inval"))?;
     m.get_mut(start..start.checked_add(len).ok_or(Fault("inval"))?).ok_or(Fault("inval"))
 }
@@ -935,7 +935,7 @@ pub fn lower(sig: &Sig, m: &mut [u8], raw: &[wasmtime::Val], results: &[Val]) ->
             write(m, raw_u64(&raw[i + k]), ty, part.next().ok_or(Fault("error"))?)?;
         }
     }
-    Ok(Some(status).filter(|_| sig.status.is_some()).or(None))
+    Ok(sig.status.is_some().then_some(status))
 }
 
 /// The most bytes a read-style call can take: the length of its buffer.
