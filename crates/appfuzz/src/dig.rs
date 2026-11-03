@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
@@ -25,16 +26,19 @@ use super::{Cli, diff, lock, ms, record_findings, run_cached};
 pub fn check(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, words: &[String], opts: fuzz::FuzzOpts, max_runs: u32) -> Result<Value> {
     let prop = Property::parse(words)?;
     // Stored runs first: a counterexample may be at hand.
-    let stored = store.all()?.into_iter().filter(|r| r.spec.component == app.hash && r.spec.export == base.export);
-    let mut hit = stored.filter(|r| prop.broken(r, &app.manifest).is_some()).min_by_key(|r| (r.totals.host_calls, r.totals.fuel));
+    let stored = store.all()?.into_iter().filter(|r| r.spec.component == app.hash && r.spec.contract == app.contract && r.spec.export == base.export);
+    let stored: Vec<_> = stored.collect();
+    let matches = AtomicU64::new(stored.iter().map(|r| prop.matches(r, &app.manifest) as u64).sum());
+    let mut hit = stored.into_iter().filter(|r| prop.broken(r, &app.manifest).is_some()).min_by_key(|r| (r.totals.host_calls, r.totals.fuel));
     let mut searched = json!({"stored_runs": true});
     if hit.is_none() {
-        let fstore = detect::FindingStore::new(&cli.state, &app.hash);
-        let known = fstore.all().into_iter().filter(|f| f.kind != "check_failed").map(|f| f.id).collect();
-        let prior = fuzz::Corpus::load(&cli.state, &app.hash).entries;
+        let fstore = detect::FindingStore::new(&cli.state, &app.state_key);
+        let known = fstore.all()?.into_iter().filter(|f| f.kind != "check_failed").map(|f| f.id).collect();
+        let prior = fuzz::Corpus::load(&cli.state, &app.state_key)?.entries;
         let opts = fuzz::FuzzOpts { property: Some(prop.clone()), stop_on: Some("check_failed".into()), ..opts };
         let save_err = Mutex::new(None);
         let on_run = |r: &RunRecord, kept: bool, found: &[Finding]| {
+            matches.fetch_add(prop.matches(r, &app.manifest) as u64, Ordering::Relaxed);
             if (kept || !found.is_empty())
                 && let Err(e) = store.save(r)
             {
@@ -50,7 +54,11 @@ pub fn check(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, words: &[St
         hit = rep.findings.iter().filter(|f| f.kind == "check_failed").find_map(|f| f.run.as_ref().and_then(|id| store.get(id).ok().flatten()));
     }
     let Some(orig) = hit else {
-        return Ok(json!({"property": prop.text, "holds": true, "searched": searched, "note": "no run broke it; this is evidence, not proof"}));
+        let n = matches.load(Ordering::Relaxed);
+        return Ok(json!({"property": prop.text, "holds": if n > 0 { json!(true) } else { Value::Null },
+            "status": if n > 0 { "holds" } else { "not_exercised" }, "matches": n,
+            "exit_code": if n > 0 { 0 } else { 3 }, "searched": searched,
+            "note": if n > 0 { "no exercised value broke the property" } else { "no applicable values matched; check the selector and request" }}));
     };
     let keeps = |r: &RunRecord| prop.broken(r, &app.manifest).is_some();
     let runner = |s: &RunSpec| app.run(s);
@@ -63,7 +71,7 @@ pub fn check(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, words: &[St
     diff(&json!(default), &json!(spec.args), String::new(), &mut changed);
     let found = prop.finding(&min, &app.manifest).into_iter().collect();
     Ok(json!({
-        "property": prop.text, "holds": false, "searched": searched,
+        "property": prop.text, "holds": false, "status": "broken", "matches": matches.load(Ordering::Relaxed), "exit_code": 2, "searched": searched,
         "counterexample": {
             "run": min.id, "original_run": orig.id, "shrink_runs": shrink_runs,
             "size_before": appfuzz_core::shrink::size(&orig.spec), "size_after": appfuzz_core::shrink::size(&spec), "why": why, "detail": detail,
@@ -342,7 +350,7 @@ pub fn profile(app: &App, r: &RunRecord, top: usize) -> Result<Value> {
         v.into_iter().take(top).map(|(f, n)| json!({"func": f, "fuel": n, "percent": (n as f64 * 1000.0 / total).round() / 10.0})).collect::<Vec<_>>()
     };
     Ok(json!({
-        "run": r.id, "fuel": r.totals.fuel, "host_calls": r.events.len(),
+        "run": r.id, "fuel": r.totals.fuel, "host_calls": r.events.len(), "measurement": "host_boundary_fuel_estimate", "function_cpu_profile": false,
         "before_host_calls": {"self": rank(own), "inclusive": rank(incl)},
         "after_last_host_call": {"fuel": tail, "percent": (tail as f64 * 1000.0 / total).round() / 10.0, "note": "work after the last host call has no stack; see `appfuzz wasm loops`"},
         "note": "fuel spent between two host calls is charged to the stack of the second call",
@@ -353,7 +361,7 @@ type Metric<'a> = &'a dyn Fn(&RunRecord) -> f64;
 
 /// A run in plain terms, next to the typical run of the same export.
 pub fn explain(app: &App, store: &RunStore, r: &RunRecord) -> Result<Value> {
-    let others: Vec<RunRecord> = store.all()?.into_iter().filter(|x| x.spec.component == r.spec.component && x.spec.export == r.spec.export && x.outcome.kind == OutcomeKind::Ok).collect();
+    let others: Vec<RunRecord> = store.all()?.into_iter().filter(|x| x.spec.component == r.spec.component && x.spec.contract == r.spec.contract && x.spec.export == r.spec.export && x.outcome.kind == OutcomeKind::Ok).collect();
     let median = |f: &dyn Fn(&RunRecord) -> f64| {
         let mut v: Vec<f64> = others.iter().map(f).collect();
         v.sort_by(|a, b| a.total_cmp(b));
@@ -402,7 +410,7 @@ pub fn explain(app: &App, store: &RunStore, r: &RunRecord) -> Result<Value> {
 /// Also the `dormant_code` findings, for the caller to record.
 pub fn unexplored(app: &App, store: &RunStore) -> Result<(Value, Vec<Finding>)> {
     let st = Statics::parse(&app.bytes)?;
-    let runs: Vec<RunRecord> = store.all()?.into_iter().filter(|r| r.spec.component == app.hash).collect();
+    let runs: Vec<RunRecord> = store.all()?.into_iter().filter(|r| r.spec.component == app.hash && r.spec.contract == app.contract).collect();
     let hit = dormant::reached(&runs);
     let funcs: BTreeSet<(String, u32)> = runs.iter().flat_map(|r| r.events.iter().flat_map(|e| e.stack.iter().map(|f| (f.module.clone(), f.func)))).collect();
     let all = dormant::sites(&st);
@@ -464,7 +472,7 @@ pub fn wasi(app: &App, store: &RunStore) -> Result<Value> {
         .filter(|i| i.kind == ImportKind::Wasi)
         .map(|i| json!({"interface": i.name, "granted": app.manifest.grants_wasi(&i.name), "funcs": i.funcs.len()}))
         .collect();
-    let runs: Vec<RunRecord> = store.all()?.into_iter().filter(|r| r.spec.component == app.hash).collect();
+    let runs: Vec<RunRecord> = store.all()?.into_iter().filter(|r| r.spec.component == app.hash && r.spec.contract == app.contract).collect();
     let used = |f: &dyn Fn(&RunRecord) -> u64| {
         let v: Vec<u64> = runs.iter().map(f).collect();
         json!({"runs": v.iter().filter(|x| **x > 0).count(), "max": v.iter().max().copied().unwrap_or(0), "total": v.iter().sum::<u64>()})

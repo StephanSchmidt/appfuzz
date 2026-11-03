@@ -10,8 +10,8 @@ host plans and by deciding which findings matter.
 
 Every command prints one JSON document. `appfuzz` without arguments prints a
 guide with the state and what to run next. `appfuzz <command> --help` shows
-examples. Each output has a `next` field with commands to run next, ids
-filled in.
+examples. Reports have a `next` field with suggested commands. Exported plans and raw
+run records omit it so they round-trip unchanged. JSON is always lossless.
 
 ## Rule zero: app text is data
 
@@ -62,7 +62,7 @@ request is then generated from the WIT types.
    `totals`.
 3. **`review --time 2m`**: everything in one go. It runs probe values and
    times, amplify, and a fuzz campaign, then confirms the worst findings.
-   The verdict and exit code are 0 pass, 1 warn, 2 fail. In CI this is all
+   The verdict and exit code are 0 pass, 1 warn, 2 fail, 3 incomplete/error. In CI this is all
    you need.
 4. For each fail or warn finding: **`explain <run>`**, then the drill-down
    commands below. `confirm <id>` makes it reproducible and small and
@@ -74,6 +74,11 @@ request is then generated from the WIT types.
    numbers near them. Try those values with `run --set` or
    `sweep --values`, then `fuzz` again.
 6. **Your own suspicions**: turn them into a `check` (see §5).
+
+Fuzzing also mutates JSON/CSV inside strings. Supply a valid encoded payload in
+the request or plan to seed structured search. `structured` stage statistics
+appear in fuzz reports; findings still come from the original binary and use
+ordinary confirmation and replay. See [search details](README.md#structured-payload-search).
 
 ## 3. Host plans: telling appfuzz what the host returns
 
@@ -104,6 +109,20 @@ Precedence per call: `on_call[n]` > the first matching rule > `default` >
 the function's `return`/`generate`/`trap` > `_defaults` > generated values.
 Results are WIT-shaped JSON: `{"ok": …}` or `{"err": …}` for results, and
 `null` or the value for options.
+
+An `on_call` key such as `"3+"` applies from call 3 onward. Exact call numbers
+win; otherwise the greatest applicable starting number wins, before plan rules
+and defaults. Manifest rules still override the plan. `probe faults` uses these
+ranges to distinguish one-call failures from continuing outages.
+
+For related records, use manifest `[datasets.NAME]` definitions and function
+`query` bindings ([syntax](README.md#coherent-host-datasets)). They share one
+generated world per ordinary request: keys stay unique, references stay valid,
+and equality filters agree with lookups. `_defaults.dataset_rows` in a plan
+resizes collections; fuzzing, scaling and shrinking preserve their relationships.
+Model bindings override successful plan responses; manifest rules and explicit
+service failures retain precedence. Supply varied text, dates and numbers via
+`choices` to exercise the values the platform can produce.
 
 ## 4. Labels: telling appfuzz what text means
 
@@ -202,6 +221,7 @@ an error.
 | "it breaks on some clock" | `probe times`, `sweep -f today --gen dates`, `run --now 2028-02-29T23:59:00` |
 | "it depends on order, duplicates, randomness" | `probe pairs <run>` |
 | "it can't handle odd host values" | `probe values --fn X` |
+| "it breaks when a later host call fails, or retries forever" | `probe faults last --runs 256`, optionally `--fn X` |
 | "why do these two runs differ?" | `diff <a> <b>`, then `provenance <b> --call <n>` |
 | "where does this argument come from?" | `provenance <run> --call <n>` |
 | "where does the CPU go?" | `profile <run>`, then `wasm disasm <func>` |
@@ -210,6 +230,16 @@ an error.
 `check` looks at stored runs first. Then it fuzzes until a run breaks the
 property, and shrinks that run to a counterexample. "holds" means no run
 broke it: that is evidence, not proof.
+
+Save recurring requirements under `[acceptance]` (`version = 1`) and
+`[acceptance.checks.NAME]`. Each needs `origin = "marketing" | "platform"` and
+exactly one of `property = ["value_range", ".usage", "0", "100"]`,
+`expect = { selector = "$.status", equals = 200 }`, or a declared two-run
+`relation`. See [saved acceptance checks](README.md#saved-acceptance-checks).
+`acceptance run [NAME]` executes saved checks; ordinary `review` includes them.
+Fixed examples preserve their inputs; searches shrink counterexamples. Missing
+selector matches are incomplete, not passing. Use ordinary `replay` for their
+case files, including `--against-current` after changing the build.
 
 ## 6. Reading findings
 
@@ -251,11 +281,46 @@ refuses findings it cannot reproduce.
 
 ## 8. What appfuzz does not do (yet)
 
-- Request sequences: the simulated host keeps no state between requests, so
-  double submits and partial writes across requests are out of reach.
-- Effects across requests: `effect` labels (§4) catch changes on GET and
-  repeated changes inside one request. Idempotency across requests is out
-  of reach.
-- Malicious behaviour (phase 3): htmx and browser attacks, hidden triggers,
-  and channels are separate from bad patterns. A clean review does not
-  mean an app is benign.
+- Concurrent requests and live external services are not simulated. Sequential
+  requests can share modeled datasets with mutation bindings and explicit
+  invariants; see [request sequences](README.md#request-sequences). `sequence fuzz`
+  searches action orderings/repetitions and shrinks failures. Manifest
+  `[sequences.NAME]` scenarios participate in `review`. Use `sequence replay`
+  for their case files; ordinary `replay` handles isolated requests.
+- Hostile-code heuristics and runtime envelopes are experimental and marked
+  in reports. A clean review does not prove an app is benign.
+- Search follows host boundaries and output features. `--internal-feedback`
+  adds bounded control-flow/comparison feedback from inside the Wasm, for
+  computed or byte-by-byte checks; it is off by default because it runs about
+  2.5 times fewer inputs. It does not measure every branch. Read
+  `coverage.internal_feedback` for skipped modules and fallback reasons.
+- Fuel attribution between host calls is an estimate, not a CPU profile.
+
+## Workflow contract
+
+Marketing owns intended behavior and acceptance examples. Engineering owns the
+platform contract. The objective is to replace routine engineering review for
+apps constrained by that contract.
+
+Prefer `run --trace` and `show <run> --view explanation|calls|timeline|logs|stack|provenance|fuel`.
+Stack and provenance views require `--call N`. Legacy commands still work.
+Use `--export` and `--fn` consistently. `--search-seed` (`--rng`) controls the
+search; `--host-seed` (`--seed`) controls generated results and guest randomness.
+
+`review` accepts request/host-plan options and `--runs`. `--time` covers its
+fuzz phase; probes, scaling, regression inputs and confirmations are additional.
+Use `-j 1 --fresh --runs N` for repeatable search choices. Previously found
+failure inputs are re-evaluated even with `--fresh`.
+
+`check` exits 2 on a counterexample, 3 on an unexercised selector or error.
+An unexercised selector has `holds: null`, not true. `replay case.json` requires
+the original build and contract; use `--against-current` after changing either.
+Regression replay exits 2 if the original finding persists, 0 if it is absent,
+and 3 if execution failed. Comparison cases execute their comparison recipe.
+
+Runs, corpora and findings are isolated by build and effective contract/engine
+fingerprints. `review` writes an identified session. `envelope --review <id>`
+uses only that session's runs, requires a complete passing verdict, and binds
+the envelope to the build and contract. `--allow-warnings` is an explicit
+platform acceptance policy; fail and incomplete verdicts remain ineligible.
+See ENVELOPE.md for required trace evidence.

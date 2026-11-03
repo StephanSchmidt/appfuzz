@@ -8,6 +8,7 @@
     }
   ],
   "allow": [
-    "missing_owner_check"
+    "missing_owner_check",
+    "big_output"
   ]
 }

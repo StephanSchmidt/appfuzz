@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use wasmtime::component::Type;
 
-use crate::detect::{Finding, panic_text, per_run_fast, per_run_text};
+use crate::detect::{Finding, panic_text, per_run};
 use crate::harness::{App, field, fn_key_eq, set_clock_fields};
 use crate::check::Property;
 use crate::metamorphic;
@@ -50,6 +50,10 @@ pub enum Stage {
     Request,
     /// Change what one host function returns (from its WIT type).
     HostValues,
+    /// Substitute observed comparison operands into matching request values.
+    Compare,
+    /// Preserve JSON/CSV syntax while changing embedded request or host data.
+    Structured,
     /// Make a host function return a long list.
     GrowList,
     /// Make a request field big (number or length).
@@ -69,8 +73,8 @@ pub enum Stage {
 /// Longest list the permute stage hands back.
 const MAX_PERMUTED: usize = 64;
 
-const STAGES: [Stage; 9] =
-    [Stage::Crawl, Stage::Request, Stage::HostValues, Stage::GrowList, Stage::GrowInput, Stage::Fault, Stage::Permute, Stage::Env, Stage::Splice];
+const STAGES: [Stage; 11] =
+    [Stage::Crawl, Stage::Request, Stage::Compare, Stage::Structured, Stage::HostValues, Stage::GrowList, Stage::GrowInput, Stage::Fault, Stage::Permute, Stage::Env, Stage::Splice];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -79,6 +83,8 @@ pub struct Entry {
     pub stage: Stage,
     /// Why it was kept: `features 4` or `max calls …`.
     pub reasons: Vec<String>,
+    #[serde(default)]
+    pub feedback:crate::feedback::Feedback,
     #[serde(skip)]
     record: Option<Arc<RunRecord>>,
     /// Same-host links and form inputs of the record, for crawling;
@@ -97,18 +103,21 @@ impl Corpus {
     pub fn path(state: &std::path::Path, component: &str) -> std::path::PathBuf {
         state.join("corpus").join(format!("{component}.json"))
     }
-    pub fn load(state: &std::path::Path, component: &str) -> Corpus {
-        std::fs::read(Self::path(state, component))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or(Corpus { component: component.to_string(), entries: vec![] })
+    pub fn load(state: &std::path::Path, component: &str) -> anyhow::Result<Corpus> {
+        use anyhow::Context;
+        let path = Self::path(state, component);
+        match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("invalid corpus in {}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Corpus { component: component.to_string(), entries: vec![] }),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
     }
     pub fn save(&self, state: &std::path::Path) -> anyhow::Result<()> {
         let p = Self::path(state, &self.component);
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d)?;
         }
-        std::fs::write(p, serde_json::to_vec(self)?)?;
+        crate::store::write_atomic(&p, &serde_json::to_vec(self)?)?;
         Ok(())
     }
 }
@@ -135,6 +144,7 @@ pub struct FuzzOpts {
     pub dict_limit: usize,
     /// Seed with the request keys and modes `amplify` would find.
     pub discover: bool,
+    pub internal_feedback:bool,
     /// Checked on every run like a detector (`check_failed`).
     pub property: Option<Property>,
     /// Stop at the first new finding of this kind.
@@ -143,7 +153,7 @@ pub struct FuzzOpts {
 
 impl Default for FuzzOpts {
     fn default() -> Self {
-        FuzzOpts { runs: None, time: Some(Duration::from_secs(60)), until: Until::Budget, seed: 1, plateau: 2000, max_corpus: 300, dict_limit: 200, discover: true, property: None, stop_on: None }
+        FuzzOpts { runs: None, time: Some(Duration::from_secs(60)), until: Until::Budget, seed: 1, plateau: 2000, max_corpus: 300, dict_limit: 200, discover: true, internal_feedback:false, property: None, stop_on: None }
     }
 }
 
@@ -179,10 +189,12 @@ pub struct FuzzReport {
     pub features: usize,
     pub stages: BTreeMap<Stage, StageStat>,
     pub maxima: Vec<Maximum>,
-    /// Findings this campaign saw for the first time.
+    /// All findings observed in this campaign, including previously known ones.
     pub findings: Vec<Finding>,
     pub last_new_at_run: u64,
     pub jobs: usize,
+    pub feedback:crate::feedback::Status,
+    pub faults: crate::faults::Coverage,
 }
 
 static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<([a-zA-Z][a-zA-Z0-9-]*)\b([^>]*)>").unwrap());
@@ -317,6 +329,9 @@ struct State {
     stages: BTreeMap<Stage, StageStat>,
     known: BTreeSet<String>,
     new_findings: Vec<Finding>,
+    observed: BTreeMap<String, Finding>,
+    comparison_progress:BTreeMap<String,(u64,String)>,
+    faults: crate::faults::Search,
     /// Runs admitted, and runs handed to a worker.
     runs: u64,
     started: u64,
@@ -330,6 +345,7 @@ struct State {
 
 /// A run and what the worker derived from it.
 struct Executed {
+    feedback:crate::feedback::Feedback,
     r: Arc<RunRecord>,
     findings: Vec<Finding>,
     features: BTreeSet<String>,
@@ -337,16 +353,18 @@ struct Executed {
 }
 
 /// The unlocked half of an evaluation: run, detectors, features.
-fn execute(app: &App, st: &Statics, spec: &RunSpec, prop: Option<&Property>) -> Executed {
+fn execute(app: &App, st: &Statics, spec: &RunSpec, prop: Option<&Property>, probe:&crate::feedback::Probe) -> Executed {
     let r = Arc::new(app.run(spec));
     if matches!(r.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) {
-        return Executed { r, findings: vec![], features: BTreeSet::new(), metrics: vec![] };
+        return Executed { feedback:Default::default(), r, findings: vec![], features: BTreeSet::new(), metrics: vec![] };
     }
-    let mut findings = per_run_fast(&r, &app.manifest);
+    let mut findings = per_run(&r, &app.manifest);
     findings.extend(prop.and_then(|p| p.finding(&r, &app.manifest)));
-    let features = features(&r, st, app);
+    let feedback=if r.outcome.kind==OutcomeKind::Ok {probe.collect(spec)}else{Default::default()};
+    let mut features = features(&r, st, app);
+    features.extend(feedback.features());
     let metrics = if r.outcome.kind == OutcomeKind::Ok { metrics(&r) } else { vec![] };
-    Executed { r, findings, features, metrics }
+    Executed { feedback, r, findings, features, metrics }
 }
 
 fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -357,7 +375,7 @@ impl State {
     /// Keeps a run if it is new in any way, and collects its findings.
     /// Returns the run, whether it was kept, and the findings new in it.
     fn admit(&mut self, spec: RunSpec, stage: Stage, ex: Executed) -> (Arc<RunRecord>, bool, Vec<Finding>) {
-        let Executed { r, findings, features: feats, metrics } = ex;
+        let Executed { feedback, r, findings, features: feats, metrics } = ex;
         self.runs += 1;
         let stat = self.stages.entry(stage).or_default();
         stat.runs += 1;
@@ -367,12 +385,27 @@ impl State {
         }
         let mut found: Vec<Finding> = Vec::new();
         for f in findings {
-            if self.known.insert(f.id.clone()) {
+            let novel = self.known.insert(f.id.clone());
+            if novel {
+                self.new_findings.push(f.clone());
+            }
+            let refresh = self.observed.get(&f.id).is_none_or(|old| f.severity > old.severity);
+            if refresh {
+                self.observed.insert(f.id.clone(), f.clone());
                 found.push(f);
             }
         }
         stat.findings += found.len() as u64;
         let mut reasons = Vec::new();
+        if !found.is_empty() {
+            reasons.push(format!("findings {}", found.len()));
+        }
+        if stage!=Stage::Check && let Some((group,distance))=feedback.progress()
+            && (self.comparison_progress.contains_key(&group) || self.comparison_progress.len()<self.max_corpus.max(2)/2)
+            && self.comparison_progress.get(&group).is_none_or(|(old,_)|distance<*old) {
+            self.comparison_progress.insert(group,(distance,r.id.clone()));
+            reasons.push(format!("comparison distance {distance}"));
+        }
         let fresh = feats.iter().filter(|f| !self.features.contains(*f)).count();
         if fresh > 0 {
             reasons.push(format!("features {fresh}"));
@@ -397,26 +430,14 @@ impl State {
                 self.kept += 1;
                 self.last_new = self.runs;
             }
-            self.corpus.push(Arc::new(Entry { spec, run: r.id.clone(), stage, reasons, record: Some(r.clone()), links: OnceLock::new() }));
+            self.corpus.push(Arc::new(Entry { spec, run: r.id.clone(), stage, reasons, feedback, record: Some(r.clone()), links: OnceLock::new() }));
             self.picked.push(0);
             self.prune();
         }
         if !found.is_empty() {
             self.last_new = self.runs;
         }
-        self.new_findings.extend(found.iter().cloned());
         (r, keep, found)
-    }
-
-    /// Findings of the text checks for a kept run: the ones new so far.
-    fn merge(&mut self, stage: Stage, findings: Vec<Finding>) -> Vec<Finding> {
-        let found: Vec<Finding> = findings.into_iter().filter(|f| self.known.insert(f.id.clone())).collect();
-        self.stages.entry(stage).or_default().findings += found.len() as u64;
-        if !found.is_empty() {
-            self.last_new = self.runs;
-        }
-        self.new_findings.extend(found.iter().cloned());
-        found
     }
 
     /// Drops the oldest entry that holds no maximum once the corpus is full.
@@ -424,7 +445,7 @@ impl State {
         if self.corpus.len() <= self.max_corpus {
             return;
         }
-        let holders: BTreeSet<&String> = self.maxima.values().map(|(_, r)| r).collect();
+        let holders: BTreeSet<&String> = self.maxima.values().chain(self.comparison_progress.values()).map(|(_, r)| r).collect();
         if let Some(i) = (1..self.corpus.len()).find(|&i| !holders.contains(&self.corpus[i].run)) {
             self.corpus.remove(i);
             self.picked.remove(i);
@@ -458,7 +479,7 @@ impl State {
 
     fn pick_parent(&mut self, rng: &mut StdRng) -> usize {
         let holders: Vec<usize> = {
-            let h: BTreeSet<&String> = self.maxima.values().map(|(_, r)| r).collect();
+            let h: BTreeSet<&String> = self.maxima.values().chain(self.comparison_progress.values()).map(|(_, r)| r).collect();
             (0..self.corpus.len()).filter(|i| h.contains(&self.corpus[*i].run)).collect()
         };
         // Run time in ms, bucketed by powers of two: a 4 s input should not
@@ -675,7 +696,7 @@ impl Mutator<'_> {
         let mut spec = parent.spec.clone();
         let rec = parent.record.clone();
         match stage {
-            Stage::Seed | Stage::Check => return None,
+            Stage::Seed | Stage::Check | Stage::Fault => return None,
             Stage::Request if !self.keys.is_empty() && self.rng.random_bool(0.4) => {
                 // A key the app is known to read, with a new value.
                 let k = self.pick(self.keys)?.clone();
@@ -699,14 +720,56 @@ impl Mutator<'_> {
                 }
                 any.then_some(())?;
             }
+            Stage::Compare => {
+                let candidates=crate::feedback::substitutions(&spec.args,&parent.feedback.comparisons);
+                let changed=self.pick(&candidates).is_some_and(|patch|patch.apply(&mut spec.args));
+                if !changed && !self.mutate_request(&mut spec.args){return None;}
+                crate::constraints::conform_request(&mut spec.args,&self.app.manifest,self.rng.random());
+            }
+            Stage::Structured => {
+                // Request strings and observed host-result strings use the same
+                // parser. Model-backed successes remain owned by their datasets.
+                let mut root = Value::Array(spec.args.clone());
+                let request_paths = crate::structured::locations(&root);
+                let host_values: Vec<_> = rec.as_ref().into_iter().flat_map(|r| r.events.iter()).take(256)
+                    .filter(|e| !self.app.manifest.function(&e.func).is_some_and(|f| f.query.is_some() || f.mutation.is_some()))
+                    .filter_map(|e| {
+                        let value = e.result.as_ref()?;
+                        let paths = crate::structured::locations(value);
+                        (!paths.is_empty()).then_some((e, paths))
+                    }).collect();
+                if !request_paths.is_empty() && (host_values.is_empty() || self.rng.random_bool(0.5)) {
+                    let path = self.pick(&request_paths)?;
+                    let slot = root.pointer_mut(path)?;
+                    *slot = json!(crate::structured::mutate(slot.as_str()?, &mut self.rng, self.words, self.consts)?);
+                    spec.args = root.as_array()?.clone();
+                    crate::constraints::conform_request(&mut spec.args, &self.app.manifest, spec.seed);
+                } else {
+                    let (event, paths) = self.pick(&host_values)?;
+                    let path = self.pick(paths)?;
+                    let mut value = event.result.clone()?;
+                    let slot = value.pointer_mut(path)?;
+                    *slot = json!(crate::structured::mutate(slot.as_str()?, &mut self.rng, self.words, self.consts)?);
+                    spec.plan.0.entry(event.func.clone()).or_default().on_call.insert(event.call.to_string(), Response { ret: Some(value), ..Default::default() });
+                }
+            }
             Stage::HostValues => {
                 let (key, _) = self.pick(self.funcs)?.clone();
+                if self.app.manifest.function(&key).is_some_and(|f| f.query.is_some()) {
+                    spec.plan.0.entry("_defaults".into()).or_default().dataset_seed = Some(self.rng.random());
+                    return Some(spec);
+                }
                 let o = self.gen_opts(Self::current_opts(&spec.plan, &key));
                 Self::set_generate(&mut spec.plan, &key, o);
             }
             Stage::GrowList => {
                 let fs: Vec<_> = self.funcs.iter().filter(|(_, t)| has_list(t)).cloned().collect();
                 let (key, _) = self.pick(&fs)?.clone();
+                if let Some(q) = self.app.manifest.function(&key).and_then(|f| f.query.as_ref()) {
+                    let n = *self.pick(&[0usize, 1, 2, 4, 8, 16, 32])?;
+                    spec.plan.0.entry("_defaults".into()).or_default().dataset_rows.insert(q.dataset.clone(), n);
+                    return Some(spec);
+                }
                 let mut o = Self::current_opts(&spec.plan, &key);
                 // Bigger lists are `amplify`'s job; here they would only slow runs.
                 o.list_len = Some(*self.pick(&[4usize, 8, 16, 32]).expect("non-empty"));
@@ -719,21 +782,11 @@ impl Mutator<'_> {
                 let n = *self.pick(&sizes[sizes.len() / 2..])?;
                 spec = scale::apply(self.app, &spec, &k, n).ok()?;
             }
-            Stage::Fault => {
-                let r = rec?;
-                let e = self.pick(&r.events)?.clone();
-                let ty = self.funcs.iter().find(|(k, _)| *k == e.func).map(|(_, t)| t.clone())?;
-                let resp = match &ty {
-                    Type::Result(_) => Response { generate: Some(GenOpts { results: Some("err".into()), ..Default::default() }), ..Default::default() },
-                    Type::Option(_) => Response { generate: Some(GenOpts { options: Some("none".into()), ..Default::default() }), ..Default::default() },
-                    _ => Response { trap: Some("appfuzz: injected fault".into()), ..Default::default() },
-                };
-                spec.plan.0.entry(e.func.clone()).or_default().on_call.insert(e.call.to_string(), resp);
-            }
             Stage::Permute => {
                 let r = rec?;
                 let with_list: Vec<_> = r.events.iter().filter(|e| e.result.as_ref().is_some_and(|v| first_list(v).is_some_and(|a| !a.is_empty()))).cloned().collect();
                 let e = self.pick(&with_list)?.clone();
+                if self.app.manifest.function(&e.func).is_some_and(|f| f.query.is_some()) { return None; }
                 let mut v = e.result.clone()?;
                 let a = first_list_mut(&mut v)?;
                 match self.rng.random_range(0..4u8) {
@@ -1017,6 +1070,9 @@ pub fn fuzz(
     opts: &FuzzOpts,
     on_run: OnRun,
 ) -> anyhow::Result<(FuzzReport, Corpus)> {
+    if opts.runs == Some(0) { anyhow::bail!("run budget must be positive"); }
+    let started = Instant::now();
+    let probe=crate::feedback::Probe::new(app,opts.internal_feedback);
     let st = Statics::parse(&app.bytes)?;
     let words = dictionary(&st, opts.dict_limit);
     let consts = compare_constants(&st, 32);
@@ -1036,6 +1092,9 @@ pub fn fuzz(
         stages: BTreeMap::new(),
         known: known_findings,
         new_findings: Vec::new(),
+        observed: BTreeMap::new(),
+        comparison_progress:BTreeMap::new(),
+        faults: crate::faults::Search::new(),
         runs: 0,
         started: 0,
         kept: 0,
@@ -1044,7 +1103,6 @@ pub fn fuzz(
         stopped: None,
         checked: BTreeSet::new(),
     });
-    let started = Instant::now();
     let jobs = par::jobs();
     // Seeds: the example request as is, on the happy path, and earlier entries.
     let steady_base = RunSpec { plan: steady(&base.plan), fuel: base.fuel.min(fuel), ..base.clone() };
@@ -1065,11 +1123,13 @@ pub fn fuzz(
         }
     }
     seeds.extend(flow_seeds(app, &steady_base, &keys, &funcs));
-    seeds.extend(prior.into_iter().filter(|e| e.spec.component == app.hash && e.spec.export == base.export).map(|e| e.spec));
+    seeds.extend(prior.into_iter().filter(|e| e.spec.component == app.hash && e.spec.contract == app.contract && e.spec.export == base.export).map(|e| e.spec));
     // Seeds run at once and are admitted in order.
     for s in &mut seeds {
         s.fuel = s.fuel.min(fuel);
     }
+    if let Some(n) = opts.runs { seeds.truncate(n.min(usize::MAX as u64) as usize); }
+    lock(&state).started += seeds.len() as u64;
     // Pair checks of a kept run, once per call shape.
     let check = |r: &RunRecord| {
         if r.outcome.kind != OutcomeKind::Ok {
@@ -1090,20 +1150,18 @@ pub fn fuzz(
                 }
                 s.started += 1;
             }
-            let mut ex = execute(app, &st, &v.spec, opts.property.as_ref());
+            let mut ex = execute(app, &st, &v.spec, opts.property.as_ref(), &probe);
             ex.findings.retain(|f| !metamorphic::expected(&v, f));
             ex.findings.extend(metamorphic::compare(app, r, &v, &ex.r));
             let (vr, keep, found) = lock(&state).admit(v.spec, Stage::Check, ex);
             on_run(&vr, keep, &found);
         }
     };
-    let done = par::map(&seeds, |s| execute(app, &st, s, opts.property.as_ref()));
+    let done = par::map(&seeds, |s| execute(app, &st, s, opts.property.as_ref(), &probe));
     let mut kept_seeds = Vec::new();
     for (spec, ex) in seeds.into_iter().zip(done) {
-        let (r, keep, mut found) = lock(&state).admit(spec, Stage::Seed, ex);
-        if keep {
-            found.extend(lock(&state).merge(Stage::Seed, per_run_text(&r, &app.manifest)));
-        }
+        let (r, keep, found) = lock(&state).admit(spec, Stage::Seed, ex);
+        lock(&state).faults.enqueue(app, r.clone());
         on_run(&r, keep, &found);
         kept_seeds.push(r);
     }
@@ -1114,36 +1172,42 @@ pub fn fuzz(
     let worker = |i: usize| {
         let mut m = Mutator { app, words: &words, consts: &consts, keys: &keys, funcs: &funcs, rng: StdRng::seed_from_u64(opts.seed.wrapping_add(i as u64 * 0x9e37_79b9_7f4a_7c15)) };
         loop {
-            let (stage, parent, other) = {
+            let (stage, parent, other, fault) = {
                 let mut s = lock(&state);
                 if let Some(why) = s.stop(opts, started) {
                     s.stopped = Some(why);
                     return;
                 }
                 s.started += 1;
-                let p = s.pick_parent(&mut m.rng);
                 let stage = s.pick_stage(&mut m.rng);
+                let p = s.pick_parent(&mut m.rng);
                 let o = m.rng.random_range(0..s.corpus.len());
-                (stage, s.corpus[p].clone(), (o != p).then(|| s.corpus[o].clone()))
+                let fault = if stage == Stage::Fault { s.faults.next(app) } else { None };
+                (stage, s.corpus[p].clone(), (o != p).then(|| s.corpus[o].clone()), fault)
             };
-            let Some(mut spec) = m.mutate(stage, &parent, other.as_deref()) else {
+            let candidate = match &fault {
+                Some((base, recipe)) => recipe.variant(app, base).map(|v| v.spec),
+                None => m.mutate(stage, &parent, other.as_deref()),
+            };
+            let Some(mut spec) = candidate else {
                 let mut s = lock(&state);
                 s.started -= 1;
                 s.stages.entry(stage).or_default();
                 continue;
             };
             // Sometimes stack a second, request-side change (havoc).
-            if m.rng.random_bool(0.2) {
+            if !matches!(stage, Stage::Structured | Stage::Fault) && m.rng.random_bool(0.2) {
                 m.mutate_request(&mut spec.args);
             }
             spec.fuel = spec.fuel.min(fuel);
-            let ex = execute(app, &st, &spec, opts.property.as_ref());
-            let (r, keep, mut found) = lock(&state).admit(spec, stage, ex);
-            if keep {
-                // Outside the lock: the text checks read every byte.
-                let text = per_run_text(&r, &app.manifest);
-                found.extend(lock(&state).merge(stage, text));
+            let mut ex = execute(app, &st, &spec, opts.property.as_ref(), &probe);
+            if let Some((base, recipe)) = &fault {
+                lock(&state).faults.observe(crate::faults::injected(base, recipe, &ex.r));
+                let variant = metamorphic::Variant { change: metamorphic::Change::Fault, func: Some(recipe.func.clone()), call: Some(recipe.call), spec: spec.clone() };
+                ex.findings.extend(crate::faults::compare(app, base, recipe, &variant, &ex.r));
             }
+            let (r, keep, found) = lock(&state).admit(spec, stage, ex);
+            if keep && stage != Stage::Fault { lock(&state).faults.enqueue(app, r.clone()); }
             on_run(&r, keep, &found);
             if keep {
                 check(&r);
@@ -1171,12 +1235,14 @@ pub fn fuzz(
         features: fz.features.len(),
         stages: fz.stages,
         maxima,
-        findings: fz.new_findings,
+        findings: fz.observed.into_values().collect(),
         last_new_at_run: fz.last_new,
         jobs,
+        feedback:probe.finish(),
+        faults: fz.faults.coverage(),
     };
     let entries = fz.corpus.into_iter().map(Arc::unwrap_or_clone).collect();
-    Ok((report, Corpus { component: app.hash.clone(), entries }))
+    Ok((report, Corpus { component: app.state_key.clone(), entries }))
 }
 
 #[cfg(test)]

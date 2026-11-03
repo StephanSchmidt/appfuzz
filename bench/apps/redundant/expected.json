@@ -10,6 +10,7 @@
   "allow": [
     "n_plus_1",
     "over_budget",
+    "big_output",
     "serial_chain",
     "slow_host_sensitivity"
   ]

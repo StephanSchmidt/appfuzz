@@ -17,7 +17,7 @@ labels = "1"
 
 appfuzz refuses a manifest written for a vocabulary it doesn't know.
 Without `labels`, the current vocabulary applies. Without any labels,
-appfuzz still runs every phase 1 check (AGENTS.md §6).
+appfuzz still runs the generic behavioral checks (AGENTS.md §6).
 
 Labels sit under `[functions."<interface>#<function>"]`. The interface
 version may be left out. A function the app doesn't import is skipped, so a

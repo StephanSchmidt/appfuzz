@@ -119,6 +119,14 @@ pub fn values(
         let Some(t) = f.ty.results().next() else { continue };
         for (variant, opts) in variants(&t) {
             let mut spec = base.clone();
+            if let Some(q) = app.manifest.function(&f.key).and_then(|s| s.query.as_ref()) {
+                if matches!(variant, "empty list" | "long list") {
+                    spec.plan.0.entry("_defaults".into()).or_default().dataset_rows.insert(q.dataset.clone(), opts.list_len.unwrap());
+                    tries.push((f, variant, spec));
+                    continue;
+                }
+                if !matches!(variant, "err" | "none") { continue; }
+            }
             let fp = spec.plan.0.entry(f.key.clone()).or_default();
             *fp = FnPlan {
                 response: Response { generate: Some(opts), latency_ms: fp.response.latency_ms, ..Default::default() },

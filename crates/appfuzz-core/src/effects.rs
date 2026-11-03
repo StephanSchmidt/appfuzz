@@ -92,8 +92,9 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let status = crate::output::response(r, m).status;
     if r.outcome.kind == OutcomeKind::Ok && status.is_some_and(|s| s < 400) {
         let changes: Vec<&crate::record::HostCall> = r.events.iter().filter(|e| m.effect_of(&e.func).is_some_and(|x| x.changes())).collect();
-        if let Some(fail) = changes.iter().find(|e| is_err(e))
-            && let Some(done) = changes.iter().find(|e| e.n < fail.n && !is_err(e) && e.func != fail.func)
+        if let Some(fail) = changes.iter().find(|e| is_err(e)
+            && !changes.iter().any(|later| later.n > e.n && later.func == e.func && later.args == e.args && !is_err(later)))
+            && let Some(done) = changes.iter().find(|e| e.n < fail.n && !is_err(e) && (e.func != fail.func || e.args != fail.args))
         {
             out.push(Finding::new(
                 "partial_write",
@@ -170,6 +171,7 @@ mod tests {
     fn run(method: &str, events: Vec<HostCall>) -> RunRecord {
         let spec = RunSpec {
             component: String::new(),
+            contract: String::new(),
             export: "h".into(),
             args: vec![json!({"method": method, "path": "/"})],
             plan: Default::default(),

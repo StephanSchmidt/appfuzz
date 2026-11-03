@@ -11,6 +11,7 @@
     "n_plus_1",
     "redundant_calls",
     "over_budget",
+    "big_output",
     "serial_chain",
     "slow_host_sensitivity"
   ]

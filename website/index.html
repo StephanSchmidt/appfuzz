@@ -50,7 +50,9 @@
     <a class="logo" href="#"><span class="mark" aria-hidden="true"></span>appfuzz</a>
     <div class="links">
       <a href="#finds">What it finds</a>
+      <a href="#why-wasm">Why Wasm</a>
       <a href="#minute">Walkthrough</a>
+      <a href="#search">Search</a>
       <a href="#languages">Languages</a>
       <a href="#granted">Hostile code</a>
       <a href="#appos">AppOS</a>
@@ -183,16 +185,101 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
   <p class="aside">Tell it which call takes SQL or which field is an email address, and it also checks for SQL, shell and path injection, SSRF, open redirects, leaked secrets and personal data, writes on GET, the same write twice, other users' records on the page, scripts in a widget that must have none. <a href="https://github.com/StephanSchmidt/appfuzz/blob/main/LABELS.md">The label list</a>.</p>
 </section>
 
+<section id="why-wasm" class="frame sec">
+  <div class="sec-head">
+    <h2>A sandbox per request is how production runs already.</h2>
+    <p>WebAssembly isn't a lab experiment. The big edge and serverless platforms give every request, or every function, a sandbox of its own: it starts fast, can touch only what it's given, and is gone afterwards. Your platform can do the same with your apps.</p>
+  </div>
+  <div class="grid4">
+    <article>
+      <h3>Fastly Compute</h3>
+      <p class="mono">WebAssembly, one instance per request</p>
+      <p>Every request gets a fresh WebAssembly instance, started in microseconds and thrown away afterwards. It runs on Wasmtime, the same runtime appfuzz runs your app in.</p>
+    </article>
+    <article>
+      <h3>Cloudflare Workers</h3>
+      <p class="mono">V8 isolates, JavaScript and WebAssembly</p>
+      <p>Thousands of customers' code side by side in one process, each in an isolate that sees only its own memory. WebAssembly modules run in the same isolates.</p>
+    </article>
+    <article>
+      <h3>Bunny Edge Scripting</h3>
+      <p class="mono">Deno on V8, WebAssembly built in</p>
+      <p>Each script gets an isolated runtime with only the standard Web APIs. WebAssembly support is built in, so any app compiled to Wasm runs at the edge.</p>
+    </article>
+    <article>
+      <h3>AWS Lambda</h3>
+      <p class="mono">Firecracker microVMs</p>
+      <p>Each function runs in its own microVM that handles one request at a time. Not WebAssembly, but the same idea: isolation per tenant and request is the default, not a luxury.</p>
+    </article>
+  </div>
+  <p class="aside">Why this matters with agents: an app an agent wrote, or one a prompt injection talked into misbehaving, can only call what its WASM shell grants. No file system, no network, no other app's memory unless you gave it, and nothing left in memory for the next request. appfuzz checks what the app does with the grants it has.</p>
+</section>
+
+<section id="search" class="frame sec speed">
+  <p class="speed-pre">With a one second search budget</p>
+  <p class="speed-n"><span>6 / 6</span></p>
+  <p class="speed-u">controlled campaigns found the crash with internal feedback. Boundary feedback: 0 / 6.</p>
+  <p class="speed-cpu">Two synthetic components · three search seeds · one worker</p>
+  <div class="split speed-body">
+    <div>
+      <h2>Get past the first condition.</h2>
+      <p class="lead">Different inputs can make the same host calls and return the same page, right up to the one that crashes. Turn on <code>--internal-feedback</code> and appfuzz looks inside the compiled Wasm to guide the search.</p>
+      <p>It records control-flow hits and integer comparison operands in a temporary instrumented copy. Inputs that reach new paths or get closer to satisfying comparisons stay in the corpus. Observed values guide changes to request numbers and string bytes.</p>
+      <p>No source changes or special fuzzing build. Every candidate runs on the original component for bug reports and resource measurements.</p>
+      <p class="note">One fixture hides a crash behind computed numeric comparisons, another behind byte comparisons with no embedded keyword. Internal feedback found both across all three seeds, under a one second budget and a 1,000-evaluation budget, and every crash was confirmed on the original Wasm. A controlled mechanism test, not a general detection rate. <a href="https://github.com/StephanSchmidt/appfuzz/blob/main/crates/appfuzz-core/tests/feedback.rs">Reproduce the experiment</a>.</p>
+    </div>
+    <div class="term">
+      <div class="term-bar"><span>compare the search</span></div>
+<pre><code><span class="p">$</span> appfuzz -j 1 fuzz --fresh --time 10s
+<span class="p">$</span> appfuzz -j 1 fuzz --fresh --time 10s \
+    --internal-feedback</code></pre>
+      <p class="note">Internal feedback is off by default: it runs fewer requests a second, and on the 74 test apps it found nothing extra. Turn it on for parsers, checksums and computed checks. Reports show instrumented modules, skipped code and fallback reasons. Findings replay on the original Wasm.</p>
+    </div>
+  </div>
+</section>
+
+<section id="inputs" class="frame sec">
+  <div class="sec-head">
+    <h2>Find the bug behind a valid request.</h2>
+    <p>A parser that accepts the input. Two sizes that multiply. A backend that fails halfway through. appfuzz searches the conditions that get your app into trouble.</p>
+  </div>
+  <div class="grid4 search-methods">
+    <article>
+      <h3>Get past the parser.</h3>
+      <p class="mono">JSON and CSV, still valid</p>
+      <p>Change nested values and list sizes inside JSON, or change CSV cells and rows while keeping the header and column count. The payload stays valid, so the search reaches the code after the parser.</p>
+      <p>A valid order with quantity zero can reach a division that random text never gets near. Seed a valid payload in your request or host plan; appfuzz mutates both.</p>
+      <code class="chip">appfuzz review</code>
+    </article>
+    <article>
+      <h3>Find the costly combination.</h3>
+      <p class="mono">several input sizes, together</p>
+      <p>Sixteen customers for one day may be fine. One customer over sixteen days may be fine. Both together can mean 256 host calls. appfuzz varies request sizes and host lists together to find that product.</p>
+      <p>The search follows inputs that increase fuel, memory, host cost, latency or output size, measured against your platform's budgets.</p>
+      <code class="chip">appfuzz review</code>
+    </article>
+    <article>
+      <h3>Fail the seventh call.</h3>
+      <p class="mono">one failure, then an outage</p>
+      <p>The first save works. A later one fails. appfuzz walks reached calls and tries both a single failure and a continuing outage, including retries the successful request never made.</p>
+      <p>Find later-call crashes, swallowed errors, retry storms and partial writes. Run the sweep automatically in review, or target one successful run with <code>probe faults</code>.</p>
+      <code class="chip">appfuzz probe faults last</code>
+    </article>
+  </div>
+  <p class="aside">All three run automatically in <code>fuzz</code> and <code>review</code>. Findings use the original Wasm, with confirmation, shrinking and replay. Platform rules and value constraints stay authoritative; overridden fault injections are reported as blocked.</p>
+  <p class="aside">Search is bounded by its budget. Structured mutation needs a valid starting payload; a short campaign may not test every fault position. <a href="https://github.com/StephanSchmidt/appfuzz#structured-payload-search">Read the details</a>.</p>
+</section>
+
 <section id="minute" class="frame sec">
   <div class="sec-head">
     <h2>Your first four commands.</h2>
-    <p>Start with an app you've never read and end at the line you need to fix. The app here is <code>chatty</code>: it lists items, then fetches each one again. Every output is real, cut short.</p>
+    <p>Start with an app you've never read and end at the line you need to fix. The app here is <code>chatty</code>: it lists items, then fetches each one again. Every output is real, cut short. Yellow notes explain the important values.</p>
   </div>
   <div class="minute">
     <ol class="steps" role="tablist" aria-label="Walkthrough step" aria-orientation="vertical">
       <li><button role="tab" id="st-1" aria-controls="sp-1" aria-selected="true"><code>appfuzz inspect</code><span>What can this app touch? Its imports against what your platform grants, and risky code found without running it, like a database call inside a loop.</span></button></li>
       <li><button role="tab" id="st-2" aria-controls="sp-2" aria-selected="false" tabindex="-1"><code>appfuzz run</code><span>Does it work at all? One request against a fake backend: the page it returns and every call it makes. A quick check before the long search.</span></button></li>
-      <li><button role="tab" id="st-3" aria-controls="sp-3" aria-selected="false" tabindex="-1"><code>appfuzz review</code><span>The one for CI. 176,115 requests in 10 seconds with empty lists, huge lists, errors and odd text. Pass, warn or fail, and an exit code that fails the build.</span></button></li>
+      <li><button role="tab" id="st-3" aria-controls="sp-3" aria-selected="false" tabindex="-1"><code>appfuzz review</code><span>The one for CI. Search with empty lists, huge lists, errors and odd text, guided by internal execution and host behavior. Pass, warn, fail or incomplete, with an exit code for the build.</span></button></li>
       <li><button role="tab" id="st-4" aria-controls="sp-4" aria-selected="false" tabindex="-1"><code>appfuzz explain</code><span>What do I fix? The worst run next to all the others: 64 times the calls of a normal request, one lookup per item. That loop is the bug.</span></button></li>
     </ol>
 
@@ -200,10 +287,15 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
       <div class="term-bar"><span>~/bench/apps/chatty</span></div>
 <pre role="tabpanel" id="sp-1" aria-labelledby="st-1"><code><span class="p">$</span> appfuzz inspect
 {
-  <span class="k">"exports"</span>: [ "bench:web/handler#handle" ],
-  <span class="k">"imports"</span>: [ "bench:web/items@0.1.0", "wasi:cli", "wasi:io", … ],
+  <span class="k">"exports"</span>: [ <span class="json-note" role="note">The function appfuzz runs</span>
+    "bench:web/handler#handle"
+  ],
+  <span class="k">"imports"</span>: [ <span class="json-note" role="note">The app's host dependencies</span>
+    "bench:web/items@0.1.0", "wasi:cli", "wasi:io", …
+  ],
   <span class="k">"findings"</span>: [
-    { <span class="k">"severity"</span>: <span class="info">"info"</span>, <span class="k">"kind"</span>: <span class="s">"host_call_in_loop"</span>,
+    { <span class="k">"severity"</span>: <span class="info">"info"</span>, <span class="json-note" role="note">A clue to investigate</span>
+      <span class="k">"kind"</span>: <span class="s">"host_call_in_loop"</span>,
       <span class="k">"title"</span>: "handle calls bench:web/items#get inside a loop
                (static; check with `scale`)" }
   ],
@@ -212,22 +304,25 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 <pre role="tabpanel" id="sp-2" aria-labelledby="st-2" hidden><code><span class="p">$</span> appfuzz run
 {
   <span class="k">"run"</span>: "rd6d5fddc2a",
-  <span class="k">"outcome"</span>: <span class="ok">"ok"</span>,
+  <span class="k">"outcome"</span>: <span class="ok">"ok"</span>, <span class="json-note" role="note">Finished without a crash</span>
   <span class="k">"result"</span>: { <span class="k">"status"</span>: 200, <span class="k">"body"</span>: "&lt;ul&gt;&lt;li&gt;alpha grove&lt;/li&gt;&lt;/ul&gt;" },
   <span class="k">"totals"</span>: {
-    <span class="k">"host_calls"</span>: 2,
-    <span class="k">"cost"</span>: 2,
-    <span class="k">"fuel"</span>: 10477,
-    <span class="k">"virtual_ms"</span>: 2.01
+    <span class="k">"host_calls"</span>: 2, <span class="json-note" role="note">Calls to the backend</span>
+    <span class="k">"cost"</span>: 2, <span class="json-note" role="note">Host cost against your budget</span>
+    <span class="k">"fuel"</span>: 10477, <span class="json-note" role="note">CPU work, in Wasm fuel</span>
+    <span class="k">"virtual_ms"</span>: 2.01 <span class="json-note" role="note">Simulated request time</span>
   },
   <span class="k">"next"</span>: [ "appfuzz explain rd6d5fddc2a", "appfuzz probe pairs rd6d5fddc2a" ]
 }</code></pre>
 <pre role="tabpanel" id="sp-3" aria-labelledby="st-3" hidden><code><span class="p">$</span> appfuzz review --time 10s
 {
-  <span class="k">"verdict"</span>: <span class="fail">"fail"</span>,
-  <span class="k">"exit_code"</span>: 2,
-  <span class="k">"counts"</span>: { <span class="k">"fail"</span>: 2, <span class="k">"warn"</span>: 3, <span class="k">"info"</span>: 1, <span class="k">"confirmed"</span>: 5 },
-  <span class="k">"coverage"</span>: { <span class="k">"fuzz_runs"</span>: 176115, <span class="k">"unreached_call_sites"</span>: 0 },
+  <span class="k">"verdict"</span>: <span class="fail">"fail"</span>, <span class="json-note" role="note">A failure was found</span>
+  <span class="k">"exit_code"</span>: 2, <span class="json-note" role="note">Fails the CI build</span>
+  <span class="k">"counts"</span>: {
+    <span class="k">"fail"</span>: 2, <span class="k">"warn"</span>: 3, <span class="k">"info"</span>: 1,
+    <span class="k">"confirmed"</span>: 5 <span class="json-note" role="note">Five reproducible cases</span>
+  },
+  <span class="k">"coverage"</span>: { <span class="k">"kind"</span>: "internal_and_boundary_features", <span class="k">"unreached_call_sites"</span>: 0 },
   <span class="k">"findings"</span>: [
     { <span class="k">"id"</span>: "f62ff690b", <span class="k">"severity"</span>: <span class="fail">"fail"</span>, <span class="k">"kind"</span>: <span class="s">"n_plus_1"</span>,
       <span class="k">"title"</span>: "calls to items#get grow as 1·n with n = length of
@@ -244,9 +339,12 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 <pre role="tabpanel" id="sp-4" aria-labelledby="st-4" hidden><code><span class="p">$</span> appfuzz explain rff6825faed
 {
   <span class="k">"status"</span>: 200,
-  <span class="k">"calls"</span>: { <span class="k">"bench:web/items#all"</span>: 1, <span class="k">"bench:web/items#get"</span>: 128 },
+  <span class="k">"calls"</span>: {
+    <span class="k">"bench:web/items#all"</span>: 1,
+    <span class="k">"bench:web/items#get"</span>: 128 <span class="json-note" role="note">One extra lookup per item</span>
+  },
   <span class="k">"vs_stored_runs"</span>: {
-    <span class="k">"runs"</span>: 1863,
+    <span class="k">"runs"</span>: 1863, <span class="json-note" role="note">Compared with stored runs</span>
     <span class="k">"unusual"</span>: [
       "host_calls is 64.5× the median",
       "virtual_ms is 64.34× the median",
@@ -283,7 +381,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
         out += &amp;format!(<span class="str">"&lt;li&gt;{}&lt;/li&gt;"</span>, esc(&amp;full.owner));
     }
 }</code></pre>
-        <p class="facts"><b>65 KB</b> component. cargo, wasm32-wasip2. Up to 26,500 runs a second on 24 threads.</p>
+        <p class="facts"><b>65 KB</b> component. cargo, wasm32-wasip2. Fuel, memory, calls and latency measured on the original component.</p>
       </div>
       <div role="tabpanel" id="panel-zig" aria-labelledby="tab-zig" hidden>
 <pre class="code"><code><span class="kw">for</span> (items) |it| {
@@ -295,7 +393,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
     <span class="kw">try</span> esc(&amp;out, gpa, slice(full.owner));
     <span class="kw">try</span> out.appendSlice(gpa, <span class="str">"&lt;/li&gt;"</span>);
 }</code></pre>
-        <p class="facts"><b>114 KB</b> component. zig, wit-bindgen c, the WASI adapter. Up to 9,800 runs a second. Also found: libc imports file system access the app never uses.</p>
+        <p class="facts"><b>114 KB</b> component. zig, wit-bindgen c, the WASI adapter. Also found: libc imports file system access the app never uses.</p>
       </div>
     </div>
     <div class="lang-out">
@@ -388,7 +486,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 
 <section id="granted" class="frame sec">
   <div class="sec-head">
-    <h2>What if the app is up to something?</h2>
+    <h2>Experimental: what if the app is up to something?</h2>
     <p>The sandbox decides what an app can call, not why. An app written by an agent can use a granted fetch to report every page view to a server of its own, send your API key out in base64, leave a note telling your reviewing agent to look away, or wait for a day no test simulates. appfuzz tells you where granted calls go, what they carry, and which calls never ran.</p>
   </div>
   <div class="ex-list">
@@ -431,21 +529,21 @@ http::fetch(&amp;format!(
       <p class="verdict"><b>fail</b> <span class="kind">outside_envelope</span> handle calls http#fetch with drop.example.org:443, a destination of its own that no reviewed run named</p>
     </div>
   </div>
-  <p class="aside">The date is hashed, so it isn't in the binary and no review run reaches it. The review still points you at the call. And <code>appfuzz envelope</code> writes down what the reviewed app did: hosts, call sites, peak cost. Your platform can check every request against it and refuse a call outside it.</p>
+  <p class="aside">The date is hashed, so it isn't in the binary and no review run reaches it. The review still points you at the call. The experimental <code>appfuzz envelope --review &lt;id&gt;</code> uses an explicitly accepted review session. A warning review requires <code>--allow-warnings</code>. It records hosts, call sites, peak cost. Your platform can check every request against it and refuse a call outside it.</p>
   <p class="aside">It also flags scans of internal ports, cloud metadata addresses, other apps' routes, random-looking blobs in outgoing mail, invisible Unicode.</p>
 </section>
 
 <section id="appos" class="frame sec split">
   <div>
     <h2>If you run a platform like AppOS.</h2>
-    <p class="lead">AppOS lets marketing ship to production the way apps ship to your phone. Engineering owns the shell. Each app runs in a WebAssembly sandbox and does only what its manifest grants. appfuzz is the automatic app review: every app is checked before it runs, pass or fail, and nobody waits for a human reviewer.</p>
+    <p class="lead">AppOS lets marketing ship to production the way apps ship to your phone. Engineering owns the shell. Each app runs in a WebAssembly sandbox and does only what its manifest grants. appfuzz is the automatic app review: every app is checked before deployment; incomplete reviews cannot pass, and nobody waits for a human reviewer.</p>
     <p class="more"><a href="appos/">The AppOS architecture slides</a></p>
   </div>
   <dl class="facts-list">
     <div><dt>Manifest</dt><dd>Marketing and engineering agree on what an app may call. appfuzz reads the same grants and tells you about any import outside them.</dd></div>
     <div><dt>App review</dt><dd>Before deploy, appfuzz fuzzes the app against simulated host functions: crashes, n+1 queries, injections, leaks.</dd></div>
-    <div><dt>Sandbox</dt><dd>In production every request has a budget for I/O, time, CPU and memory, and an envelope: the hosts and calls the review saw. appfuzz measures the app against the budgets first and writes the envelope.</dd></div>
-    <div><dt>Code review</dt><dd>Your engineers review the manifest, a few lines. appfuzz reviews the code.</dd></div>
+    <div><dt>Sandbox</dt><dd>Engineering sets production budgets for I/O, time, CPU and memory. appfuzz tests those limits. Experimental envelopes can additionally constrain behavior observed in an accepted review.</dd></div>
+    <div><dt>Code review</dt><dd>Marketing checks that the feature does what it intended. Engineering owns the platform contract. appfuzz automates routine implementation review against that contract.</dd></div>
   </dl>
 </section>
 
@@ -457,8 +555,8 @@ http::fetch(&amp;format!(
   <dl class="facts-list">
     <div><dt>Prove an app is harmless</dt><dd>It finds the usual tricks: servers of the app's own, data in disguise, notes to the reviewer, code waiting for a trigger. A careful author can hide better. The envelope catches some of that in production.</dd></div>
     <div><dt>Know your business rules</dt><dd>It can't tell that <code>create</code> writes or that a field is an email address. Labels in the manifest tell it: SQL, secrets, personal data, writes, who owns a record.</dd></div>
-    <div><dt>Test sequences of requests</dt><dd>Each run is one request. Double submits are out of reach for now.</dd></div>
-    <div><dt>See inside interpreters</dt><dd>TypeScript and Python apps are measured just as well from outside, but the search is less guided and runs are slower.</dd></div>
+    <div><dt>Simulate concurrent requests</dt><dd>Configured request sequences share modeled backend state and can expose double submits. They run sequentially; live services and concurrent execution remain outside the model.</dd></div>
+    <div><dt>Measure every branch</dt><dd>Internal feedback is bounded and instruments directly instantiated core modules. Nested components and GC type groups can remain opaque. Reports identify skipped modules. For interpreted apps, signals describe the interpreter and may be less useful.</dd></div>
   </dl>
 </section>
 

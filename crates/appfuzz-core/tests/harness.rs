@@ -122,3 +122,18 @@ fn statics_find_the_loop() {
         .collect();
     assert_eq!(looping.len(), 1);
 }
+
+#[test]
+fn binary_feedback_preserves_execution_and_reports_internal_paths() {
+    let app=app();
+    let guide=appfuzz_core::feedback::Guide::new(&app).unwrap();
+    let export=app.export("run").unwrap();
+    let a=app.spec(export,vec![json!(0)],Plan::default(),1);
+    let b=app.spec(export,vec![json!(7)],Plan::default(),1);
+    let fa=guide.collect(&a).unwrap();
+    let fb=guide.collect(&b).unwrap();
+    assert!(!fa.hits.is_empty());
+    assert_ne!(fa.hits,fb.hits);
+    assert!(!fb.comparisons.is_empty());
+    assert_eq!(app.run(&b).spec,b);
+}

@@ -1,4 +1,4 @@
-//! The runtime envelope: what the reviewed app was seen to do, written
+//! Experimental runtime envelope: what the reviewed app was seen to do, written
 //! down so a platform can hold it to that in production.
 //!
 //! A review only sees the runs it made. A time bomb, a trigger on a rare
@@ -22,7 +22,7 @@ use crate::detect::{Finding, Severity};
 use crate::manifest::Manifest;
 use crate::record::{Frame, HostCall, Outcome, OutcomeKind, RunRecord, RunSpec, Totals};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// How far above the most seen a count or budget may go before it counts.
 pub const MARGIN: f64 = 2.0;
 /// Guest frames that make up a call site.
@@ -33,6 +33,9 @@ pub struct Envelope {
     pub version: u32,
     /// blake3 of the component the runs were made with.
     pub component: String,
+    pub contract: String,
+    pub review: String,
+    pub acceptance: String,
     pub runs: usize,
     pub margin: f64,
     pub functions: BTreeMap<String, FnEnvelope>,
@@ -76,11 +79,14 @@ pub struct Budget {
     pub host_calls: u32,
 }
 
-/// One request as a platform saw it. Every field may be left out; a
-/// stored run (`RunRecord`) reads as a trace too.
+/// One request as a platform saw it. The CLI validates complete identity,
+/// events, totals and output before checking. Library callers must do likewise.
+/// A stored run (`RunRecord`) reads as a trace too.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Trace {
+    pub component: String,
+    pub contract: String,
     pub export: String,
     /// The export's arguments (the request), WIT-shaped JSON.
     pub args: Vec<Value>,
@@ -113,7 +119,8 @@ impl Trace {
         RunRecord {
             id: "trace".into(),
             spec: RunSpec {
-                component: String::new(),
+                component: spec.and_then(|s| s["component"].as_str()).unwrap_or(&self.component).to_string(),
+                contract: spec.and_then(|s| s["contract"].as_str()).unwrap_or(&self.contract).to_string(),
                 export,
                 args,
                 plan: Default::default(),
@@ -212,6 +219,7 @@ impl Envelope {
     pub fn build(runs: &[RunRecord], m: &Manifest) -> Self {
         let mut e = Envelope { version: VERSION, margin: MARGIN, runs: runs.len(), ..Default::default() };
         e.component = runs.first().map(|r| r.spec.component.clone()).unwrap_or_default();
+        e.contract = m.fingerprint();
         for r in runs {
             for (f, n) in r.call_counts() {
                 let x = e.functions.entry(f.clone()).or_default();
@@ -342,6 +350,11 @@ impl Envelope {
     /// Every check on one trace, as `outside_envelope` findings.
     pub fn check(&self, r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         let mut v = Vec::new();
+        if self.version != VERSION || self.component.is_empty() || r.spec.component != self.component || r.spec.contract != self.contract || self.contract != m.fingerprint() {
+            return vec![Finding::new("outside_envelope", "identity", Severity::Fail,
+                "trace, envelope and platform contract must identify the same build and configuration".into(),
+                json!({"what": "identity"}), Some(&r.id))];
+        }
         for i in 0..r.events.len() {
             v.extend(self.check_call(r, i, m));
         }
@@ -389,8 +402,14 @@ impl Violation {
 mod tests {
     use super::*;
 
+    fn manifest() -> Manifest {
+        toml::from_str("[app]\nwasm = \"x.wasm\"\n[functions.\"a/http#fetch\"]\nparams = { url = \"url\" }\n").unwrap()
+    }
+
     fn trace(calls: &[(&str, &str)]) -> RunRecord {
         Trace {
+            component: "fixture".into(),
+            contract: manifest().fingerprint(),
             export: "x#handle".into(),
             events: calls
                 .iter()
@@ -408,7 +427,7 @@ mod tests {
 
     #[test]
     fn holds_traces_to_the_envelope() {
-        let m: Manifest = toml::from_str("[app]\nwasm = \"x.wasm\"\n[functions.\"a/http#fetch\"]\nparams = { url = \"url\" }\n").unwrap();
+        let m = manifest();
         let reviewed = trace(&[("a/http#fetch", "https://api.example.com/v1")]);
         let e = Envelope::build(std::slice::from_ref(&reviewed), &m);
         assert_eq!(e.functions["a/http#fetch"].destinations, BTreeSet::from(["api.example.com:443".to_string()]));

@@ -2,5 +2,7 @@
   "app": "sql-params",
   "bug": "passes ?q as a query parameter, not in the SQL text",
   "expect": [],
-  "allow": []
+  "allow": [
+    "over_budget"
+  ]
 }

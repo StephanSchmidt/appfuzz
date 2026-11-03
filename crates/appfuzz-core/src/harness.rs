@@ -46,6 +46,9 @@ struct Platform {
     constraints: BTreeMap<String, Vec<(String, crate::constraints::Constraint)>>,
     /// The manifest's rules: what the host always answers for some arguments.
     rules: BTreeMap<String, Vec<crate::plan::Rule>>,
+    queries: BTreeMap<String, crate::dataset::Query>,
+    mutations: BTreeMap<String, crate::dataset::Mutation>,
+    datasets: BTreeMap<String, crate::dataset::Dataset>,
 }
 
 pub struct App {
@@ -53,12 +56,15 @@ pub struct App {
     pub component: Component,
     pub bytes: Vec<u8>,
     pub hash: String,
+    pub contract: String,
+    pub state_key: String,
     pub manifest: Manifest,
     pub imports: Vec<Interface>,
     pub exports: Vec<FuncInfo>,
     pre: InstancePre<Host>,
     platform: Arc<Platform>,
     ticker_stop: Arc<AtomicBool>,
+    feedback_readers: Vec<String>,
 }
 
 // Runs share an `App` across threads; each run has its own store.
@@ -81,6 +87,7 @@ struct Host {
     /// imports and exports on every frame of every call is slow).
     modules: Vec<(wasmtime::Module, String)>,
     plan: Arc<Plan>,
+    world: Arc<Mutex<crate::dataset::State>>,
     seed: u64,
     /// The caller's id for generated `identity` and `owner` values.
     identity: String,
@@ -196,9 +203,19 @@ impl App {
         Self::load(Manifest::for_wasm(wasm))
     }
 
-    pub fn from_bytes(mut manifest: Manifest, bytes: Vec<u8>) -> Result<Self> {
-        manifest.binary = crate::manifest::Binary::of(&bytes);
+    pub fn from_bytes(manifest: Manifest, bytes: Vec<u8>) -> Result<Self> {
         let engine = pooled_engine(manifest.limits.memory.saturating_mul(4))?;
+        Self::from_bytes_engine(manifest, bytes, engine)
+    }
+
+    pub(crate) fn from_feedback(manifest: Manifest, bytes: Vec<u8>, readers: Vec<String>) -> Result<Self> {
+        let mut app=Self::from_bytes_engine(manifest,bytes,engine()?)?;
+        app.feedback_readers=readers;
+        Ok(app)
+    }
+
+    fn from_bytes_engine(mut manifest: Manifest, bytes: Vec<u8>, engine: Engine) -> Result<Self> {
+        manifest.binary = crate::manifest::Binary::of(&bytes);
         let component = Component::new(&engine, &bytes).map_err(anyhow::Error::from).context("not a WebAssembly component (appfuzz runs components only)")?;
         let hash = component_hash(&bytes);
         let imports = wit::imports(&engine, &component);
@@ -212,14 +229,66 @@ impl App {
             marks: BTreeMap::new(),
             constraints: BTreeMap::new(),
             rules: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            mutations: BTreeMap::new(),
+            datasets: manifest.datasets.clone(),
         };
         crate::labels::check_wit(&manifest, &imports)?;
+        crate::dataset::validate(&manifest.datasets)?;
+        if let Some(suite)=&manifest.acceptance {suite.validate(&manifest)?;}
+        for spec in manifest.functions.values() {
+            if spec.query.is_some() && spec.mutation.is_some() { bail!("a host function cannot have both query and mutation bindings"); }
+            if let Some(m) = &spec.mutation {
+                m.validate(&manifest.datasets)?;
+                let expected = match m.operation { crate::dataset::Operation::Delete => crate::manifest::Effect::Delete, _ => crate::manifest::Effect::Write };
+                if spec.effect != Some(expected) { bail!("mutation binding requires effect = {}", expected.name()); }
+            }
+            if let Some(q) = &spec.query { q.validate(&manifest.datasets)?; }
+        }
         for iface in imports.iter().filter(|i| i.kind == ImportKind::Platform) {
             for f in &iface.funcs {
                 platform.granted.insert(f.key.clone(), iface.name.is_empty() || manifest.grants_import(&iface.name));
                 platform.cost.insert(f.key.clone(), manifest.cost_of(&f.key));
                 platform.latency_ms.insert(f.key.clone(), manifest.latency_ms_of(&f.key));
                 platform.funcs.insert(f.key.clone(), f.clone());
+                if let Some(m) = manifest.function(&f.key).and_then(|s| s.mutation.as_ref()) {
+                    let names = f.param_names();
+                    if m.fields.values().chain(m.filter.values()).any(|p| !names.iter().any(|n| n == p.split('.').next().unwrap_or(""))) {
+                        bail!("{}: mutation names an unknown parameter", f.key);
+                    }
+                    let results: Vec<_> = f.ty.results().collect();
+                    if results.len() != 1 { bail!("{}: mutation requires one WIT result", f.key); }
+                    json_to_val(&m.response, &results[0]).context("mutation success response does not match WIT")?;
+                    json_to_val(&m.reject, &results[0]).context("mutation rejection response does not match WIT")?;
+                    platform.mutations.insert(f.key.clone(), m.clone());
+                }
+                if let Some(q) = manifest.function(&f.key).and_then(|s| s.query.as_ref()) {
+                    let names = f.param_names();
+                    if q.filter.values().any(|p| !names.contains(p)) { bail!("{}: dataset filter names an unknown parameter", f.key); }
+                    let types: Vec<_> = f.ty.results().collect();
+                    if types.len() != 1 { bail!("{}: dataset query requires one WIT result", f.key); }
+                    let sizes = manifest.datasets.keys().map(|k| (k.clone(), 1)).collect();
+                    let world = crate::dataset::build(&manifest.datasets, &sizes, 0)?;
+                    let mut sample_query = q.clone();
+                    sample_query.filter.clear();
+                    let check = |w: &crate::dataset::World| -> Result<()> {
+                        let value = sample_query.resolve(w, &[])?;
+                        json_to_val(&value, &types[0]).with_context(|| format!("{}: dataset response does not match WIT", f.key))?;
+                        Ok(())
+                    };
+                    check(&world)?;
+                    for (field, values) in &manifest.datasets[&q.dataset].choices {
+                        for value in values {
+                            let mut variant = world.clone();
+                            variant.get_mut(&q.dataset).expect("validated")[0][field] = value.clone();
+                            check(&variant)?;
+                        }
+                    }
+                    let mut empty = world;
+                    empty.get_mut(&q.dataset).expect("validated").clear();
+                    check(&empty)?;
+                    platform.queries.insert(f.key.clone(), q.clone());
+                }
                 let marks: Vec<_> = manifest
                     .result_labels(&f.key)
                     .into_iter()
@@ -302,7 +371,9 @@ impl App {
             });
         }
 
-        Ok(App { engine, component, bytes, hash, manifest, imports, exports, pre, platform: Arc::new(platform), ticker_stop })
+        let contract = manifest.fingerprint();
+        let state_key = manifest.state_key(&hash);
+        Ok(App { contract, state_key, engine, component, bytes, hash, manifest, imports, exports, pre, platform: Arc::new(platform), ticker_stop, feedback_readers:vec![] })
     }
 
     pub fn export(&self, name: &str) -> Result<&FuncInfo> {
@@ -333,6 +404,7 @@ impl App {
     pub fn spec(&self, export: &FuncInfo, args: Vec<Value>, plan: Plan, seed: u64) -> RunSpec {
         RunSpec {
             component: self.hash.clone(),
+            contract: self.contract.clone(),
             export: export.key.clone(),
             args,
             plan,
@@ -363,9 +435,35 @@ impl App {
         Ok(args)
     }
 
-    pub fn run(&self, spec: &RunSpec) -> RunRecord {
+    pub fn initial_state(&self, plan: &Plan, seed: u64) -> Result<crate::dataset::State> {
+        let defaults = plan.0.get("_defaults");
+        Ok(crate::dataset::State::new(crate::dataset::build(&self.manifest.datasets,
+            &defaults.map(|p| p.dataset_rows.clone()).unwrap_or_default(), defaults.and_then(|p| p.dataset_seed).unwrap_or(seed))?))
+    }
+
+    pub fn run(&self, spec: &RunSpec) -> RunRecord { self.run_shared(spec, None) }
+
+    /// Sequence records include the starting state in their identity. They are
+    /// replayed as a sequence, never through the stateless run cache.
+    pub fn run_in_state(&self, spec: &RunSpec, state: Arc<Mutex<crate::dataset::State>>) -> RunRecord {
+        self.run_shared(spec, Some(state))
+    }
+
+    fn run_shared(&self, spec: &RunSpec, state: Option<Arc<Mutex<crate::dataset::State>>>) -> RunRecord { self.run_captured(spec,state).0 }
+
+    pub(crate) fn feedback(&self,spec:&RunSpec)->Result<crate::feedback::Feedback> {
+        let (record,feedback)=self.run_captured(spec,None);
+        if matches!(record.outcome.kind,OutcomeKind::Error|OutcomeKind::PlanError) {bail!("{}",record.outcome.message.unwrap_or_else(||"feedback run could not execute".into()));}
+        Ok(feedback)
+    }
+
+    fn run_captured(&self, spec: &RunSpec, state: Option<Arc<Mutex<crate::dataset::State>>>) -> (RunRecord,crate::feedback::Feedback) {
         let started = Instant::now();
-        let id = spec.id();
+        let id = if let Some(s) = &state {
+            let mut bytes = serde_json::to_vec(&*s.lock().unwrap_or_else(|e| e.into_inner())).expect("state serializes");
+            bytes.extend_from_slice(spec.id().as_bytes());
+            format!("s{}", &blake3::hash(&bytes).to_hex()[..16])
+        } else { spec.id() };
         let mut record = RunRecord {
             id,
             spec: spec.clone(),
@@ -376,16 +474,20 @@ impl App {
             stdout: String::new(),
             stderr: String::new(),
         };
-        if let Err(e) = self.run_inner(spec, &mut record) {
+        let mut feedback=crate::feedback::Feedback::default();
+        if let Err(e) = self.run_inner(spec, &mut record, state, &mut feedback) {
             record.outcome = Outcome { kind: OutcomeKind::Error, message: Some(format!("{e:#}")), stack: vec![] };
         }
         record.totals.wall_us = started.elapsed().as_micros() as u64;
-        record
+        (record,feedback)
     }
 
-    fn run_inner(&self, spec: &RunSpec, record: &mut RunRecord) -> Result<()> {
+    fn run_inner(&self, spec: &RunSpec, record: &mut RunRecord, state: Option<Arc<Mutex<crate::dataset::State>>>, feedback:&mut crate::feedback::Feedback) -> Result<()> {
         if spec.component != self.hash {
             bail!("spec is for component {}, this is {}", spec.component, self.hash);
+        }
+        if spec.contract != self.contract {
+            bail!("saved run uses a different platform contract or engine; use replay --against-current for a regression check");
         }
         let export = self.export(&spec.export)?.clone();
         let params: Vec<_> = export.ty.params().collect();
@@ -419,6 +521,7 @@ impl App {
             platform: self.platform.clone(),
             modules: Vec::new(),
             plan: Arc::new(spec.plan.clone()),
+            world: match state { Some(s) => s, None => Arc::new(Mutex::new(self.initial_state(&spec.plan, spec.seed)?)) },
             seed: spec.seed,
             identity: crate::identity::caller(spec, &self.manifest),
             clock: clock.clone(),
@@ -477,6 +580,15 @@ impl App {
             wall_us: 0,
         };
         record.events = std::mem::take(&mut data.events);
+        if !self.feedback_readers.is_empty() {
+            store.set_fuel(10_000_000)?;
+            store.set_epoch_deadline(100);
+            for (module,name) in self.feedback_readers.iter().enumerate() {
+                let read=instance.get_typed_func::<(),(Vec<u8>,)>(&mut store,name)?;
+                let (bytes,)=read.call(&mut store,())?;
+                feedback.decode(&bytes,module as u32)?;
+            }
+        }
         drop(store);
         record.stdout = String::from_utf8_lossy(&stdout.contents()).into_owned();
         record.stderr = String::from_utf8_lossy(&stderr.contents()).into_owned();
@@ -536,10 +648,39 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     let args: Vec<(String, Value)> = names.iter().cloned().zip(params.iter().map(val_to_json)).collect();
     // The platform's rules come first: the host keeps its promises, whatever
     // the plan or the fuzzer says.
-    let resolved = match platform.rules.get(key) {
+    let mut resolved = match platform.rules.get(key) {
         Some(rules) => crate::plan::resolve_rules(rules, &args, None).unwrap_or_else(|| data.plan.resolve(key, call, &args)),
         None => data.plan.resolve(key, call, &args),
     };
+    let commit_trap = match &resolved.decision { Decision::CommitThenTrap(msg) => Some(msg.clone()), _ => None };
+    if commit_trap.is_some() && (!platform.mutations.contains_key(key) || resolved.source.starts_with("manifest rule")) {
+        data.plan_error = Some("commit_then_trap requires a modeled mutation in a host plan".into());
+        bail!("commit_then_trap requires a modeled mutation in a host plan");
+    }
+    // Dataset bindings are platform guarantees. Raw success mutations cannot
+    // contradict the shared world. Explicit service failures remain injectable.
+    let failure = match &resolved.decision {
+        Decision::CommitThenTrap(_) => false,
+        Decision::Trap(_) => true,
+        Decision::Return(v) => v.get("err").is_some() || v.is_null(),
+        Decision::Generate(o) => o.results.as_deref() == Some("err") || o.options.as_deref() == Some("none"),
+    };
+    if !resolved.source.starts_with("manifest rule") && !failure
+        && let Some(query) = platform.queries.get(key)
+    {
+        resolved.decision = Decision::Return(query.resolve(&data.world.lock().unwrap_or_else(|e| e.into_inner()).tables, &args)?);
+        resolved.source = format!("dataset {}", query.dataset);
+    }
+    let mut pending_state = None;
+    if !resolved.source.starts_with("manifest rule") && !failure
+        && let Some(mutation) = platform.mutations.get(key)
+    {
+        let current = data.world.lock().unwrap_or_else(|e| e.into_inner());
+        let (next, response) = mutation.prepare(&platform.datasets, &current, &args)?;
+        pending_state = Some(next);
+        resolved.decision = Decision::Return(response);
+        resolved.source = format!("dataset mutation {}", mutation.dataset);
+    }
     let latency_ms = resolved.latency_ms.unwrap_or_else(|| platform.latency_ms.get(key).copied().unwrap_or(1.0));
     let latency_ns = (latency_ms * 1_000_000.0) as u64;
     let cost = resolved.cost.unwrap_or_else(|| platform.cost.get(key).copied().unwrap_or(1));
@@ -567,6 +708,7 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
 
     let result_types: Vec<_> = ty.results().collect();
     let outcome: Result<()> = match resolved.decision {
+        Decision::CommitThenTrap(_) => unreachable!("resolved modeled mutation"),
         Decision::Trap(msg) => {
             event.trap = Some(msg.clone());
             data.host_trap = Some(msg.clone());
@@ -575,7 +717,14 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
         Decision::Return(mut v) => {
             // The host keeps its promises, whatever the plan says.
             if let (Some(c), 1) = (platform.constraints.get(key), result_types.len()) {
-                crate::constraints::conform_at(&mut v, c, data.seed);
+                if resolved.source.starts_with("dataset ") {
+                    let mut conformed = v.clone();
+                    crate::constraints::conform_at(&mut conformed, c, data.seed);
+                    if conformed != v {
+                        data.plan_error = Some(format!("dataset response for {key} contradicts value constraints"));
+                        bail!("dataset response contradicts value constraints");
+                    }
+                } else { crate::constraints::conform_at(&mut v, c, data.seed); }
             }
             let vals: Result<Vec<Val>> = match result_types.len() {
                 0 => Ok(vec![]),
@@ -589,6 +738,15 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
             };
             match vals {
                 Ok(vals) => {
+                    if let Some(next) = pending_state {
+                        *data.world.lock().unwrap_or_else(|e| e.into_inner()) = next;
+                    }
+                    if let Some(msg) = commit_trap {
+                        event.trap = Some(msg.clone());
+                        data.host_trap = Some(msg.clone());
+                        data.events.push(event);
+                        bail!("host response lost after commit: {msg}");
+                    }
                     event.result = Some(compact(v));
                     for (r, v) in results.iter_mut().zip(vals) {
                         *r = v;
@@ -776,6 +934,7 @@ pub fn set_clock_fields(request: &mut Value, fields: &BTreeMap<String, String>, 
 }
 
 pub fn field_mut<'a>(v: &'a mut Value, path: &str) -> Option<&'a mut Value> {
+    if path.is_empty() { return Some(v); }
     let mut cur = v;
     for seg in path.split('.') {
         cur = match cur {
@@ -791,6 +950,7 @@ pub fn field_mut<'a>(v: &'a mut Value, path: &str) -> Option<&'a mut Value> {
 }
 
 pub fn field<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
+    if path.is_empty() { return Some(v); }
     let mut cur = v;
     for seg in path.split('.') {
         cur = match cur {

@@ -26,8 +26,10 @@ rayon = "1.12"
 url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+csv = "1.4"
 toml = "0.8"
 wasmparser = "0.262"
+wasm-encoder = { version = "0.262", features = ["wasmparser"] }
 wasmtime = { version = "50.0.0", features = ["anyhow"] }
 wasmtime-wasi = "50.0.0"
 wit-component = "0.262"

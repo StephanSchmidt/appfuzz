@@ -1,0 +1,12 @@
+[app]
+wasm = "../../target/wasm32-wasip2/release/csv_payload.wasm"
+name = "csv-payload"
+[entry]
+export = "bench:web/handler#handle"
+request = { method = "GET", path = "/", query = [["payload", "item,quantity\nA,12\nB,5\n"]], form = [], today = "", now = "" }
+output = { status = "status", body = "body", headers = "headers", body_format = "html" }
+[limits]
+fuel = 200000000
+memory = "64MiB"
+cost_per_request = 100
+max_latency_ms = 10000

@@ -1,0 +1,13 @@
+{
+  "app": "csv-payload",
+  "bug": "valid payload reaches division by zero",
+  "expect": [
+    {
+      "kind": "crash",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "crash_on_host_value"
+  ]
+}

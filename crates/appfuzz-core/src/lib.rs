@@ -31,3 +31,14 @@ pub mod store;
 pub mod value;
 pub mod wasi;
 pub mod wit;
+
+pub mod dataset;
+
+pub mod sequence;
+
+pub mod acceptance;
+
+pub mod feedback;
+pub mod faults;
+
+mod structured;

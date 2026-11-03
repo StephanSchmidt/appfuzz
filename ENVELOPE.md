@@ -1,4 +1,4 @@
-# The runtime envelope, version 1
+# Experimental runtime envelope, version 2
 
 A review only sees the runs it made. Code that waits for a date, a rare
 value or a flag the author flips later does something no review run did.
@@ -7,17 +7,30 @@ platform can hold it to that in production.
 
 ```sh
 appfuzz review --time 2m          # make the runs
-appfuzz envelope                  # envelope.json from every stored run
+appfuzz envelope --review <id>    # envelope.json from that accepted session
 appfuzz envelope check <trace>    # a production trace against it
 ```
 
 `envelope check` prints `outside_envelope` findings and a verdict. The exit
-code is 0 for pass, 1 for warn and 2 for fail, as with `review`.
+code is 0 for pass, 1 for warn, 2 for fail, and 3 for incomplete evidence or
+configuration errors. This feature is experimental.
+
+Creation requires a complete passing review of the current component and
+platform contract. `--allow-warnings` explicitly changes the acceptance policy
+to pass-or-warn; failed and incomplete reviews are always rejected. `--review`
+defaults to the latest review. Exploratory runs after a review do not widen its
+envelope. The artifact records its review id, contract fingerprint, component
+hash and acceptance policy. Rebuild it after changing the app or contract.
+
+Observed behavior is not automatically approved behavior: acceptance is based
+on the selected review's verdict and the platform's explicit warning policy.
+The platform must still enforce its manifest's hard limits and permissions;
+the envelope's relative thresholds never replace those controls.
 
 ## What it records
 
-From every stored run of the component (`runs`), keyed by its hash
-(`component`):
+From the runs recorded in the selected accepted review session (`runs`), bound
+to the component hash (`component`) and effective platform contract (`contract`):
 
 | Field | Means |
 |-------|-------|
@@ -58,11 +71,15 @@ nothing the user or the host did explains it.
 
 ## Traces
 
-A trace is one request as the platform saw it, as JSON. Every field may be
-left out:
+A trace is one complete request as the platform saw it. CLI checks require
+component and contract identity, export, events, totals, and the response when
+the manifest defines an output body. Missing evidence is an error, not a pass.
+Use the component and contract fingerprints recorded in the envelope:
 
 ```json
 {
+  "component": "<component hash from envelope>",
+  "contract": "<contract fingerprint from envelope>",
   "export": "acme:web/handler#handle",
   "args": [{"method": "GET", "path": "/", "query": [], "form": []}],
   "events": [
@@ -71,7 +88,9 @@ left out:
   ],
   "result": {"status": 200, "body": "<p>…</p>", "headers": []},
   "stdout": "", "stderr": "",
-  "totals": {"fuel": 412000, "cost": 1, "virtual_ns": 4000000, "peak_memory": 1179648}
+  "totals": {"fuel": 412000, "cost": 1, "virtual_ns": 4000000, "peak_memory": 1179648,
+    "guest_ns": 0, "host_ns": 4000000, "sleep_ns": 0, "host_calls": 1,
+    "clock_reads": 0, "random_bytes": 0, "wall_us": 0}
 }
 ```
 
@@ -79,8 +98,9 @@ left out:
 WIT-shaped JSON as in host plans. `result` is the export's result, read
 through the manifest's `[entry] output`. `stack` holds guest frames,
 innermost first, with the module ids appfuzz uses (`appfuzz wasm info`);
-without it the `site` check is skipped. Without `totals` the `budget` check
-is skipped. A stored run (`appfuzz show <run>`) is a trace too, so
+without it the `site` check is skipped. Totals are required for CLI checks;
+use complete `Totals` fields as emitted by `show`, including zero-valued
+counters. Build or contract mismatches cannot pass. A stored run (`appfuzz show <run>`) is a trace too, so
 `envelope check last` works.
 
 ## In a platform
@@ -93,6 +113,10 @@ use appfuzz_core::envelope::{Envelope, Trace};
 
 let env: Envelope = serde_json::from_str(&std::fs::read_to_string("envelope.json")?)?;
 let r = trace.to_record();
+// Verify build/contract identity before enforcing individual calls.
+assert_eq!(r.spec.component, env.component);
+assert_eq!(r.spec.contract, env.contract);
+assert_eq!(manifest.fingerprint(), env.contract);
 for i in 0..r.events.len() {
     for v in env.check_call(&r, i, &manifest) { /* deny or log v */ }
 }
@@ -107,8 +131,8 @@ call it before it runs the host function and refuse the call.
 ## What it does not do
 
 - It is only as wide as the review. Behaviour the review never triggered
-  is outside it, even when it is fine. Run `review` longer or add runs with
-  `run --set` before writing the envelope.
+  is outside it, even when it is fine. Run a new review with a longer budget or
+  a representative `--request` / `--plan`, then select that accepted session.
 - It does not keep state across requests: a trace is one request.
 - A destination built from input (`destinations_from_input`) is allowed
   wherever reviewed runs did the same; the `ssrf` and `open_redirect`

@@ -1,8 +1,6 @@
 //! `appfuzz.toml`: what appfuzz knows about an app and its platform.
 //!
-//! Phase 1 needs only `[app]`, `[entry]`, `[grants]` and `[limits]`.
-//! `[functions]` adds per host function cost and latency; `[web]` is
-//! reserved for phase 2 labels and kept as raw data.
+//! The platform supplies grants, limits, labels, constraints and host rules.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,9 +25,12 @@ pub struct Manifest {
     /// without the interface version).
     #[serde(default)]
     pub functions: BTreeMap<String, FunctionSpec>,
-    /// Reserved for phase 2 (labels for how the platform treats output).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub datasets: BTreeMap<String, crate::dataset::Dataset>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sequences: BTreeMap<String, crate::sequence::Scenario>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub web: Option<Value>,
+    pub acceptance: Option<crate::acceptance::Suite>,
     /// Where the manifest was loaded from; relative paths resolve against it.
     #[serde(skip)]
     pub dir: PathBuf,
@@ -246,6 +247,10 @@ pub struct FunctionSpec {
     /// in a loop is then an n+1 fail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_of: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<crate::dataset::Query>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<crate::dataset::Mutation>,
     /// What the host promises about its result, by path (`range:0..100`,
     /// `len:..50`, `enum:a,b`, `format:date`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -306,6 +311,23 @@ pub fn fn_key(interface: &str, func: &str) -> String {
 }
 
 impl Manifest {
+    /// Identity of the effective platform contract, independent of its location.
+    /// Bump the execution schema when simulation/detector semantics change.
+    pub fn fingerprint(&self) -> String {
+        let mut v = serde_json::to_value(self).expect("manifest serializes");
+        v["app"]["wasm"] = Value::Null;
+        let mut h = blake3::Hasher::new();
+        h.update(b"appfuzz-execution-v2");
+        h.update(env!("CARGO_PKG_VERSION").as_bytes());
+        h.update(include_bytes!("../../../Cargo.lock"));
+        h.update(&serde_json::to_vec(&v).expect("manifest serializes"));
+        h.finalize().to_hex().to_string()
+    }
+
+    pub fn state_key(&self, component: &str) -> String {
+        blake3::hash(format!("{component}:{}", self.fingerprint()).as_bytes()).to_hex().to_string()
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut m: Manifest = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
@@ -322,7 +344,9 @@ impl Manifest {
             grants: Grants::default(),
             limits: Limits::default(),
             functions: BTreeMap::new(),
-            web: None,
+            datasets: BTreeMap::new(),
+            sequences: BTreeMap::new(),
+            acceptance: None,
             dir: PathBuf::new(),
             binary: Binary::default(),
         }

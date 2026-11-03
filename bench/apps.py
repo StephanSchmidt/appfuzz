@@ -146,7 +146,7 @@ app("redundant", "loads the same setting once per item",
             out += &format!("<li>{} {}</li>", it.score, esc(&unit));
         }
         html(out + "</ul>")
-    """), [("redundant_calls", "warn")], allow=["n_plus_1", "over_budget", "serial_chain", "slow_host_sensitivity"], grants=[ITEMS, STORE])
+    """), [("redundant_calls", "warn")], allow=["n_plus_1", "over_budget", "big_output", "serial_chain", "slow_host_sensitivity"], grants=[ITEMS, STORE])
 
 app("chatty", "lists all items, then fetches each one again",
     handler("""
@@ -158,7 +158,7 @@ app("chatty", "lists all items, then fetches each one again",
             }
         }
         html(out + "</ul>")
-    """), [("chatty", "warn")], allow=["n_plus_1", "redundant_calls", "over_budget", "serial_chain", "slow_host_sensitivity"])
+    """), [("chatty", "warn")], allow=["n_plus_1", "redundant_calls", "over_budget", "big_output", "serial_chain", "slow_host_sensitivity"])
 
 # --- Time and budget -------------------------------------------------------
 
@@ -263,7 +263,7 @@ app("broken-markup", "leaves <b> open for hot items",
             }
         }
         html(out + "</ul>")
-    """), [("broken_markup", "warn")])
+    """), [("broken_markup", "warn")], allow=["big_output"])
 
 app("panic-in-body", "shows the host's error text, with internal details, to the user",
     handler("""
@@ -288,7 +288,7 @@ app("reflect-host", "renders item names from the host unescaped",
             out += &format!("<li>{}</li>", it.name);
         }
         html(out + "</ul>")
-    """), [("stored_reflection", "fail")], allow=["broken_markup"])
+    """), [("stored_reflection", "fail")], allow=["broken_markup", "big_output"])
 
 # --- Grants ----------------------------------------------------------------
 
@@ -359,19 +359,21 @@ def labelled(body):
     return handler(body, prelude="prelude-labelled.rs")
 
 
+# These fixtures leave database result sizes unbounded. Joint row/column/text
+# growth can exceed the memory budget even when the SQL is parameterized.
 app("sql-concat", "puts ?q into SQL text",
     labelled("""
         let q = param(&req.query, "q").unwrap_or("");
         let rows = db::query(&format!("SELECT name FROM items WHERE name = '{q}'"), &[]).unwrap_or_default();
         html(format!("<p>{} rows</p>", rows.len()))
-    """), [("sql_injection", "fail")], grants=[DB], extra=LABELS)
+    """), [("sql_injection", "fail")], allow=["over_budget"], grants=[DB], extra=LABELS)
 
 app("sql-hand-escaped", "doubles the quotes in ?q, then puts it into SQL text",
     labelled("""
         let q = param(&req.query, "q").unwrap_or("").replace('\\'', "''");
         let rows = db::query(&format!("SELECT name FROM items WHERE name = '{q}'"), &[]).unwrap_or_default();
         html(format!("<p>{} rows</p>", rows.len()))
-    """), [("escaped_by_hand", "warn")], grants=[DB], extra=LABELS)
+    """), [("escaped_by_hand", "warn")], allow=["over_budget"], grants=[DB], extra=LABELS)
 
 app("stored-sql", "puts the user's name from the host into SQL text",
     labelled("""
@@ -379,7 +381,7 @@ app("stored-sql", "puts the user's name from the host into SQL text",
         let u = users::current();
         let rows = db::query(&format!("SELECT * FROM orders WHERE owner = '{}'", u.name), &[]).unwrap_or_default();
         html(format!("<p>{} orders for {}</p>", rows.len(), esc(&u.name)))
-    """), [("sql_injection", "fail")], grants=[DB, USERS], extra=LABELS)
+    """), [("sql_injection", "fail")], allow=["over_budget"], grants=[DB, USERS], extra=LABELS)
 
 app("path-traversal", "reads the file named by ?doc",
     labelled("""
@@ -430,7 +432,7 @@ app("sql-params", "passes ?q as a query parameter, not in the SQL text",
         let q = param(&req.query, "q").unwrap_or("");
         let rows = db::query("SELECT name FROM items WHERE name = ?", &[q.to_string()]).unwrap_or_default();
         html(format!("<p>{} rows for {}</p>", rows.len(), esc(q)))
-    """), [], grants=[DB], extra=LABELS)
+    """), [], allow=["over_budget"], grants=[DB], extra=LABELS)
 
 app("trusted-html", "renders the user's bio-html as is (labelled trusted) and the email in the page",
     labelled("""
@@ -449,7 +451,7 @@ app("orders-for-query-user", "lists the orders of the user named in ?user",
             out += &format!("<li>{} ({})</li>", esc(&o.item), o.total);
         }
         html(out + "</ul>")
-    """), [("foreign_user_access", "fail")], allow=["missing_owner_check"], grants=[ORDERS], extra=LABELS)
+    """), [("foreign_user_access", "fail")], allow=["missing_owner_check", "big_output"], grants=[ORDERS], extra=LABELS)
 
 app("order-no-owner-check", "shows the order named in ?id without checking whose it is",
     labelled("""
@@ -518,7 +520,7 @@ app("save-per-item", "archives the items with one store write per item",
             return Response { status: 303, body: String::new(), headers: vec![("location".into(), "/".into())] };
         }
         html(r#"<form method="post" action="/archive"><button>Archive</button></form>"#.into())
-    """), [("n_plus_1", "fail")], allow=["over_budget", "serial_chain", "chatty", "slow_host_sensitivity"], grants=[ITEMS, STORE], extra=EFFECTS)
+    """), [("n_plus_1", "fail")], allow=["over_budget", "serial_chain", "chatty", "partial_write", "slow_host_sensitivity"], grants=[ITEMS, STORE], extra=EFFECTS)
 
 app("batch-ignored", "fetches each item on its own although items#get-many exists",
     handler("""
@@ -530,7 +532,7 @@ app("batch-ignored", "fetches each item on its own although items#get-many exist
             }
         }
         html(out + "</ul>")
-    """), [("n_plus_1", "fail")], allow=["over_budget", "serial_chain", "chatty", "redundant_calls", "slow_host_sensitivity"], extra=EFFECTS)
+    """), [("n_plus_1", "fail")], allow=["over_budget", "serial_chain", "chatty", "big_output", "redundant_calls", "slow_host_sensitivity"], extra=EFFECTS)
 
 app("double-send", "sends the order confirmation twice (once per code path)",
     handler("""

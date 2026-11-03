@@ -1,7 +1,7 @@
 //! Pairs of runs: a run, and the same run with one thing changed that
-//! should (or should not) change what the app does. All host results of
-//! the base run are pinned (`on_call`), so the pair differs only in that
-//! one thing.
+//! should (or should not) change what the app does. List, seed, clock and
+//! latency comparisons pin the base host results. Fault comparisons keep
+//! the original plan, so new calls on a recovery path use normal host behavior.
 //!
 //! - reversed list → output words change: `order_dependence`
 //! - duplicated element → impossible percentages: `duplicate_sensitivity`
@@ -74,7 +74,13 @@ pub fn variants(app: &App, r: &RunRecord) -> Vec<Variant> {
     if r.outcome.kind != OutcomeKind::Ok {
         return out;
     }
-    let Some(base) = pinned(r) else { return out };
+    let Some(mut base) = pinned(r) else { return out };
+    // A different guest RNG seed must keep host datasets fixed, just as
+    // pinning keeps ordinary host responses fixed.
+    if !app.manifest.datasets.is_empty() {
+        let defaults = base.plan.0.entry("_defaults".into()).or_default();
+        defaults.dataset_seed = Some(defaults.dataset_seed.unwrap_or(r.spec.seed));
+    }
     let set = |spec: &mut RunSpec, e: &crate::record::HostCall, v: Value| {
         spec.plan.0.entry(e.func.clone()).or_default().on_call.insert(e.call.to_string(), Response { ret: Some(v), ..Default::default() });
     };
@@ -82,6 +88,7 @@ pub fn variants(app: &App, r: &RunRecord) -> Vec<Variant> {
     let lists: Vec<_> = r
         .events
         .iter()
+        .filter(|e| !app.manifest.function(&e.func).is_some_and(|s| s.query.is_some()))
         .filter(|e| e.result.as_ref().and_then(list_in).is_some_and(|a| a.len() >= 2 && a.iter().any(|x| *x != a[0])))
         .take(PER_KIND)
         .collect();
@@ -94,7 +101,7 @@ pub fn variants(app: &App, r: &RunRecord) -> Vec<Variant> {
         set(&mut s, e, v);
         out.push(Variant { change: Change::Reverse, func: Some(e.func.clone()), call: Some(e.call), spec: s });
     }
-    for e in r.events.iter().filter(|e| e.result.as_ref().and_then(list_in).is_some_and(|a| !a.is_empty())).take(PER_KIND) {
+    for e in r.events.iter().filter(|e| !app.manifest.function(&e.func).is_some_and(|s| s.query.is_some())).filter(|e| e.result.as_ref().and_then(list_in).is_some_and(|a| !a.is_empty())).take(PER_KIND) {
         let mut v = e.result.clone().unwrap_or_default();
         if let Some(a) = list_mut(&mut v) {
             let x = a[0].clone();
@@ -119,14 +126,8 @@ pub fn variants(app: &App, r: &RunRecord) -> Vec<Variant> {
         let (d, _, hms) = format_datetime(t + 25 * 3600);
         out.push(Variant { change: Change::Clock, func: None, call: None, spec: RunSpec { now: format!("{d}T{hms}"), ..base.clone() } });
     }
-    // A call that succeeded with something (failing instead of returning
-    // nothing may rightly look the same).
-    let something = |v: &Value| !matches!(v, Value::Null) && v.as_array().is_none_or(|a| !a.is_empty()) && v.as_str().is_none_or(|s| !s.is_empty());
-    if let Some(e) = r.events.iter().find(|e| matches!(&e.result, Some(Value::Object(o)) if o.len() == 1 && o.get("ok").is_some_and(something))) {
-        let mut s = base.clone();
-        set(&mut s, e, json!({"err": "appfuzz: injected failure"}));
-        out.push(Variant { change: Change::Fault, func: Some(e.func.clone()), call: Some(e.call), spec: s });
-    }
+    // One recoverable success, with an error matching its actual WIT type.
+    if let Some(variant) = crate::faults::first_variant(app, r) { out.push(variant); }
     let mut funcs: Vec<&str> = Vec::new();
     for e in &r.events {
         if !funcs.contains(&e.func.as_str()) && funcs.len() < SLOW_FUNCS {
@@ -216,6 +217,10 @@ pub fn compare(app: &App, base: &RunRecord, v: &Variant, vr: &RunRecord) -> Vec<
             ));
         }
         Change::Fault => {
+            let Some(call) = v.call else { return out; };
+            let outage = vr.events.iter().any(|e| e.func == func && e.call == call && e.source == format!("on_call {call}+"));
+            let recipe = crate::faults::Recipe { func: func.clone(), call, mode: if outage { crate::faults::Mode::Outage } else { crate::faults::Mode::Once } };
+            if !crate::faults::injected(base, &recipe, vr) { return out; }
             let retried = vr.events.iter().filter(|e| e.func == func).count() > base.events.iter().filter(|e| e.func == func).count();
             if same && !retried {
                 out.push(Finding::new(

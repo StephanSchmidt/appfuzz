@@ -7,5 +7,7 @@
       "min": "fail"
     }
   ],
-  "allow": []
+  "allow": [
+    "over_budget"
+  ]
 }

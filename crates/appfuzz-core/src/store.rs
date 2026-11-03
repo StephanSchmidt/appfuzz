@@ -50,7 +50,11 @@ impl RunStore {
     }
 
     pub fn ids(&self) -> Result<Vec<String>> {
-        let Ok(rd) = std::fs::read_dir(&self.dir) else { return Ok(vec![]) };
+        let rd = match std::fs::read_dir(&self.dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", self.dir.display())),
+        };
         let mut out = Vec::new();
         for e in rd {
             let name = e?.file_name().to_string_lossy().into_owned();

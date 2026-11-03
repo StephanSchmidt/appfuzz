@@ -1,0 +1,12 @@
+[app]
+wasm = "../../target/wasm32-wasip2/release/json_payload.wasm"
+name = "json-payload"
+[entry]
+export = "bench:web/handler#handle"
+request = { method = "GET", path = "/", query = [["payload", '{"order":{"quantity":12,"memo":"hello"},"items":[1,2]}']], form = [], today = "", now = "" }
+output = { status = "status", body = "body", headers = "headers", body_format = "html" }
+[limits]
+fuel = 200000000
+memory = "64MiB"
+cost_per_request = 100
+max_latency_ms = 10000

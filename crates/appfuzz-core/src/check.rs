@@ -22,6 +22,8 @@ pub struct Property {
     /// As given (`value_range .usage 0 100`).
     pub text: String,
     test: Arc<Test>,
+    selector: Option<Selector>,
+    numeric: bool,
 }
 
 impl std::fmt::Debug for Property {
@@ -38,10 +40,15 @@ impl Property {
     pub fn parse(words: &[String]) -> Result<Self> {
         let text = words.join(" ");
         let w: Vec<&str> = words.iter().map(String::as_str).collect();
-        let num = |s: &str| s.parse::<f64>().map_err(|_| anyhow!("{s:?} is not a number"));
+        let num = |s: &str| -> Result<f64> {
+            let n = s.parse::<f64>().map_err(|_| anyhow!("{s:?} is not a number"))?;
+            if !n.is_finite() { bail!("{s:?} must be finite"); }
+            Ok(n)
+        };
         let test: Arc<Test> = match w.as_slice() {
             ["value_range", sel, lo, hi] => {
                 let (lo, hi) = (num(lo)?, num(hi)?);
+                if lo > hi { bail!("lower bound exceeds upper bound"); }
                 let sel = Selector::parse(sel)?;
                 Arc::new(move |r, m| {
                     let bad: Vec<(String, f64)> = sel.values(r, m).into_iter().filter_map(|t| number(&t).map(|x| (t, x))).filter(|(_, x)| *x < lo || *x > hi).collect();
@@ -49,7 +56,9 @@ impl Property {
                 })
             }
             ["max_calls", f, n] => {
-                let (f, n) = (f.to_string(), num(n)? as u32);
+                let count=num(n)?;
+                if count<0.0 || count>u32::MAX as f64 || count.fract()!=0.0 {bail!("max_calls requires a non-negative u32 integer");}
+                let (f, n) = (f.to_string(), count as u32);
                 Arc::new(move |r, _| {
                     let c = r.events.iter().filter(|e| e.func.contains(&f)).count() as u32;
                     (c > n).then(|| (format!("{c} calls to {f}, at most {n} allowed"), json!({"calls": c, "max": n})))
@@ -78,7 +87,24 @@ impl Property {
             }
             _ => bail!("unknown property {text:?}. {HELP}"),
         };
-        Ok(Property { text, test })
+        let selector = if let ["value_range", sel, ..] = w.as_slice() { Some(Selector::parse(sel)?) } else { None };
+        Ok(Property { text, test, selector, numeric: true })
+    }
+
+    /// Exact expectations preserve JSON types for field selectors and text for HTML selectors.
+    pub fn expect(selector: &str, expected: Value) -> Result<Self> {
+        let sel = Selector::parse(selector)?;
+        let selected = sel.clone();
+        let text = format!("expect {selector} = {expected}");
+        Ok(Self { text, selector: Some(sel), numeric: false, test: Arc::new(move |r,m| {
+            selected.selected(r,m).into_iter().find(|v| v != &expected).map(|actual| (format!("{} is {actual}, expected {expected}", selected.text), json!({"actual":actual,"expected":expected})))
+        }) })
+    }
+
+    /// Numeric values actually exercised, rather than vacuous successes.
+    pub fn matches(&self, r: &RunRecord, m: &Manifest) -> usize {
+        if matches!(r.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) { return 0; }
+        self.selector.as_ref().map_or(1, |s| if self.numeric { s.values(r, m).iter().filter(|v| number(v).is_some_and(f64::is_finite)).count() } else { s.selected(r, m).len() })
     }
 
     /// How the run breaks the property, if it does.
@@ -112,10 +138,24 @@ fn metric_of(name: &str, r: &RunRecord) -> Option<f64> {
     })
 }
 
+static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-?\d[\d,]*(?:\.\d+)?").unwrap());
+fn scalar_number(value: &Value) -> Option<f64> {
+    let n = match value {
+        Value::Number(n) => n.as_f64()?,
+        Value::String(s) => match s.replace(',', "").trim().parse::<f64>() {
+            Ok(n) => n,
+            Err(_) if NUMBER.find_iter(s).count() == 1 => number(s)?,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    // Beyond this range distinct integer outputs can collapse to the same f64.
+    (n.is_finite() && !(n.fract()==0.0 && n.abs()>9_007_199_254_740_991.0)).then_some(n)
+}
+
 /// The first number in a text (`1,234.5 %` → 1234.5).
 fn number(t: &str) -> Option<f64> {
-    static NUM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-?\d[\d,]*(?:\.\d+)?").unwrap());
-    NUM.find(t)?.as_str().replace(',', "").parse().ok()
+    NUMBER.find(t)?.as_str().replace(',', "").parse().ok()
 }
 
 /// Where a value is read from.
@@ -150,6 +190,20 @@ impl Selector {
             bail!("bad selector {s:?}. {HELP}");
         };
         Ok(Selector { text: s.to_string(), kind })
+    }
+
+    pub fn selected(&self, r: &RunRecord, m: &Manifest) -> Vec<Value> {
+        if let SelKind::Field(path) = &self.kind {
+            return r.result.as_ref().and_then(|v| field(v,path)).cloned().into_iter().collect();
+        }
+        self.values(r,m).into_iter().map(Value::String).collect()
+    }
+
+    /// Relations require an unambiguous, finite scalar number.
+    pub fn scalar(&self, r: &RunRecord, m: &Manifest) -> Option<f64> {
+        let values = self.selected(r,m);
+        if values.len() != 1 { return None; }
+        scalar_number(&values[0])
     }
 
     /// Every text the selector picks out of a run's output.
@@ -200,6 +254,17 @@ mod tests {
         assert_eq!(number("used 1,234.5 %"), Some(1234.5));
         assert_eq!(number("-3 left"), Some(-3.0));
         assert_eq!(number("none"), None);
+    }
+
+    #[test]
+    fn relational_numbers_are_unambiguous_and_do_not_round_large_integers() {
+        assert_eq!(scalar_number(&json!("3 of 5")),None);
+        assert_eq!(scalar_number(&json!("1,234.5 rooms")),Some(1234.5));
+        assert_eq!(scalar_number(&json!("1e3")),Some(1000.0));
+        assert_eq!(scalar_number(&json!(9007199254740993u64)),None);
+        assert_eq!(scalar_number(&json!("NaN")),None);
+        assert!(Property::parse(&["max_calls".into(),"x".into(),"-1".into()]).is_err());
+        assert!(Property::parse(&["max_calls".into(),"x".into(),"1.5".into()]).is_err());
     }
 
     #[test]

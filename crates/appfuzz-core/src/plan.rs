@@ -13,7 +13,7 @@
 //! }
 //! ```
 //!
-//! Precedence per call: `on_call[n]` > first matching rule > `default` >
+//! Precedence per call: `on_call[n]` > latest applicable `on_call["N+"]` > first matching rule > `default` >
 //! the function's own `return`/`generate`/`trap` > `_defaults` > values
 //! generated from the WIT type. Keys starting with `_` inside a function
 //! entry (`_sig`, `_example`) are notes and ignored.
@@ -41,12 +41,14 @@ pub struct Response {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trap: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_then_trap: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<f64>,
 }
 
 impl Response {
     pub fn decides(&self) -> bool {
-        self.ret.is_some() || self.generate.is_some() || self.trap.is_some()
+        self.ret.is_some() || self.generate.is_some() || self.trap.is_some() || self.commit_then_trap.is_some()
     }
 }
 
@@ -73,6 +75,11 @@ pub struct FnPlan {
     /// Overrides the manifest's cost for this function.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<u64>,
+    /// Collection sizes for the shared world, only valid under `_defaults`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dataset_rows: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_seed: Option<u64>,
     /// Notes such as `_sig` and `_example`.
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub notes: BTreeMap<String, Value>,
@@ -84,6 +91,7 @@ pub enum Decision {
     Return(Value),
     Generate(GenOpts),
     Trap(String),
+    CommitThenTrap(String),
 }
 
 #[derive(Debug, Clone)]
@@ -107,15 +115,16 @@ impl Plan {
         Self::parse(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         for (key, f) in &self.0 {
+            if (!f.dataset_rows.is_empty() || f.dataset_seed.is_some()) && key != "_defaults" { bail!("dataset_rows belongs under _defaults"); }
             for k in f.notes.keys() {
                 if !k.starts_with('_') {
                     bail!("{key}: unknown plan field {k:?} (notes must start with _)");
                 }
             }
             for n in f.on_call.keys() {
-                n.parse::<u32>().with_context(|| format!("{key}: on_call key {n:?} must be a call number"))?;
+                if call_start(n).is_none() { bail!("{key}: on_call key {n:?} must be a positive call number or N+"); }
             }
             for (i, r) in f.rules.iter().enumerate() {
                 for m in r.when.values() {
@@ -126,7 +135,7 @@ impl Plan {
         Ok(())
     }
 
-    fn get(&self, key: &str) -> Option<&FnPlan> {
+    pub(crate) fn get(&self, key: &str) -> Option<&FnPlan> {
         self.0.get(key).or_else(|| {
             self.0
                 .iter()
@@ -146,7 +155,9 @@ impl Plan {
         let fn_latency = fp.and_then(|f| f.response.latency_ms);
         let cost = fp.and_then(|f| f.cost);
         let finish = |r: &Response, source: String| -> Option<Resolved> {
-            let decision = if let Some(msg) = &r.trap {
+            let decision = if let Some(msg) = &r.commit_then_trap {
+                Decision::CommitThenTrap(msg.clone())
+            } else if let Some(msg) = &r.trap {
                 Decision::Trap(msg.clone())
             } else if let Some(v) = &r.ret {
                 Decision::Return(v.clone())
@@ -168,6 +179,13 @@ impl Plan {
             {
                 return res;
             }
+            // Exact positions win; otherwise the latest starting range wins.
+            let range = f.on_call.iter().filter_map(|(key, response)| {
+                let (start, tail) = call_start(key)?;
+                (tail && start <= call).then_some((start, response))
+            }).max_by_key(|(start, _)| *start);
+            if let Some((start, response)) = range
+                && let Some(res) = finish(response, format!("on_call {start}+")) { return res; }
             for (i, rule) in f.rules.iter().enumerate() {
                 if rule.when.iter().all(|(param, m)| arg(args, param).is_some_and(|a| matches(m, a)))
                     && let Some(res) = finish(&rule.response, format!("rule {i}"))
@@ -200,6 +218,13 @@ impl Plan {
     }
 }
 
+/// Exact call or an outage starting at that call. Calls are one-based.
+pub(crate) fn call_start(key: &str) -> Option<(u32, bool)> {
+    let (number, tail) = key.strip_suffix('+').map_or((key, false), |number| (number, true));
+    let start = number.parse::<u32>().ok()?;
+    (start > 0 && number == start.to_string()).then_some((start, tail))
+}
+
 /// Checks a rule's matchers (a bad regex is an error).
 pub fn check_rule(r: &Rule) -> Result<()> {
     r.when.values().try_for_each(matcher_ok)
@@ -210,7 +235,9 @@ pub fn check_rule(r: &Rule) -> Result<()> {
 pub fn resolve_rules(rules: &[Rule], args: &[(String, Value)], fn_latency: Option<f64>) -> Option<Resolved> {
     let (i, rule) = rules.iter().enumerate().find(|(_, r)| r.when.iter().all(|(param, m)| arg(args, param).is_some_and(|a| matches(m, a))))?;
     let r = &rule.response;
-    let decision = if let Some(msg) = &r.trap {
+    let decision = if let Some(msg) = &r.commit_then_trap {
+        Decision::CommitThenTrap(msg.clone())
+    } else if let Some(msg) = &r.trap {
         Decision::Trap(msg.clone())
     } else if let Some(v) = &r.ret {
         Decision::Return(v.clone())
@@ -284,6 +311,18 @@ fn text(v: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn outage_ranges_are_numeric_and_exact_positions_override_them() {
+        let p=Plan::parse(r#"{"x:y/a#get":{"return":0,"on_call":{"2+":{"return":2},"10+":{"return":10},"12":{"return":12}}}}"#).unwrap();
+        for (n,expected) in [(1,0),(2,2),(9,2),(10,10),(11,10),(12,12),(13,10)] {
+            let Decision::Return(value)=p.resolve("x:y/a#get",n,&[]).decision else {panic!("literal");};
+            assert_eq!(value,json!(expected));
+        }
+        for key in ["0","0+","-1+","1++","4294967296+","01+"] {
+            assert!(Plan::parse(&json!({"x:y/a#get":{"on_call":{key:{"return":1}}}}).to_string()).is_err());
+        }
+    }
 
     fn plan() -> Plan {
         Plan::parse(

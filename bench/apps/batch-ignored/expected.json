@@ -11,6 +11,7 @@
     "over_budget",
     "serial_chain",
     "chatty",
+    "big_output",
     "redundant_calls",
     "slow_host_sensitivity"
   ]

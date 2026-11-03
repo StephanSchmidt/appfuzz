@@ -8,6 +8,7 @@
     }
   ],
   "allow": [
-    "broken_markup"
+    "broken_markup",
+    "big_output"
   ]
 }

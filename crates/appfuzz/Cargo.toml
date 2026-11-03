@@ -14,4 +14,10 @@ clap.workspace = true
 rayon.workspace = true
 regex.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 mimalloc = "0.1.52"
+
+[dev-dependencies]
+wat = "1.262"
+wit-parser = "0.262"
+wit-component.workspace = true

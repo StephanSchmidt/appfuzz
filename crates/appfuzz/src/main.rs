@@ -33,392 +33,13 @@ mod wasm_cmd;
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[derive(Parser)]
-#[command(name = "appfuzz", version, about = "Fuzz sandboxed WebAssembly components for bad patterns. Output is JSON.")]
-struct Cli {
-    /// The manifest (default: ./appfuzz.toml if it exists).
-    #[arg(short, long, global = true)]
-    manifest: Option<PathBuf>,
-    /// A component to use without a manifest (or instead of its [app] wasm).
-    #[arg(long, global = true)]
-    wasm: Option<PathBuf>,
-    /// Where runs are kept.
-    #[arg(long, global = true, default_value = ".appfuzz")]
-    state: PathBuf,
-    /// Do not shorten long strings and lists in the output.
-    #[arg(long, global = true)]
-    full: bool,
-    /// Runs at once (default: one per CPU). Each run may use up to four
-    /// times the manifest's memory limit.
-    #[arg(short, long, global = true)]
-    jobs: Option<usize>,
-    #[command(subcommand)]
-    cmd: Option<Cmd>,
-}
-
-#[derive(Subcommand)]
-enum Cmd {
-    /// Everything in one go: a verdict, confirmed findings, exit code 0/1/2.
-    ///
-    /// Runs inspect, run, probe values, probe times, amplify and a
-    /// time-boxed fuzz (with pair checks), confirms the worst findings, and
-    /// reports coverage and the domains the output refers to. Exit code 0:
-    /// pass, 1: warn findings, 2: fail findings (or an error).
-    Review {
-        /// How long to fuzz (`90s`, `5m`).
-        #[arg(long, default_value = "60s")]
-        time: String,
-        #[arg(long, default_value_t = 1)]
-        rng: u64,
-        /// Start fuzzing from the example request, not the stored corpus.
-        #[arg(long)]
-        fresh: bool,
-        /// Most findings to confirm (worst first).
-        #[arg(long, default_value_t = 10)]
-        confirm: usize,
-        /// Findings to list: info, warn, fail (counts include all).
-        #[arg(long, default_value = "warn")]
-        min: String,
-    },
-    /// What the component imports and exports, and what the manifest grants.
-    Inspect {
-        /// Also print the component's world as WIT.
-        #[arg(long)]
-        wit: bool,
-    },
-    /// Host plan helpers.
-    Plan {
-        #[command(subcommand)]
-        cmd: PlanCmd,
-    },
-    /// Run an export once and summarize what it did.
-    Run(RunArgs),
-    /// Run an export and list every host call it made.
-    ///
-    /// Each call with arguments, result, latency, cost and the app function
-    /// that made it.
-    Call(RunArgs),
-    /// A stored run, whole (or one field of it with --field).
-    Show {
-        #[arg(default_value = "last")]
-        run: String,
-        /// Dot path into the record, e.g. `totals` or `result.body`.
-        #[arg(long)]
-        field: Option<String>,
-    },
-    /// Host calls of a stored run in order, one line each.
-    Timeline {
-        #[arg(default_value = "last")]
-        run: String,
-    },
-    /// Host calls of a stored run grouped by function, with all arguments.
-    Calls {
-        #[arg(default_value = "last")]
-        run: String,
-        /// Only this function (substring of `interface#function`).
-        #[arg(long)]
-        func: Option<String>,
-    },
-    /// Which guest code made host call N of a run.
-    Why {
-        run: String,
-        n: u32,
-    },
-    /// What the app wrote to stdout and stderr in a run.
-    Stdout {
-        #[arg(default_value = "last")]
-        run: String,
-    },
-    /// Run a stored run (or a `confirm` case file) again; did anything change?
-    Replay {
-        #[arg(default_value = "last")]
-        run: String,
-    },
-    /// Stored runs.
-    Runs,
-    /// Turn one knob through sizes and fit growth laws.
-    ///
-    /// Measures calls per host function, cost, time, fuel, memory, output.
-    /// Knobs: `fn:<host fn>` (length of the list it returns),
-    /// `field:<path>` (request field = n), `len:<path>` (request field of n
-    /// characters).
-    Scale {
-        knob: String,
-        /// Comma-separated sizes (default 1,2,4,8,16,32; lengths 16…4096).
-        #[arg(long, value_delimiter = ',')]
-        sizes: Vec<u64>,
-        #[arg(long)]
-        export: Option<String>,
-        #[command(flatten)]
-        spec: SpecArgs,
-        /// Include every measured point.
-        #[arg(long)]
-        points: bool,
-    },
-    /// Find inputs that drive up calls to each host function.
-    ///
-    /// Grows host lists, request fields, and request keys found in the
-    /// binary; reports fan-out per function and nested fan-out.
-    Amplify {
-        /// Only host functions matching this.
-        #[arg(long = "fn")]
-        func: Option<String>,
-        /// How many words from the binary to try as request keys.
-        #[arg(long, default_value_t = 200)]
-        dict: usize,
-        #[arg(long)]
-        export: Option<String>,
-        #[command(flatten)]
-        spec: SpecArgs,
-    },
-    /// Targeted questions: odd host values, clock edges, one-change pairs.
-    Probe {
-        #[command(subcommand)]
-        cmd: ProbeCmd,
-    },
-    /// Every URL the output refers to, with the domains behind them.
-    Urls {
-        /// Only this run (default: every stored run of this component).
-        #[arg(long)]
-        run: Option<String>,
-        /// Only the domain list.
-        #[arg(long)]
-        domains: bool,
-    },
-    /// Coverage-guided campaign running every detector on every run.
-    ///
-    /// Mutates requests, host values, list sizes, faults, clock and seed,
-    /// follows the app's own links and forms, and checks kept runs with
-    /// one-change pairs. The corpus is kept in the state directory and
-    /// resumed next time.
-    Fuzz {
-        /// Stop after this many runs.
-        #[arg(long)]
-        runs: Option<u64>,
-        /// Stop after this long (`90s`, `5m`, `500ms`).
-        #[arg(long, default_value = "60s")]
-        time: String,
-        /// Stop early: `new-finding` or `plateau` (nothing new for
-        /// --plateau runs).
-        #[arg(long, default_value = "budget")]
-        until: String,
-        #[arg(long, default_value_t = 2000)]
-        plateau: u64,
-        /// Seed of the fuzzer's own choices.
-        #[arg(long, default_value_t = 1)]
-        rng: u64,
-        /// Start from the example request only, not the stored corpus.
-        #[arg(long)]
-        fresh: bool,
-        #[arg(long)]
-        export: Option<String>,
-        #[command(flatten)]
-        spec: SpecArgs,
-    },
-    /// Make a finding reproducible and small, and write a case file.
-    ///
-    /// Replays the finding's run N times (it must give the same record),
-    /// shrinks its input while the finding still shows.
-    Confirm {
-        /// A finding id (`f…`) or a run id.
-        target: String,
-        /// With a run id: which of its findings (default: the worst).
-        #[arg(long)]
-        finding: Option<String>,
-        #[arg(short = 'n', long, default_value_t = 3)]
-        times: u32,
-        /// Most runs to spend on shrinking.
-        #[arg(long, default_value_t = 400)]
-        max_runs: u32,
-    },
-    /// Fuzz until a run breaks a property, then shrink it to a counterexample.
-    ///
-    /// Properties: `value_range <selector> <lo> <hi>`
-    /// (selector `.class`, `#id`, `tag`, `$.field`, `/regex/`),
-    /// `max_calls <fn> <n>`, `no_crash`, `not_contains <regex>`,
-    /// `max <metric> <n>` (fuel, memory, host_calls, virtual_ms, cost,
-    /// output_bytes, clock_reads). Stored runs are checked first.
-    Check {
-        /// The property, as words: `value_range .usage 0 100`.
-        #[arg(required = true, num_args = 1.., allow_negative_numbers = true)]
-        property: Vec<String>,
-        #[arg(long)]
-        runs: Option<u64>,
-        #[arg(long, default_value = "60s")]
-        time: String,
-        #[arg(long, default_value_t = 1)]
-        rng: u64,
-        /// Runs spent shrinking the counterexample.
-        #[arg(long, default_value_t = 300)]
-        max_runs: u32,
-        #[arg(long)]
-        export: Option<String>,
-        #[command(flatten)]
-        spec: SpecArgs,
-    },
-    /// One run per value of a request field, side by side.
-    ///
-    /// Outcome, status, calls, text and findings per value; values that
-    /// behave alike are grouped.
-    Sweep {
-        /// The request field (`query.days`, `today`).
-        #[arg(short = 'f', long)]
-        field: String,
-        /// Values to try: numbers, dates, times, strings, words (from the
-        /// binary), lengths.
-        #[arg(long, default_value = "numbers")]
-        r#gen: String,
-        /// Exactly these values, comma separated (instead of --gen).
-        #[arg(long, value_delimiter = ',')]
-        values: Vec<String>,
-        #[arg(long)]
-        export: Option<String>,
-        #[command(flatten)]
-        spec: SpecArgs,
-    },
-    /// What differs between two stored runs.
-    ///
-    /// Input, outcome, totals, calls per function, the first host call that
-    /// differs, the output.
-    Diff { a: String, b: String },
-    /// Where the arguments of host call N came from.
-    ///
-    /// A request field (equal, contained, a date offset), an earlier host
-    /// result, a constant in the binary. Heuristic.
-    Provenance {
-        run: String,
-        #[arg(long)]
-        call: u32,
-    },
-    /// Where the guest spends fuel, per function.
-    ///
-    /// Instructions between host calls, per function (self and inclusive),
-    /// and after the last host call.
-    Profile {
-        run: String,
-        #[arg(long, default_value_t = 15)]
-        top: usize,
-    },
-    /// A run in plain terms, compared with the median stored run.
-    Explain { run: String },
-    /// Host call sites no stored run reached, with hints to get there.
-    ///
-    /// Texts and numbers of the function and its callers that may lead
-    /// there.
-    Unexplored,
-    /// WASI imports and how stored runs used clock, random, sleep, output.
-    Wasi,
-    /// Findings so far for this component.
-    Findings {
-        /// Minimum severity: info, warn, fail.
-        #[arg(long, default_value = "info")]
-        min: String,
-    },
-    /// What the reviewed app was seen to do, for a platform to enforce.
-    ///
-    /// Writes envelope.json from every stored run of this component: per
-    /// host function the most calls, call sites and destinations; the
-    /// destinations the output fires requests to; scripts; the most fuel,
-    /// cost, latency and memory. `envelope check` holds a trace to it.
-    Envelope {
-        #[command(subcommand)]
-        cmd: Option<EnvelopeCmd>,
-        /// Where to write the envelope.
-        #[arg(long, default_value = "envelope.json")]
-        out: PathBuf,
-    },
-    /// Static views of the code: functions, call graph, loops, strings.
-    Wasm {
-        #[command(subcommand)]
-        cmd: wasm_cmd::WasmCmd,
-    },
-}
-
-#[derive(Subcommand)]
-enum ProbeCmd {
-    /// Runs at calendar and clock edges (leap day, year end, DST, 2038).
-    Times {
-        #[arg(long)]
-        export: Option<String>,
-        #[command(flatten)]
-        spec: SpecArgs,
-    },
-    /// The run again with one thing changed; what changed in the answer?
-    ///
-    /// Every host result is pinned; one variant each reverses a list, adds
-    /// a duplicate, changes the random seed or the wall clock, fails one
-    /// call, or slows one function.
-    Pairs {
-        /// A stored run (default: run the request given below).
-        run: Option<String>,
-        #[arg(long)]
-        export: Option<String>,
-        #[command(flatten)]
-        spec: SpecArgs,
-    },
-    /// Every kind of value each host function may return.
-    Values {
-        /// Only host functions matching this.
-        #[arg(long = "fn")]
-        func: Option<String>,
-        #[arg(long)]
-        export: Option<String>,
-        #[command(flatten)]
-        spec: SpecArgs,
-    },
-}
-
-#[derive(Subcommand)]
-enum EnvelopeCmd {
-    /// A trace against the envelope: outside_envelope findings, exit code 0/1/2.
-    ///
-    /// The trace is a stored run (`last`, an id) or a JSON file: a run
-    /// record, or {export, args, events: [{func, args, result, stack}],
-    /// result, stdout, stderr, totals} (see ENVELOPE.md).
-    Check {
-        trace: String,
-        #[arg(long, default_value = "envelope.json")]
-        envelope: PathBuf,
-    },
-}
-
-#[derive(Subcommand)]
-enum PlanCmd {
-    /// A plan with every host function, its signature and an example value.
-    Template,
-}
-
-#[derive(clap::Args, Clone)]
-struct RunArgs {
-    /// The export (`interface#function`); default: [entry] export.
-    export: Option<String>,
-    #[command(flatten)]
-    spec: SpecArgs,
-}
-
-#[derive(clap::Args, Clone)]
-struct SpecArgs {
-    /// Arguments as a JSON array, one per parameter.
-    #[arg(long, conflicts_with = "request")]
-    args: Option<String>,
-    /// The single argument as JSON (for one-parameter exports).
-    #[arg(long)]
-    request: Option<String>,
-    /// JSON merged into the default request (from the manifest).
-    #[arg(long, conflicts_with_all = ["args", "request"])]
-    set: Vec<String>,
-    /// Host plan: a file, or inline JSON.
-    #[arg(long)]
-    plan: Option<String>,
-    #[arg(long, default_value_t = 1)]
-    seed: u64,
-    /// Virtual start time, `YYYY-MM-DDTHH:MM:SS`.
-    #[arg(long)]
-    now: Option<String>,
-    /// Fuel for the run (default: 5× the production limit).
-    #[arg(long)]
-    fuel: Option<u64>,
-}
+mod commands;
+use commands::{run, run_with_app};
+mod cases;
+mod acceptance;
+mod sequences;
+mod cli;
+use cli::*;
 
 /// The CLI with each command's examples, output and next steps (from
 /// `guide::DOCS`) as its help footer.
@@ -497,7 +118,7 @@ fn main() {
             };
             out["help"] = json!(help);
             println!("{}", serde_json::to_string_pretty(&out).expect("json"));
-            std::process::exit(2);
+            std::process::exit(3);
         }
     };
     let path = cmd_path(&matches);
@@ -505,7 +126,13 @@ fn main() {
         Ok(c) => c,
         Err(e) => e.exit(),
     };
-    let full = cli.full;
+    let raw_output = matches!(&cli.cmd, Some(Cmd::Plan { .. }))
+        || matches!(&cli.cmd, Some(Cmd::Show { view, .. }) if view == "record");
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let mut prefix = String::from("appfuzz");
+    if let Some(m) = &cli.manifest { prefix += &format!(" --manifest {}", quote(&m.to_string_lossy())); }
+    if let Some(w) = &cli.wasm { prefix += &format!(" --wasm {}", quote(&w.to_string_lossy())); }
+    if cli.state != Path::new(".appfuzz") { prefix += &format!(" --state {}", quote(&cli.state.to_string_lossy())); }
     if let Some(n) = cli.jobs {
         let _ = rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global();
     }
@@ -517,23 +144,32 @@ fn main() {
     let mut out = match out {
         Ok(v) => v,
         Err(e) => {
-            let mut o = json!({"error": format!("{e:#}")});
+            let mut o = json!({"error": format!("{e:#}"), "exit_code": 3});
+            if path == "review" {
+                o["status"] = json!("incomplete");
+                o["verdict"] = json!("incomplete");
+            }
             if let Some(d) = guide::doc(&path) {
                 o["examples"] = json!(d.examples);
             }
             println!("{}", serde_json::to_string_pretty(&o).expect("json"));
-            std::process::exit(2);
+            std::process::exit(3);
         }
     };
     if !path.is_empty()
         && let Value::Object(o) = &mut out
+        && !raw_output
         && !o.contains_key("next")
     {
-        let n = guide::next(&path, &Value::Object(o.clone()));
+        let n: Vec<String> = guide::next(&path, &Value::Object(o.clone())).into_iter()
+            .map(|s| s.strip_prefix("appfuzz").map_or_else(|| s.clone(), |tail| format!("{prefix}{tail}"))).collect();
         o.insert("next".into(), json!(n));
     }
-    let code = if path == "review" || path == "envelope check" { out["exit_code"].as_i64().unwrap_or(0) as i32 } else { 0 };
-    let out = if full { out } else { shorten(out) };
+    let code = match path.as_str() {
+        "review" | "envelope check" | "check" | "replay" | "sequence run" | "sequence fuzz" | "sequence replay" | "acceptance run" | "probe faults" => out["exit_code"].as_i64().unwrap_or(3) as i32,
+        "run" | "call" if matches!(out["outcome"]["kind"].as_str(), Some("error" | "plan_error")) => 3,
+        _ => 0,
+    };
     println!("{}", serde_json::to_string_pretty(&out).expect("json"));
     std::process::exit(code);
 }
@@ -572,9 +208,13 @@ fn state(cli: &Cli) -> Value {
         st["error"] = json!(format!("cannot read {}", m.wasm_path().display()));
         return st;
     };
-    let runs: Vec<RunRecord> = RunStore::new(&cli.state).all().unwrap_or_default().into_iter().filter(|r| r.spec.component == hash).collect();
-    let findings = FindingStore::new(&cli.state, &hash).all();
-    let corpus = fuzz::Corpus::load(&cli.state, &hash).entries.len();
+    let runs: Vec<RunRecord> = RunStore::new(&cli.state).all().unwrap_or_default().into_iter().filter(|r| r.spec.component == hash && r.spec.contract == m.fingerprint()).collect();
+    let findings = match FindingStore::new(&cli.state, &m.state_key(&hash)).all() {
+        Ok(f) => f, Err(e) => { st["error"] = json!(e.to_string()); return st; }
+    };
+    let corpus = match fuzz::Corpus::load(&cli.state, &m.state_key(&hash)) {
+        Ok(c) => c.entries.len(), Err(e) => { st["error"] = json!(e.to_string()); return st; }
+    };
     let count = |s: Severity| findings.iter().filter(|f| f.severity == s).count();
     st["component"] = json!(m.wasm_path().display().to_string());
     st["runs"] = json!(runs.len());
@@ -613,456 +253,12 @@ fn load_manifest(cli: &Cli) -> Result<Manifest> {
     Ok(m)
 }
 
-fn run(cli: Cli) -> Result<Value> {
-    let store = RunStore::new(&cli.state);
-    let Some(cmd) = &cli.cmd else { bail!("no command") };
-    match cmd {
-        Cmd::Review { time, rng, fresh, confirm, min } => {
-            parse_duration(time)?;
-            review::review(&cli, &review::Opts { time: time.clone(), rng: *rng, fresh: *fresh, confirm: *confirm, min: severity(min) })
-        }
-        Cmd::Inspect { wit } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let mut out = inspect(&app, *wit)?;
-            let st = Statics::parse(&app.bytes)?;
-            out["findings"] = record_findings(&cli, &app, detect::static_findings(&app.manifest, &app.imports, &st))?;
-            Ok(out)
-        }
-        Cmd::Plan { cmd: PlanCmd::Template } => plan_template(&App::load(load_manifest(&cli)?)?),
-        Cmd::Run(a) => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let r = execute(&app, &store, a)?;
-            let mut s = summary(&app, &r);
-            s["findings"] = record_findings(&cli, &app, detect::per_run(&r, &app.manifest))?;
-            Ok(s)
-        }
-        Cmd::Call(a) => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let r = execute(&app, &store, a)?;
-            let mut s = summary(&app, &r);
-            s["findings"] = record_findings(&cli, &app, detect::per_run(&r, &app.manifest))?;
-            s["host_calls"] = timeline(&r, &Statics::parse(&app.bytes)?);
-            Ok(s)
-        }
-        Cmd::Show { run, field } => {
-            let r = serde_json::to_value(store.load(run)?)?;
-            match field {
-                None => Ok(r),
-                Some(f) => appfuzz_core::harness::field(&r, f).cloned().ok_or_else(|| anyhow!("no field {f}")),
-            }
-        }
-        Cmd::Timeline { run } => {
-            let r = store.load(run)?;
-            let st = statics_for(&cli)?;
-            Ok(json!({"run": r.id, "host_calls": timeline(&r, &st)}))
-        }
-        Cmd::Calls { run, func } => {
-            let r = store.load(run)?;
-            Ok(json!({"run": r.id, "functions": by_function(&r, func.as_deref())}))
-        }
-        Cmd::Why { run, n } => {
-            let r = store.load(run)?;
-            let e = r.events.iter().find(|e| e.n == *n).ok_or_else(|| anyhow!("run {} has no host call {n}", r.id))?;
-            let st = statics_for(&cli)?;
-            Ok(json!({
-                "run": r.id, "n": n, "func": e.func, "args": e.args,
-                "stack": e.stack.iter().map(|f| {
-                    let m = st.module(&f.module);
-                    json!({
-                        "module": f.module, "role": m.map(|m| m.role.clone()), "func": f.func,
-                        "name": st.frame_name(f), "offset": f.offset.map(|o| format!("{o:x}")),
-                    })
-                }).collect::<Vec<_>>(),
-            }))
-        }
-        Cmd::Stdout { run } => {
-            let r = store.load(run)?;
-            Ok(json!({"run": r.id, "stdout": r.stdout, "stderr": r.stderr}))
-        }
-        Cmd::Replay { run } if run.ends_with(".json") && Path::new(run).exists() => {
-            let case: Value = serde_json::from_slice(&std::fs::read(run)?)?;
-            let spec: RunSpec = serde_json::from_value(case["spec"].clone()).context("case file has no spec")?;
-            let fid = case["finding"]["id"].as_str().unwrap_or_default().to_string();
-            let app = App::load(load_manifest(&cli)?)?;
-            let r = app.run(&spec);
-            store.save(&r)?;
-            let shows = detect::per_run(&r, &app.manifest).iter().any(|f| f.id == fid);
-            Ok(json!({"case": run, "finding": fid, "run": r.id, "outcome": r.outcome.kind, "reproduced": shows || case["per_run"] == json!(false)}))
-        }
-        Cmd::Replay { run } => {
-            let old = store.load(run)?;
-            let app = App::load(load_manifest(&cli)?)?;
-            let new = app.run(&old.spec);
-            let mut diffs = Vec::new();
-            let a = strip_wall(serde_json::to_value(&old)?);
-            let b = strip_wall(serde_json::to_value(&new)?);
-            diff(&a, &b, String::new(), &mut diffs);
-            Ok(json!({"run": old.id, "same": diffs.is_empty(), "differences": diffs}))
-        }
-        Cmd::Scale { knob, sizes, export, spec, points } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let base = build_spec(&app, export.as_deref(), spec)?;
-            let base = RunSpec { plan: scale::steady(&base.plan), ..base };
-            let knob = Knob::parse(knob)?;
-            let sizes = if sizes.is_empty() { scale::default_sizes(&knob) } else { sizes.clone() };
-            let per_run = Mutex::new(Vec::new());
-            let runner = |s: &RunSpec| {
-                let r = run_cached(&app, &store, s).unwrap_or_else(|_| app.run(s));
-                lock(&per_run).extend(detect::per_run(&r, &app.manifest).into_iter().map(|f| ((r.totals.host_calls, r.totals.fuel), f)));
-                r
-            };
-            let rep = scale::scale(&app, &base, knob, &sizes, &runner)?;
-            let mut found = rep.findings.clone();
-            found.extend(sorted(per_run));
-            let mut out = json!({
-                "knob": rep.knob, "sizes": rep.points.iter().map(|p| p.n).collect::<Vec<_>>(),
-                "growth": rep.growth.iter().map(|g| {
-                    let mut o = json!({"metric": g.metric, "law": g.law.text, "class": g.law.class});
-                    if let Some(b) = g.breaks_at { o["breaks_at"] = json!(b); o["limit"] = json!(g.limit); }
-                    o
-                }).collect::<Vec<_>>(),
-                "table": scale_table(&rep),
-            });
-            if *points {
-                out["points"] = json!(rep.points);
-            }
-            out["findings"] = record_findings(&cli, &app, found)?;
-            Ok(out)
-        }
-        Cmd::Amplify { func, dict, export, spec } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let base = build_spec(&app, export.as_deref(), spec)?;
-            let per_run = Mutex::new(Vec::new());
-            let runner = |s: &RunSpec| {
-                let r = app.run(s);
-                lock(&per_run).extend(detect::per_run(&r, &app.manifest).into_iter().map(|f| ((r.totals.host_calls, r.totals.fuel), f)));
-                let _ = store.save(&r);
-                r
-            };
-            let rep = scale::amplify(&app, &base, func.as_deref(), *dict, &runner)?;
-            let mut found: Vec<Finding> = rep.reports.iter().flat_map(|r| r.findings.clone()).chain(rep.findings.clone()).collect();
-            found.extend(sorted(per_run));
-            let growing: Vec<Value> = rep
-                .reports
-                .iter()
-                .filter(|r| r.growth.iter().any(|g| g.metric.starts_with("calls ") || g.law.class.superlinear()))
-                .map(|r| json!({"knob": r.knob, "context": r.context, "growth": r.growth.iter().map(|g| json!({"metric": g.metric, "law": g.law.text, "breaks_at": g.breaks_at})).collect::<Vec<_>>()}))
-                .collect();
-            Ok(json!({
-                "runs": rep.runs,
-                "knobs_tried": rep.knobs.len(),
-                "discovered_keys": rep.discovered_keys,
-                "contexts": rep.contexts,
-                "fan_out": rep.fan_out,
-                "nested": rep.nested,
-                "growing_knobs": growing,
-                "findings": record_findings(&cli, &app, found)?,
-            }))
-        }
-        Cmd::Probe { cmd: ProbeCmd::Values { func, export, spec } } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let base = build_spec(&app, export.as_deref(), spec)?;
-            let runner = |s: &RunSpec| run_cached(&app, &store, s).unwrap_or_else(|_| app.run(s));
-            let (probes, found) = appfuzz_core::probe::values(&app, &base, func.as_deref(), &runner);
-            let failed: Vec<Value> = probes
-                .iter()
-                .filter(|p| p.outcome != appfuzz_core::record::OutcomeKind::Ok)
-                .map(|p| json!({"func": p.func, "variant": p.variant, "outcome": p.outcome, "run": p.run}))
-                .collect();
-            Ok(json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, &app, found)?}))
-        }
-        Cmd::Probe { cmd: ProbeCmd::Pairs { run, export, spec } } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let runner = |s: &RunSpec| run_cached(&app, &store, s).unwrap_or_else(|_| app.run(s));
-            let base = match run {
-                Some(id) => store.load(id)?,
-                None => runner(&build_spec(&app, export.as_deref(), spec)?),
-            };
-            if base.outcome.kind != appfuzz_core::record::OutcomeKind::Ok {
-                anyhow::bail!("run {} did not end ok ({:?}); pairs need an ok run", base.id, base.outcome.kind);
-            }
-            if appfuzz_core::metamorphic::pinned(&base).is_none() {
-                anyhow::bail!("run {} has host results too long to replay; pairs need every result in full", base.id);
-            }
-            let (_, lines, found) = appfuzz_core::metamorphic::pairs(&app, &base, &runner);
-            Ok(json!({"run": base.id, "pairs": lines, "findings": record_findings(&cli, &app, found)?}))
-        }
-        Cmd::Probe { cmd: ProbeCmd::Times { export, spec } } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let base = build_spec(&app, export.as_deref(), spec)?;
-            let runner = |s: &RunSpec| run_cached(&app, &store, s).unwrap_or_else(|_| app.run(s));
-            let (probes, found) = appfuzz_core::probe::times(&app, &base, &runner);
-            let failed: Vec<Value> = probes
-                .iter()
-                .filter(|p| p.outcome != appfuzz_core::record::OutcomeKind::Ok)
-                .map(|p| json!({"now": p.now, "what": p.what, "outcome": p.outcome, "run": p.run}))
-                .collect();
-            Ok(json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, &app, found)?}))
-        }
-        Cmd::Envelope { cmd: None, out } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let runs: Vec<RunRecord> = store.all()?.into_iter().filter(|r| r.spec.component == app.hash).collect();
-            if runs.is_empty() {
-                anyhow::bail!("no stored runs of this component; run `review` first");
-            }
-            let mut env = appfuzz_core::envelope::Envelope::build(&runs, &app.manifest);
-            env.unreached = dig::unexplored(&app, &store)?.0["sites"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|s| json!({"host": s["host"], "module": s["module"], "func": s["func"], "name": s["name"], "at": s["at"]}))
-                .collect();
-            std::fs::write(out, serde_json::to_string_pretty(&env)? + "\n").with_context(|| format!("writing {}", out.display()))?;
-            let functions: Vec<Value> = env
-                .functions
-                .iter()
-                .map(|(f, x)| json!({"func": f, "max_calls": x.max_calls, "sites": x.sites.len(), "destinations": x.destinations, "destinations_from_input": x.destinations_from_input}))
-                .collect();
-            Ok(json!({
-                "envelope": out, "runs": env.runs, "functions": functions, "output": env.output, "budget": env.budget,
-                "unreached": env.unreached.len(),
-            }))
-        }
-        Cmd::Envelope { cmd: Some(EnvelopeCmd::Check { trace, envelope }), .. } => {
-            let m = load_manifest(&cli)?;
-            let env: appfuzz_core::envelope::Envelope = serde_json::from_str(&std::fs::read_to_string(envelope).with_context(|| format!("reading {}", envelope.display()))?)
-                .with_context(|| format!("parsing {}", envelope.display()))?;
-            let r = match store.load(trace) {
-                Ok(r) => r,
-                Err(_) => {
-                    let v = parse_json_arg(trace)?;
-                    match serde_json::from_value::<RunRecord>(v.clone()) {
-                        Ok(r) => r,
-                        Err(_) => serde_json::from_value::<appfuzz_core::envelope::Trace>(v).context("not a trace")?.to_record(),
-                    }
-                }
-            };
-            let mut findings = env.check(&r, &m);
-            findings.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.kind.cmp(&b.kind)));
-            let worst = findings.iter().map(|f| f.severity).max();
-            let (verdict, code) = match worst {
-                Some(Severity::Fail) => ("fail", 2),
-                Some(Severity::Warn) => ("warn", 1),
-                _ => ("pass", 0),
-            };
-            let mut o = json!({
-                "trace": r.id, "verdict": verdict, "exit_code": code, "calls": r.events.len(),
-                "findings": findings.iter().map(|f| { let mut o = finding_json(f); o["detail"] = f.detail.clone(); o }).collect::<Vec<_>>(),
-            });
-            if !r.spec.component.is_empty() && r.spec.component != env.component {
-                o["note"] = json!("the trace comes from another build of the component than the envelope");
-            }
-            Ok(o)
-        }
-        Cmd::Urls { run, domains } => {
-            let m = load_manifest(&cli)?;
-            let runs = match run {
-                Some(r) => vec![store.load(r)?],
-                None => {
-                    let hash = blake3_hex(&std::fs::read(m.wasm_path())?);
-                    store.all()?.into_iter().filter(|r| r.spec.component == hash).collect()
-                }
-            };
-            let mut inv = appfuzz_core::urls::inventory(&runs, &m);
-            if *domains {
-                inv.as_object_mut().map(|o| o.remove("urls"));
-            }
-            Ok(inv)
-        }
-        Cmd::Fuzz { runs, time, until, plateau, rng, fresh, export, spec } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let base = build_spec(&app, export.as_deref(), spec)?;
-            let until = match until.as_str() {
-                "budget" => fuzz::Until::Budget,
-                "new-finding" => fuzz::Until::NewFinding,
-                "plateau" => fuzz::Until::Plateau,
-                u => bail!("--until must be budget, new-finding or plateau, not {u:?}"),
-            };
-            let opts = fuzz::FuzzOpts { runs: *runs, time: Some(parse_duration(time)?), until, seed: *rng, plateau: *plateau, ..Default::default() };
-            let prior = if *fresh { vec![] } else { fuzz::Corpus::load(&cli.state, &app.hash).entries };
-            let findings = FindingStore::new(&cli.state, &app.hash);
-            let known = findings.all().into_iter().map(|f| f.id).collect();
-            let save_err = Mutex::new(None);
-            let on_run = |r: &RunRecord, kept: bool, found: &[Finding]| {
-                if (kept || !found.is_empty())
-                    && let Err(e) = store.save(r)
-                {
-                    *lock(&save_err) = Some(e);
-                }
-            };
-            let (rep, corpus) = fuzz::fuzz(&app, &base, prior, known, &opts, &on_run)?;
-            if let Some(e) = lock(&save_err).take() {
-                return Err(e);
-            }
-            corpus.save(&cli.state)?;
-            let maxima: Vec<Value> = rep.maxima.iter().map(|m| json!({"metric": m.metric, "max": m.value, "run": m.run})).collect();
-            Ok(json!({
-                "runs": rep.runs, "discovery_runs": rep.discovery_runs, "keys": rep.keys, "modes": rep.modes,
-                "elapsed_ms": rep.elapsed_ms, "stopped": rep.stopped,
-                "corpus": rep.corpus, "kept": rep.kept, "features": rep.features, "last_new_at_run": rep.last_new_at_run,
-                "stages": rep.stages, "maxima": maxima, "jobs": rep.jobs,
-                "findings": record_findings(&cli, &app, rep.findings)?,
-            }))
-        }
-        Cmd::Confirm { target, finding, times, max_runs } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let fstore = FindingStore::new(&cli.state, &app.hash);
-            let all = fstore.all();
-            let (run_id, wanted) = match all.iter().find(|f| f.id == *target) {
-                Some(f) => (f.run.clone().ok_or_else(|| anyhow!("finding {target} has no run"))?, Some(f.id.clone())),
-                None => (target.clone(), finding.clone()),
-            };
-            let orig = store.load(&run_id)?;
-            let shown = detect::per_run(&orig, &app.manifest);
-            let mut f = match &wanted {
-                Some(id) => all.iter().find(|f| f.id == *id).cloned().or_else(|| shown.iter().find(|f| f.id == *id).cloned()),
-                None => shown.iter().max_by_key(|f| f.severity).cloned(),
-            }
-            .ok_or_else(|| anyhow!("no such finding for run {run_id}"))?;
-            // Deterministic: N replays give the same record.
-            let key = |r: &RunRecord| strip_wall(serde_json::to_value(r).unwrap_or_default());
-            let want = key(&orig);
-            let replays: Vec<u32> = (0..*times).collect();
-            let same = appfuzz_core::par::map(&replays, |_| key(&app.run(&orig.spec)) == want).into_iter().filter(|s| *s).count() as u32;
-            let deterministic = same == *times;
-            let per_run = shown.iter().any(|x| x.id == f.id);
-            let mut out = json!({"finding": finding_json(&f), "run": orig.id, "replays": times, "identical": same, "deterministic": deterministic, "per_run": per_run});
-            if !deterministic {
-                out["confirmed"] = json!(false);
-                out["why"] = json!("replays differ; see `appfuzz replay`");
-                return Ok(out);
-            }
-            use appfuzz_core::shrink::{self, Across};
-            let runner = |s: &RunSpec| app.run(s);
-            let base = app.default_args(app.export(&orig.spec.export)?, &orig.spec.now)?;
-            // A finding from comparing runs shrinks by rerunning the
-            // comparison, from the run it compared.
-            let across = if per_run { None } else { Across::of(&f) };
-            let start = match across.as_ref().and_then(|a| a.start_run(&f)) {
-                Some(id) if id != orig.id => store.load(id).ok().map(|r| r.spec),
-                _ => Some(orig.spec.clone()),
-            };
-            let across = across.zip(start).filter(|(a, s)| a.shows(&app, &f.id, s, &runner).is_some());
-            let (from, spec, shrink_runs, min) = if per_run {
-                let id = f.id.clone();
-                let keeps = |r: &RunRecord| detect::per_run(r, &app.manifest).iter().any(|x| x.id == id);
-                let (spec, n) = shrink::minimise(&app, &orig.spec, &base, &keeps, *max_runs, &runner);
-                let min = app.run(&spec);
-                store.save(&min)?;
-                (orig.spec.clone(), spec, n, min.id)
-            } else if let Some((a, start)) = &across {
-                let per = a.runs_per_test();
-                let (spec, n) = shrink::shrink(&app, start, &base, &|c| a.shows(&app, &f.id, c, &runner).is_some(), (*max_runs / per).max(1));
-                // Once more, keeping the runs: the finding's run is one of them.
-                let saving = |s: &RunSpec| {
-                    let r = app.run(s);
-                    let _ = store.save(&r);
-                    r
-                };
-                let shown = a.shows(&app, &f.id, &spec, &saving);
-                let run = shown.and_then(|x| x.run).unwrap_or_else(|| orig.id.clone());
-                (start.clone(), spec, n * per, run)
-            } else {
-                (orig.spec.clone(), orig.spec.clone(), 0, orig.id.clone())
-            };
-            let dir = cli.state.join("cases");
-            std::fs::create_dir_all(&dir)?;
-            let path = dir.join(format!("{}.json", f.id));
-            f.confirmed = Some(path.display().to_string());
-            let reproduce = across.as_ref().map(|(a, _)| a.describe());
-            let note = if per_run {
-                "minimised: the finding still shows in this run"
-            } else if across.is_some() {
-                "minimised: comparing runs from this spec as `reproduce` says still shows the finding"
-            } else {
-                "found by an analysis across runs; the run is replayed, not minimised"
-            };
-            let (size_before, size_after) = (shrink::size(&from), shrink::size(&spec));
-            let case = json!({
-                "finding": f, "per_run": per_run, "spec": spec, "reproduce": reproduce, "original_run": orig.id, "run": min,
-                "size_before": size_before, "size_after": size_after, "plan_size": shrink::plan_size(&spec), "note": note,
-            });
-            std::fs::write(&path, serde_json::to_vec_pretty(&case)?)?;
-            fstore.update(&f)?;
-            out["confirmed"] = json!(true);
-            out["case"] = json!(path);
-            out["minimised_run"] = json!(min);
-            out["shrink_runs"] = json!(shrink_runs);
-            out["size_before"] = json!(size_before);
-            out["size_after"] = json!(size_after);
-            out["plan_size"] = json!(shrink::plan_size(&spec));
-            if let Some(r) = reproduce {
-                out["reproduce"] = r;
-            }
-            out["spec"] = json!({"args": spec.args, "plan": spec.plan, "now": spec.now, "seed": spec.seed});
-            Ok(out)
-        }
-        Cmd::Findings { min } => {
-            let m = load_manifest(&cli)?;
-            let hash = blake3_hex(&std::fs::read(m.wasm_path())?);
-            let min = severity(min);
-            let mut all: Vec<Finding> = FindingStore::new(&cli.state, &hash).all().into_iter().filter(|f| f.severity >= min).collect();
-            all.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.kind.cmp(&b.kind)));
-            Ok(json!({"count": all.len(), "findings": all.iter().map(finding_json).collect::<Vec<_>>()}))
-        }
-        Cmd::Wasm { cmd } => {
-            let m = load_manifest(&cli)?;
-            let bytes = std::fs::read(m.wasm_path()).with_context(|| format!("reading {}", m.wasm_path().display()))?;
-            let hash = blake3_hex(&bytes);
-            let runs: Vec<RunRecord> = store.all()?.into_iter().filter(|r| r.spec.component == hash).collect();
-            wasm_cmd::run(cmd, &bytes, &runs)
-        }
-        Cmd::Check { property, runs, time, rng, max_runs, export, spec } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let base = build_spec(&app, export.as_deref(), spec)?;
-            let opts = fuzz::FuzzOpts { runs: *runs, time: Some(parse_duration(time)?), seed: *rng, ..Default::default() };
-            dig::check(&cli, &app, &store, &base, property, opts, *max_runs)
-        }
-        Cmd::Sweep { field, r#gen, values, export, spec } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let base = build_spec(&app, export.as_deref(), spec)?;
-            let values = if values.is_empty() { dig::sweep_values(r#gen, &Statics::parse(&app.bytes)?)? } else { values.clone() };
-            dig::sweep(&cli, &app, &store, &base, field, values)
-        }
-        Cmd::Diff { a, b } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            Ok(dig::diff_runs(&app, &store.load(a)?, &store.load(b)?))
-        }
-        Cmd::Provenance { run, call } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            dig::provenance(&app, &store.load(run)?, *call)
-        }
-        Cmd::Profile { run, top } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            dig::profile(&app, &store.load(run)?, *top)
-        }
-        Cmd::Explain { run } => {
-            let app = App::load(load_manifest(&cli)?)?;
-            dig::explain(&app, &store, &store.load(run)?)
-        }
-        Cmd::Unexplored => {
-            let app = App::load(load_manifest(&cli)?)?;
-            let (mut v, found) = dig::unexplored(&app, &store)?;
-            v["findings"] = record_findings(&cli, &app, found)?;
-            Ok(v)
-        }
-        Cmd::Wasi => dig::wasi(&App::load(load_manifest(&cli)?)?, &store),
-        Cmd::Runs => {
-            let runs: Vec<Value> = store
-                .all()?
-                .iter()
-                .map(|r| json!({"run": r.id, "export": r.spec.export, "outcome": r.outcome.kind, "host_calls": r.totals.host_calls, "fuel": r.totals.fuel}))
-                .collect();
-            Ok(json!({"runs": runs}))
-        }
-    }
-}
-
-fn severity(s: &str) -> Severity {
+fn severity(s: &str) -> Result<Severity> {
     match s {
-        "fail" => Severity::Fail,
-        "warn" => Severity::Warn,
-        _ => Severity::Info,
+        "fail" => Ok(Severity::Fail),
+        "warn" => Ok(Severity::Warn),
+        "info" => Ok(Severity::Info),
+        _ => bail!("unknown severity {s:?}; use info, warn or fail"),
     }
 }
 
@@ -1075,7 +271,7 @@ fn parse_json_arg(s: &str) -> Result<Value> {
 }
 
 fn execute(app: &App, store: &RunStore, a: &RunArgs) -> Result<RunRecord> {
-    let spec = build_spec(app, a.export.as_deref(), &a.spec)?;
+    let spec = build_spec(app, a.export.as_deref().or(a.legacy_export.as_deref()), &a.spec)?;
     run_cached(app, store, &spec)
 }
 
@@ -1203,7 +399,7 @@ fn summary(app: &App, r: &RunRecord) -> Value {
 }
 
 fn finding_json(f: &Finding) -> Value {
-    let mut o = json!({"id": f.id, "severity": f.severity, "kind": f.kind, "title": f.title});
+    let mut o = json!({"id": f.id, "severity": f.severity, "kind": f.kind, "title": f.title, "evidence": f.evidence(), "experimental": f.experimental()});
     if let Some(r) = &f.run {
         o["run"] = json!(r);
     }
@@ -1222,7 +418,7 @@ fn record_findings(cli: &Cli, app: &App, found: Vec<Finding>) -> Result<Value> {
     let mut seen = std::collections::BTreeSet::new();
     let mut found: Vec<Finding> = found.into_iter().filter(|f| seen.insert(f.id.clone())).collect();
     found.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.kind.cmp(&b.kind)));
-    let new = FindingStore::new(&cli.state, &app.hash).add(&found)?;
+    let new = FindingStore::new(&cli.state, &app.state_key).add(&found)?;
     Ok(Value::Array(
         found
             .iter()
@@ -1429,6 +625,8 @@ fn plan_template(app: &App) -> Result<Value> {
                 many => Value::Array(many.iter().map(|t| g.gen_json(t)).collect()),
             };
             let mut o = json!({"_sig": f.signature(), "_example": example});
+            if let Some(q) = app.manifest.function(&f.key).and_then(|s| s.query.as_ref()) { o["_query"] = serde_json::to_value(q)?; }
+            if let Some(m) = app.manifest.function(&f.key).and_then(|s| s.mutation.as_ref()) { o["_mutation"] = serde_json::to_value(m)?; }
             if let Some(l) = labels_json(&app.manifest, &f.key) {
                 o["_labels"] = l;
             }
@@ -1478,30 +676,8 @@ fn parse_duration(s: &str) -> Result<std::time::Duration> {
         "h" => n * 3600.0,
         u => bail!("bad duration unit {u:?} (ms, s, m, h)"),
     };
-    Ok(std::time::Duration::from_secs_f64(secs))
-}
-
-const MAX_STR: usize = 500;
-const MAX_LIST: usize = 50;
-
-/// Shortens long strings and lists so output stays small; `--full` turns
-/// this off.
-fn shorten(v: Value) -> Value {
-    match v {
-        Value::String(s) if s.chars().count() > MAX_STR => {
-            let head: String = s.chars().take(MAX_STR).collect();
-            Value::String(format!("{head}…(+{} chars, --full)", s.chars().count() - MAX_STR))
-        }
-        Value::Array(a) if a.len() > MAX_LIST => {
-            let n = a.len();
-            let mut out: Vec<Value> = a.into_iter().take(MAX_LIST).map(shorten).collect();
-            out.push(json!(format!("…(+{} more, --full)", n - MAX_LIST)));
-            Value::Array(out)
-        }
-        Value::Array(a) => Value::Array(a.into_iter().map(shorten).collect()),
-        Value::Object(o) => Value::Object(o.into_iter().map(|(k, x)| (k, shorten(x))).collect()),
-        other => other,
-    }
+    if !secs.is_finite() || secs <= 0.0 { bail!("duration must be positive and finite"); }
+    std::time::Duration::try_from_secs_f64(secs).context("duration is too large")
 }
 
 #[cfg(test)]

@@ -41,6 +41,23 @@ pub struct Finding {
 }
 
 impl Finding {
+    /// The nature of the evidence is independent of its policy severity.
+    pub fn evidence(&self) -> &'static str {
+        match self.kind.as_str() {
+            "crash" | "stack_overflow" | "hang" | "over_budget" | "check_failed" |
+            "crash_on_host_value" | "hang_on_host_value" | "crash_at_time" | "hang_at_time" |
+            "big_output" | "big_payload" | "redundant_calls" | "busy_wait" | "sleeps" => "measured",
+            "acceptance_failed" | "sequence_check_failed" | "ungranted_import" | "ungranted_call" | "write_on_safe_method" |
+            "script_in_output" | "non_local_url" | "open_redirect" | "outside_envelope" => "policy_violation",
+            _ => "heuristic",
+        }
+    }
+
+    pub fn experimental(&self) -> bool {
+        matches!(self.kind.as_str(), "agent_directed_text" | "hidden_text" | "encoded_flow" |
+            "constant_payload" | "unexpected_destination" | "probing" | "dormant_code" | "outside_envelope")
+    }
+
     pub fn new(kind: &str, key: &str, severity: Severity, title: String, detail: Value, run: Option<&str>) -> Self {
         let h = blake3::hash(format!("{kind}\0{key}").as_bytes()).to_hex();
         Finding {
@@ -72,9 +89,8 @@ pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
 }
 
 /// The checks that read every byte of the output, the logs and the host
-/// arguments for text the app's own code wrote: destinations, encoded
-/// payloads, text aimed at agents. That text follows the code paths, so
-/// the fuzzer runs these only on runs that reach new code.
+/// arguments for destinations, encoded payloads and text aimed at agents.
+/// Content can change without a new host call site: check every valid run.
 pub fn per_run_text(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut out = crate::dest::check(r, m);
     out.extend(crate::payload::check(r, m));
@@ -550,13 +566,19 @@ impl FindingStore {
         FindingStore { path: state.join("findings").join(format!("{component}.json")) }
     }
 
-    pub fn all(&self) -> Vec<Finding> {
-        std::fs::read(&self.path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    pub fn all(&self) -> anyhow::Result<Vec<Finding>> {
+        use anyhow::Context;
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", self.path.display())),
+        };
+        serde_json::from_slice(&bytes).with_context(|| format!("invalid findings in {}", self.path.display()))
     }
 
     /// Replaces a stored finding (same id).
     pub fn update(&self, f: &Finding) -> anyhow::Result<()> {
-        let mut all = self.all();
+        let mut all = self.all()?;
         match all.iter_mut().find(|x| x.id == f.id) {
             Some(x) => *x = f.clone(),
             None => all.push(f.clone()),
@@ -564,13 +586,13 @@ impl FindingStore {
         if let Some(d) = self.path.parent() {
             std::fs::create_dir_all(d)?;
         }
-        std::fs::write(&self.path, serde_json::to_vec_pretty(&all)?)?;
+        crate::store::write_atomic(&self.path, &serde_json::to_vec_pretty(&all)?)?;
         Ok(())
     }
 
     /// Adds findings; returns the ids that were new.
     pub fn add(&self, new: &[Finding]) -> anyhow::Result<Vec<String>> {
-        let mut all = self.all();
+        let mut all = self.all()?;
         let mut added = Vec::new();
         for f in new {
             if !all.iter().any(|x| x.id == f.id) {
@@ -578,11 +600,18 @@ impl FindingStore {
                 added.push(f.id.clone());
             }
         }
-        if !added.is_empty() {
+        for f in new {
+            if let Some(old) = all.iter_mut().find(|x| x.id == f.id)
+                && (f.severity > old.severity || (f.severity == old.severity && old.run != f.run && old.confirmed.is_none()))
+            {
+                *old = f.clone();
+            }
+        }
+        if !new.is_empty() {
             if let Some(d) = self.path.parent() {
                 std::fs::create_dir_all(d)?;
             }
-            std::fs::write(&self.path, serde_json::to_vec_pretty(&all)?)?;
+            crate::store::write_atomic(&self.path, &serde_json::to_vec_pretty(&all)?)?;
         }
         Ok(added)
     }

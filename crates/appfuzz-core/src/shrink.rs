@@ -20,7 +20,7 @@ use crate::harness::{App, fn_key_eq, set_clock_fields};
 use crate::metamorphic::{self, Change};
 use crate::par::{self, Runner};
 use crate::plan::{FnPlan, Response};
-use crate::record::{RunRecord, RunSpec};
+use crate::record::{OutcomeKind, RunRecord, RunSpec};
 use crate::scale::{self, Knob};
 use crate::value::GenOpts;
 
@@ -114,6 +114,8 @@ pub fn plan_size(s: &RunSpec) -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Across {
+    /// One exact function occurrence, with a transient failure or an outage.
+    Fault { fault: crate::faults::Recipe },
     /// Turn a knob over sizes (`appfuzz scale`).
     /// `context`: the mode it was turned in, which the spec sets.
     Scale { knob: Knob, sizes: Vec<u64>, context: Option<String> },
@@ -124,6 +126,9 @@ pub enum Across {
 impl Across {
     /// How `f` was found, if it came from comparing runs this way.
     pub fn of(f: &Finding) -> Option<Across> {
+        if let Some(fault) = f.detail.get("fault") {
+            return serde_json::from_value(fault.clone()).ok().map(|fault| Across::Fault { fault });
+        }
         if let Some(k) = f.detail.get("knob") {
             let knob: Knob = serde_json::from_value(k.clone()).ok()?;
             let sizes = scale::default_sizes(&knob);
@@ -138,16 +143,27 @@ impl Across {
     /// The run `f` was found from: the base of a pair, else `f`'s run.
     pub fn start_run<'a>(&self, f: &'a Finding) -> Option<&'a str> {
         match self {
-            Across::Pair { .. } => f.detail.get("base_run").and_then(Value::as_str),
+            Across::Pair { .. } | Across::Fault { .. } => f.detail.get("base_run").and_then(Value::as_str),
             Across::Scale { .. } => f.run.as_deref(),
         }
     }
 
     /// The finding with this id, if comparing runs from `spec` shows it.
     pub fn shows(&self, app: &App, id: &str, spec: &RunSpec, run: Runner) -> Option<Finding> {
-        match self {
+        self.evaluate(app, id, spec, run).ok().flatten()
+    }
+
+    pub fn evaluate(&self, app: &App, id: &str, spec: &RunSpec, run: Runner) -> anyhow::Result<Option<Finding>> {
+        Ok(match self {
+            Across::Fault { fault } => {
+                let base = run(spec);
+                if base.outcome.kind != OutcomeKind::Ok { return Ok(None); }
+                let Some(variant) = fault.variant(app, &base) else { return Ok(None); };
+                let actual = run(&variant.spec);
+                crate::faults::compare(app, &base, fault, &variant, &actual).into_iter().find(|f| f.id == id)
+            }
             Across::Scale { knob, sizes, context } => {
-                let found = scale::scale(app, spec, knob.clone(), sizes, run).ok()?.findings.into_iter();
+                let found = scale::scale(app, spec, knob.clone(), sizes, run)?.findings.into_iter();
                 found
                     .map(|f| match context {
                         Some(c) => scale::in_context(f, c),
@@ -160,19 +176,20 @@ impl Across {
                 let vs: Vec<_> = metamorphic::variants(app, &r).into_iter().filter(|v| v.change == *change && v.func == *func).collect();
                 vs.iter().find_map(|v| metamorphic::compare(app, &r, v, &run(&v.spec)).into_iter().find(|f| f.id == id))
             }
-        }
+        })
     }
 
     /// Runs one test costs.
     pub fn runs_per_test(&self) -> u32 {
         match self {
             Across::Scale { sizes, .. } => sizes.len().max(1) as u32,
-            Across::Pair { .. } => 2,
+            Across::Pair { .. } | Across::Fault { .. } => 2,
         }
     }
 
     pub fn describe(&self) -> Value {
         match self {
+            Across::Fault { fault } => json!({"fault": fault}),
             Across::Scale { knob, sizes, context } => json!({"scale": knob, "sizes": sizes, "context": context}),
             Across::Pair { change, func } => json!({"variant": {"change": change, "func": func}}),
         }
@@ -217,6 +234,15 @@ fn candidates(app: &App, s: &RunSpec, base: &[Value], lows: &Lows) -> Vec<Cand> 
         c.plan.0.remove(k);
         tiers[0].push(c.into());
     }
+    for (name, definition) in &app.manifest.datasets {
+        let n = s.plan.0.get("_defaults").and_then(|p| p.dataset_rows.get(name)).copied().unwrap_or(definition.rows);
+        let at = format!("dataset_rows:{name}");
+        for m in down(n as u64, 0, &at, lows) {
+            let mut c = s.clone();
+            c.plan.0.entry("_defaults".into()).or_default().dataset_rows.insert(name.clone(), m as usize);
+            tiers[1].push(Cand { spec: c, step: Some((at.clone(), m)) });
+        }
+    }
     for (k, fp) in &s.plan.0 {
         let with = |f: &dyn Fn(&mut FnPlan)| {
             let mut c = s.clone();
@@ -233,6 +259,18 @@ fn candidates(app: &App, s: &RunSpec, base: &[Value], lows: &Lows) -> Vec<Cand> 
             tiers[1].push(with(&|p| {
                 p.on_call.remove(n);
             }));
+            if let Some((start, tail)) = crate::plan::call_start(n) {
+                let key = format!("{k}\0call:{n}");
+                for m in down(start as u64, 1, &key, lows) {
+                    let next = format!("{m}{}", if tail { "+" } else { "" });
+                    if fp.on_call.contains_key(&next) { continue; }
+                    let mut candidate = with(&|p| {
+                        if let Some(response) = p.on_call.remove(n) { p.on_call.insert(next.clone(), response); }
+                    });
+                    candidate.step = Some((key.clone(), m));
+                    tiers[1].push(candidate);
+                }
+            }
         }
         for i in 0..fp.rules.len() {
             tiers[1].push(with(&|p| {
@@ -302,6 +340,19 @@ fn response_edits(r: &Response, at: &str, lows: &Lows) -> Vec<Step> {
     let mut steps: Vec<Step> = Vec::new();
     let out = &mut edits;
     if let Some(v) = &r.ret {
+        let mut structured_bytes = 1024 * 1024;
+        let mut structured_edits = 0;
+        'structured: for path in crate::structured::locations(v) {
+            for text in crate::structured::shrink(v.pointer(&path).and_then(Value::as_str).expect("string")) {
+                if structured_edits == 32 || text.len() > structured_bytes { break 'structured; }
+                structured_edits += 1;
+                structured_bytes -= text.len();
+                let path = path.clone();
+                out.push((2, Box::new(move |r| {
+                    if let Some(slot) = r.ret.as_mut().and_then(|v| v.pointer_mut(&path)) { *slot = json!(text); }
+                })));
+            }
+        }
         // A literal list whose content does not matter: generated
         // values of the same length read in one line.
         if let Some(a) = first_list(v) {
@@ -449,6 +500,8 @@ fn request_edits(app: &App, s: &RunSpec, base: &[Value], lows: &Lows, out: &mut 
     let root = Value::Array(s.args.clone());
     let base_root = Value::Array(base.to_vec());
     let clock: HashSet<String> = app.manifest.entry.iter().flat_map(|e| e.fields.keys()).map(|k| format!("/0/{}", k.replace('.', "/"))).collect();
+    let mut structured_bytes = 1024 * 1024;
+    let mut structured_edits = 0;
     for p in ptrs {
         let Some(node) = root.pointer(&p) else { continue };
         if clock.contains(&p) {
@@ -475,7 +528,17 @@ fn request_edits(app: &App, s: &RunSpec, base: &[Value], lows: &Lows, out: &mut 
                 }));
                 v
             }
-            Value::String(t) => match t.parse::<u64>() {
+            Value::String(t) => {
+                let mut inner = Vec::new();
+                if structured_edits < 32 && structured_bytes > 0 {
+                    for text in crate::structured::shrink(t) {
+                        if structured_edits == 32 || text.len() > structured_bytes { break; }
+                        structured_edits += 1;
+                        structured_bytes -= text.len();
+                        inner.push((json!(text), None));
+                    }
+                }
+                inner.extend(match t.parse::<u64>() {
                 Ok(n) => num(n, true),
                 // Only long text is cut, to no less than 16 characters:
                 // short text is a word that matters.
@@ -483,6 +546,8 @@ fn request_edits(app: &App, s: &RunSpec, base: &[Value], lows: &Lows, out: &mut 
                     .into_iter()
                     .map(|n| (json!(t.chars().take(n as usize).collect::<String>()), Some((len_key.clone(), n))))
                     .collect(),
+                });
+                inner
             },
             Value::Number(n) => n.as_u64().map(|n| num(n, false)).unwrap_or_default(),
             _ => vec![],

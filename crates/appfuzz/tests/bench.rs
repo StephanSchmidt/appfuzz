@@ -42,6 +42,7 @@ fn check(manifest: &Path, expected: &Value, state: &Path) -> (Vec<String>, Value
         .arg("--state")
         .arg(state)
         .args(["--full", "review", "--fresh", "--time", &time, "--min", "info"])
+        .args(std::env::var("BENCH_ARGS").unwrap_or_default().split_whitespace())
         .output()
         .expect("running appfuzz");
     let review: Value = match serde_json::from_slice(&out.stdout) {
@@ -174,7 +175,9 @@ fn envelope_time_bomb() {
     // The review cannot reach the bomb; it can point at it.
     assert_eq!(review["verdict"], "warn", "{review}");
     assert!(review["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "dormant_code"), "{review}");
-    let e = appfuzz(&manifest, &state, &["envelope", "--out", env]);
+    let rejected = appfuzz(&manifest, &state, &["envelope", "--out", env]);
+    assert!(rejected.get("error").is_some(), "{rejected}");
+    let e = appfuzz(&manifest, &state, &["envelope", "--allow-warnings", "--out", env]);
     assert!(e.get("error").is_none(), "{e}");
     let check = |now: &str| {
         let run = appfuzz(&manifest, &state, &["run", "--now", now]);

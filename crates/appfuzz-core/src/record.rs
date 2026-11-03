@@ -13,6 +13,9 @@ use crate::plan::Plan;
 pub struct RunSpec {
     /// blake3 of the component bytes.
     pub component: String,
+    /// Effective platform contract and engine identity. Empty for legacy records.
+    #[serde(default)]
+    pub contract: String,
     /// `interface#function` or a top-level function.
     pub export: String,
     /// Arguments as WIT-shaped JSON, one per parameter.

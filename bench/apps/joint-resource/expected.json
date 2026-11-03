@@ -1,0 +1,18 @@
+{
+  "app": "joint-resource",
+  "bug": "two independent counts multiply host cost",
+  "expect": [
+    {
+      "kind": "over_budget",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "n_plus_1",
+    "input_amplification",
+    "serial_chain",
+    "slow_host_sensitivity",
+    "chatty",
+    "nested_fan_out"
+  ]
+}

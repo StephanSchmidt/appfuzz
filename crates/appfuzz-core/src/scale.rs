@@ -103,6 +103,11 @@ pub fn apply(app: &App, base: &RunSpec, knob: &Knob, n: u64) -> Result<RunSpec> 
                 .flat_map(|i| i.funcs.iter())
                 .find(|x| x.key == *f || x.key.ends_with(&format!("/{f}")) || x.key.ends_with(&format!("#{f}")))
                 .ok_or_else(|| anyhow!("no platform import {f}"))?;
+            if let Some(q) = app.manifest.function(&info.key).and_then(|s| s.query.as_ref()) {
+                if n > crate::dataset::MAX_ROWS as u64 { bail!("dataset scale exceeds {}", crate::dataset::MAX_ROWS); }
+                spec.plan.0.entry("_defaults".into()).or_default().dataset_rows.insert(q.dataset.clone(), n as usize);
+                return Ok(spec);
+            }
             let ty = info.ty.results().next().ok_or_else(|| anyhow!("{f} returns nothing"))?;
             let template = spec.plan.0.get(&info.key).and_then(|p| p.response.ret.clone());
             // New elements follow the function's (or the default) generate options.
@@ -115,7 +120,7 @@ pub fn apply(app: &App, base: &RunSpec, knob: &Knob, n: u64) -> Result<RunSpec> 
                 .unwrap_or_default();
             let grown = grow(&ty, template.as_ref(), n as usize, spec.seed, &opts)?;
             let mut fp = spec.plan.0.remove(&info.key).unwrap_or_default();
-            fp.response = Response { ret: Some(grown), generate: None, trap: None, latency_ms: fp.response.latency_ms };
+            fp.response = Response { ret: Some(grown), generate: None, trap: None, commit_then_trap: None, latency_ms: fp.response.latency_ms };
             spec.plan.0.insert(info.key.clone(), fp);
         }
         Knob::Field(p) | Knob::FieldLen(p) => {

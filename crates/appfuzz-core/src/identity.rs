@@ -243,6 +243,7 @@ mod tests {
     fn run(query: Value, body: &str, events: Vec<HostCall>) -> RunRecord {
         let spec = RunSpec {
             component: String::new(),
+            contract: String::new(),
             export: "h".into(),
             args: vec![json!({"method": "GET", "query": query})],
             plan: Default::default(),

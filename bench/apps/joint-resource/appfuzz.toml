@@ -1,0 +1,13 @@
+[app]
+wasm = "../../target/wasm32-wasip2/release/joint_resource.wasm"
+name = "joint-resource"
+[entry]
+export = "bench:web/handler#handle"
+request = { method = "GET", path = "/", query = [["x", "1"], ["y", "1"]], form = [], today = "", now = "" }
+output = { status = "status", body = "body", headers = "headers", body_format = "html" }
+values = { "query.x" = "range:1..16", "query.y" = "range:1..16" }
+[limits]
+fuel = 200000000
+memory = "64MiB"
+cost_per_request = 100
+max_latency_ms = 10000
