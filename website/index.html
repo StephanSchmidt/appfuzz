@@ -48,16 +48,16 @@
 <nav class="bar">
   <div class="frame bar-in">
     <a class="logo" href="#"><span class="mark" aria-hidden="true"></span>appfuzz</a>
-    <div class="links">
-      <a href="#finds">What it finds</a>
-      <a href="#why-wasm">Why Wasm</a>
-      <a href="#minute">Walkthrough</a>
-      <a href="#search">Search</a>
-      <a href="#languages">Languages</a>
-      <a href="#granted">Hostile code</a>
-      <a href="#appos">AppOS</a>
-      <a href="#limits">Limits</a>
-    </div>
+    <button type="button" class="menu-btn" aria-expanded="false" aria-controls="site-menu">Menu</button>
+    <ul class="links" id="site-menu">
+      <li class="has-drop"><a href="#finds">What it finds</a><button type="button" class="drop-btn" aria-expanded="false" aria-controls="drop-0"><span class="sr-only">More: What it finds</span></button>
+        <ul class="drop" id="drop-0"><li><a href="#finds">Bugs before production</a></li><li><a href="#inputs">Bugs behind valid requests</a></li><li><a href="#asserts">Wrong answers</a></li><li><a href="#granted">Hostile code</a></li></ul></li>
+      <li class="has-drop"><a href="#minute">How it works</a><button type="button" class="drop-btn" aria-expanded="false" aria-controls="drop-1"><span class="sr-only">More: How it works</span></button>
+        <ul class="drop" id="drop-1"><li><a href="#minute">Walkthrough</a></li><li><a href="#search">Search</a></li><li><a href="#why-wasm">Why Wasm</a></li><li><a href="#sandbox">Sandbox</a></li><li><a href="#agents">Your agent</a></li></ul></li>
+      <li class="has-drop"><a href="#languages">Where it runs</a><button type="button" class="drop-btn" aria-expanded="false" aria-controls="drop-2"><span class="sr-only">More: Where it runs</span></button>
+        <ul class="drop" id="drop-2"><li><a href="#languages">Languages</a></li><li><a href="#fastly">Fastly Compute</a></li><li><a href="#appos">AppOS</a></li></ul></li>
+      <li><a href="#limits">Limits</a></li>
+    </ul>
     <a class="gh" href="https://github.com/StephanSchmidt/appfuzz" aria-label="appfuzz on GitHub">
       <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
       <span class="gh-text">GitHub</span>
@@ -424,7 +424,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 <section class="frame sec">
   <div class="sec-head">
     <h2>Bugs you would approve in a review.</h2>
-    <p>Each looks fine at a glance. Below each one is what appfuzz tells you, word for word. They come from the 71 test apps it must pass on every commit, each with one planted bug.</p>
+    <p>Each looks fine at a glance. Below each one is what appfuzz tells you, word for word. They come from appfuzz's bench of 76 test apps, most with one planted bug.</p>
   </div>
   <div class="ex-list">
     <div class="ex">
@@ -455,6 +455,26 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
       <p class="verdict"><b>fail</b> .usage is 200, outside 0–100. Counterexample saved, with the backend data that causes it.</p>
     </div>
   </div>
+</section>
+
+<section id="asserts" class="frame sec split asserts">
+  <div>
+    <h2>Say what a right answer is.</h2>
+    <p class="lead">appfuzz knows a crash when it sees one. It can't know that every item belongs on the page, or that the total must match the line items. Whoever asked for the app knows. Write it down once, in the manifest, and appfuzz spends the whole search trying to break it.</p>
+<pre class="code"><code>[acceptance.checks.every_item]
+origin = <span class="str">"marketing"</span>
+let.rows = <span class="str">"select li"</span>
+let.items = <span class="str">"host.items#all.result"</span>
+assert = <span class="str">"size(rows) == size(items)"</span></code></pre>
+    <p class="verdict"><b>fail</b> <span class="kind">acceptance_failed</span> acceptance check every_item failed</p>
+    <p class="verdict"><b>why</b> size(rows) == size(items) is false; rows: [], items: [{"id": 7, "name": "pine sage", …}]</p>
+    <p class="foot">The <code>chatty</code> app from the walkthrough drops an item when its lookup fails, and still answers 200. No crash, nothing unescaped, so no other check fires. The search broke the assert on its 13th request and shrank the case to one item.</p>
+  </div>
+  <dl class="facts-list">
+    <div><dt>Checked on every request</dt><dd>Not one test at the end. <code>fuzz</code> and <code>review</code> check each assert against every request they try, so it breaks wherever the search finds the input.</dd></div>
+    <div><dt>Goes for the edge</dt><dd>An assert that holds at 99 but not at 101 tells the search where to look. appfuzz keeps the inputs that come closest to breaking it and tries the limit and its neighbours.</dd></div>
+    <div><dt>Flags asserts that test nothing</dt><dd>appfuzz changes the values an assert reads. If it still holds, the assert only restates the code, and you get a warning instead of a false sense of safety.</dd></div>
+  </dl>
 </section>
 
 <section id="agents" class="frame sec split">
@@ -534,6 +554,19 @@ http::fetch(&amp;format!(
   <p class="aside">It also flags scans of internal ports, cloud metadata addresses, other apps' routes, random-looking blobs in outgoing mail, invisible Unicode.</p>
 </section>
 
+<section id="fastly" class="frame sec split">
+  <div>
+    <h2>Deploying to Fastly Compute?</h2>
+    <p class="lead">Know your app holds up before it reaches every edge location. appfuzz sends it thousands of requests you would never type by hand and tells you which one breaks it. Run it in CI, and a broken build never gets deployed.</p>
+    <p class="note">Tried on Fastly's own starter kit, it fails the build: the welcome page loads a frame from a host nobody approved.</p>
+  </div>
+  <dl class="facts-list">
+    <div><dt>No crashes in production</dt><dd>You get the exact request that crashes your app, cut down to the smallest, ready to replay and fix.</dd></div>
+    <div><dt>Within Fastly's limits</dt><dd>Find out before you deploy if a request needs more than Fastly's 128 MB of memory or 50 ms of CPU.</dd></div>
+    <div><dt>Responses that work</dt><dd>Every request gets an answer, with valid headers and HTML that renders, loading only from hosts you approved.</dd></div>
+  </dl>
+</section>
+
 <section id="appos" class="frame sec split">
   <div>
     <h2>If you run a platform like AppOS.</h2>
@@ -544,7 +577,7 @@ http::fetch(&amp;format!(
     <div><dt>Manifest</dt><dd>Marketing and engineering agree on what an app may call. appfuzz reads the same grants and tells you about any import outside them.</dd></div>
     <div><dt>App review</dt><dd>Before deploy, appfuzz fuzzes the app against simulated host functions: crashes, n+1 queries, injections, leaks.</dd></div>
     <div><dt>Sandbox</dt><dd>Engineering sets production budgets for I/O, time, CPU and memory. appfuzz tests those limits. Experimental envelopes can additionally constrain behavior observed in an accepted review.</dd></div>
-    <div><dt>Code review</dt><dd>Marketing checks that the feature does what it intended. Engineering owns the platform contract. appfuzz automates routine implementation review against that contract.</dd></div>
+    <div><dt>Code review</dt><dd>Marketing writes down what the feature must do, as asserts in the manifest, and every review checks them. Engineering owns the platform contract. appfuzz automates routine implementation review against that contract.</dd></div>
   </dl>
 </section>
 
@@ -555,7 +588,7 @@ http::fetch(&amp;format!(
   </div>
   <dl class="facts-list">
     <div><dt>Prove an app is harmless</dt><dd>It finds the usual tricks: servers of the app's own, data in disguise, notes to the reviewer, code waiting for a trigger. A careful author can hide better. The envelope catches some of that in production.</dd></div>
-    <div><dt>Know your business rules</dt><dd>It can't tell that <code>create</code> writes or that a field is an email address. Labels in the manifest tell it: SQL, secrets, personal data, writes, who owns a record.</dd></div>
+    <div><dt>Know your business rules</dt><dd>It can't tell that <code>create</code> writes or that a field is an email address. Labels in the manifest tell it: SQL, secrets, personal data, writes, who owns a record. Asserts tell it what a right answer is.</dd></div>
     <div><dt>Simulate concurrent requests</dt><dd>Configured request sequences share modeled backend state and can expose double submits. They run sequentially; live services and concurrent execution remain outside the model.</dd></div>
     <div><dt>Measure every branch</dt><dd>Internal feedback is bounded and instruments directly instantiated core modules. Nested components and GC type groups can remain opaque. Reports identify skipped modules. For interpreted apps, signals describe the interpreter and may be less useful.</dd></div>
   </dl>
@@ -584,6 +617,47 @@ http::fetch(&amp;format!(
 <script>
 (function () {
   var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Nav: dropdowns open on hover and focus; buttons for touch and keyboard.
+  (function () {
+    var bar = document.querySelector('.bar'), menu = bar.querySelector('.menu-btn');
+    function close(except) {
+      bar.querySelectorAll('.has-drop.open').forEach(function (li) {
+        if (li !== except) { li.classList.remove('open'); li.querySelector('.drop-btn').setAttribute('aria-expanded', 'false'); }
+      });
+    }
+    bar.querySelectorAll('.drop-btn').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var li = b.parentNode, open = !li.classList.contains('open');
+        li.classList.remove('shut');
+        close(li);
+        li.classList.toggle('open', open);
+        b.setAttribute('aria-expanded', String(open));
+      });
+    });
+    menu.addEventListener('click', function () {
+      var open = !bar.classList.contains('open');
+      bar.querySelectorAll('.has-drop.shut').forEach(function (li) { li.classList.remove('shut'); });
+      bar.classList.toggle('open', open);
+      menu.setAttribute('aria-expanded', String(open));
+    });
+    // After a click the pointer still hovers the menu: keep it shut until it leaves.
+    bar.querySelectorAll('.has-drop').forEach(function (li) {
+      li.addEventListener('mouseleave', function () { li.classList.remove('shut'); });
+    });
+    bar.querySelectorAll('.links a').forEach(function (a) {
+      a.addEventListener('click', function () {
+        var li = a.closest('.has-drop');
+        if (li) li.classList.add('shut');
+        close(null);
+        bar.classList.remove('open');
+        menu.setAttribute('aria-expanded', 'false');
+        if (document.activeElement) document.activeElement.blur();
+      });
+    });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(null); });
+    document.addEventListener('click', function (e) { if (!bar.contains(e.target)) close(null); });
+  })();
 
   // GitHub stars, cached for an hour (the API allows 60 calls an hour per IP).
   (function () {
