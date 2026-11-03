@@ -177,9 +177,10 @@ A wall-clock safety timeout can still interrupt an overloaded machine.
    scripts realistic data when you need it (`appfuzz plan template`).
 3. **Every valid fuzz evaluation runs the per-run detectors:** call patterns,
    output checks, and data flow. Separate analyses compare runs and fit growth
-   laws. Search uses internal control-flow and integer-comparison feedback,
-   host-call sites, call sequences, output shapes and resource maxima. Findings
-   and resource measurements always come from the original component.
+   laws. Search uses host-call sites, call sequences, output shapes and resource
+   maxima; `--internal-feedback` adds control-flow and integer-comparison
+   feedback from inside the Wasm. Findings and resource measurements always
+   come from the original component.
 4. **Labels** say what text means: this parameter is SQL, this field is an
    email address, this result is a secret.
 

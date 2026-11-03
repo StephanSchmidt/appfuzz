@@ -254,8 +254,8 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
     <article>
       <h3>Find the costly combination.</h3>
       <p class="mono">several input sizes, together</p>
-      <p>Sixteen customers for one day may be fine. One customer over sixteen days may be fine. Both together can mean 256 host calls. appfuzz varies request sizes and host lists together to find that product.</p>
-      <p>The search follows inputs that increase fuel, memory, host cost, latency or output size, measured against your platform's budgets.</p>
+      <p>Sixteen customers for one day may be fine. One customer over sixteen days may be fine. Both together can mean 256 host calls. appfuzz grows request fields and host lists, and keeps every input that sets a new high in fuel, memory, host cost, latency or output size, so sizes that only hurt together still surface.</p>
+      <p>Each high is measured against your platform's budgets: over the limit is a fail.</p>
       <code class="chip">appfuzz review</code>
     </article>
     <article>
@@ -279,7 +279,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
     <ol class="steps" role="tablist" aria-label="Walkthrough step" aria-orientation="vertical">
       <li><button role="tab" id="st-1" aria-controls="sp-1" aria-selected="true"><code>appfuzz inspect</code><span>What can this app touch? Its imports against what your platform grants, and risky code found without running it, like a database call inside a loop.</span></button></li>
       <li><button role="tab" id="st-2" aria-controls="sp-2" aria-selected="false" tabindex="-1"><code>appfuzz run</code><span>Does it work at all? One request against a fake backend: the page it returns and every call it makes. A quick check before the long search.</span></button></li>
-      <li><button role="tab" id="st-3" aria-controls="sp-3" aria-selected="false" tabindex="-1"><code>appfuzz review</code><span>The one for CI. Search with empty lists, huge lists, errors and odd text, guided by internal execution and host behavior. Pass, warn, fail or incomplete, with an exit code for the build.</span></button></li>
+      <li><button role="tab" id="st-3" aria-controls="sp-3" aria-selected="false" tabindex="-1"><code>appfuzz review</code><span>The one for CI. Search with empty lists, huge lists, errors and odd text, guided by host calls and output. Pass, warn, fail or incomplete, with an exit code for the build.</span></button></li>
       <li><button role="tab" id="st-4" aria-controls="sp-4" aria-selected="false" tabindex="-1"><code>appfuzz explain</code><span>What do I fix? The worst run next to all the others: 64 times the calls of a normal request, one lookup per item. That loop is the bug.</span></button></li>
     </ol>
 
