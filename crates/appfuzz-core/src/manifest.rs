@@ -89,6 +89,10 @@ pub struct AppSection {
     /// its `platform.toml`. Its contract is merged in; the app may only tighten it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// The world of the platform's WIT this app targets, when it has several
+    /// (one per app on a platform whose apps export different functions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world: Option<String>,
 }
 
 /// What a host function does to the world.
@@ -403,7 +407,10 @@ impl Manifest {
         let mut m: Manifest = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         m.dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         if let Some(p) = m.app.platform.clone() {
-            let host = crate::host_manifest::HostManifest::resolve(&p, &m.dir)?;
+            let mut host = crate::host_manifest::HostManifest::resolve(&p, &m.dir)?;
+            if let Some(w) = &m.app.world {
+                host.platform.world = Some(w.clone());
+            }
             let table: toml::Table = toml::from_str(&text)?;
             let dir = m.dir.clone();
             m = crate::host_manifest::merge(&host, m, &table).with_context(|| format!("in {}", path.display()))?;
@@ -420,7 +427,7 @@ impl Manifest {
     /// A manifest for a bare `.wasm` without `appfuzz.toml`.
     pub fn for_wasm(wasm: &Path) -> Self {
         Manifest {
-            app: AppSection { wasm: wasm.to_path_buf(), name: None, description: None, labels: None, base: None, platform: None },
+            app: AppSection { wasm: wasm.to_path_buf(), name: None, description: None, labels: None, base: None, platform: None, world: None },
             entry: None,
             grants: Grants::default(),
             limits: Limits::default(),

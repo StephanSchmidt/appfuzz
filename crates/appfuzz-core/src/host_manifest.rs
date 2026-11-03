@@ -79,6 +79,13 @@ pub struct PlatformInfo {
     /// The status of an absent value (`none`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub absent: Option<String>,
+    /// How plain-module apps talk to the host when it is not witx:
+    /// `extism` (JSON through the Extism kernel, typed by `wit`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi: Option<String>,
+    /// `abi = "extism"`: how the JSON spells WIT names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json: Option<crate::extism::JsonNames>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -142,7 +149,14 @@ impl HostManifest {
         match (&self.platform.wit, &self.platform.witx) {
             (Some(_), Some(_)) => bail!("[platform] has both wit and witx; name one"),
             (None, None) => bail!("[platform] names no types: set wit = \"<dir or file>\" or witx = [...]"),
-            (Some(wit), None) => wit_types(engine, &self.dir.join(wit), self.platform.world.as_deref()),
+            (Some(wit), None) => {
+                let extism = match self.platform.abi.as_deref() {
+                    None => None,
+                    Some("extism") => Some(self.platform.json.clone().unwrap_or_default()),
+                    Some(other) => bail!("unknown [platform] abi {other:?}; appfuzz knows extism (or witx = [...])"),
+                };
+                wit_types(engine, &self.dir.join(wit), self.platform.world.as_deref(), extism.as_ref())
+            }
             (None, Some(files)) => {
                 let mut sources = Vec::new();
                 for f in files {
@@ -161,7 +175,15 @@ impl HostManifest {
                 let p = crate::witx_abi::load(engine, &doc, self.platform.entry_wit.as_deref())?;
                 let docs = p.sigs.values().map(|s| (s.key(), FnDocs { description: s.doc.clone(), params: s.param_docs.clone() })).collect();
                 let unsupported = p.unsupported.values().map(|u| (format!("{}#{}", u.module, u.name), u.reason.clone())).collect();
-                Ok(Types { imports: p.imports, exports: p.exports, docs, unsupported, witx: Some(Arc::new(p.sigs)), unsupported_sigs: Arc::new(p.unsupported) })
+                Ok(Types {
+                    imports: p.imports,
+                    exports: p.exports,
+                    docs,
+                    unsupported,
+                    witx: Some(Arc::new(p.sigs)),
+                    unsupported_sigs: Arc::new(p.unsupported),
+                    extism: None,
+                })
             }
         }
     }
@@ -186,6 +208,8 @@ pub struct Types {
     /// witx platforms: each function's raw ABI, for running plain modules.
     pub witx: Option<Arc<BTreeMap<String, crate::witx_abi::Sig>>>,
     pub unsupported_sigs: Arc<BTreeMap<String, crate::witx_abi::Unsupported>>,
+    /// Extism platforms: how each function's JSON looks.
+    pub extism: Option<Arc<crate::extism::Abi>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -200,7 +224,7 @@ impl Types {
     }
 }
 
-fn wit_types(engine: &Engine, path: &Path, world: Option<&str>) -> Result<Types> {
+fn wit_types(engine: &Engine, path: &Path, world: Option<&str>, extism: Option<&crate::extism::JsonNames>) -> Result<Types> {
     let mut resolve = wit_parser::Resolve::new();
     let (pkg, _) = resolve.push_path(path).with_context(|| format!("reading WIT {}", path.display()))?;
     let w = resolve.select_world(&[pkg], world)?;
@@ -225,6 +249,7 @@ fn wit_types(engine: &Engine, path: &Path, world: Option<&str>) -> Result<Types>
         unsupported: BTreeMap::new(),
         witx: None,
         unsupported_sigs: Default::default(),
+        extism: extism.map(|names| crate::extism::Abi::new(&resolve, w, names).map(Arc::new)).transpose().context("the platform WIT as Extism JSON")?,
     })
 }
 

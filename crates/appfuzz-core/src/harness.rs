@@ -33,6 +33,9 @@ use crate::wit::{self, FuncInfo, ImportKind, Interface};
 #[path = "harness_core.rs"]
 mod core;
 use core::CoreApp;
+#[path = "harness_extism.rs"]
+mod extism;
+use extism::ExtismApp;
 
 const EPOCH_TICK: Duration = Duration::from_millis(10);
 const MAX_FRAMES: usize = 32;
@@ -65,6 +68,15 @@ enum Pre {
     Component(InstancePre<Host>),
     /// A plain module on a witx platform; a run calls `start`.
     Core { pre: wasmtime::InstancePre<Host>, start: String },
+    /// An Extism plugin; a run calls the export's function of the module.
+    Extism { pre: wasmtime::InstancePre<Host>, abi: Arc<crate::extism::Abi>, names: Arc<BTreeMap<String, String>> },
+}
+
+impl Pre {
+    /// A plain module with WASI preview 1.
+    fn plain(&self) -> bool {
+        !matches!(self, Pre::Component(_))
+    }
 }
 
 pub struct App {
@@ -122,6 +134,8 @@ struct Host {
     request: Option<Value>,
     /// The buffer length of the current read-style call.
     read_limit: Option<usize>,
+    /// Extism plugins: the kernel's byte store.
+    kernel: Option<crate::extism::Kernel>,
 }
 
 impl WasiView for Host {
@@ -240,7 +254,14 @@ impl App {
     fn from_bytes_engine(mut manifest: Manifest, bytes: Vec<u8>, engine: Engine) -> Result<Self> {
         manifest.binary = crate::manifest::Binary::of(&bytes);
         let hash = component_hash(&bytes);
-        let (component, core, imports, exports) = if wasmparser::Parser::is_core_wasm(&bytes) {
+        let extism_abi = manifest.host.as_ref().is_some_and(|h| h.platform.abi.as_deref() == Some("extism"));
+        let mut plugin = None;
+        let (component, core, imports, exports) = if wasmparser::Parser::is_core_wasm(&bytes) && extism_abi {
+            let p = ExtismApp::new(&engine, &manifest, &bytes)?;
+            let (imports, exports) = (p.imports.clone(), p.exports.clone());
+            plugin = Some(p);
+            (None, None, imports, exports)
+        } else if wasmparser::Parser::is_core_wasm(&bytes) {
             let core = CoreApp::new(&engine, &manifest, &bytes)?;
             let (imports, exports) = (core.imports.clone(), core.exports.clone());
             (None, Some(core), imports, exports)
@@ -367,10 +388,11 @@ impl App {
             }
             platform.handles = Some(spec);
         }
-        let pre = match (component, core) {
-            (_, Some(core)) => Pre::Core { pre: core.link(&engine)?, start: core.start },
-            (Some(component), None) => Pre::Component(link_component(&engine, &component, &imports)?),
-            (None, None) => unreachable!("one of them"),
+        let pre = match (component, core, plugin) {
+            (_, _, Some(p)) => Pre::Extism { pre: p.link(&engine)?, abi: p.abi.clone(), names: p.names.clone() },
+            (_, Some(core), _) => Pre::Core { pre: core.link(&engine)?, start: core.start },
+            (Some(component), None, None) => Pre::Component(link_component(&engine, &component, &imports)?),
+            (None, None, None) => unreachable!("one of them"),
         };
 
         let ticker_stop = Arc::new(AtomicBool::new(false));
@@ -530,9 +552,10 @@ impl App {
             .stdout(stdout.clone())
             .stderr(stderr.clone());
         // Plain modules use WASI preview 1, made the same way.
-        let (ctx, p1) = match &self.pre {
-            Pre::Component(_) => (builder.build(), None),
-            Pre::Core { .. } => (WasiCtx::builder().build(), Some(builder.build_p1())),
+        let (ctx, p1) = if self.pre.plain() { (WasiCtx::builder().build(), Some(builder.build_p1())) } else { (builder.build(), None) };
+        let kernel = match &self.pre {
+            Pre::Extism { abi, .. } => Some(crate::extism::Kernel::new(extism::input(abi, &export, &args), spec.memory as usize)),
+            _ => None,
         };
         let host = Host {
             ctx,
@@ -555,6 +578,7 @@ impl App {
             handles: Default::default(),
             request: matches!(self.pre, Pre::Core { .. }).then(|| spec.args.first().cloned()).flatten(),
             read_limit: None,
+            kernel,
         };
         let mut store = Store::new(&self.engine, host);
         store.limiter(|h| &mut h.limiter);
@@ -588,6 +612,14 @@ impl App {
                     Err(e) => Err(e),
                 }
             }
+            Pre::Extism { pre, names, .. } => {
+                let inst = pre.instantiate(&mut store).map_err(anyhow::Error::from).context("instantiating the plugin")?;
+                let fuel_start = store.get_fuel()?;
+                store.data_mut().fuel_start = fuel_start;
+                let name = names.get(&export.key).ok_or_else(|| anyhow!("the plugin does not export {}", export.key))?;
+                let func = inst.get_typed_func::<(), i32>(&mut store, name).map_err(anyhow::Error::from)?;
+                func.call(&mut store, ()).map(|status| vec![Val::S32(status)])
+            }
         };
         let fuel_start = store.data().fuel_start;
 
@@ -599,6 +631,17 @@ impl App {
         match call {
             // A plain module's result is the response it sent, if any.
             Ok(_) if matches!(self.pre, Pre::Core { .. }) => record.result = store.data_mut().handles.response.take(),
+            Ok(status) if let Pre::Extism { abi, .. } = &self.pre => {
+                let status = match status.first() {
+                    Some(Val::S32(s)) => *s,
+                    _ => 0,
+                };
+                let k = store.data().kernel.as_ref().expect("plugin runs have a kernel");
+                match extism::answer(abi, &export, status, k.output.as_deref(), k.error.as_deref()) {
+                    Ok(v) => record.result = Some(v),
+                    Err(message) => record.outcome = Outcome { kind: OutcomeKind::Trap, message: Some(message), stack: vec![] },
+                }
+            }
             Ok(results) => {
                 record.result = Some(match results.as_slice() {
                     [] => Value::Null,
@@ -613,7 +656,7 @@ impl App {
         let c = clock.with(|c| c.clone());
         record.totals = Totals {
             fuel: used,
-            peak_memory: data.limiter.peak,
+            peak_memory: data.limiter.peak + data.kernel.as_ref().map_or(0, |k| k.peak as u64),
             virtual_ns: c.elapsed_ns(),
             guest_ns: c.guest_ns,
             host_ns: c.host_ns,
@@ -625,6 +668,7 @@ impl App {
             wall_us: 0,
         };
         record.events = std::mem::take(&mut data.events);
+        let kernel_logs = data.kernel.as_mut().map(|k| std::mem::take(&mut k.logs)).unwrap_or_default();
         if let Some(instance) = instance.filter(|_| !self.feedback_readers.is_empty()) {
             store.set_fuel(10_000_000)?;
             store.set_epoch_deadline(100);
@@ -637,6 +681,10 @@ impl App {
         drop(store);
         record.stdout = String::from_utf8_lossy(&stdout.contents()).into_owned();
         record.stderr = String::from_utf8_lossy(&stderr.contents()).into_owned();
+        // Extism logs go to the host, which shows them like stderr.
+        for (level, text) in kernel_logs {
+            record.stderr.push_str(&format!("[{level}] {text}\n"));
+        }
         Ok(())
     }
 }

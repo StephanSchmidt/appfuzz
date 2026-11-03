@@ -794,6 +794,41 @@ pod-booking site with four apps, a `make` that reviews them, and a shell
 that refuses a version that fails. Its README has an exercise: an agent
 adds a feature, and the review refuses it.
 
+## Platforms: components, witx and Extism
+
+A component carries its own WIT, so appfuzz needs nothing else. A plain
+module doesn't: its platform's `platform.toml` supplies the types and the
+calling convention, and the app's manifest names it with `[app] platform`.
+
+- **witx** (Fastly Compute, bundled as `platform = "fastly"`): pointers and
+  lengths into the module's memory, typed by the platform's witx files.
+- **Extism** (`abi = "extism"`): JSON through the Extism kernel. appfuzz
+  emulates `extism:host/env` and types the JSON with a WIT file. WIT is used
+  only as a type language here, and the plugin stays a plain module. Each
+  WIT import is a host function (`extism:host/user`), and each WIT export
+  is a plugin export. Names match ignoring case, `-` and `_`.
+
+```toml
+[platform]
+name = "acme-plugins"
+abi = "extism"
+wit = "wit"                 # one world per app, chosen with [app] world
+
+[platform.json]             # how the JSON spells WIT names
+fields = "snake"            # default; also kebab, camel, pascal, lower, screaming
+cases = "pascal"            # variant and enum cases (serde's default)
+err = "error"               # result as {"ok": …} / {"error": …}
+rename_all = { create-form = "camel" }
+rename = { "conference.id" = "Id" }
+```
+
+Decoding the plugin's JSON is lenient, like `#[serde(default)]`: keys match
+regardless of case and separators, missing fields take their empty value,
+`null` is an empty list (Go's nil slice), and a `string` accepts any JSON as
+its text. An export whose WIT result is `result<T, E>` answers `ok` when its
+status is 0, and `err` with its `error_set` text otherwise. Kernel logs show
+up in `stderr`, and `http_request` traps because it isn't simulated yet.
+
 ## Limits
 
 - A pass means the search found nothing. That's evidence, not proof.

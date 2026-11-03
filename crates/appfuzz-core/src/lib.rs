@@ -14,6 +14,7 @@ pub mod dormant;
 pub mod dest;
 pub mod effects;
 pub mod envelope;
+pub mod extism;
 pub mod fuzz;
 pub mod par;
 pub mod payload;

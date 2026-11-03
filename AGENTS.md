@@ -54,6 +54,13 @@ cost = 1
 Without a manifest, `appfuzz --wasm app.wasm inspect` still works. The
 request is then generated from the WIT types.
 
+A plain module (not a component) needs `[app] platform`, which is a bundled
+name (`fastly`) or a `platform.toml` path. For an Extism plugin, the platform
+has `abi = "extism"` and a WIT file that types the JSON. `[app] world` picks
+the app's world, and each WIT export is one export to review with
+`review --export NAME`. See
+[README](README.md#platforms-components-witx-and-extism).
+
 ## 2. Order of work
 
 1. **`inspect`**: exports, imports, grants, static findings (ungranted or
