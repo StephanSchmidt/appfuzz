@@ -47,7 +47,7 @@ impl Finding {
             "crash" | "stack_overflow" | "hang" | "over_budget" | "check_failed" |
             "crash_on_host_value" | "hang_on_host_value" | "crash_at_time" | "hang_at_time" |
             "big_output" | "big_payload" | "redundant_calls" | "busy_wait" | "sleeps" => "measured",
-            "acceptance_failed" | "sequence_check_failed" | "ungranted_import" | "ungranted_call" | "write_on_safe_method" |
+            "invalid_host_argument" | "acceptance_failed" | "sequence_check_failed" | "ungranted_import" | "ungranted_call" | "write_on_safe_method" |
             "script_in_output" | "non_local_url" | "open_redirect" | "outside_envelope" => "policy_violation",
             _ => "heuristic",
         }
@@ -165,6 +165,11 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let arg_text: Vec<String> = r.events.iter().map(|e| serde_json::to_string(&e.args).unwrap_or_default()).collect();
     let mut same: BTreeMap<(&str, &str), u32> = BTreeMap::new();
     for (e, a) in r.events.iter().zip(&arg_text) {
+        for v in e.value_checks.iter().flat_map(|c|&c.violations) {
+            out.push(Finding::new("invalid_host_argument", &format!("{}\0{}\0{}\0{}",e.func,v.declaration,v.constraint,v.reason), Severity::Fail,
+                format!("{} parameter {} violates {}",e.func,v.path,v.constraint),
+                json!({"func":e.func,"parameter":v.declaration,"path":v.path,"constraint":v.constraint,"reason":v.reason,"value":v.value,"bytes":v.bytes,"n":e.n,"call":e.call,"source":m.function(&e.func).and_then(|f|f.value_source.as_deref())}),run));
+        }
         *same.entry((e.func.as_str(), a.as_str())).or_default() += 1;
     }
     let mut redundant: BTreeMap<&str, (u32, u32, &str)> = BTreeMap::new();

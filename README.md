@@ -341,6 +341,95 @@ number wins over a range; otherwise the range with the greatest applicable
 starting number wins. These precede plan rules and defaults. Manifest rules still
 come first.
 
+## Declared value contracts
+
+WIT supplies structural types; platform metadata supplies semantic requirements
+on guest-to-host arguments. These are declared explicitly, never guessed from
+names, observed values or guest prose:
+
+```toml
+[functions."acme:web/bookings#create"]
+param_values = { date = "format:date", seats = "range:1..6", reference = "format:uuid", subject = "bytes:1..200" }
+value_source = "Platform HOST-API.md: booking parameter requirements"
+effect = "write"
+```
+
+An actual argument outside its declared domain produces an
+`invalid_host_argument` fail, even when the host returns an ordinary error. Checks
+inspect complete values before shortening traces. They do not repair arguments,
+change responses or invent rollback; host rules still determine behavior. A
+function documented to accept raw text for validation should declare that
+broader contract. `value_source` records provenance, not authority by itself.
+
+Paths start with a parameter name and can select record fields or tuple indices,
+traversing lists, present options and `ok` results. A length on a list checks the
+collection. `required` rejects absent options; other rules skip them. An absent
+optional parent does not require its child fields. Invalid paths, incompatible
+WIT types and contradictory constraints are configuration errors.
+
+New `param_values` and `entry.input_values` maps accept one constraint string or
+an array of constraints that all apply. They support `range`, `len`, `enum` and
+existing formats, plus `required`, `bytes:a..b` and `format:uuid`. Integer bounds
+preserve all bits. `len` counts Unicode scalar values or list elements; `bytes`
+counts UTF-8 bytes. Presence and nonempty values are separate: combine `required`
+with `len:1..` when needed. Calendar dates are real `YYYY-MM-DD` dates in years
+0001–9999. Local times are `HH:MM` or `HH:MM:SS`; `datetime` joins a date and local
+time with `T`. These formats have no offsets, fractional seconds or leap seconds.
+UUID syntax is 8-4-4-4-12 hexadecimal digits, case insensitive; nil fits that
+syntax. Syntax alone establishes no UUID version, ownership or existence.
+`format:uuid` also works in existing `values` guarantees on requests and host
+results, including present options. Generated/supplied host data is conformed to
+those guarantees so guest code receives a valid UUID when the platform promises
+one. This is format-conforming generation, not a new UUID search stage.
+
+Guest acceptance domains are separate from platform request filters:
+
+```toml
+[entry]
+values = { today = "format:date" } # the platform filters other values out
+input_values = { "form.date" = ["required", "format:date"], "form.seats" = ["required", "format:int", "range:1..6"] }
+
+[acceptance]
+version = 1
+[acceptance.checks.reject-invalid-date]
+origin = "marketing"
+input_class = "invalid"
+input_fields = ["form.date"]
+when = { method = "POST", path = "/book" }
+expect = { selector = "$.status", equals = 400 }
+forbid_effects = ["write", "delete", "external"]
+search = true
+```
+
+Seed the request with fields to exercise, or supply a fixed acceptance `request`
+and `search = false`. This example requires POST `/book` requests with an invalid
+date to return 400 and make no forbidden host calls, even calls that would fail.
+Reads remain allowed. Expected rejection behavior comes from the brief; a field
+type alone does not establish whether to reject, normalize or use a default.
+
+`input_class` is `valid` (all selected domains hold) or `invalid` (at least one
+does not). Omit `input_fields` to select all declared guest domains. Missing
+optional fields are skipped; missing `required` fields are invalid. If no selected
+domain is exercised, the check is incomplete.
+Request paths use the existing first-matching query/form key convention. `when`
+matches fields by exact equality. These scopes and `forbid_effects` apply to
+single-run acceptance checks. Cases outside platform filters and unmatched scopes
+or selectors are unexercised, never passing. Shrinking preserves the class and
+violation; an upper-bound failure cannot shrink into a lower-bound failure.
+Effect assertions require effect metadata for reached platform calls; an
+unclassified call makes that assertion unexercised rather than proving no writes.
+
+`inspect` shows host argument declarations. Review reports function-level
+evidence under `coverage.host_value_contracts`, including checked-rule counts and
+unexercised functions over recorded runs. This is not exhaustive value coverage.
+Existing manifest fields retain their meaning. The updated execution fingerprint
+requires `--against-current` for regression replay of earlier-engine cases.
+
+This addition reuses ordinary search and saved acceptance checks. A dedicated
+semantic mutation stage has not been enabled; its incremental value must be
+measured separately. Monetary business arithmetic, UUID ownership/existence,
+additional encodings and arbitrary cross-field rules remain outside this work.
+
 ## Coherent host datasets
 
 The platform can declare shared record collections. List and lookup functions

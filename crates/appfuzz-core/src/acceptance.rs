@@ -23,6 +23,9 @@ pub enum Origin {
     Marketing,
     Platform,
 }
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="lowercase")]
+pub enum InputClass { Valid, Invalid }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Check {
@@ -41,6 +44,16 @@ pub struct Check {
     pub seed: Option<u64>,
     #[serde(default)]
     pub plan: Plan,
+    /// Scope to an explicitly declared guest acceptance domain, not a platform filter.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub input_class: Option<InputClass>,
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub input_fields: Vec<String>,
+    /// Exact request-field scope (for example method=POST and a route).
+    #[serde(default,skip_serializing_if="BTreeMap::is_empty")]
+    pub when: BTreeMap<String,Value>,
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub forbid_effects: Vec<crate::manifest::Effect>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,10 +102,31 @@ impl Check {
         self.search.unwrap_or(self.expect.is_none())
     }
     pub fn property(&self) -> Result<Option<Property>> {
-        if let Some(words) = &self.property {
-            return Ok(Some(Property::parse(words)?));
+        let property = if let Some(words)=&self.property {Some(Property::parse(words)?)}
+            else {self.expect.as_ref().map(|e|Property::expect(&e.selector,e.equals.clone())).transpose()?};
+        let property=property.map(|p|p.forbid_effects(self.forbid_effects.clone()));
+        if self.input_class.is_none() && self.when.is_empty() && self.forbid_effects.is_empty() {return Ok(property);}
+        let check=self.clone();
+        Ok(property.map(|p|p.scoped(move|r,m|check.applies(r,m))))
+    }
+    pub fn applies(&self,r:&RunRecord,m:&Manifest) -> bool {
+        if !self.forbid_effects.is_empty() && r.events.iter().any(|e|m.function(&e.func).and_then(|f|f.effect).is_none()) {return false;}
+        let Some(req)=r.spec.args.first() else {return self.when.is_empty() && self.input_class.is_none();};
+        if !self.when.iter().all(|(path,v)|crate::harness::field(req,path)==Some(v)) {return false;}
+        let Some(class)=self.input_class else {return true;};
+        if !crate::constraints::broken_request(&r.spec.args,m).is_empty() {return false;}
+        let Some(entry)=&m.entry else {return false;};
+        let fields:Vec<_>=if self.input_fields.is_empty() {entry.input_values.keys().collect()}else{self.input_fields.iter().collect()};
+        if fields.is_empty() {return false;}
+        let mut invalid=false;let mut exercised=false;
+        for path in fields {
+            let Some(domain)=entry.input_values.get(path) else {return false;};
+            let value=crate::harness::field(req,path);
+            if !domain.exercised(value) {continue;}
+            exercised=true;
+            invalid|=!domain.holds(value);
         }
-        self.expect.as_ref().map(|e| Property::expect(&e.selector, e.equals.clone())).transpose()
+        exercised && invalid==(class==InputClass::Invalid)
     }
     pub fn validate(&self, m: &Manifest) -> Result<()> {
         if usize::from(self.property.is_some()) + usize::from(self.expect.is_some()) + usize::from(self.relation.is_some()) != 1 {
@@ -103,6 +137,12 @@ impl Check {
         }
         self.plan.validate()?;
         self.property()?;
+        if (!self.input_fields.is_empty() && self.input_class.is_none()) || self.input_class.is_some() && m.entry.as_ref().is_none_or(|e|e.input_values.is_empty()) {bail!("input_class needs declared entry.input_values; input_fields needs input_class");}
+        for path in &self.input_fields {
+            if m.entry.as_ref().is_none_or(|e|!e.input_values.contains_key(path)) {bail!("undeclared input field {path}");}
+        }
+        if self.input_class.is_some() && self.export.as_deref().is_some_and(|x|m.entry.as_ref().is_none_or(|e|!crate::harness::fn_key_eq(x,&e.export))) {bail!("input_class applies to the declared entry export");}
+        if self.relation.is_some() && (self.input_class.is_some() || !self.when.is_empty() || !self.forbid_effects.is_empty()) {bail!("input scopes and forbidden effects require a single-run acceptance check");}
         if let Some(r) = &self.relation {
             Selector::parse(&r.selector)?;
             if r.dataset.is_some() == !r.set.is_empty() {
@@ -121,6 +161,7 @@ impl Check {
     }
     pub fn spec(&self, app: &App, base: &RunSpec) -> Result<RunSpec> {
         let export = app.export(self.export.as_deref().unwrap_or(&base.export))?;
+        if self.input_class.is_some() && app.manifest.entry.as_ref().is_none_or(|e|!crate::harness::fn_key_eq(&export.key,&e.export)) {bail!("input_class applies to the declared entry export");}
         let mut spec = base.clone();
         spec.export = export.key.clone();
         spec.now = self.now.clone().unwrap_or_else(|| base.now.clone());
@@ -176,6 +217,7 @@ pub fn evaluate(app: &App, check: &Check, spec: &RunSpec) -> Result<Evaluation> 
 }
 pub fn evaluate_record(app: &App, check: &Check, record: RunRecord) -> Result<Evaluation> {
     let mut records = vec![record];
+    if !check.applies(&records[0],&app.manifest) {return Ok(Evaluation{status:"not_exercised".into(),matches:0,detail:json!({"reason":"input is outside this check's declared scope"}),records});}
     if let Some(r) = &check.relation {
         let spec = check.variant(app, &records[0].spec)?;
         records.push(app.run(&spec));

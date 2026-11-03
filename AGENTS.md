@@ -181,10 +181,21 @@ with `sensitive_paths = ["/admin"]`. `html:no-scripts` allows no script,
 `html:safe` also allows no request the user didn't ask for, and `url:local`
 allows only paths on the app's own host.
 
+Host argument requirements come from the platform's function descriptions:
+`param_values = { date = "format:date", quantity = "range:1..6" }` on a
+function checks actual guest-to-host calls, before trace shortening. A violation
+is `invalid_host_argument`, even when the host returns an ordinary error. Never
+guess semantic types from names or guest output. The guest's `input_values`
+describes accepted domains without excluding invalid incoming values. Saved
+single-run acceptance checks can use `input_class`, `input_fields`, exact `when`
+matches and `forbid_effects` to state valid/invalid input behavior. Unexercised
+classes are incomplete. These new domain maps also support conjunctive arrays,
+`required`, UTF-8 `bytes:a..b`, and `format:uuid`; see README for exact semantics.
+
 Value constraints say what the platform promises: `values = { score =
 "range:0..100" }` on a host function (results), `[entry] values = {
 "query.days" = "range:1..31" }` (requests the platform lets through). Also
-`len:a..b`, `enum:x,y`, `format:date|time|datetime|email|int`. Generated
+`len:a..b`, `enum:x,y`, `format:date|time|datetime|email|int|uuid`. Generated
 values keep to them, so a finding is about a value that can happen.
 
 Rules say what the host always answers for some arguments, the
@@ -267,6 +278,7 @@ and `confirm <id>` makes it reproducible.
 | `write_on_safe_method`, `repeated_write`, `partial_write` | a change on GET, the same change twice, a change that stays when a later one fails (§4 effects) |
 | `ungranted_import`, `ungranted_call`, `unused_grant` | imports versus the manifest's grants |
 | `check_failed` | a property from `check` broke |
+| `invalid_host_argument` | an actual guest-to-host argument violates its platform-declared semantic domain |
 
 Findings are judged against the manifest's limits. If a limit is wrong,
 fix the manifest. Don't explain the finding away.

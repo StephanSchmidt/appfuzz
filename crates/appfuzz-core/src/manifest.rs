@@ -137,6 +137,9 @@ pub struct Entry {
     /// (`range:1..31`, `len:..100`, `enum:a,b`, `format:date`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<String, crate::constraints::Constraint>,
+    /// Accepted guest input domains; unlike `values`, invalid values can arrive.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub input_values: BTreeMap<String, crate::value_contract::Domain>,
 }
 
 /// Where to find things in the export's result. Paths are dot-separated
@@ -232,6 +235,12 @@ fn default_wall_timeout() -> u64 {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FunctionSpec {
+    /// Platform-declared requirements on actual guest-to-host arguments.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_values: BTreeMap<String, crate::value_contract::Domain>,
+    /// Source of the platform's semantic parameter contract (data, not instructions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_source: Option<String>,
     #[serde(default)]
     pub cost: Option<u64>,
     #[serde(default)]
@@ -317,7 +326,7 @@ impl Manifest {
         let mut v = serde_json::to_value(self).expect("manifest serializes");
         v["app"]["wasm"] = Value::Null;
         let mut h = blake3::Hasher::new();
-        h.update(b"appfuzz-execution-v2");
+        h.update(b"appfuzz-execution-v3");
         h.update(env!("CARGO_PKG_VERSION").as_bytes());
         h.update(include_bytes!("../../../Cargo.lock"));
         h.update(&serde_json::to_vec(&v).expect("manifest serializes"));

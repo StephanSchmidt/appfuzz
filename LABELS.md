@@ -155,6 +155,32 @@ sensitive_paths = ["/admin", "/settings"]
 With output labels the fuzzer also tries `//evil.example/`,
 `javascript:alert(1)` and markup with event handlers in request fields.
 
+## Host argument requirements and guest input domains
+
+`[functions.KEY].param_values` declares platform requirements on actual host-call
+arguments, by parameter and nested field path. Violations produce
+`invalid_host_argument` fails, including when the host returns an ordinary error.
+Values are checked before trace shortening; host rules still determine responses
+and effects. Optional `value_source` records the platform requirement source.
+
+`[entry].input_values` describes what the guest should accept. Other values can
+still arrive. Saved single-run acceptance checks can select `input_class`
+(`valid`/`invalid`), optional `input_fields`, exact request-field `when` matches,
+and `forbid_effects` (`write`, `delete`, `external`, `read`). Expected behavior
+remains an explicit output expectation or property. Unexercised classes,
+platform-filtered cases and missing selectors are incomplete, never passing.
+
+These two new maps accept a constraint string or an array of conjunctive
+constraints. Besides the vocabulary below, they support `required` (presence),
+`bytes:a..b` (UTF-8 byte length), and `format:uuid` (8-4-4-4-12 hex digits; nil is
+syntactically valid). Existing `len` still counts Unicode scalars or list
+elements. Combine `required` with `len:1..` for nonempty values. New domains keep
+numeric integer bounds exact. Dates use years 0001–9999 with real calendar
+validation; time/date-time use local hours/minutes and optional seconds, without
+offsets, fractions or leap seconds. Integer text allows one optional minus sign
+and one or more ASCII digits. Types are never inferred from names or values.
+See README's declared value contracts for paths, examples and replay semantics.
+
 ## Value constraints: `values = { <path> = "<constraint>" }`
 
 What the platform promises about a value. On a host function, the paths
@@ -167,7 +193,7 @@ app sees them.
 | `range:a..b` | a number, or text holding one, from `a` to `b` (either end may be left out: `range:0..`) |
 | `len:a..b` | characters of text, or elements of a list |
 | `enum:x,y,z` | one of these |
-| `format:date`, `format:time`, `format:datetime`, `format:email`, `format:int` | `2026-11-02`, `10:00`, `2026-11-02T10:00:00`, `a@b.c`, `-12` |
+| `format:date`, `format:time`, `format:datetime`, `format:email`, `format:int`, `format:uuid` | `2026-11-02`, `10:00`, `2026-11-02T10:00:00`, `a@b.c`, `-12`, `00000000-0000-4000-8000-000000000001` |
 
 Generated host values keep to the constraints, and so do plan values (the
 host keeps its promises). Fuzzed requests mostly keep to them, and `scale`

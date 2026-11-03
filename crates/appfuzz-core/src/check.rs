@@ -15,6 +15,7 @@ use crate::output::response;
 use crate::record::{OutcomeKind, RunRecord};
 
 type Test = dyn Fn(&RunRecord, &Manifest) -> Option<(String, Value)> + Send + Sync;
+type Scope = dyn Fn(&RunRecord, &Manifest) -> bool + Send + Sync;
 
 /// A property: a test that says how a run breaks it, if it does.
 #[derive(Clone)]
@@ -24,6 +25,7 @@ pub struct Property {
     test: Arc<Test>,
     selector: Option<Selector>,
     numeric: bool,
+    scope: Option<Arc<Scope>>,
 }
 
 impl std::fmt::Debug for Property {
@@ -88,7 +90,7 @@ impl Property {
             _ => bail!("unknown property {text:?}. {HELP}"),
         };
         let selector = if let ["value_range", sel, ..] = w.as_slice() { Some(Selector::parse(sel)?) } else { None };
-        Ok(Property { text, test, selector, numeric: true })
+        Ok(Property { text, test, selector, numeric: true, scope: None })
     }
 
     /// Exact expectations preserve JSON types for field selectors and text for HTML selectors.
@@ -96,20 +98,34 @@ impl Property {
         let sel = Selector::parse(selector)?;
         let selected = sel.clone();
         let text = format!("expect {selector} = {expected}");
-        Ok(Self { text, selector: Some(sel), numeric: false, test: Arc::new(move |r,m| {
+        Ok(Self { text, selector: Some(sel), numeric: false, scope: None, test: Arc::new(move |r,m| {
             selected.selected(r,m).into_iter().find(|v| v != &expected).map(|actual| (format!("{} is {actual}, expected {expected}", selected.text), json!({"actual":actual,"expected":expected})))
         }) })
     }
 
     /// Numeric values actually exercised, rather than vacuous successes.
     pub fn matches(&self, r: &RunRecord, m: &Manifest) -> usize {
+        if self.scope.as_ref().is_some_and(|s| !s(r,m)) { return 0; }
         if matches!(r.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) { return 0; }
         self.selector.as_ref().map_or(1, |s| if self.numeric { s.values(r, m).iter().filter(|v| number(v).is_some_and(f64::is_finite)).count() } else { s.selected(r, m).len() })
     }
 
     /// How the run breaks the property, if it does.
     pub fn broken(&self, r: &RunRecord, m: &Manifest) -> Option<(String, Value)> {
+        if self.scope.as_ref().is_some_and(|s| !s(r,m)) { return None; }
         (self.test)(r, m)
+    }
+
+    pub fn scoped(mut self, scope: impl Fn(&RunRecord,&Manifest)->bool + Send + Sync + 'static) -> Self {
+        self.scope=Some(Arc::new(scope));self
+    }
+    pub fn forbid_effects(mut self, effects:Vec<crate::manifest::Effect>) -> Self {
+        if effects.is_empty() {return self;}
+        let previous=self.test.clone();
+        self.test=Arc::new(move|r,m| {
+            previous(r,m).or_else(||r.events.iter().find(|e|m.function(&e.func).and_then(|f|f.effect).is_some_and(|effect|effects.contains(&effect)))
+                .map(|e|(format!("forbidden effect in {}",e.func),json!({"func":e.func,"n":e.n,"effect":m.function(&e.func).and_then(|f|f.effect)}))))
+        });self
     }
 
     /// The finding for a run that breaks the property.

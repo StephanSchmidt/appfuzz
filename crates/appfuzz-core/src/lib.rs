@@ -6,6 +6,7 @@ pub mod manifest;
 pub mod markup;
 pub mod check;
 pub mod constraints;
+pub mod value_contract;
 pub mod metamorphic;
 pub mod output;
 pub mod detect;

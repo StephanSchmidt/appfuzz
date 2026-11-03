@@ -96,6 +96,10 @@ pub struct HostCall {
     pub call: u32,
     /// Arguments by parameter name.
     pub args: Map<String, Value>,
+    /// Validation of complete arguments before trace compaction. Absent on legacy
+    /// calls or functions without explicit parameter value declarations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_checks: Option<crate::value_contract::Evidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -535,6 +535,10 @@ fn inspect(app: &App, with_wit: bool) -> Result<Value> {
                         if let Some(l) = labels_json(m, &f.key) {
                             o["labels"] = l;
                         }
+                        if let Some(s)=m.function(&f.key).filter(|s|!s.param_values.is_empty()) {
+                            o["param_values"]=json!(s.param_values);
+                            o["value_source"]=json!(s.value_source);
+                        }
                     }
                     o
                 })

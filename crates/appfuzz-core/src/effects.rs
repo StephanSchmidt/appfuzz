@@ -156,6 +156,7 @@ mod tests {
             func: func.into(),
             call: 1,
             args: args.as_object().cloned().unwrap_or_default(),
+            value_checks: None,
             result: Some(result),
             trap: None,
             source: String::new(),

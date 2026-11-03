@@ -44,8 +44,9 @@ struct Platform {
     marks: BTreeMap<String, Vec<(String, crate::labels::Label)>>,
     /// Value constraints of host results.
     constraints: BTreeMap<String, Vec<(String, crate::constraints::Constraint)>>,
+    argument_checks: BTreeMap<String, crate::value_contract::HostChecks>,
     /// The manifest's rules: what the host always answers for some arguments.
-    rules: BTreeMap<String, Vec<crate::plan::Rule>>,
+    rules: BTreeMap<String, Vec<crate::plan::CompiledRule>>,
     queries: BTreeMap<String, crate::dataset::Query>,
     mutations: BTreeMap<String, crate::dataset::Mutation>,
     datasets: BTreeMap<String, crate::dataset::Dataset>,
@@ -228,12 +229,19 @@ impl App {
             latency_ms: BTreeMap::new(),
             marks: BTreeMap::new(),
             constraints: BTreeMap::new(),
+            argument_checks: BTreeMap::new(),
             rules: BTreeMap::new(),
             queries: BTreeMap::new(),
             mutations: BTreeMap::new(),
             datasets: manifest.datasets.clone(),
         };
         crate::labels::check_wit(&manifest, &imports)?;
+        if let Some(entry)=&mut manifest.entry
+            && !entry.input_values.is_empty() {
+                let export=exports.iter().find(|e|fn_key_eq(&e.key,&entry.export)).context("input_values export not found")?;
+                let (_,ty)=export.ty.params().next().context("input_values needs a request argument")?;
+                for (path,domain) in &mut entry.input_values {domain.validate_input_type(&ty,path).with_context(||format!("input_values {path}"))?;}
+        }
         crate::dataset::validate(&manifest.datasets)?;
         if let Some(suite)=&manifest.acceptance {suite.validate(&manifest)?;}
         for spec in manifest.functions.values() {
@@ -251,6 +259,11 @@ impl App {
                 platform.cost.insert(f.key.clone(), manifest.cost_of(&f.key));
                 platform.latency_ms.insert(f.key.clone(), manifest.latency_ms_of(&f.key));
                 platform.funcs.insert(f.key.clone(), f.clone());
+                if let Some(spec) = manifest.function(&f.key).filter(|s| !s.param_values.is_empty()) {
+                    let params = f.ty.params().map(|(n,t)|(n.to_string(),t)).collect::<Vec<_>>();
+                    let checks = crate::value_contract::HostChecks::compile(&params, &spec.param_values).with_context(||format!("{} param_values",f.key))?;
+                    platform.argument_checks.insert(f.key.clone(),checks);
+                }
                 if let Some(m) = manifest.function(&f.key).and_then(|s| s.mutation.as_ref()) {
                     let names = f.param_names();
                     if m.fields.values().chain(m.filter.values()).any(|p| !names.iter().any(|n| n == p.split('.').next().unwrap_or(""))) {
@@ -298,7 +311,7 @@ impl App {
                     platform.marks.insert(f.key.clone(), marks);
                 }
                 if let Some(spec) = manifest.function(&f.key).filter(|s| !s.rules.is_empty()) {
-                    platform.rules.insert(f.key.clone(), spec.rules.clone());
+                    platform.rules.insert(f.key.clone(), crate::plan::compile_rules(&spec.rules));
                 }
                 if let Some(spec) = manifest.function(&f.key).filter(|s| !s.values.is_empty()) {
                     platform.constraints.insert(f.key.clone(), spec.values.iter().map(|(p, c)| (p.clone(), c.clone())).collect());
@@ -646,10 +659,11 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     };
     let names = info.param_names();
     let args: Vec<(String, Value)> = names.iter().cloned().zip(params.iter().map(val_to_json)).collect();
+    let value_checks = platform.argument_checks.get(key).map(|checks|checks.check(&args));
     // The platform's rules come first: the host keeps its promises, whatever
     // the plan or the fuzzer says.
     let mut resolved = match platform.rules.get(key) {
-        Some(rules) => crate::plan::resolve_rules(rules, &args, None).unwrap_or_else(|| data.plan.resolve(key, call, &args)),
+        Some(rules) => crate::plan::resolve_compiled_rules(rules, &args, None).unwrap_or_else(|| data.plan.resolve(key, call, &args)),
         None => data.plan.resolve(key, call, &args),
     };
     let commit_trap = match &resolved.decision { Decision::CommitThenTrap(msg) => Some(msg.clone()), _ => None };
@@ -695,6 +709,7 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
         func: key.to_string(),
         call,
         args: args.into_iter().map(|(k, v)| (k, compact(v))).collect::<Map<_, _>>(),
+        value_checks,
         result: None,
         trap: None,
         source: resolved.source.clone(),

@@ -318,6 +318,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
         "findings": all.iter().filter(|f| f.severity >= o.min).map(finding_json).collect::<Vec<_>>(),
         "coverage": {"kind": if fuzz.as_ref().is_some_and(|v|v["feedback"]["mode"]=="internal") {"internal_and_boundary_features"}else{"host_boundary_and_output_features"},
             "internal_feedback":fuzz.as_ref().map(|v| &v["feedback"]), "faults":fuzz.as_ref().map(|v| &v["faults"]), "fuzz_runs": fuzz.as_ref().map(|v| &v["runs"]),
+            "host_value_contracts":appfuzz_core::value_contract::coverage(&app,&runs),
             "corpus": fuzz.as_ref().map(|v| &v["corpus"]), "static_call_sites": unexplored.as_ref().map(|v| &v["static_sites"]),
             "unreached_call_sites": unexplored.as_ref().map(|v| &v["unreached"]), "instruction_branch_coverage": false},
         "not_exercised": {"sink_checks": !app.manifest.has_sinks(), "identity_checks": !appfuzz_core::identity::declared(&app.manifest),

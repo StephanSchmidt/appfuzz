@@ -83,6 +83,58 @@ impl Fixture {
     }
 }
 
+#[test]
+fn semantic_host_argument_violations_confirm_replay_and_regress() {
+    let f=Fixture::new(false);
+    f.edit("\nrequest = 1\n","\nrequest = 7\n");
+    let mut text=std::fs::read_to_string(&f.manifest).unwrap();
+    text.push_str("\n[functions.\"test:workflow/db#get\"]\nparam_values={id='range:1..6'}\nvalue_source='test platform specification'\n");
+    std::fs::write(&f.manifest,text).unwrap();
+    let (_,r)=f.cli(&["run"]);
+    let bad=r["findings"].as_array().unwrap().iter().find(|v|v["kind"]=="invalid_host_argument").unwrap();
+    assert_eq!(bad["evidence"],"policy_violation");
+    let (_,confirmed)=f.cli(&["confirm",bad["id"].as_str().unwrap(),"--max-runs","30"]);
+    assert_eq!(confirmed["confirmed"],true,"{confirmed}");
+    assert_eq!(confirmed["spec"]["args"][0],7,"shrinking must keep an upper-bound violation above six");
+    let case=confirmed["case"].as_str().unwrap();assert_eq!(f.cli(&["replay",case]).0,0);
+    let bytes=component("package test:workflow; interface db { get:func(id:u32)->u32; } world app {import db;export run:func(n:u32)->u32;}",
+        r#"(module (import "test:workflow/db" "get" (func $get (param i32) (result i32))) (func (export "run") (param i32) (result i32) (call $get (i32.const 1))))"#);
+    std::fs::write(f.dir.join("app.wasm"),bytes).unwrap();
+    let (code,replayed)=f.cli(&["replay",case,"--against-current"]);assert_eq!(code,0,"{replayed}");assert_eq!(replayed["reproduced"],false);
+}
+
+#[test]
+fn guest_input_domains_do_not_filter_out_invalid_requests() {
+    let f=Fixture::new(true);
+    f.edit("request = \"safe\"","request = \"0.0.0000\"\ninput_values={''=['required','format:date']}");
+    let mut text=std::fs::read_to_string(&f.manifest).unwrap();
+    text.push_str("\n[acceptance]\nversion=1\n[acceptance.checks.reject]\norigin='marketing'\nsearch=false\ninput_class='invalid'\nexpect={selector='$',equals='rejected'}\n");
+    std::fs::write(&f.manifest,text).unwrap();
+    let (code,r)=f.cli(&["acceptance","run"]);assert_eq!(code,2,"{r}");assert_eq!(r["checks"][0]["status"],"broken");
+    let case=r["checks"][0]["case"].as_str().unwrap();assert_eq!(f.cli(&["replay",case]).0,0);
+    f.edit("input_class='invalid'","input_class='valid'");
+    let (code,r)=f.cli(&["acceptance","run"]);assert_eq!(code,3,"{r}");assert_eq!(r["checks"][0]["matches"],0);
+    f.edit("input_class='valid'","input_class='invalid'");
+    f.edit("input_values=", "values={''='format:date'}\ninput_values=");
+    let (code,r)=f.cli(&["acceptance","run"]);assert_eq!(code,3,"{r}");assert_eq!(r["checks"][0]["status"],"not_exercised");
+}
+
+#[test]
+fn rejected_input_must_obey_declared_effect_restrictions() {
+    let f=Fixture::new(false);f.edit("\nrequest = 1\n","\nrequest = 7\ninput_values={''='range:1..6'}\n");
+    let mut text=std::fs::read_to_string(&f.manifest).unwrap();
+    text.push_str("\n[functions.\"test:workflow/db#get\"]\neffect='write'\n[acceptance]\nversion=1\n[acceptance.checks.reject]\norigin='marketing'\nsearch=false\ninput_class='invalid'\nproperty=['no_crash']\nforbid_effects=['write','delete','external']\n");
+    std::fs::write(&f.manifest,text).unwrap();
+    let (code,r)=f.cli(&["acceptance","run"]);assert_eq!(code,2,"{r}");assert!(r["checks"][0]["evidence"]["why"].as_str().unwrap().contains("forbidden effect"));
+    let case=r["checks"][0]["case"].as_str().unwrap();
+    f.edit("effect='write'\n","");
+    let (code,unknown)=f.cli(&["acceptance","run"]);assert_eq!(code,3,"{unknown}");
+    f.edit("[functions.\"test:workflow/db#get\"]\n","[functions.\"test:workflow/db#get\"]\neffect='write'\n");
+    let bytes=component("package test:workflow; world app {export run:func(n:u32)->u32;}",r#"(module (func (export "run") (param i32) (result i32) (i32.const 7)))"#);
+    std::fs::write(f.dir.join("app.wasm"),bytes).unwrap();
+    let (code,r)=f.cli(&["replay",case,"--against-current"]);assert_eq!(code,0,"{r}");assert_eq!(r["reproduced"],false);
+}
+
 fn fault_fixture(crash: bool) -> Fixture {
     let f=Fixture::new(false);
     let wit="package test:workflow; interface db { save:func(id:u32) -> result<u32,u32>; } world app { import db; export run:func(n:u32) -> u32; }";

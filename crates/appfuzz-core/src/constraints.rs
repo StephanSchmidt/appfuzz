@@ -32,6 +32,7 @@ pub enum Format {
     DateTime,
     Email,
     Int,
+    Uuid,
 }
 
 impl Constraint {
@@ -64,7 +65,8 @@ impl Constraint {
                 "datetime" => Format::DateTime,
                 "email" => Format::Email,
                 "int" => Format::Int,
-                _ => bail!("{s:?}: a format is one of date, time, datetime, email, int"),
+                "uuid" => Format::Uuid,
+                _ => bail!("{s:?}: a format is one of date, time, datetime, email, int, uuid"),
             }),
             _ => bail!("{s:?}: a value constraint is range:a..b, len:a..b, enum:x,y or format:<f>"),
         })
@@ -140,12 +142,13 @@ fn fmt_num(n: f64) -> String {
     if n.fract() == 0.0 && n.abs() < 1e15 { format!("{}", n as i64) } else { n.to_string() }
 }
 
-fn format_ok(f: Format, s: &str) -> bool {
+pub(crate) fn format_ok(f: Format, s: &str) -> bool {
     let digits = |x: &str, n: usize| x.len() == n && x.bytes().all(|b| b.is_ascii_digit());
     let date = |x: &str| {
         let p: Vec<&str> = x.split('-').collect();
         p.len() == 3
             && digits(p[0], 4)
+            && p[0] != "0000"
             && digits(p[1], 2)
             && digits(p[2], 2)
             && crate::wasi::parse_datetime(&format!("{x}T00:00:00")).is_some_and(|t| crate::wasi::format_datetime(t).0 == x)
@@ -162,8 +165,13 @@ fn format_ok(f: Format, s: &str) -> bool {
         Format::Time => time(s),
         Format::DateTime => s.split_once('T').is_some_and(|(d, t)| date(d) && time(t)),
         Format::Email => s.split_once('@').is_some_and(|(a, b)| !a.is_empty() && b.contains('.') && !s.contains(char::is_whitespace)),
-        Format::Int => !s.is_empty() && s.trim_start_matches('-').bytes().all(|b| b.is_ascii_digit()) && !s.trim_start_matches('-').is_empty(),
+        Format::Int => { let digits=s.strip_prefix('-').unwrap_or(s); !digits.is_empty() && digits.bytes().all(|b|b.is_ascii_digit()) },
+        Format::Uuid => uuid_ok(s),
     }
+}
+
+pub(crate) fn uuid_ok(s:&str)->bool {
+    s.len()==36 && s.bytes().enumerate().all(|(i,b)|if [8,13,18,23].contains(&i){b==b'-'}else{b.is_ascii_hexdigit()})
 }
 
 fn example(f: Format, seed: u64) -> String {
@@ -175,6 +183,7 @@ fn example(f: Format, seed: u64) -> String {
         Format::DateTime => format!("2026-{month:02}-{day:02}T{:02}:{:02}:00", seed % 24, (seed / 24) % 60),
         Format::Email => format!("user{}@mail.example", seed % 1000),
         Format::Int => (seed % 1000).to_string(),
+        Format::Uuid => format!("00000000-0000-4000-8000-{:012x}",seed & 0x0000_ffff_ffff_ffff),
     }
 }
 
@@ -194,6 +203,7 @@ impl fmt::Display for Constraint {
                     Format::DateTime => "datetime",
                     Format::Email => "email",
                     Format::Int => "int",
+                    Format::Uuid => "uuid",
                 }
             ),
         }
@@ -235,6 +245,9 @@ fn conform_node(v: &mut Value, segs: &[&str], c: &Constraint, seed: u64, n: &mut
         Value::Array(a) => a.iter_mut().for_each(|x| conform_node(x, segs, c, seed, n)),
         Value::Object(o) if o.len() == 1 && o.contains_key("ok") && segs.first() != Some(&"ok") => {
             conform_node(o.get_mut("ok").expect("checked"), segs, c, seed, n)
+        }
+        Value::Object(o) if o.len() == 1 && o.contains_key("some") && segs.first() != Some(&"some") => {
+            conform_node(o.get_mut("some").expect("checked"), segs, c, seed, n)
         }
         Value::Object(o) if o.len() == 1 && (o.contains_key("err") || o.contains_key("none")) => {}
         Value::Object(o) if !segs.is_empty() => {

@@ -142,6 +142,7 @@ impl Trace {
                     func: e.func.clone(),
                     call: 0,
                     args: e.args.clone(),
+                    value_checks: None,
                     result: e.result.clone(),
                     trap: None,
                     source: "trace".into(),
