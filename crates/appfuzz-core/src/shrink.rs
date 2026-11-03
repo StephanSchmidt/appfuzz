@@ -213,7 +213,7 @@ fn smaller(n: u64, floor: u64) -> Vec<u64> {
 fn candidates(app: &App, s: &RunSpec, base: &[Value], lows: &Lows) -> Vec<Cand> {
     let mut tiers: [Vec<Cand>; TIERS] = Default::default();
     let start = app.manifest.start_time();
-    let entry = app.manifest.entry.as_ref().filter(|e| fn_key_eq(&e.export, &s.export));
+    let entry = app.manifest.entry.as_ref();
     // The clock at the start, and request fields filled from the clock
     // as it says (the fuzzer may have set them to anything).
     for now in [start.clone(), s.now.clone()] {

@@ -1051,8 +1051,7 @@ impl Mutator<'_> {
                 if self.rng.random_bool(0.5) {
                     spec.seed = self.rng.random_range(0..1_000_000);
                 }
-                let entry = self.app.manifest.entry.as_ref().filter(|e| fn_key_eq(&e.export, &spec.export));
-                if let (Some(e), Some(a)) = (entry, spec.args.first_mut()) {
+                if let (Some(e), Some(a)) = (self.app.manifest.entry.as_ref(), spec.args.first_mut()) {
                     set_clock_fields(a, &e.fields, &spec.now);
                 }
             }

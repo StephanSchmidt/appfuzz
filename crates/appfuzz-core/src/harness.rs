@@ -465,7 +465,9 @@ impl App {
                 export.ty.params().map(|(_, t)| g.gen_json(&t)).collect()
             }
         };
-        if let (Some(e), Some(first)) = (entry, args.first_mut()) {
+        // Clock fields are paths of the platform's request: every export
+        // that has them gets them.
+        if let (Some(e), Some(first)) = (self.manifest.entry.as_ref(), args.first_mut()) {
             set_clock_fields(first, &e.fields, now);
         }
         Ok(args)

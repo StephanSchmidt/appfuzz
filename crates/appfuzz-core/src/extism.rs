@@ -271,13 +271,20 @@ impl Abi {
     }
 
     /// One argument or result in WIT-shaped JSON (as `val_to_json` writes
-    /// it) to the bytes the plugin reads.
+    /// it) to the bytes the plugin reads. A top-level `string` crosses as
+    /// its bytes, as the PDK's `String` does; everything else as JSON.
     pub fn encode(&self, v: &Value, s: &Shape) -> Vec<u8> {
+        if let (Shape::Str, Value::String(text)) = (s, v) {
+            return text.as_bytes().to_vec();
+        }
         serde_json::to_vec(&self.out(v, s)).expect("JSON serializes")
     }
 
     /// The bytes the plugin wrote to WIT-shaped JSON (as `json_to_val` reads it).
     pub fn decode(&self, bytes: &[u8], s: &Shape) -> Result<Value> {
+        if let Shape::Str = s {
+            return Ok(Value::String(String::from_utf8_lossy(bytes).into_owned()));
+        }
         let v: Value =
             if bytes.iter().all(u8::is_ascii_whitespace) { Value::Null } else { serde_json::from_slice(bytes).map_err(|e| anyhow!("not JSON: {e}"))? };
         self.into(&v, s)
@@ -705,6 +712,9 @@ mod tests {
         let s = a.funcs["extism:host/user#todo-state"].result.clone().unwrap();
         assert_eq!(a.encode(&json!("in-progress"), &s), br#""InProgress""#);
         assert_eq!(a.decode(br#""in_progress""#, &s).unwrap(), json!("in-progress"));
+        // A top-level string is its bytes (the PDK's `String`), not JSON.
+        assert_eq!(a.encode(&json!("hi"), &Shape::Str), b"hi");
+        assert_eq!(a.decode(b"<p>x</p>", &Shape::Str).unwrap(), json!("<p>x</p>"));
         // Several arguments are one object.
         let p = args_shape(&a.funcs["page"].params).unwrap();
         assert_eq!(a.encode(&json!({"org-id": "o", "limit": 3}), &p), br#"{"org_id":"o","limit":3}"#);

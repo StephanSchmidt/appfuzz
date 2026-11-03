@@ -201,8 +201,7 @@ pub fn times(app: &App, base: &RunSpec, run: Runner) -> (Vec<TimeProbe>, Vec<Fin
             let mut spec = base.clone();
             spec.now = now.to_string();
             // Request fields that carry the clock follow `now`.
-            let entry = app.manifest.entry.as_ref().filter(|e| crate::harness::fn_key_eq(&e.export, &spec.export));
-            if let (Some(e), Some(a)) = (entry, spec.args.first_mut()) {
+            if let (Some(e), Some(a)) = (app.manifest.entry.as_ref(), spec.args.first_mut()) {
                 crate::harness::set_clock_fields(a, &e.fields, now);
             }
             spec
