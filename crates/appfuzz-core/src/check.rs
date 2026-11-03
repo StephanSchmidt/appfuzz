@@ -26,7 +26,10 @@ pub struct Property {
     selector: Option<Selector>,
     numeric: bool,
     scope: Option<Arc<Scope>>,
+    /// Exercised values when not counted by a selector (assertions).
+    count: Option<Arc<Count>>,
 }
+type Count = dyn Fn(&RunRecord, &Manifest) -> usize + Send + Sync;
 
 impl std::fmt::Debug for Property {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -90,7 +93,7 @@ impl Property {
             _ => bail!("unknown property {text:?}. {HELP}"),
         };
         let selector = if let ["value_range", sel, ..] = w.as_slice() { Some(Selector::parse(sel)?) } else { None };
-        Ok(Property { text, test, selector, numeric: true, scope: None })
+        Ok(Property { text, test, selector, numeric: true, scope: None, count: None })
     }
 
     /// Exact expectations preserve JSON types for field selectors and text for HTML selectors.
@@ -98,15 +101,33 @@ impl Property {
         let sel = Selector::parse(selector)?;
         let selected = sel.clone();
         let text = format!("expect {selector} = {expected}");
-        Ok(Self { text, selector: Some(sel), numeric: false, scope: None, test: Arc::new(move |r,m| {
+        Ok(Self { text, selector: Some(sel), numeric: false, scope: None, count: None, test: Arc::new(move |r,m| {
             selected.selected(r,m).into_iter().find(|v| v != &expected).map(|actual| (format!("{} is {actual}, expected {expected}", selected.text), json!({"actual":actual,"expected":expected})))
         }) })
+    }
+
+    /// A `let` + `assert` property: broken when the expression is false on a
+    /// completed run; exercised when it holds non-vacuously or breaks.
+    pub fn assertion(a: Arc<crate::assertion::Assertion>) -> Self {
+        let (t, c) = (a.clone(), a.clone());
+        Self {
+            text: format!("assert {}", a.expr.text),
+            selector: None,
+            numeric: false,
+            scope: None,
+            count: Some(Arc::new(move |r, m| crate::assertion::status(&c, r, m).1)),
+            test: Arc::new(move |r, m| match crate::assertion::status(&t, r, m) {
+                ("broken", _, d) => Some((d["why"].as_str().unwrap_or("the assertion is false").to_string(), d)),
+                _ => None,
+            }),
+        }
     }
 
     /// Numeric values actually exercised, rather than vacuous successes.
     pub fn matches(&self, r: &RunRecord, m: &Manifest) -> usize {
         if self.scope.as_ref().is_some_and(|s| !s(r,m)) { return 0; }
         if matches!(r.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) { return 0; }
+        if let Some(c) = &self.count { return c(r, m); }
         self.selector.as_ref().map_or(1, |s| if self.numeric { s.values(r, m).iter().filter(|v| number(v).is_some_and(f64::is_finite)).count() } else { s.selected(r, m).len() })
     }
 
@@ -155,7 +176,7 @@ fn metric_of(name: &str, r: &RunRecord) -> Option<f64> {
 }
 
 static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-?\d[\d,]*(?:\.\d+)?").unwrap());
-fn scalar_number(value: &Value) -> Option<f64> {
+pub(crate) fn scalar_number(value: &Value) -> Option<f64> {
     let n = match value {
         Value::Number(n) => n.as_f64()?,
         Value::String(s) => match s.replace(',', "").trim().parse::<f64>() {

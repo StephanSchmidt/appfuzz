@@ -41,6 +41,7 @@ pub mod dataset;
 pub mod sequence;
 
 pub mod acceptance;
+pub mod assertion;
 
 pub mod feedback;
 pub mod faults;

@@ -237,6 +237,7 @@ an error.
 | "where does this argument come from?" | `provenance <run> --call <n>` |
 | "where does the CPU go?" | `profile <run>`, then `wasm disasm <func>` |
 | "this text must never show up" | `check not_contains 'panicked\|stack backtrace'` |
+| "the output must agree with the input" | `bindings`, `eval last '<expr>' --let n=path`, then save it as an `[acceptance]` assert: `run`, `fuzz` and `review` judge it on every run and steer toward breaking it |
 
 `check` looks at stored runs first. Then it fuzzes until a run breaks the
 property, and shrinks that run to a counterexample. "holds" means no run
@@ -245,6 +246,9 @@ broke it: that is evidence, not proof.
 Save recurring requirements under `[acceptance]` (`version = 1`) and
 `[acceptance.checks.NAME]`. Each needs `origin = "marketing" | "platform"` and
 exactly one of `property = ["value_range", ".usage", "0", "100"]`,
+`let = { total = "out.json.total", items = "host.items#all.result" }` with
+`assert = "total == sum(items.map(i, i.price))"` (CEL over the `let` names; a
+table of named asserts runs one check each),
 `expect = { selector = "$.status", equals = 200 }`, or a declared two-run
 `relation`. See [saved acceptance checks](README.md#saved-acceptance-checks).
 `acceptance run [NAME]` executes saved checks; ordinary `review` includes them.
@@ -278,6 +282,7 @@ and `confirm <id>` makes it reproducible.
 | `write_on_safe_method`, `repeated_write`, `partial_write` | a change on GET, the same change twice, a change that stays when a later one fails (§4 effects) |
 | `ungranted_import`, `ungranted_call`, `unused_grant` | imports versus the manifest's grants |
 | `check_failed` | a property from `check` broke |
+| `weak_assert` | a saved assert still holds when its values change: it restates the code or tests nothing |
 | `invalid_host_argument` | an actual guest-to-host argument violates its platform-declared semantic domain |
 
 Findings are judged against the manifest's limits. If a limit is wrong,

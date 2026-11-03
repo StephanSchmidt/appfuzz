@@ -824,3 +824,161 @@ expect = { selector = "$", equals = 5 }
     f.edit("\"/0\" = 0", "\"/0\" = 1");
     assert_eq!(f.cli(&["acceptance", "run", "increasing"]).0, 3); // No-op transform cannot support a comparison.
 }
+
+fn assert_fixture(inverted: bool, checks: &str) -> Fixture {
+    let f = availability_fixture(inverted);
+    let s = std::fs::read_to_string(&f.manifest).unwrap();
+    let head = s.split("[acceptance]").next().unwrap().to_string();
+    std::fs::write(&f.manifest, format!("{head}[acceptance]\nversion = 1\n{checks}")).unwrap();
+    f
+}
+const COUNT: &str = r#"
+[acceptance.checks.count]
+origin = "marketing"
+let = { rooms = "host.db#all.result", shown = "out.result" }
+assert = "shown == size(rooms)"
+"#;
+#[test]
+fn assert_checks_break_with_evidence_shrink_and_hold_on_the_fix() {
+    let f = assert_fixture(true, COUNT);
+    let (code, result) = f.cli(&["acceptance", "run", "--runs", "20"]);
+    assert_eq!(code, 2, "{result}");
+    let c = &result["checks"][0];
+    assert_eq!(c["status"], "broken", "{result}");
+    assert_eq!(c["property"], "shown == size(rooms)");
+    assert_eq!(c["evidence"]["failing"], "shown == size(rooms)", "{result}");
+    let explained = &c["evidence"]["evidence"]["explained"];
+    assert_eq!(explained["left"].as_i64().unwrap() + explained["right"].as_i64().unwrap(), 10, "{result}");
+    let case = c["case"].as_str().unwrap().to_string();
+    assert_eq!(f.cli(&["replay", &case]).0, 0);
+    let fixed = availability_fixture(false);
+    std::fs::copy(fixed.dir.join("app.wasm"), f.dir.join("app.wasm")).unwrap();
+    let (code, result) = f.cli(&["acceptance", "run", "--runs", "20"]);
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["checks"][0]["weak"], false, "{result}");
+    let (code, result) = f.cli(&["replay", &case, "--against-current"]);
+    assert_eq!(code, 0, "{result}");
+    // A case made for an edited requirement no longer gates review.
+    f.edit("shown == size(rooms)", "shown == size(rooms) + 0");
+    let (_, result) = f.cli(&["replay", &case, "--against-current"]);
+    assert_eq!(result["superseded"], true, "{result}");
+    let (code, review) = f.cli(&["review", "--runs", "10", "--confirm", "0"]);
+    assert_eq!(code, 0, "{review}");
+}
+#[test]
+fn assert_tables_name_each_property_and_report_weak_and_strict_errors() {
+    let f = assert_fixture(
+        false,
+        r#"
+[acceptance.checks.rooms]
+origin = "marketing"
+let = { rooms = "host.db#all.result", shown = "out.result" }
+assert = { count = "shown == size(rooms)", positive = "shown >= 0", third = "rooms[2] > 0" }
+"#,
+    );
+    let (code, result) = f.cli(&["acceptance", "run", "--runs", "10"]);
+    assert_eq!(code, 3, "{result}");
+    let row = |n: &str| result["checks"].as_array().unwrap().iter().find(|c| c["name"] == n).unwrap_or_else(|| panic!("{n}: {result}")).clone();
+    assert_eq!(row("rooms.count")["status"], "holds");
+    assert_eq!(row("rooms.positive")["weak"], true, "{result}");
+    assert!(row("rooms.positive")["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "weak_assert"), "{result}");
+    assert_eq!(row("rooms.third")["status"], "error", "{result}");
+    let (code, one) = f.cli(&["acceptance", "run", "rooms.count", "--runs", "5"]);
+    assert_eq!(code, 0, "{one}");
+    assert_eq!(one["checks"].as_array().unwrap().len(), 1);
+    // Unused bindings and unknown host functions are rejected before running.
+    f.edit("shown = \"out.result\"", "shown = \"out.result\", spare = \"out.status\"");
+    assert_eq!(f.cli(&["inspect"]).0, 3);
+    f.edit(", spare = \"out.status\"", "");
+    f.edit("host.db#all.result", "host.db#everything.result");
+    assert_eq!(f.cli(&["inspect"]).0, 3);
+}
+#[test]
+fn assume_scopes_runs_and_unexercised_asserts_cannot_pass() {
+    let f = assert_fixture(false, &format!("{COUNT}assume = \"size(rooms) > 50\"\n"));
+    let (code, result) = f.cli(&["acceptance", "run", "--runs", "10"]);
+    assert_eq!(code, 3, "{result}");
+    assert_eq!(result["checks"][0]["status"], "not_exercised", "{result}");
+    assert!(result["checks"][0]["rejected"].as_u64().unwrap() > 0, "{result}");
+    assert!(!result["checks"][0]["health"].as_array().unwrap().is_empty(), "{result}");
+}
+#[test]
+fn run_judges_saved_asserts_and_eval_and_bindings_explain_them() {
+    let f = assert_fixture(true, COUNT);
+    let (code, r) = f.cli(&["run"]);
+    assert_eq!(code, 2, "{r}");
+    assert_eq!(r["asserts"]["count"]["status"], "broken", "{r}");
+    assert_eq!(f.cli(&["check", "value_range", "$", "0", "100", "--let", "x=out.result"]).0, 3);
+    let (code, r) = f.cli(&["eval", "last", "size(rooms) + 1", "--let", "rooms=host.db#all.result"]);
+    assert_eq!(code, 0, "{r}");
+    assert_eq!(r["value"], 3, "{r}");
+    assert_eq!(r["bindings"]["rooms"]["value"], json!([1, 2]), "{r}");
+    let (code, r) = f.cli(&["bindings"]);
+    assert_eq!(code, 0, "{r}");
+    assert!(r["host"].as_array().unwrap().iter().any(|h| h["func"] == "test:workflow/db#all"), "{r}");
+    // --fast skips judging: no verdict, no exit 2, and fuzzing reports no asserts.
+    let (code, r) = f.cli(&["--fast", "run"]);
+    assert_eq!(code, 0, "{r}");
+    assert!(r.get("asserts").is_none(), "{r}");
+    let (_, r) = f.cli(&["--fast", "fuzz", "--runs", "20"]);
+    assert!(r["asserts"].as_array().is_some_and(Vec::is_empty) && r["fast"] == true, "{r}");
+}
+fn identity_fixture(checks: &str) -> Fixture {
+    let f = Fixture::new(false);
+    let wit = "package test:workflow; world app { export run: func(n:u32) -> u32; }";
+    let wat = "(module (func (export \"run\") (param i32) (result i32) (local.get 0)))";
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    let mut manifest = std::fs::read_to_string(&f.manifest).unwrap();
+    manifest.push_str(&format!("[acceptance]\nversion = 1\n{checks}"));
+    std::fs::write(&f.manifest, manifest).unwrap();
+    f
+}
+#[test]
+fn fuzzing_judges_asserts_on_every_run_and_closes_in_on_their_boundaries() {
+    let f = identity_fixture(
+        r#"
+[acceptance.checks.limit]
+origin = "marketing"
+let = { n = "args.0", shown = "out.result" }
+assert = "shown < 123457 && shown == n"
+[acceptance.checks.wide]
+origin = "platform"
+let = { shown = "out.result" }
+assert = "shown <= 4294967295"
+"#,
+    );
+    let (code, r) = f.cli(&["fuzz", "--runs", "300", "--fresh"]);
+    assert_eq!(code, 0, "{r}");
+    let a = |n: &str| r["asserts"].as_array().unwrap().iter().find(|a| a["name"] == n).unwrap_or_else(|| panic!("{n}: {r}")).clone();
+    // The literal is a boundary to try: 123457 breaks `shown < 123457`.
+    assert!(a("limit")["broken"].as_u64().unwrap() > 0, "{r}");
+    assert!(a("limit")["broken_at"]["run"].is_string(), "{r}");
+    // A holding assert reports how close a run came, and that runs got closer.
+    let wide = a("wide");
+    assert_eq!(wide["broken"], 0, "{r}");
+    assert!(wide["evaluated"].as_u64().unwrap() > 100, "{r}");
+    assert!(wide["closer"].as_u64().unwrap() > 0, "{r}");
+    assert!(wide["closest"]["margin"].as_f64().unwrap() < 1000.0, "{r}");
+    // The broken run was kept: the acceptance search starts from it and shrinks it.
+    let (code, r) = f.cli(&["acceptance", "run", "limit", "--runs", "5"]);
+    assert_eq!(code, 2, "{r}");
+    let case = r["checks"][0]["case"].as_str().unwrap();
+    let artifact: Value = serde_json::from_slice(&std::fs::read(case).unwrap()).unwrap();
+    assert_eq!(artifact["spec"]["args"], json!([123457]), "{artifact}");
+}
+#[test]
+fn envelopes_are_bound_to_the_acceptance_suite_they_were_reviewed_with() {
+    let f = assert_fixture(false, COUNT);
+    let path = f.dir.join("envelope.json");
+    let path = path.to_str().unwrap();
+    let (code, v) = f.cli(&["review", "--runs", "10", "--confirm", "0"]);
+    assert_eq!(code, 0, "{v}");
+    let id = v["session"].as_str().unwrap().to_string();
+    assert_eq!(f.cli(&["envelope", "--review", &id, "--out", path]).0, 0);
+    f.cli(&["run"]);
+    assert_eq!(f.cli(&["envelope", "check", "last", "--envelope", path]).0, 0);
+    // Editing a requirement keeps runs, but not the review or envelope built on the old one.
+    f.edit("shown == size(rooms)", "shown <= size(rooms)");
+    assert_eq!(f.cli(&["envelope", "--review", &id, "--out", path]).0, 3);
+    assert_eq!(f.cli(&["envelope", "check", "last", "--envelope", path]).0, 3);
+}

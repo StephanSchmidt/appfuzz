@@ -58,7 +58,7 @@ pub const DOCS: &[Doc] = &[
             "appfuzz run --plan plan.json --now 2028-02-29T23:59:00",
             "appfuzz run --plan '{\"bench:web/items#all\": {\"return\": []}}'",
         ],
-        output: "run id, outcome, result, totals (fuel, memory, virtual ms, host calls, cost), calls per function, over_limits, findings",
+        output: "run id, outcome, result, totals (fuel, memory, virtual ms, host calls, cost), calls per function, over_limits, findings, asserts (each saved assert's verdict; exit 2 when one breaks)",
         next: "`timeline <run>` for the calls; `explain <run>`; `confirm <finding>`",
     },
     Doc {
@@ -153,8 +153,8 @@ pub const DOCS: &[Doc] = &[
     Doc {
         path: "fuzz",
         examples: &["appfuzz fuzz", "appfuzz fuzz --time 5m", "appfuzz fuzz --runs 20000 --until plateau", "appfuzz fuzz --fresh -j 1 --rng 7"],
-        output: "runs, stages, corpus, maxima (worst runs per metric), observed findings (including known ones)",
-        next: "`confirm <finding>` for each fail/warn; `findings`; `unexplored` for code no run reached",
+        output: "runs, stages, corpus, maxima (worst runs per metric), observed findings (including known ones), asserts (per saved assert: runs judged, first break, closest approach)",
+        next: "`confirm <finding>` for each fail/warn; `findings`; `unexplored` for code no run reached; `acceptance run <name>` to shrink a broken assert",
     },
     Doc {
         path: "confirm",
@@ -197,6 +197,18 @@ pub const DOCS: &[Doc] = &[
         examples: &["appfuzz profile last", "appfuzz profile r5166a18fdb --top 30"],
         output: "estimated fuel attribution at host boundaries; not a function-level CPU profile",
         next: "`wasm loops`; `wasm disasm <func>`",
+    },
+    Doc {
+        path: "eval",
+        examples: &["appfuzz eval last 'size(rows)' --let rows='select .row'", "appfuzz eval last 'total == sum(prices)' --let total=out.json.total --let prices=host.items#all.result"],
+        output: "each binding's value (or why it is undefined), the expression's value, and the verdict a saved assert would give on this run",
+        next: "save it as an `[acceptance.checks.NAME]` with `let` and `assert`; `fuzz` and `review` then judge it on every run",
+    },
+    Doc {
+        path: "bindings",
+        examples: &["appfuzz bindings", "appfuzz bindings --run last"],
+        output: "binding paths for `let`: request fields, host functions with signatures, output, run-wide sources, functions, with example values from a run",
+        next: "`eval last '<expr>' --let name=path` to try one",
     },
     Doc {
         path: "explain",

@@ -7,8 +7,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Result, anyhow, bail};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
+use appfuzz_core::assertion::Assertion;
 use appfuzz_core::check::Property;
 use appfuzz_core::detect::{self, Finding};
 use appfuzz_core::dormant;
@@ -18,13 +19,114 @@ use appfuzz_core::output::response;
 use appfuzz_core::record::{OutcomeKind, RunRecord, RunSpec};
 use appfuzz_core::statics::Statics;
 use appfuzz_core::store::RunStore;
-use appfuzz_core::wit::ImportKind;
+use appfuzz_core::wit::{self, ImportKind};
 
 use super::{Cli, diff, lock, ms, record_findings, run_cached};
 
+/// `--let name=path` arguments as a map.
+fn lets_of(lets: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for l in lets {
+        let (k, v) = l.split_once('=').ok_or_else(|| anyhow!("--let needs name=path, got {l:?}"))?;
+        if out.insert(k.trim().to_string(), v.trim().to_string()).is_some() {
+            bail!("--let binds {} twice", k.trim());
+        }
+    }
+    Ok(out)
+}
+
+fn assertion(app: &App, export: &str, expr: &str, lets: &[String], assume: Option<&str>) -> Result<Assertion> {
+    let a = Assertion::new(&lets_of(lets)?, expr, assume)?;
+    appfuzz_core::assertion::validate_wit(&a.bindings, &app.imports, &app.exports, Some(export))?;
+    Ok(a)
+}
+
+/// Evaluates an expression on a stored run: every binding, the value, the verdict.
+pub fn eval(app: &App, r: &RunRecord, expr: &str, lets: &[String], assume: Option<&str>) -> Result<Value> {
+    let a = assertion(app, &r.spec.export, expr, lets, assume)?;
+    let mut bindings = Map::new();
+    let mut values = BTreeMap::new();
+    for b in &a.bindings {
+        match b.resolve(r, &app.manifest) {
+            Ok(v) => {
+                bindings.insert(b.name.clone(), json!({"path": b.path, "value": appfuzz_core::assertion::shorten(&v)}));
+                values.insert(b.name.clone(), v);
+            }
+            Err(e) => {
+                bindings.insert(b.name.clone(), json!({"path": b.path, "undefined": e}));
+            }
+        }
+    }
+    let defined = values.len() == a.bindings.len();
+    let value = if defined { a.value(&values).map_or_else(|e| json!({"error": e}), |v| json!(v)) } else { Value::Null };
+    let (status, _, detail) = appfuzz_core::assertion::status(&a, r, &app.manifest);
+    Ok(json!({"run": r.id, "expression": a.expr.text, "assume": a.assume.as_ref().map(|x| &x.text), "bindings": bindings, "value": value,
+        "status": status, "detail": detail,
+        "note": "status is what a saved acceptance check would report for this run; `value` is the whole expression, which need not be true or false here"}))
+}
+
+/// Binding paths for this app: sources, host functions with signatures, request fields, and example values.
+pub fn bindings(app: &App, run: Option<RunRecord>) -> Result<Value> {
+    let example = |path: &str| -> Value {
+        let Some(r) = &run else { return Value::Null };
+        match appfuzz_core::assertion::Binding::parse("x", path) {
+            Ok(b) => b.resolve(r, &app.manifest).map_or_else(|e| json!({"undefined": e}), |v| appfuzz_core::assertion::shorten(&v)),
+            Err(_) => Value::Null,
+        }
+    };
+    let funcs: Vec<&wit::FuncInfo> = app.imports.iter().filter(|i| i.kind == ImportKind::Platform).flat_map(|i| &i.funcs).collect();
+    let short = |key: &str| -> String {
+        let s = key.rsplit_once('/').map_or(key, |(_, s)| s);
+        if funcs.iter().filter(|f| appfuzz_core::assertion::fn_matches(&f.key, s)).count() == 1 { s.to_string() } else { key.to_string() }
+    };
+    let mut host = Vec::new();
+    for f in &funcs {
+        let k = short(&f.key);
+        let mut paths = vec![format!("host.{k}.calls"), format!("host.{k}.results")];
+        if f.ty.results().next().is_some() {
+            paths.push(format!("host.{k}.result"));
+        }
+        paths.extend(f.ty.params().map(|(p, _)| format!("host.{k}.args.{p}")));
+        host.push(json!({"func": f.key, "signature": f.signature(), "paths": paths.iter().map(|p| json!({"path": p, "example": example(p)})).collect::<Vec<_>>()}));
+    }
+    let mut request = Vec::new();
+    if let Some(req) = run.as_ref().and_then(|r| r.spec.args.first()).cloned().or_else(|| {
+        app.default_export().ok().and_then(|e| app.default_args(e, &app.manifest.start_time()).ok()).and_then(|a| a.into_iter().next())
+    }) {
+        fn walk(v: &Value, prefix: &str, out: &mut Vec<String>, depth: usize) {
+            match v {
+                Value::Object(o) if depth < 3 => o.iter().for_each(|(k, x)| walk(x, &format!("{prefix}.{k}"), out, depth + 1)),
+                Value::Array(a) if a.iter().all(|p| p.as_array().is_some_and(|p| p.len() == 2 && p[0].is_string())) => {
+                    if a.is_empty() {
+                        out.push(format!("{prefix}.<name>"));
+                    }
+                    for p in a {
+                        out.push(format!("{prefix}.{}", p[0].as_str().unwrap_or_default()));
+                    }
+                }
+                _ => out.push(prefix.to_string()),
+            }
+        }
+        let mut paths = Vec::new();
+        walk(&req, "request", &mut paths, 0);
+        request = paths.iter().map(|p| json!({"path": p, "example": if p.contains('<') { Value::Null } else { example(p) }})).collect();
+    }
+    let output: Vec<Value> = ["out.status", "out.body", "out.headers", "out.result", "out.json"].iter().map(|p| json!({"path": p, "example": example(p)})).collect();
+    let run_wide: Vec<Value> =
+        ["calls", "totals", "clock.now", "clock.today", "clock.time", "logs", "outcome"].iter().map(|p| json!({"path": p, "example": example(p)})).collect();
+    Ok(json!({
+        "run": run.as_ref().map(|r| &r.id),
+        "sources": appfuzz_core::assertion::SOURCES.iter().map(|(p, d)| json!({"path": p, "gives": d})).collect::<Vec<_>>(),
+        "functions": appfuzz_core::assertion::FUNCTIONS.iter().map(|(f, d)| json!({"function": f, "gives": d})).collect::<Vec<_>>(),
+        "request": request, "host": host, "output": output, "run_wide": run_wide,
+        "notes": ["a trailing ? makes a missing value null: request.form.note?",
+                  "host.<fn>.result is undefined unless the function was called exactly once; bind .results or .calls otherwise",
+                  "select <selector> gives a list of texts: select .row, select #total, select /Total: (\\d+)/"],
+    }))
+}
+
 /// Fuzzes until a run breaks the property, then shrinks that run.
-pub fn check(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, words: &[String], opts: fuzz::FuzzOpts, max_runs: u32) -> Result<Value> {
-    let prop = Property::parse(words)?;
+pub fn check(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, prop: Property, opts: fuzz::FuzzOpts, max_runs: u32) -> Result<Value> {
     // Stored runs first: a counterexample may be at hand.
     let stored = store.all()?.into_iter().filter(|r| r.spec.component == app.hash && r.spec.contract == app.contract && r.spec.export == base.export);
     let stored: Vec<_> = stored.collect();

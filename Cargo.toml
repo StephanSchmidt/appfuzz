@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/appfuzz-core", "crates/appfuzz"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/StephanSchmidt/appfuzz"
@@ -33,3 +33,5 @@ wasm-encoder = { version = "0.262", features = ["wasmparser"] }
 wasmtime = { version = "50.0.0", features = ["anyhow"] }
 wasmtime-wasi = "50.0.0"
 wit-component = "0.262"
+cel = { version = "=0.15.0", default-features = false, features = ["regex", "chrono"] }
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }

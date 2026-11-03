@@ -56,6 +56,11 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let r = execute(app, &store, a)?;
             let mut s = summary(app, &r);
             s["findings"] = record_findings(&cli, app, detect::per_run(&r, &app.manifest))?;
+            if !cli.fast
+                && let Some(asserts) = crate::acceptance::asserts_on(app, &r)
+            {
+                s["asserts"] = asserts;
+            }
             if a.trace {
                 s["host_calls"] = timeline(&r, &Statics::parse(&app.bytes)?);
             }
@@ -275,6 +280,9 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             if session.component != app.hash || session.contract != app.contract {
                 bail!("review belongs to a different build or platform contract");
             }
+            if session.requirements != app.manifest.requirements_fingerprint() {
+                bail!("the [acceptance] suite changed since this review; run review again");
+            }
             let session_store = RunStore::new(&cli.state.join("review-runs").join(&review_id));
             let runs: Vec<RunRecord> = session.runs.iter().map(|id| session_store.load(id)).collect::<Result<_>>()?;
             if runs.is_empty() || runs.iter().any(|r| r.spec.component != app.hash || r.spec.contract != app.contract) {
@@ -305,7 +313,9 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let env: appfuzz_core::envelope::Envelope =
                 serde_json::from_str(&std::fs::read_to_string(envelope).with_context(|| format!("reading {}", envelope.display()))?)
                     .with_context(|| format!("parsing {}", envelope.display()))?;
-            if env.version != appfuzz_core::envelope::VERSION || env.review.is_empty() || env.contract != m.fingerprint() {
+            if env.version != appfuzz_core::envelope::VERSION || env.review.is_empty() || env.contract != m.fingerprint()
+                || env.requirements != m.requirements_fingerprint()
+            {
                 bail!("envelope is not bound to an accepted review of this platform contract");
             }
             let hash = blake3_hex(&std::fs::read(m.wasm_path())?);
@@ -373,7 +383,8 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 "plateau" => fuzz::Until::Plateau,
                 u => bail!("--until must be budget, new-finding or plateau, not {u:?}"),
             };
-            let opts = fuzz::FuzzOpts { runs: *runs, time: Some(parse_duration(time)?), until, seed: *rng, plateau: *plateau, internal_feedback:*internal_feedback, ..Default::default() };
+            let asserts = app.manifest.acceptance.as_ref().filter(|_| !cli.fast).map(|s| s.shared_asserts(&base.export, app.manifest.entry.as_ref().map(|e| e.export.as_str()))).unwrap_or_default();
+            let opts = fuzz::FuzzOpts { runs: *runs, time: Some(parse_duration(time)?), until, seed: *rng, plateau: *plateau, internal_feedback:*internal_feedback, asserts, ..Default::default() };
             let prior = if *fresh { vec![] } else { fuzz::Corpus::load(&cli.state, &app.state_key)?.entries };
             let findings = FindingStore::new(&cli.state, &app.state_key);
             let known = findings.all()?.into_iter().map(|f| f.id).collect();
@@ -397,6 +408,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 "feedback":rep.feedback,"faults":rep.faults,"corpus": rep.corpus, "kept": rep.kept, "features": rep.features, "last_new_at_run": rep.last_new_at_run,
                 "stages": rep.stages, "maxima": maxima, "jobs": rep.jobs,
                 "findings": record_findings(&cli, app, rep.findings)?,
+                "asserts": rep.asserts, "assert_cost_pct": rep.assert_cost_pct, "fast": cli.fast,
             }))
         }
         Cmd::Confirm { target, finding, times, max_runs } => {
@@ -511,7 +523,16 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let app = load()?;
             let base = build_spec(app, export.as_deref(), spec)?;
             let opts = fuzz::FuzzOpts { runs: *runs, time: Some(parse_duration(time)?), seed: *rng, ..Default::default() };
-            dig::check(&cli, app, &store, &base, property, opts, *max_runs)
+            let prop = appfuzz_core::check::Property::parse(property)?;
+            dig::check(&cli, app, &store, &base, prop, opts, *max_runs)
+        }
+        Cmd::Eval { run, expr, lets, assume } => {
+            let app = load()?;
+            dig::eval(app, &store.load(run)?, expr, lets, assume.as_deref())
+        }
+        Cmd::Bindings { run } => {
+            let app = load()?;
+            dig::bindings(app, store.load(run).ok())
         }
         Cmd::Sweep { field, r#gen, values, export, spec } => {
             let app = load()?;

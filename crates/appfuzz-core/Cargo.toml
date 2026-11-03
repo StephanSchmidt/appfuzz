@@ -28,6 +28,8 @@ wasmparser.workspace = true
 wasm-encoder.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
+cel.workspace = true
+chrono.workspace = true
 wit-component = { workspace = true, features = ["dummy-module"] }
 wit-parser = "0.262"
 witx = "0.9"
