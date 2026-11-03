@@ -55,7 +55,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
     let mut errors = Vec::new();
     let mut step = |name: &str, cmd: Cmd| -> Option<Value> {
         let started = Instant::now();
-        let c = Cli { manifest: cli.manifest.clone(), wasm: cli.wasm.clone(), state: state.clone(), full: true, jobs: cli.jobs, cmd: Some(cmd) };
+        let c = Cli { manifest: cli.manifest.clone(), wasm: cli.wasm.clone(), state: state.clone(), full: true, jobs: cli.jobs, fast: cli.fast, cmd: Some(cmd) };
         let result = crate::run_with_app(c, Some(&app));
         let mut row = json!({"step": name, "ms": started.elapsed().as_millis()});
         let output = match result {
@@ -264,6 +264,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
             state: state.clone(),
             full: true,
             jobs: cli.jobs,
+            fast: cli.fast,
             cmd: Some(Cmd::Confirm { target: f.id.clone(), finding: None, times: 3, max_runs: 500 }),
         };
         match crate::run_with_app(c, Some(&app)) {

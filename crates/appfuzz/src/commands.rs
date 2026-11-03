@@ -55,7 +55,9 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let r = execute(app, &store, a)?;
             let mut s = summary(app, &r);
             s["findings"] = record_findings(&cli, app, detect::per_run(&r, &app.manifest))?;
-            if let Some(asserts) = crate::acceptance::asserts_on(app, &r) {
+            if !cli.fast
+                && let Some(asserts) = crate::acceptance::asserts_on(app, &r)
+            {
                 s["asserts"] = asserts;
             }
             if a.trace {
@@ -380,7 +382,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 "plateau" => fuzz::Until::Plateau,
                 u => bail!("--until must be budget, new-finding or plateau, not {u:?}"),
             };
-            let asserts = app.manifest.acceptance.as_ref().map(|s| s.shared_asserts(&base.export, app.manifest.entry.as_ref().map(|e| e.export.as_str()))).unwrap_or_default();
+            let asserts = app.manifest.acceptance.as_ref().filter(|_| !cli.fast).map(|s| s.shared_asserts(&base.export, app.manifest.entry.as_ref().map(|e| e.export.as_str()))).unwrap_or_default();
             let opts = fuzz::FuzzOpts { runs: *runs, time: Some(parse_duration(time)?), until, seed: *rng, plateau: *plateau, internal_feedback:*internal_feedback, asserts, ..Default::default() };
             let prior = if *fresh { vec![] } else { fuzz::Corpus::load(&cli.state, &app.state_key)?.entries };
             let findings = FindingStore::new(&cli.state, &app.state_key);
@@ -405,7 +407,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 "feedback":rep.feedback,"faults":rep.faults,"corpus": rep.corpus, "kept": rep.kept, "features": rep.features, "last_new_at_run": rep.last_new_at_run,
                 "stages": rep.stages, "maxima": maxima, "jobs": rep.jobs,
                 "findings": record_findings(&cli, app, rep.findings)?,
-                "asserts": rep.asserts, "assert_cost_pct": rep.assert_cost_pct,
+                "asserts": rep.asserts, "assert_cost_pct": rep.assert_cost_pct, "fast": cli.fast,
             }))
         }
         Cmd::Confirm { target, finding, times, max_runs } => {

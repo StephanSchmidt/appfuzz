@@ -19,6 +19,10 @@ pub(crate) struct Cli {
     /// times the manifest's memory limit.
     #[arg(short, long, global = true)]
     pub(crate) jobs: Option<usize>,
+    /// Skip work that slows runs and search: saved asserts are not judged
+    /// per run (`acceptance run` and review's acceptance step still check them).
+    #[arg(long, global = true)]
+    pub(crate) fast: bool,
     #[command(subcommand)]
     pub(crate) cmd: Option<Cmd>,
 }

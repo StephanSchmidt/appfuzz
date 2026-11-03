@@ -916,6 +916,12 @@ fn run_judges_saved_asserts_and_eval_and_bindings_explain_them() {
     let (code, r) = f.cli(&["bindings"]);
     assert_eq!(code, 0, "{r}");
     assert!(r["host"].as_array().unwrap().iter().any(|h| h["func"] == "test:workflow/db#all"), "{r}");
+    // --fast skips judging: no verdict, no exit 2, and fuzzing reports no asserts.
+    let (code, r) = f.cli(&["--fast", "run"]);
+    assert_eq!(code, 0, "{r}");
+    assert!(r.get("asserts").is_none(), "{r}");
+    let (_, r) = f.cli(&["--fast", "fuzz", "--runs", "20"]);
+    assert!(r["asserts"].as_array().is_some_and(Vec::is_empty) && r["fast"] == true, "{r}");
 }
 fn identity_fixture(checks: &str) -> Fixture {
     let f = Fixture::new(false);

@@ -662,7 +662,9 @@ kept; `acceptance run NAME` (and `review`) starts from it, shrinks it and writes
 the case. Checks with their own `request`, `plan`, `when` or input class keep
 a separate search. Judging is cheap (microseconds per assert); when it takes
 more than a quarter of worker time, runs are sampled, but every run that showed
-something new is still judged. `assert_cost_pct` reports the share.
+something new is still judged. `assert_cost_pct` reports the share. `--fast`
+skips judging in `run` and `fuzz` (and review's fuzz phase); `acceptance run`
+and review's acceptance step still check every assert.
 
 Try an expression on a stored run before saving it:
 
