@@ -825,7 +825,8 @@ rename = { "conference.id" = "Id" }
 Decoding the plugin's JSON is lenient, like `#[serde(default)]`: keys match
 regardless of case and separators, missing fields take their empty value,
 `null` is an empty list (Go's nil slice), and a `string` accepts any JSON as
-its text. An export whose WIT result is `result<T, E>` answers `ok` when its
+its text. A top-level `string` argument or output crosses as its bytes,
+not JSON, like the PDK's `String`. An export whose WIT result is `result<T, E>` answers `ok` when its
 status is 0, and `err` with its `error_set` text otherwise. Kernel logs show
 up in `stderr`, and `http_request` traps because it isn't simulated yet.
 
