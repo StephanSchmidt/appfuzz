@@ -51,7 +51,7 @@
     <button type="button" class="menu-btn" aria-expanded="false" aria-controls="site-menu">Menu</button>
     <ul class="links" id="site-menu">
       <li class="has-drop"><a href="#finds">What it finds</a><button type="button" class="drop-btn" aria-expanded="false" aria-controls="drop-0"><span class="sr-only">More: What it finds</span></button>
-        <ul class="drop" id="drop-0"><li><a href="#finds">Bugs before production</a></li><li><a href="#inputs">Bugs behind valid requests</a></li><li><a href="#granted">Hostile code</a></li></ul></li>
+        <ul class="drop" id="drop-0"><li><a href="#finds">Bugs before production</a></li><li><a href="#inputs">Bugs behind valid requests</a></li><li><a href="#asserts">Wrong answers</a></li><li><a href="#granted">Hostile code</a></li></ul></li>
       <li class="has-drop"><a href="#minute">How it works</a><button type="button" class="drop-btn" aria-expanded="false" aria-controls="drop-1"><span class="sr-only">More: How it works</span></button>
         <ul class="drop" id="drop-1"><li><a href="#minute">Walkthrough</a></li><li><a href="#search">Search</a></li><li><a href="#why-wasm">Why Wasm</a></li><li><a href="#sandbox">Sandbox</a></li><li><a href="#agents">Your agent</a></li></ul></li>
       <li class="has-drop"><a href="#languages">Where it runs</a><button type="button" class="drop-btn" aria-expanded="false" aria-controls="drop-2"><span class="sr-only">More: Where it runs</span></button>
@@ -424,7 +424,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 <section class="frame sec">
   <div class="sec-head">
     <h2>Bugs you would approve in a review.</h2>
-    <p>Each looks fine at a glance. Below each one is what appfuzz tells you, word for word. They come from the 71 test apps it must pass on every commit, each with one planted bug.</p>
+    <p>Each looks fine at a glance. Below each one is what appfuzz tells you, word for word. They come from appfuzz's bench of 76 test apps, most with one planted bug.</p>
   </div>
   <div class="ex-list">
     <div class="ex">
@@ -455,6 +455,26 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
       <p class="verdict"><b>fail</b> .usage is 200, outside 0–100. Counterexample saved, with the backend data that causes it.</p>
     </div>
   </div>
+</section>
+
+<section id="asserts" class="frame sec split asserts">
+  <div>
+    <h2>Say what a right answer is.</h2>
+    <p class="lead">appfuzz knows a crash when it sees one. It can't know that every item belongs on the page, or that the total must match the line items. Whoever asked for the app knows. Write it down once, in the manifest, and appfuzz spends the whole search trying to break it.</p>
+<pre class="code"><code>[acceptance.checks.every_item]
+origin = <span class="str">"marketing"</span>
+let.rows = <span class="str">"select li"</span>
+let.items = <span class="str">"host.items#all.result"</span>
+assert = <span class="str">"size(rows) == size(items)"</span></code></pre>
+    <p class="verdict"><b>fail</b> <span class="kind">acceptance_failed</span> acceptance check every_item failed</p>
+    <p class="verdict"><b>why</b> size(rows) == size(items) is false; rows: [], items: [{"id": 7, "name": "pine sage", …}]</p>
+    <p class="foot">The <code>chatty</code> app from the walkthrough drops an item when its lookup fails, and still answers 200. No crash, nothing unescaped, so no other check fires. The search broke the assert on its 13th request and shrank the case to one item.</p>
+  </div>
+  <dl class="facts-list">
+    <div><dt>Checked on every request</dt><dd>Not one test at the end. <code>fuzz</code> and <code>review</code> check each assert against every request they try, so it breaks wherever the search finds the input.</dd></div>
+    <div><dt>Goes for the edge</dt><dd>An assert that holds at 99 but not at 101 tells the search where to look. appfuzz keeps the inputs that come closest to breaking it and tries the limit and its neighbours.</dd></div>
+    <div><dt>Flags asserts that test nothing</dt><dd>appfuzz changes the values an assert reads. If it still holds, the assert only restates the code, and you get a warning instead of a false sense of safety.</dd></div>
+  </dl>
 </section>
 
 <section id="agents" class="frame sec split">
@@ -557,7 +577,7 @@ http::fetch(&amp;format!(
     <div><dt>Manifest</dt><dd>Marketing and engineering agree on what an app may call. appfuzz reads the same grants and tells you about any import outside them.</dd></div>
     <div><dt>App review</dt><dd>Before deploy, appfuzz fuzzes the app against simulated host functions: crashes, n+1 queries, injections, leaks.</dd></div>
     <div><dt>Sandbox</dt><dd>Engineering sets production budgets for I/O, time, CPU and memory. appfuzz tests those limits. Experimental envelopes can additionally constrain behavior observed in an accepted review.</dd></div>
-    <div><dt>Code review</dt><dd>Marketing checks that the feature does what it intended. Engineering owns the platform contract. appfuzz automates routine implementation review against that contract.</dd></div>
+    <div><dt>Code review</dt><dd>Marketing writes down what the feature must do, as asserts in the manifest, and every review checks them. Engineering owns the platform contract. appfuzz automates routine implementation review against that contract.</dd></div>
   </dl>
 </section>
 
@@ -568,7 +588,7 @@ http::fetch(&amp;format!(
   </div>
   <dl class="facts-list">
     <div><dt>Prove an app is harmless</dt><dd>It finds the usual tricks: servers of the app's own, data in disguise, notes to the reviewer, code waiting for a trigger. A careful author can hide better. The envelope catches some of that in production.</dd></div>
-    <div><dt>Know your business rules</dt><dd>It can't tell that <code>create</code> writes or that a field is an email address. Labels in the manifest tell it: SQL, secrets, personal data, writes, who owns a record.</dd></div>
+    <div><dt>Know your business rules</dt><dd>It can't tell that <code>create</code> writes or that a field is an email address. Labels in the manifest tell it: SQL, secrets, personal data, writes, who owns a record. Asserts tell it what a right answer is.</dd></div>
     <div><dt>Simulate concurrent requests</dt><dd>Configured request sequences share modeled backend state and can expose double submits. They run sequentially; live services and concurrent execution remain outside the model.</dd></div>
     <div><dt>Measure every branch</dt><dd>Internal feedback is bounded and instruments directly instantiated core modules. Nested components and GC type groups can remain opaque. Reports identify skipped modules. For interpreted apps, signals describe the interpreter and may be less useful.</dd></div>
   </dl>
