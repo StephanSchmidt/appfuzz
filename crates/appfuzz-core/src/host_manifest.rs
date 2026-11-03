@@ -327,6 +327,8 @@ pub fn merge(host: &HostManifest, mut app: Manifest, app_toml: &toml::Table) -> 
                     e.sensitive_paths.push(p);
                 }
             }
+            // Either side can forbid personal data in the output; neither can allow it back.
+            e.no_pii |= ae.no_pii;
         }
         app.entry = Some(e);
     }

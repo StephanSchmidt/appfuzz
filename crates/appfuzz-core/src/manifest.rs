@@ -143,6 +143,11 @@ pub struct Entry {
     /// Routes no `html:safe` markup may send a request to (`/admin`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sensitive_paths: Vec<String>,
+    /// The export's output never contains personal data: a value a host
+    /// function returned at a `pii` path anywhere in the result is a
+    /// `pii_leak` fail. Reading personal data stays allowed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_pii: bool,
     /// What the platform lets through in request fields, by path
     /// (`range:1..31`, `len:..100`, `enum:a,b`, `format:date`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

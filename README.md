@@ -195,7 +195,8 @@ A wall-clock safety timeout can still interrupt an overloaded machine.
    ```
 
    Request and backend text that reaches the SQL with its quote intact is
-   `sql_injection`. An email address in the log is `pii_leak`. `inspect`
+   `sql_injection`. An email address in the log is `pii_leak`; with
+   `[entry] no_pii = true`, anywhere in the output. `inspect`
    suggests labels from the WIT names.
 5. **`check`** turns your own suspicion ("usage never exceeds 100") into a
    search for a counterexample.

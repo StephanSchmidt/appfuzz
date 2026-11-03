@@ -52,7 +52,7 @@ result.
 |-------|-------|-------|
 | `untrusted` | the default: text that must not reach sinks or HTML unescaped | `stored_reflection`, sink findings |
 | `html` | trusted markup | no `stored_reflection` or `html_injection` for it |
-| `pii` | personal data | `pii_leak`: fail in logs, error pages, and host parameters not labelled `pii`; warn in a URL or header; nothing in an ordinary page |
+| `pii` | personal data | `pii_leak`: fail in logs, error pages, and host parameters not labelled `pii`; warn in a URL or header; nothing in an ordinary page, unless `[entry] no_pii = true` (below) |
 | `secret` | a secret | `secret_leak`: fail anywhere in the output, logs, or host parameters not labelled `secret` |
 
 | `identity` | who the caller is (a user id) | the run's caller for `user-id` and `owner` |
@@ -63,6 +63,31 @@ Generated values at `pii` and `secret` paths are traceable markers
 numbers. Generated identities are the run's caller, and about half the
 generated owners are the caller too. An app that checks ownership shows
 the record in some runs and refuses it in others.
+
+A value the request itself carries is not a leak: the user typed it.
+`reflection` covers request text. Values shorter than four characters are
+not traced. One finding covers all values from the same function and path
+in the same place; `detail.count` says how many (the emails of 37 people
+in one page are one finding with `count: 37`).
+
+### No personal data in the output: `[entry] no_pii = true`
+
+Some exports have no business returning personal data: a dashboard of
+counts, a menu, a status. They may still read it, to count or filter.
+
+```toml
+[entry]
+no_pii = true
+```
+
+With it, a value from a `pii` path anywhere in the export's output is
+`pii_leak` (fail): in the body and headers when `[entry] output` maps them,
+and in every string of the result otherwise, at any depth
+(`detail.at = "ok.rows[1].contact"`). Encoded forms (`encoded_flow`) in the
+body fail too. Calling functions that return personal data stays allowed;
+which functions an app may call is the platform's business. The caller's
+own data counts as well: an export that shows the user's own profile
+doesn't get `no_pii`.
 
 ## Identity
 

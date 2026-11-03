@@ -1,0 +1,6 @@
+{
+  "app": "pii-counted",
+  "bug": "reads the user's email but shows only whether it is set (clean twin of pii-in-result)",
+  "expect": [],
+  "allow": []
+}
