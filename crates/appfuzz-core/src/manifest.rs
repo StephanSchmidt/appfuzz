@@ -37,6 +37,10 @@ pub struct Manifest {
     /// Printable strings of the component, set when the app is loaded.
     #[serde(skip)]
     pub binary: Binary,
+    /// The platform named in `[app] platform`, already merged in; kept for
+    /// its types (plain modules run against its witx).
+    #[serde(skip)]
+    pub host: Option<std::sync::Arc<crate::host_manifest::HostManifest>>,
 }
 
 /// The component's printable strings, joined with NUL: what the app could
@@ -81,6 +85,10 @@ pub struct AppSection {
     /// on the same host outside it belongs to another app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// The platform the app runs on: a bundled name (`fastly`) or a path to
+    /// its `platform.toml`. Its contract is merged in; the app may only tighten it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 /// What a host function does to the world.
@@ -113,6 +121,8 @@ impl Effect {
 #[serde(deny_unknown_fields)]
 pub struct Entry {
     /// The export appfuzz calls: `interface#function` or a top-level function.
+    /// Required, but may come from the platform.
+    #[serde(default)]
     pub export: String,
     /// The default argument (for a one-parameter export) as WIT-shaped JSON,
     /// or an array of arguments.
@@ -167,6 +177,10 @@ pub struct Grants {
     /// `example.com` for it and its subdomains.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<String>,
+    /// Capabilities of the platform the app asks for, by name; each grants
+    /// the interfaces `platform.toml` lists for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +249,28 @@ fn default_wall_timeout() -> u64 {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FunctionSpec {
+    /// What the function does, for the agents writing apps (platform only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// What each parameter means, by name (platform only).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_docs: BTreeMap<String, String>,
+    /// What the result means (platform only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_doc: Option<String>,
+    /// The errors it returns and when (platform only).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub errors: BTreeMap<String, String>,
+    /// The SDK call that reaches this function (platform only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk: Option<String>,
+    /// What the call does to handle state (platform only; witx platforms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<crate::handles::Binding>,
+    /// `false`: the real host does not fail this call (the SDK treats a
+    /// failure as impossible), so no failure is injected (platform only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fails: Option<bool>,
     /// Platform-declared requirements on actual guest-to-host arguments.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub param_values: BTreeMap<String, crate::value_contract::Domain>,
@@ -325,6 +361,14 @@ impl Manifest {
     pub fn fingerprint(&self) -> String {
         let mut v = serde_json::to_value(self).expect("manifest serializes");
         v["app"]["wasm"] = Value::Null;
+        // Descriptions don't change what a run does.
+        for f in v["functions"].as_object_mut().into_iter().flat_map(|m| m.values_mut()) {
+            if let Some(f) = f.as_object_mut() {
+                for k in ["description", "param_docs", "result_doc", "errors", "sdk"] {
+                    f.remove(k);
+                }
+            }
+        }
         let mut h = blake3::Hasher::new();
         h.update(b"appfuzz-execution-v3");
         h.update(env!("CARGO_PKG_VERSION").as_bytes());
@@ -341,6 +385,17 @@ impl Manifest {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut m: Manifest = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         m.dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        if let Some(p) = m.app.platform.clone() {
+            let host = crate::host_manifest::HostManifest::resolve(&p, &m.dir)?;
+            let table: toml::Table = toml::from_str(&text)?;
+            let dir = m.dir.clone();
+            m = crate::host_manifest::merge(&host, m, &table).with_context(|| format!("in {}", path.display()))?;
+            m.dir = dir;
+            m.host = Some(std::sync::Arc::new(host));
+        }
+        if m.entry.as_ref().is_some_and(|e| e.export.is_empty()) {
+            bail!("{}: [entry] needs export = \"interface#function\"", path.display());
+        }
         crate::labels::check_positions(&m).with_context(|| format!("in {}", path.display()))?;
         Ok(m)
     }
@@ -348,7 +403,7 @@ impl Manifest {
     /// A manifest for a bare `.wasm` without `appfuzz.toml`.
     pub fn for_wasm(wasm: &Path) -> Self {
         Manifest {
-            app: AppSection { wasm: wasm.to_path_buf(), name: None, description: None, labels: None, base: None },
+            app: AppSection { wasm: wasm.to_path_buf(), name: None, description: None, labels: None, base: None, platform: None },
             entry: None,
             grants: Grants::default(),
             limits: Limits::default(),
@@ -358,6 +413,7 @@ impl Manifest {
             acceptance: None,
             dir: PathBuf::new(),
             binary: Binary::default(),
+            host: None,
         }
     }
 

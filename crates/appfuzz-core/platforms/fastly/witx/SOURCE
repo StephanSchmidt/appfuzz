@@ -1,0 +1,3 @@
+These witx files describe the Fastly Compute host ABI. They are copied unchanged from
+https://github.com/fastly/Viceroy/tree/d338a425aa55d576185ffa411e1db6e47a994e0f/wasm_abi/compute-at-edge-abi
+under the license in LICENSE (Apache-2.0 WITH LLVM-exception).

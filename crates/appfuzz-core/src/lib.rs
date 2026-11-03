@@ -19,6 +19,8 @@ pub mod par;
 pub mod payload;
 pub mod growth;
 pub mod harness;
+pub mod handles;
+pub mod host_manifest;
 pub mod identity;
 pub mod labels;
 pub mod plan;
@@ -32,6 +34,7 @@ pub mod store;
 pub mod value;
 pub mod wasi;
 pub mod wit;
+pub mod witx_abi;
 
 pub mod dataset;
 

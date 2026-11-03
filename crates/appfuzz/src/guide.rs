@@ -33,6 +33,18 @@ pub const DOCS: &[Doc] = &[
         next: "`plan template` to script the host; `run` to see one request",
     },
     Doc {
+        path: "platform docs",
+        examples: &["appfuzz platform docs --platform fastly --fn send_v2", "appfuzz platform docs --capability bookings-write", "appfuzz platform docs --markdown HOST-API.md"],
+        output: "every host function: signature, description, parameters, errors, SDK call, effect, cost, value domains, labels and rules",
+        next: "write the app against it; declare the app's own semantics in appfuzz.toml (the platform's can only be tightened)",
+    },
+    Doc {
+        path: "platform check",
+        examples: &["appfuzz platform check --platform ./platform.toml"],
+        output: "errors (functions, interfaces or parameters platform.toml names that the types lack) and the functions without a description",
+        next: "fix the errors; describe the undescribed functions apps use",
+    },
+    Doc {
         path: "plan template",
         examples: &["appfuzz plan template > plan.json"],
         output: "a plan with every host function: signature, example value, its labels from the manifest",
