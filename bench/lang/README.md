@@ -8,6 +8,8 @@ world `items-app`) and reviewed with the same manifest limits.
 |-----|----------|-----------|-----------|
 | `../apps/chatty` | Rust | cargo, wasm32-wasip2 | 65 KB |
 | `ts-chatty` | TypeScript | jco + componentize-js (StarlingMonkey) | 12 MB |
+| `js-chatty` | JavaScript | jco + componentize-js (StarlingMonkey) | 12 MB |
+| `go-chatty` | Go | TinyGo 0.44 (wasip2) + wit-bindgen-go | 784 KB |
 | `py-chatty` | Python | componentize-py 0.25 | 18 MB |
 | `zig-chatty` | Zig | zig 0.17 + wit-bindgen c + preview1 adapter | 114 KB |
 
@@ -23,6 +25,9 @@ cd ts-chatty && npm install && npx jco componentize src/app.ts \
     --wit ../../wit/web.wit --world-name items-app --disable all -o app.wasm
 cd py-chatty && uvx componentize-py -d ../../wit/web.wit -w items-app \
     componentize app -o app.wasm
+cd js-chatty && ../ts-chatty/node_modules/.bin/jco componentize app.js \
+    --wit ../../wit/web.wit --world-name items-app --disable all -o app.wasm
+go-chatty/build.sh   # tinygo, go and wasm-tools on PATH
 zig-chatty/build.sh
 ```
 
@@ -30,7 +35,7 @@ Then `appfuzz review` in each directory.
 
 ## What review finds
 
-All four: `n_plus_1` (calls to items#get grow as 1·n, cost breaks its limit
+All six: `n_plus_1` (calls to items#get grow as 1·n, cost breaks its limit
 at n = 100), `over_budget` (129 cost), `chatty`, `redundant_calls`,
 `serial_chain`, with the same titles.
 
@@ -40,6 +45,10 @@ Per language:
   whose fields are 10 KB strings, the four regex `replace` calls in `esc`
   cost about 27M fuel per item in the JS engine (Rust: 9.9M fuel for all
   32), so the run hits the 200M limit.
+- **JavaScript**: the same as TypeScript, the fuel `hang` included.
+- **Go** also fails `ungranted_import` twice: the TinyGo runtime imports
+  `wasi:filesystem`. It also goes over the fuel limit on long lists
+  (`cpu_blowup`).
 - **Python** also fails `ungranted_import` eight times: the
   componentize-py runtime imports `wasi:filesystem` and `wasi:sockets`
   whatever the app uses.

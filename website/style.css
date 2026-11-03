@@ -267,8 +267,8 @@ main > .sec:first-child { border-top: 0; }
 /* Languages */
 .langs { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); border: 1px solid var(--ink); }
 .lang-code { padding: 0 0 22px; border-right: 1px solid var(--ink); min-width: 0; }
-.tabs { display: flex; border-bottom: 1px solid var(--ink); }
-.tabs button { font: 600 15px var(--sans); background: none; border: 0; border-right: 1px solid var(--rule); padding: 13px 20px; cursor: pointer; color: var(--ink2); }
+.tabs { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--ink); }
+.tabs button { font: 600 15px var(--sans); background: none; border: 0; border-right: 1px solid var(--rule); padding: 13px 16px; cursor: pointer; color: var(--ink2); }
 .tabs button[aria-selected="true"] { background: var(--ink); color: #fff; }
 .tabs button:not([aria-selected="true"]):hover { background: var(--soft); }
 .lang-code .code { border: 0; border-bottom: 1px solid var(--rule); background: var(--paper); padding: 22px 24px; }

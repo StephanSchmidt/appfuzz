@@ -29,6 +29,8 @@ target/
 node_modules/
 .zig-cache/
 /bench/lang/zig-chatty/gen/
+/bench/lang/go-chatty/gen/
+/bench/lang/go-chatty/wit/
 .appfuzz/
 __pycache__/
 *.wasm

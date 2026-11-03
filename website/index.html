@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>appfuzz: fuzz WebAssembly apps instead of reviewing them</title>
-<meta name="description" content="appfuzz runs your WebAssembly app thousands of times against a simulated backend and finds the bugs a code review misses: crashes, XSS, n+1 queries that hammer your database. Rust, Zig, TypeScript, Python. One command, pass or fail.">
+<meta name="description" content="appfuzz runs your WebAssembly app thousands of times against a simulated backend and finds the bugs a code review misses: crashes, XSS, n+1 queries that hammer your database. Rust, Go, TypeScript, JavaScript, Python, Zig. One command, pass or fail.">
 <link rel="canonical" href="https://appfuzz.dev/">
 <meta name="color-scheme" content="light">
 <meta name="theme-color" content="#ffffff">
@@ -144,6 +144,8 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
       <li><b>Rust</b> <span>cargo, wasm32-wasip2</span></li>
       <li><b>Zig</b> <span>zig, wit-bindgen c</span></li>
       <li><b>TypeScript</b> <span>jco, componentize-js</span></li>
+      <li><b>Go</b> <span>TinyGo</span></li>
+      <li><b>JavaScript</b> <span>jco, componentize-js</span></li>
       <li><b>Python</b> <span>componentize-py</span></li>
     </ul>
   </div>
@@ -367,13 +369,17 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 <section id="languages" class="frame sec">
   <div class="sec-head">
     <h2>Whatever your teams write it in.</h2>
-    <p>You don't need a reviewer for every language. appfuzz runs the compiled component, not the source, so the same n+1 loop in Rust and in Zig gets the same finding against the same limits.</p>
+    <p>You don't need a reviewer for every language. appfuzz runs the compiled component, not the source, so the same n+1 loop gets the same finding against the same limits, whatever it was written in. Each language also brings its own surprises, and appfuzz finds those too.</p>
   </div>
 
   <div class="langs">
     <div class="lang-code stack">
       <div class="tabs" role="tablist" aria-label="Language">
         <button role="tab" id="tab-rs" aria-controls="panel-rs" aria-selected="true">Rust</button>
+        <button role="tab" id="tab-go" aria-controls="panel-go" aria-selected="false" tabindex="-1">Go</button>
+        <button role="tab" id="tab-ts" aria-controls="panel-ts" aria-selected="false" tabindex="-1">TypeScript</button>
+        <button role="tab" id="tab-js" aria-controls="panel-js" aria-selected="false" tabindex="-1">JavaScript</button>
+        <button role="tab" id="tab-py" aria-controls="panel-py" aria-selected="false" tabindex="-1">Python</button>
         <button role="tab" id="tab-zig" aria-controls="panel-zig" aria-selected="false" tabindex="-1">Zig</button>
       </div>
       <div role="tabpanel" id="panel-rs" aria-labelledby="tab-rs">
@@ -382,7 +388,44 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
         out += &amp;format!(<span class="str">"&lt;li&gt;{}&lt;/li&gt;"</span>, esc(&amp;full.owner));
     }
 }</code></pre>
-        <p class="facts"><b>65 KB</b> component. cargo, wasm32-wasip2. Fuel, memory, calls and latency measured on the original component.</p>
+        <p class="facts"><b>Rust</b> cargo, wasm32-wasip2.</p>
+      </div>
+      <div role="tabpanel" id="panel-go" aria-labelledby="tab-go" hidden>
+<pre class="code"><code><span class="kw">for</span> _, it := <span class="kw">range</span> items.All().Slice() {
+    <span class="kw">if</span> full, _, isErr := items.Get(it.ID).Result(); !isErr {
+        out += <span class="str">"&lt;li&gt;"</span> + esc(full.Owner) + <span class="str">"&lt;/li&gt;"</span>
+    }
+}</code></pre>
+        <p class="facts"><b>Go</b> TinyGo, wasip2, wit-bindgen-go. Also found: the runtime imports file system access the app never uses, and a long list runs the request over its CPU budget.</p>
+      </div>
+      <div role="tabpanel" id="panel-ts" aria-labelledby="tab-ts" hidden>
+<pre class="code"><code>handle(_req: Request): Response {
+  <span class="kw">let</span> out = <span class="str">"&lt;ul&gt;"</span>;
+  <span class="kw">for</span> (<span class="kw">const</span> it <span class="kw">of</span> all()) {
+    <span class="kw">try</span> {
+      out += <span class="str">`&lt;li&gt;${esc(get(it.id).owner)}&lt;/li&gt;`</span>;
+    } <span class="kw">catch</span> {}
+  }</code></pre>
+        <p class="facts"><b>TypeScript</b> jco, componentize-js. Also found: with long names, the regex escaping is so slow the request never finishes.</p>
+      </div>
+      <div role="tabpanel" id="panel-js" aria-labelledby="tab-js" hidden>
+<pre class="code"><code>handle(_req) {
+  <span class="kw">let</span> out = <span class="str">"&lt;ul&gt;"</span>;
+  <span class="kw">for</span> (<span class="kw">const</span> it <span class="kw">of</span> all()) {
+    <span class="kw">try</span> {
+      out += <span class="str">`&lt;li&gt;${esc(get(it.id).owner)}&lt;/li&gt;`</span>;
+    } <span class="kw">catch</span> {}
+  }</code></pre>
+        <p class="facts"><b>JavaScript</b> jco, componentize-js. Also found: with long names, the regex escaping is so slow the request never finishes.</p>
+      </div>
+      <div role="tabpanel" id="panel-py" aria-labelledby="tab-py" hidden>
+<pre class="code"><code><span class="kw">for</span> it <span class="kw">in</span> items.all():
+    <span class="kw">try</span>:
+        full = items.get(it.id)
+        out += <span class="str">f"&lt;li&gt;{escape(full.owner)}&lt;/li&gt;"</span>
+    <span class="kw">except</span> Err:
+        <span class="kw">pass</span></code></pre>
+        <p class="facts"><b>Python</b> componentize-py. Also found: the runtime imports file system and network access the app never uses.</p>
       </div>
       <div role="tabpanel" id="panel-zig" aria-labelledby="tab-zig" hidden>
 <pre class="code"><code><span class="kw">for</span> (items) |it| {
@@ -394,15 +437,15 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
     <span class="kw">try</span> esc(&amp;out, gpa, slice(full.owner));
     <span class="kw">try</span> out.appendSlice(gpa, <span class="str">"&lt;/li&gt;"</span>);
 }</code></pre>
-        <p class="facts"><b>114 KB</b> component. zig, wit-bindgen c, the WASI adapter. Also found: libc imports file system access the app never uses.</p>
+        <p class="facts"><b>Zig</b> zig, wit-bindgen c, the WASI adapter. Also found: libc imports file system access the app never uses.</p>
       </div>
     </div>
     <div class="lang-out">
-      <p class="out-label">appfuzz review, the same in both</p>
+      <p class="out-label">appfuzz review, the same in all six</p>
       <p class="verdict"><b>fail</b> <span class="kind">n_plus_1</span> calls to items#get grow as 1·n with n = length of the list items#all returns; cost breaks its limit at n = 100</p>
       <p class="verdict"><b>fail</b> <span class="kind">over_budget</span> handle uses 129 cost, the limit is 100</p>
       <p class="verdict warn"><b>warn</b> <span class="kind">chatty</span> items#get is called for each element items#all returned</p>
-      <p class="verdict warn"><b>warn</b> <span class="kind">redundant_calls</span> items#get: 13 of 50 calls repeat earlier calls with the same arguments</p>
+      <p class="verdict warn"><b>warn</b> <span class="kind">redundant_calls</span> items#get: 2 of 4 calls repeat earlier calls with the same arguments</p>
     </div>
   </div>
 </section>
