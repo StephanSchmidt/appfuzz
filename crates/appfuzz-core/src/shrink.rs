@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::detect::Finding;
 use crate::fuzz::{first_list, first_list_mut, nodes};
-use crate::harness::{App, fn_key_eq, set_clock_fields};
+use crate::harness::{App, set_clock_fields};
 use crate::metamorphic::{self, Change};
 use crate::par::{self, Runner};
 use crate::plan::{FnPlan, Response};

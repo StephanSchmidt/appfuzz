@@ -601,7 +601,10 @@ pub fn default_sizes(knob: &Knob) -> Vec<u64> {
 /// Runs a knob over sizes, all at once. `run` executes (and may store) a
 /// spec. Points after the first failing size are dropped.
 pub fn scale(app: &App, base: &RunSpec, knob: Knob, sizes: &[u64], run: Runner) -> Result<ScaleReport> {
-    let specs = sizes.iter().map(|&n| apply(app, base, &knob, n).map(|s| (n, s))).collect::<Result<Vec<_>>>()?;
+    let mut specs = sizes.iter().map(|&n| apply(app, base, &knob, n).map(|s| (n, s))).collect::<Result<Vec<_>>>()?;
+    // A size the field's type cannot hold (256 in a u8) is no request the
+    // platform can send: the app never runs, so it is no failure at size n.
+    specs.retain(|(_, s)| fits(app, s));
     let mut points = Vec::new();
     for p in par::map(&specs, |(n, s)| Point::of(*n, &run(s))) {
         let stop = p.outcome != OutcomeKind::Ok;
@@ -611,6 +614,12 @@ pub fn scale(app: &App, base: &RunSpec, knob: Knob, sizes: &[u64], run: Runner) 
         }
     }
     Ok(analyze(app, knob, points))
+}
+
+/// The arguments convert to the export's parameter types.
+fn fits(app: &App, s: &RunSpec) -> bool {
+    let Ok(export) = app.export(&s.export) else { return true };
+    export.ty.params().zip(&s.args).all(|((_, ty), v)| json_to_val(v, &ty).is_ok())
 }
 
 #[derive(Debug, Clone, Serialize)]
