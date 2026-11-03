@@ -37,7 +37,7 @@ impl std::fmt::Debug for Property {
     }
 }
 
-pub const HELP: &str = "value_range <selector> <lo> <hi> | max_calls <fn> <n> | no_crash | not_contains <regex> | max <metric> <n> | assert <cel expr> --let name=path. \
+pub const HELP: &str = "value_range <selector> <lo> <hi> | max_calls <fn> <n> | no_crash | not_contains <regex> | max <metric> <n>. \
 Selectors: `.class`, `#id`, `tag` (HTML body), `$.path` (result field), `/regex/` (first group in the body). \
 Metrics: fuel, memory, host_calls, virtual_ms, cost, output_bytes, clock_reads.";
 

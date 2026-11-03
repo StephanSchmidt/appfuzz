@@ -237,7 +237,7 @@ an error.
 | "where does this argument come from?" | `provenance <run> --call <n>` |
 | "where does the CPU go?" | `profile <run>`, then `wasm disasm <func>` |
 | "this text must never show up" | `check not_contains 'panicked\|stack backtrace'` |
-| "the output must agree with the input" | `bindings`, `eval last '<expr>' --let n=path`, then `check assert '<expr>' --let n=path` |
+| "the output must agree with the input" | `bindings`, `eval last '<expr>' --let n=path`, then save it as an `[acceptance]` assert: `run`, `fuzz` and `review` judge it on every run and steer toward breaking it |
 
 `check` looks at stored runs first. Then it fuzzes until a run breaks the
 property, and shrinks that run to a counterexample. "holds" means no run

@@ -55,6 +55,9 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let r = execute(app, &store, a)?;
             let mut s = summary(app, &r);
             s["findings"] = record_findings(&cli, app, detect::per_run(&r, &app.manifest))?;
+            if let Some(asserts) = crate::acceptance::asserts_on(app, &r) {
+                s["asserts"] = asserts;
+            }
             if a.trace {
                 s["host_calls"] = timeline(&r, &Statics::parse(&app.bytes)?);
             }
@@ -377,7 +380,8 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 "plateau" => fuzz::Until::Plateau,
                 u => bail!("--until must be budget, new-finding or plateau, not {u:?}"),
             };
-            let opts = fuzz::FuzzOpts { runs: *runs, time: Some(parse_duration(time)?), until, seed: *rng, plateau: *plateau, internal_feedback:*internal_feedback, ..Default::default() };
+            let asserts = app.manifest.acceptance.as_ref().map(|s| s.shared_asserts(&base.export, app.manifest.entry.as_ref().map(|e| e.export.as_str()))).unwrap_or_default();
+            let opts = fuzz::FuzzOpts { runs: *runs, time: Some(parse_duration(time)?), until, seed: *rng, plateau: *plateau, internal_feedback:*internal_feedback, asserts, ..Default::default() };
             let prior = if *fresh { vec![] } else { fuzz::Corpus::load(&cli.state, &app.state_key)?.entries };
             let findings = FindingStore::new(&cli.state, &app.state_key);
             let known = findings.all()?.into_iter().map(|f| f.id).collect();
@@ -401,6 +405,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 "feedback":rep.feedback,"faults":rep.faults,"corpus": rep.corpus, "kept": rep.kept, "features": rep.features, "last_new_at_run": rep.last_new_at_run,
                 "stages": rep.stages, "maxima": maxima, "jobs": rep.jobs,
                 "findings": record_findings(&cli, app, rep.findings)?,
+                "asserts": rep.asserts, "assert_cost_pct": rep.assert_cost_pct,
             }))
         }
         Cmd::Confirm { target, finding, times, max_runs } => {
@@ -511,11 +516,11 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let runs: Vec<RunRecord> = store.all()?.into_iter().filter(|r| r.spec.component == hash && r.spec.contract == m.fingerprint()).collect();
             wasm_cmd::run(cmd, &bytes, &runs)
         }
-        Cmd::Check { property, lets, assume, runs, time, rng, max_runs, export, spec } => {
+        Cmd::Check { property, runs, time, rng, max_runs, export, spec } => {
             let app = load()?;
             let base = build_spec(app, export.as_deref(), spec)?;
             let opts = fuzz::FuzzOpts { runs: *runs, time: Some(parse_duration(time)?), seed: *rng, ..Default::default() };
-            let prop = dig::property(app, &base.export, property, lets, assume.as_deref())?;
+            let prop = appfuzz_core::check::Property::parse(property)?;
             dig::check(&cli, app, &store, &base, prop, opts, *max_runs)
         }
         Cmd::Eval { run, expr, lets, assume } => {

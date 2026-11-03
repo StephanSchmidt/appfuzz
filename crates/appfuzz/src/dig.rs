@@ -3,7 +3,7 @@
 //! explain a run, list host call sites never reached, WASI usage.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Result, anyhow, bail};
@@ -39,20 +39,6 @@ fn assertion(app: &App, export: &str, expr: &str, lets: &[String], assume: Optio
     let a = Assertion::new(&lets_of(lets)?, expr, assume)?;
     appfuzz_core::assertion::validate_wit(&a.bindings, &app.imports, &app.exports, Some(export))?;
     Ok(a)
-}
-
-/// The property of `check`: words (`value_range .usage 0 100`), or `assert <expr>` with `--let` bindings.
-pub fn property(app: &App, export: &str, words: &[String], lets: &[String], assume: Option<&str>) -> Result<Property> {
-    match words.split_first() {
-        Some((first, rest)) if first == "assert" => {
-            if rest.is_empty() {
-                bail!("check assert needs an expression: check assert 'size(rows) == size(items)' --let rows='select .row' --let items=host.items#all.result");
-            }
-            Ok(Property::assertion(Arc::new(assertion(app, export, &rest.join(" "), lets, assume)?)))
-        }
-        _ if !lets.is_empty() || assume.is_some() => bail!("--let and --assume belong to check assert"),
-        _ => Property::parse(words),
-    }
 }
 
 /// Evaluates an expression on a stored run: every binding, the value, the verdict.

@@ -244,19 +244,13 @@ pub(crate) enum Cmd {
     /// (selector `.class`, `#id`, `tag`, `$.field`, `/regex/`),
     /// `max_calls <fn> <n>`, `no_crash`, `not_contains <regex>`,
     /// `max <metric> <n>` (fuel, memory, host_calls, virtual_ms, cost,
-    /// output_bytes, clock_reads), or `assert '<CEL expression>'` over
-    /// `--let name=path` bindings (see `appfuzz bindings`). Stored runs are
-    /// checked first.
+    /// output_bytes, clock_reads). Stored runs are checked first. Saved
+    /// asserts (`[acceptance]` with `let`/`assert`) need no command: `run`,
+    /// `fuzz` and `review` judge them on every run.
     Check {
-        /// The property, as words: `value_range .usage 0 100`, `assert 'sum(prices) == num(total)'`.
+        /// The property, as words: `value_range .usage 0 100`.
         #[arg(required = true, num_args = 1.., allow_negative_numbers = true)]
         property: Vec<String>,
-        /// For `assert`: a binding, `name=path` (`prices=host.items#all.results`).
-        #[arg(long = "let", value_name = "NAME=PATH")]
-        lets: Vec<String>,
-        /// For `assert`: a precondition; runs where it is false don't count.
-        #[arg(long)]
-        assume: Option<String>,
         #[arg(long)]
         runs: Option<u64>,
         #[arg(long, default_value = "60s")]

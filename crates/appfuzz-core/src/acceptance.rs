@@ -136,6 +136,28 @@ impl Suite {
         }
         out
     }
+    /// Asserts any run of `export` can judge: searching, with no inputs or
+    /// scope of their own. Fuzzing judges them on every run.
+    pub fn shared_asserts(&self, export: &str, default_export: Option<&str>) -> Vec<(String, Arc<Assertion>)> {
+        self.expanded()
+            .into_iter()
+            .filter(|(_, c)| {
+                c.assert.is_some()
+                    && c.searches()
+                    && c.export.as_deref().or(default_export) == Some(export)
+                    && c.request.is_none()
+                    && c.args.is_none()
+                    && c.now.is_none()
+                    && c.seed.is_none()
+                    && c.plan.0.is_empty()
+                    && c.input_class.is_none()
+                    && c.input_fields.is_empty()
+                    && c.when.is_empty()
+                    && c.forbid_effects.is_empty()
+            })
+            .filter_map(|(n, c)| c.assertion().ok().flatten().map(|a| (n, a)))
+            .collect()
+    }
     /// Binding paths against the component's imports and exports.
     pub fn validate_wit(&self, m: &Manifest, imports: &[crate::wit::Interface], exports: &[crate::wit::FuncInfo]) -> Result<()> {
         for (name, c) in self.expanded() {

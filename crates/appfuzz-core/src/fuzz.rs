@@ -15,6 +15,7 @@
 //! the order of admissions depends on timing (each run still replays).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,7 @@ use wasmtime::component::Type;
 
 use crate::detect::{Finding, panic_text, per_run};
 use crate::harness::{App, field, fn_key_eq, set_clock_fields};
+use crate::assertion::{Assertion, Margin, Verdict};
 use crate::check::Property;
 use crate::metamorphic;
 use crate::par;
@@ -149,11 +151,14 @@ pub struct FuzzOpts {
     pub property: Option<Property>,
     /// Stop at the first new finding of this kind.
     pub stop_on: Option<String>,
+    /// Saved asserts, judged on every run (sampled once judging takes more than a
+    /// quarter of worker time). Inputs that bring one closer to breaking are kept.
+    pub asserts: Vec<(String, Arc<Assertion>)>,
 }
 
 impl Default for FuzzOpts {
     fn default() -> Self {
-        FuzzOpts { runs: None, time: Some(Duration::from_secs(60)), until: Until::Budget, seed: 1, plateau: 2000, max_corpus: 300, dict_limit: 200, discover: true, internal_feedback:false, property: None, stop_on: None }
+        FuzzOpts { runs: None, time: Some(Duration::from_secs(60)), until: Until::Budget, seed: 1, plateau: 2000, max_corpus: 300, dict_limit: 200, discover: true, internal_feedback:false, property: None, stop_on: None, asserts: Vec::new() }
     }
 }
 
@@ -195,6 +200,84 @@ pub struct FuzzReport {
     pub jobs: usize,
     pub feedback:crate::feedback::Status,
     pub faults: crate::faults::Coverage,
+    /// What every saved assert saw in this campaign.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub asserts: Vec<AssertStat>,
+    /// Time judging asserts took, in percent of worker time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assert_cost_pct: Option<f64>,
+}
+
+/// One assert over a campaign: how runs judged it, the first break, and the
+/// closest a holding run came to breaking.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AssertStat {
+    pub name: String,
+    pub property: String,
+    pub evaluated: u64,
+    pub holds: u64,
+    pub vacuous: u64,
+    pub broken: u64,
+    pub rejected: u64,
+    pub undefined: u64,
+    pub errors: u64,
+    /// Runs skipped by sampling.
+    pub sampled_out: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broken_at: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closest: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_error: Option<String>,
+    /// How many times a run came closer to breaking it.
+    pub closer: u64,
+    #[serde(skip)]
+    best: Option<(f64, String)>,
+}
+
+/// What one run said about one assert.
+struct AssertObs {
+    verdict: Verdict,
+    margin: Option<Margin>,
+}
+
+/// Judges saved asserts per run; samples once judging takes more than a quarter of worker time.
+struct Judge<'a> {
+    list: &'a [(String, Arc<Assertion>)],
+    eval_ns: AtomicU64,
+    n: AtomicU64,
+    started: Instant,
+    jobs: u64,
+}
+
+impl Judge<'_> {
+    fn sample(&self) -> bool {
+        let n = self.n.fetch_add(1, AtomicOrdering::Relaxed);
+        self.eval_ns.load(AtomicOrdering::Relaxed) <= self.budget_ns() / 4 || n.is_multiple_of(10)
+    }
+
+    /// Worker time so far: wall time times workers.
+    fn budget_ns(&self) -> u64 {
+        (self.started.elapsed().as_nanos() as u64).saturating_mul(self.jobs).max(1)
+    }
+
+    fn judge(&self, r: &RunRecord, m: &crate::manifest::Manifest) -> Vec<AssertObs> {
+        let t = Instant::now();
+        let mut cache = std::collections::HashMap::new();
+        let out = self
+            .list
+            .iter()
+            .map(|(_, a)| match a.values_cached(r, m, &mut cache) {
+                Err((binding, reason)) => AssertObs { verdict: Verdict::Undefined { binding, reason }, margin: None },
+                Ok(values) => {
+                    let (verdict, margin) = a.assess(&values);
+                    AssertObs { verdict, margin }
+                }
+            })
+            .collect();
+        self.eval_ns.fetch_add(t.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+        out
+    }
 }
 
 static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<([a-zA-Z][a-zA-Z0-9-]*)\b([^>]*)>").unwrap());
@@ -331,6 +414,7 @@ struct State {
     new_findings: Vec<Finding>,
     observed: BTreeMap<String, Finding>,
     comparison_progress:BTreeMap<String,(u64,String)>,
+    asserts: Vec<AssertStat>,
     faults: crate::faults::Search,
     /// Runs admitted, and runs handed to a worker.
     runs: u64,
@@ -346,6 +430,8 @@ struct State {
 /// A run and what the worker derived from it.
 struct Executed {
     feedback:crate::feedback::Feedback,
+    /// None: no asserts, or skipped by sampling.
+    asserts: Option<Vec<AssertObs>>,
     r: Arc<RunRecord>,
     findings: Vec<Finding>,
     features: BTreeSet<String>,
@@ -353,18 +439,19 @@ struct Executed {
 }
 
 /// The unlocked half of an evaluation: run, detectors, features.
-fn execute(app: &App, st: &Statics, spec: &RunSpec, prop: Option<&Property>, probe:&crate::feedback::Probe) -> Executed {
+fn execute(app: &App, st: &Statics, spec: &RunSpec, prop: Option<&Property>, probe:&crate::feedback::Probe, judge: &Judge) -> Executed {
     let r = Arc::new(app.run(spec));
     if matches!(r.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) {
-        return Executed { feedback:Default::default(), r, findings: vec![], features: BTreeSet::new(), metrics: vec![] };
+        return Executed { feedback:Default::default(), asserts: None, r, findings: vec![], features: BTreeSet::new(), metrics: vec![] };
     }
+    let asserts = (!judge.list.is_empty() && r.outcome.kind == OutcomeKind::Ok && judge.sample()).then(|| judge.judge(&r, &app.manifest));
     let mut findings = per_run(&r, &app.manifest);
     findings.extend(prop.and_then(|p| p.finding(&r, &app.manifest)));
     let feedback=if r.outcome.kind==OutcomeKind::Ok {probe.collect(spec)}else{Default::default()};
     let mut features = features(&r, st, app);
     features.extend(feedback.features());
     let metrics = if r.outcome.kind == OutcomeKind::Ok { metrics(&r) } else { vec![] };
-    Executed { feedback, r, findings, features, metrics }
+    Executed { feedback, asserts, r, findings, features, metrics }
 }
 
 fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -375,8 +462,16 @@ impl State {
     /// Keeps a run if it is new in any way, and collects its findings.
     /// Returns the run, whether it was kept, and the findings new in it.
     fn admit(&mut self, spec: RunSpec, stage: Stage, ex: Executed) -> (Arc<RunRecord>, bool, Vec<Finding>) {
-        let Executed { feedback, r, findings, features: feats, metrics } = ex;
+        let Executed { feedback, asserts, r, findings, features: feats, metrics } = ex;
         self.runs += 1;
+        let assert_reasons = match asserts {
+            Some(obs) => self.observe(&r, obs, stage),
+            None if r.outcome.kind == OutcomeKind::Ok => {
+                self.asserts.iter_mut().for_each(|a| a.sampled_out += 1);
+                vec![]
+            }
+            None => vec![],
+        };
         let stat = self.stages.entry(stage).or_default();
         stat.runs += 1;
         if matches!(r.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) {
@@ -400,6 +495,7 @@ impl State {
         if !found.is_empty() {
             reasons.push(format!("findings {}", found.len()));
         }
+        reasons.extend(assert_reasons);
         if stage!=Stage::Check && let Some((group,distance))=feedback.progress()
             && (self.comparison_progress.contains_key(&group) || self.comparison_progress.len()<self.max_corpus.max(2)/2)
             && self.comparison_progress.get(&group).is_none_or(|(old,_)|distance<*old) {
@@ -440,12 +536,57 @@ impl State {
         (r, keep, found)
     }
 
+    /// Counts what each assert said. A break, or a run closer to breaking one
+    /// than any before, is a reason to keep the run.
+    fn observe(&mut self, r: &RunRecord, obs: Vec<AssertObs>, stage: Stage) -> Vec<String> {
+        let mut reasons = Vec::new();
+        for (a, o) in self.asserts.iter_mut().zip(obs) {
+            a.evaluated += 1;
+            match o.verdict {
+                Verdict::Holds { vacuous } => {
+                    a.holds += 1;
+                    a.vacuous += u64::from(vacuous);
+                }
+                Verdict::Broken { conjunct, evidence } => {
+                    a.broken += 1;
+                    if a.broken_at.is_none() {
+                        a.broken_at = Some(json!({"run": r.id, "at_run": self.runs, "failing": conjunct, "evidence": evidence}));
+                        reasons.push(format!("assert {} broken", a.name));
+                    }
+                }
+                Verdict::Rejected => a.rejected += 1,
+                Verdict::Undefined { .. } => a.undefined += 1,
+                Verdict::Error { conjunct, message } => {
+                    a.errors += 1;
+                    a.first_error.get_or_insert_with(|| format!("{conjunct}: {message}"));
+                }
+            }
+            if let Some(m) = o.margin
+                && stage != Stage::Check
+                && a.best.as_ref().is_none_or(|(old, _)| m.margin < *old)
+            {
+                if a.best.is_some() {
+                    a.closer += 1;
+                    reasons.push(format!("assert {} margin {}", a.name, m.margin));
+                }
+                a.best = Some((m.margin, r.id.clone()));
+                a.closest = Some(json!({"run": r.id, "at_run": self.runs, "margin": m.margin, "conjunct": m.conjunct, "left": m.left, "right": m.right}));
+            }
+        }
+        reasons
+    }
+
+    /// Runs that hold an assert's closest approach or break.
+    fn assert_holders(&self) -> impl Iterator<Item = &String> {
+        self.asserts.iter().filter_map(|a| a.best.as_ref().map(|(_, r)| r))
+    }
+
     /// Drops the oldest entry that holds no maximum once the corpus is full.
     fn prune(&mut self) {
         if self.corpus.len() <= self.max_corpus {
             return;
         }
-        let holders: BTreeSet<&String> = self.maxima.values().chain(self.comparison_progress.values()).map(|(_, r)| r).collect();
+        let holders: BTreeSet<&String> = self.maxima.values().chain(self.comparison_progress.values()).map(|(_, r)| r).chain(self.assert_holders()).collect();
         if let Some(i) = (1..self.corpus.len()).find(|&i| !holders.contains(&self.corpus[i].run)) {
             self.corpus.remove(i);
             self.picked.remove(i);
@@ -479,7 +620,7 @@ impl State {
 
     fn pick_parent(&mut self, rng: &mut StdRng) -> usize {
         let holders: Vec<usize> = {
-            let h: BTreeSet<&String> = self.maxima.values().chain(self.comparison_progress.values()).map(|(_, r)| r).collect();
+            let h: BTreeSet<&String> = self.maxima.values().chain(self.comparison_progress.values()).map(|(_, r)| r).chain(self.assert_holders()).collect();
             (0..self.corpus.len()).filter(|i| h.contains(&self.corpus[*i].run)).collect()
         };
         // Run time in ms, bucketed by powers of two: a 4 s input should not
@@ -1075,7 +1216,12 @@ pub fn fuzz(
     let probe=crate::feedback::Probe::new(app,opts.internal_feedback);
     let st = Statics::parse(&app.bytes)?;
     let words = dictionary(&st, opts.dict_limit);
-    let consts = compare_constants(&st, 32);
+    let mut consts = compare_constants(&st, 32);
+    // Numbers in an assert are its boundaries: `days <= 31` makes 30, 31, 32 worth trying.
+    for (_, a) in &opts.asserts {
+        consts.extend(a.constants().into_iter().filter(|c| !consts.contains(c)).collect::<Vec<_>>());
+    }
+    let judge = Judge { list: &opts.asserts, eval_ns: AtomicU64::new(0), n: AtomicU64::new(0), started, jobs: par::jobs() as u64 };
     let funcs: Vec<(String, Type)> = app
         .imports
         .iter()
@@ -1094,6 +1240,7 @@ pub fn fuzz(
         new_findings: Vec::new(),
         observed: BTreeMap::new(),
         comparison_progress:BTreeMap::new(),
+        asserts: opts.asserts.iter().map(|(n, a)| AssertStat { name: n.clone(), property: a.expr.text.clone(), ..Default::default() }).collect(),
         faults: crate::faults::Search::new(),
         runs: 0,
         started: 0,
@@ -1120,6 +1267,14 @@ pub fn fuzz(
         for c in d.contexts {
             modes.push(c.label);
             seeds.push(c.spec);
+        }
+    }
+    // Request fields an assert reads are mutated more often.
+    for (_, a) in &opts.asserts {
+        for k in a.request_fields() {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
         }
     }
     seeds.extend(flow_seeds(app, &steady_base, &keys, &funcs));
@@ -1150,14 +1305,14 @@ pub fn fuzz(
                 }
                 s.started += 1;
             }
-            let mut ex = execute(app, &st, &v.spec, opts.property.as_ref(), &probe);
+            let mut ex = execute(app, &st, &v.spec, opts.property.as_ref(), &probe, &judge);
             ex.findings.retain(|f| !metamorphic::expected(&v, f));
             ex.findings.extend(metamorphic::compare(app, r, &v, &ex.r));
             let (vr, keep, found) = lock(&state).admit(v.spec, Stage::Check, ex);
             on_run(&vr, keep, &found);
         }
     };
-    let done = par::map(&seeds, |s| execute(app, &st, s, opts.property.as_ref(), &probe));
+    let done = par::map(&seeds, |s| execute(app, &st, s, opts.property.as_ref(), &probe, &judge));
     let mut kept_seeds = Vec::new();
     for (spec, ex) in seeds.into_iter().zip(done) {
         let (r, keep, found) = lock(&state).admit(spec, Stage::Seed, ex);
@@ -1200,13 +1355,21 @@ pub fn fuzz(
                 m.mutate_request(&mut spec.args);
             }
             spec.fuel = spec.fuel.min(fuel);
-            let mut ex = execute(app, &st, &spec, opts.property.as_ref(), &probe);
+            let mut ex = execute(app, &st, &spec, opts.property.as_ref(), &probe, &judge);
+            let sampled_out = ex.asserts.is_none() && !judge.list.is_empty() && ex.r.outcome.kind == OutcomeKind::Ok;
             if let Some((base, recipe)) = &fault {
                 lock(&state).faults.observe(crate::faults::injected(base, recipe, &ex.r));
                 let variant = metamorphic::Variant { change: metamorphic::Change::Fault, func: Some(recipe.func.clone()), call: Some(recipe.call), spec: spec.clone() };
                 ex.findings.extend(crate::faults::compare(app, base, recipe, &variant, &ex.r));
             }
             let (r, keep, found) = lock(&state).admit(spec, stage, ex);
+            // A sampled-out run that showed something new is judged anyway.
+            if keep && sampled_out {
+                let obs = judge.judge(&r, &app.manifest);
+                let mut s = lock(&state);
+                s.asserts.iter_mut().for_each(|a| a.sampled_out -= 1);
+                s.observe(&r, obs, stage);
+            }
             if keep && stage != Stage::Fault { lock(&state).faults.enqueue(app, r.clone()); }
             on_run(&r, keep, &found);
             if keep {
@@ -1240,6 +1403,11 @@ pub fn fuzz(
         jobs,
         feedback:probe.finish(),
         faults: fz.faults.coverage(),
+        asserts: fz.asserts,
+        assert_cost_pct: (!opts.asserts.is_empty()).then(|| {
+            let (e, w) = (judge.eval_ns.load(AtomicOrdering::Relaxed) as f64, judge.budget_ns() as f64);
+            (e * 1000.0 / w).round() / 10.0
+        }),
     };
     let entries = fz.corpus.into_iter().map(Arc::unwrap_or_clone).collect();
     Ok((report, Corpus { component: app.state_key.clone(), entries }))

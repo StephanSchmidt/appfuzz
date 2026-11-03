@@ -903,12 +903,12 @@ fn assume_scopes_runs_and_unexercised_asserts_cannot_pass() {
     assert!(!result["checks"][0]["health"].as_array().unwrap().is_empty(), "{result}");
 }
 #[test]
-fn check_assert_eval_and_bindings_work_from_the_command_line() {
+fn run_judges_saved_asserts_and_eval_and_bindings_explain_them() {
     let f = assert_fixture(true, COUNT);
-    let (code, r) = f.cli(&["check", "assert", "shown == size(rooms)", "--let", "rooms=host.db#all.result", "--let", "shown=out.result", "--runs", "20"]);
+    let (code, r) = f.cli(&["run"]);
     assert_eq!(code, 2, "{r}");
+    assert_eq!(r["asserts"]["count"]["status"], "broken", "{r}");
     assert_eq!(f.cli(&["check", "value_range", "$", "0", "100", "--let", "x=out.result"]).0, 3);
-    f.cli(&["run"]);
     let (code, r) = f.cli(&["eval", "last", "size(rooms) + 1", "--let", "rooms=host.db#all.result"]);
     assert_eq!(code, 0, "{r}");
     assert_eq!(r["value"], 3, "{r}");
@@ -916,6 +916,49 @@ fn check_assert_eval_and_bindings_work_from_the_command_line() {
     let (code, r) = f.cli(&["bindings"]);
     assert_eq!(code, 0, "{r}");
     assert!(r["host"].as_array().unwrap().iter().any(|h| h["func"] == "test:workflow/db#all"), "{r}");
+}
+fn identity_fixture(checks: &str) -> Fixture {
+    let f = Fixture::new(false);
+    let wit = "package test:workflow; world app { export run: func(n:u32) -> u32; }";
+    let wat = "(module (func (export \"run\") (param i32) (result i32) (local.get 0)))";
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    let mut manifest = std::fs::read_to_string(&f.manifest).unwrap();
+    manifest.push_str(&format!("[acceptance]\nversion = 1\n{checks}"));
+    std::fs::write(&f.manifest, manifest).unwrap();
+    f
+}
+#[test]
+fn fuzzing_judges_asserts_on_every_run_and_closes_in_on_their_boundaries() {
+    let f = identity_fixture(
+        r#"
+[acceptance.checks.limit]
+origin = "marketing"
+let = { n = "args.0", shown = "out.result" }
+assert = "shown < 123457 && shown == n"
+[acceptance.checks.wide]
+origin = "platform"
+let = { shown = "out.result" }
+assert = "shown <= 4294967295"
+"#,
+    );
+    let (code, r) = f.cli(&["fuzz", "--runs", "300", "--fresh"]);
+    assert_eq!(code, 0, "{r}");
+    let a = |n: &str| r["asserts"].as_array().unwrap().iter().find(|a| a["name"] == n).unwrap_or_else(|| panic!("{n}: {r}")).clone();
+    // The literal is a boundary to try: 123457 breaks `shown < 123457`.
+    assert!(a("limit")["broken"].as_u64().unwrap() > 0, "{r}");
+    assert!(a("limit")["broken_at"]["run"].is_string(), "{r}");
+    // A holding assert reports how close a run came, and that runs got closer.
+    let wide = a("wide");
+    assert_eq!(wide["broken"], 0, "{r}");
+    assert!(wide["evaluated"].as_u64().unwrap() > 100, "{r}");
+    assert!(wide["closer"].as_u64().unwrap() > 0, "{r}");
+    assert!(wide["closest"]["margin"].as_f64().unwrap() < 1000.0, "{r}");
+    // The broken run was kept: the acceptance search starts from it and shrinks it.
+    let (code, r) = f.cli(&["acceptance", "run", "limit", "--runs", "5"]);
+    assert_eq!(code, 2, "{r}");
+    let case = r["checks"][0]["case"].as_str().unwrap();
+    let artifact: Value = serde_json::from_slice(&std::fs::read(case).unwrap()).unwrap();
+    assert_eq!(artifact["spec"]["args"], json!([123457]), "{artifact}");
 }
 #[test]
 fn envelopes_are_bound_to_the_acceptance_suite_they_were_reviewed_with() {

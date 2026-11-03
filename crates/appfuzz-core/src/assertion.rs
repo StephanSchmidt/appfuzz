@@ -16,6 +16,7 @@ use cel::extractors::This;
 use cel::objects::{Key, Map};
 use cel::{Context, Env, ExecutionError, Program, Value as Cel, extensions};
 use regex::Regex;
+use serde::Serialize;
 use serde_json::{Value, json};
 use wasmtime::component::Type;
 
@@ -357,7 +358,7 @@ fn call_json(e: &HostCall) -> Value {
 
 fn compacted(v: &Value) -> bool {
     match v {
-        Value::String(s) => COMPACTED.is_match(s),
+        Value::String(s) => s.ends_with(']') && COMPACTED.is_match(s),
         Value::Array(a) => a.iter().any(compacted),
         Value::Object(o) => o.values().any(compacted),
         _ => false,
@@ -709,6 +710,22 @@ impl Assertion {
         Ok(out)
     }
 
+    /// Like `values`, sharing resolved paths across properties of one run.
+    pub fn values_cached(
+        &self,
+        r: &RunRecord,
+        m: &Manifest,
+        cache: &mut HashMap<String, Result<Value, String>>,
+    ) -> Result<BTreeMap<String, Value>, (String, String)> {
+        let uses = self.uses();
+        let mut out = BTreeMap::new();
+        for b in self.bindings.iter().filter(|b| uses.contains(&b.name)) {
+            let v = cache.entry(b.path.clone()).or_insert_with(|| b.resolve(r, m));
+            out.insert(b.name.clone(), v.clone().map_err(|e| (b.name.clone(), e))?);
+        }
+        Ok(out)
+    }
+
     pub fn evaluate(&self, r: &RunRecord, m: &Manifest) -> Evaluated {
         let values = match self.values(r, m) {
             Ok(v) => v,
@@ -720,10 +737,21 @@ impl Assertion {
 
     /// The verdict for given binding values.
     pub fn judge(&self, values: &BTreeMap<String, Value>) -> Verdict {
+        self.judge_in(&context(values), values)
+    }
+
+    /// The verdict and, when it holds, how close it came to breaking; one scope for both.
+    pub fn assess(&self, values: &BTreeMap<String, Value>) -> (Verdict, Option<Margin>) {
         let ctx = context(values);
+        let verdict = self.judge_in(&ctx, values);
+        let margin = if matches!(verdict, Verdict::Holds { vacuous: false }) { self.margin_in(&ctx) } else { None };
+        (verdict, margin)
+    }
+
+    fn judge_in(&self, ctx: &Context, values: &BTreeMap<String, Value>) -> Verdict {
         if let Some(a) = &self.assume {
             for (text, p) in &a.conjuncts {
-                match strict(p.expression(), &ctx) {
+                match strict(p.expression(), ctx) {
                     Ok(Cel::Bool(true)) => {}
                     Ok(Cel::Bool(false)) => return Verdict::Rejected,
                     Ok(v) => return Verdict::Error { conjunct: text.clone(), message: format!("assume must be true or false, not {}", show(&v)) },
@@ -732,15 +760,56 @@ impl Assertion {
             }
         }
         for (text, p) in &self.expr.conjuncts {
-            match strict(p.expression(), &ctx) {
+            match strict(p.expression(), ctx) {
                 Ok(Cel::Bool(true)) => {}
-                Ok(Cel::Bool(false)) => return Verdict::Broken { conjunct: text.clone(), evidence: explain(p.expression(), &ctx) },
+                Ok(Cel::Bool(false)) => return Verdict::Broken { conjunct: text.clone(), evidence: explain(p.expression(), ctx) },
                 Ok(v) => return Verdict::Error { conjunct: text.clone(), message: format!("an assertion must be true or false, not {}", show(&v)) },
                 Err(e) => return Verdict::Error { conjunct: text.clone(), message: e },
             }
         }
         let lists: Vec<&Value> = values.values().filter(|v| v.is_array()).collect();
         Verdict::Holds { vacuous: !lists.is_empty() && lists.iter().all(|v| v.as_array().is_some_and(Vec::is_empty)) }
+    }
+
+    /// How close a holding property is to breaking: the smallest margin of a
+    /// numeric comparison (`a <= b`: b − a; `a != b`: |a − b|), through `all()`.
+    /// `==` and non-numeric conjuncts have no gradient.
+    pub fn margin(&self, values: &BTreeMap<String, Value>) -> Option<Margin> {
+        self.margin_in(&context(values))
+    }
+
+    fn margin_in(&self, ctx: &Context) -> Option<Margin> {
+        let mut best: Option<Margin> = None;
+        for (text, p) in &self.expr.conjuncts {
+            if let Some((m, left, right)) = margin(p.expression(), ctx, 0)
+                && best.as_ref().is_none_or(|b| m < b.margin)
+            {
+                best = Some(Margin { conjunct: text.clone(), margin: m, left, right });
+            }
+        }
+        best
+    }
+
+    /// Integer and float literals in the assert and assume, for boundary values.
+    pub fn constants(&self) -> Vec<i64> {
+        let mut out = BTreeSet::new();
+        for e in std::iter::once(&self.expr).chain(self.assume.as_ref()) {
+            for (_, p) in &e.conjuncts {
+                literals(p.expression(), &mut out);
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// Request fields the property reads (`query.days`), to mutate more often.
+    pub fn request_fields(&self) -> Vec<String> {
+        let uses = self.uses();
+        self.bindings
+            .iter()
+            .filter(|b| uses.contains(&b.name))
+            .filter_map(|b| b.path.strip_prefix("request."))
+            .map(|p| p.trim_end_matches('?').to_string())
+            .collect()
     }
 
     /// The value of the whole assert expression, for `eval`.
@@ -811,6 +880,88 @@ fn mutations(v: &Value) -> Vec<Value> {
     }
 }
 
+/// The closest a holding property came to breaking.
+#[derive(Clone, Debug, Serialize)]
+pub struct Margin {
+    pub conjunct: String,
+    pub margin: f64,
+    pub left: Value,
+    pub right: Value,
+}
+
+fn number(v: &Cel) -> Option<f64> {
+    match v {
+        Cel::Int(i) => Some(*i as f64),
+        Cel::UInt(u) => Some(*u as f64),
+        Cel::Float(f) if f.is_finite() => Some(*f),
+        _ => None,
+    }
+}
+
+fn margin(e: &IdedExpr, ctx: &Context, depth: usize) -> Option<(f64, Value, Value)> {
+    match &e.expr {
+        Expr::Call(c) if c.target.is_none() && c.args.len() == 2 && depth < 4 => {
+            let side = |x: &IdedExpr| ctx.resolve(x).ok();
+            let op = c.func_name.as_str();
+            if !["_!=_", "_<_", "_<=_", "_>_", "_>=_"].contains(&op) {
+                return None;
+            }
+            let (l, r) = (side(&c.args[0])?, side(&c.args[1])?);
+            let (a, b) = (number(&l)?, number(&r)?);
+            let m = match op {
+                "_!=_" => (a - b).abs(),
+                "_<_" | "_<=_" => b - a,
+                _ => a - b,
+            };
+            (m >= 0.0).then(|| (m, to_json(&l), to_json(&r)))
+        }
+        Expr::Comprehension(c) if depth < 4 => {
+            let Expr::Call(step) = &c.loop_step.expr else { return None };
+            let first_is_accu = matches!(step.args.first().map(|a| &a.expr), Some(Expr::Ident(n)) if *n == c.accu_var);
+            if step.func_name != "_&&_" || !first_is_accu || step.args.len() != 2 || c.iter_var2.is_some() {
+                return None;
+            }
+            let Ok(Cel::List(items)) = ctx.resolve(&c.iter_range) else { return None };
+            let mut best: Option<(f64, Value, Value)> = None;
+            for item in items.iter().take(200) {
+                let mut inner = ctx.new_inner_scope();
+                inner.add_variable_from_value(c.iter_var.clone(), item.clone());
+                if let Some(m) = margin(&step.args[1], &inner, depth + 1)
+                    && best.as_ref().is_none_or(|b| m.0 < b.0)
+                {
+                    best = Some(m);
+                }
+            }
+            best
+        }
+        _ => None,
+    }
+}
+
+fn literals(e: &IdedExpr, out: &mut BTreeSet<i64>) {
+    match &e.expr {
+        Expr::Literal(cel::common::ast::LiteralValue::Int(i)) => {
+            out.insert(*i.inner());
+        }
+        Expr::Literal(cel::common::ast::LiteralValue::UInt(u)) => {
+            out.insert(i64::try_from(*u.inner()).unwrap_or(i64::MAX));
+        }
+        Expr::Literal(cel::common::ast::LiteralValue::Double(f)) if f.inner().is_finite() => {
+            out.insert(f.inner().round() as i64);
+        }
+        Expr::Call(c) => {
+            c.target.iter().for_each(|t| literals(t, out));
+            c.args.iter().for_each(|a| literals(a, out));
+        }
+        Expr::Comprehension(c) => {
+            literals(&c.iter_range, out);
+            literals(&c.loop_step, out);
+        }
+        Expr::List(l) => l.elements.iter().for_each(|x| literals(x, out)),
+        _ => {}
+    }
+}
+
 /// Evaluates with CEL, but `&&`, `||`, `!` and `?:` outside macros are
 /// evaluated here, so an error in either operand is an error.
 fn strict(e: &IdedExpr, ctx: &Context) -> Result<Cel, String> {
@@ -878,11 +1029,36 @@ fn explain(e: &IdedExpr, ctx: &Context) -> Value {
     }
 }
 
+/// The standard library and appfuzz functions, built once.
+static BASE: LazyLock<Context<'static, 'static>> = LazyLock::new(functions);
+
+/// A scope with the binding values over the shared functions; JSON becomes
+/// CEL values in one pass.
 fn context(values: &BTreeMap<String, Value>) -> Context<'static, 'static> {
-    let mut ctx = Context::with_env(ENV.clone());
+    let mut ctx = BASE.new_inner_scope();
     for (k, v) in values {
-        ctx.add_variable_from_value(k.clone(), to_cel(v));
+        ctx.add_variable_as_val(k.clone(), to_val(v));
     }
+    ctx
+}
+
+fn to_val(v: &Value) -> Box<dyn cel::common::value::Val> {
+    use cel::common::types::{CelBool, CelDouble, CelInt, CelList, CelMap, CelMapKey, CelNull, CelString};
+    match v {
+        Value::Null => Box::new(CelNull),
+        Value::Bool(b) => Box::new(CelBool::from(*b)),
+        Value::Number(n) => match n.as_i64() {
+            Some(i) => Box::new(CelInt::from(i)),
+            None => Box::new(CelDouble::from(n.as_f64().unwrap_or(f64::NAN))),
+        },
+        Value::String(s) => Box::new(CelString::from(s.clone())),
+        Value::Array(a) => Box::new(CelList::from(a.iter().map(to_val).collect::<Vec<_>>())),
+        Value::Object(o) => Box::new(CelMap::from(o.iter().map(|(k, v)| (CelMapKey::from(k.clone()), to_val(v))).collect::<std::collections::HashMap<_, _>>())),
+    }
+}
+
+fn functions() -> Context<'static, 'static> {
+    let mut ctx = Context::with_env(ENV.clone());
     let numbers = |v: &Cel| match v {
         Cel::Int(i) => Some(*i as f64),
         Cel::UInt(u) => Some(*u as f64),
@@ -1184,5 +1360,20 @@ mod tests {
         assert_eq!(split_and("a && f(b && c) && 'x && y' == s").len(), 3);
         assert_eq!(split_and("a && b || c").len(), 1);
         assert_eq!(split_and("a ? b && c : d").len(), 1);
+    }
+
+    #[test]
+    fn margins_measure_how_close_a_holding_assert_is_to_breaking() {
+        let lets: BTreeMap<String, String> = [("n", "out.result"), ("xs", "out.json")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let a = Assertion::new(&lets, "n <= 31 && xs.all(x, x < 10) && n != 0", None).unwrap();
+        let values: BTreeMap<String, Value> = [("n".to_string(), json!(20)), ("xs".to_string(), json!([3, 8, 1]))].into();
+        let (v, m) = a.assess(&values);
+        assert!(matches!(v, Verdict::Holds { vacuous: false }));
+        let m = m.unwrap();
+        assert_eq!((m.margin, m.conjunct.as_str()), (2.0, "xs.all(x, x < 10)"));
+        assert_eq!((m.left.clone(), m.right.clone()), (json!(8), json!(10)));
+        assert_eq!(a.constants(), vec![0, 10, 31]);
+        let eq = Assertion::new(&lets, "n == size(xs)", None).unwrap();
+        assert!(eq.assess(&values).1.is_none());
     }
 }

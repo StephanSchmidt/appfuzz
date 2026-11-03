@@ -46,7 +46,7 @@ pub const DOCS: &[Doc] = &[
             "appfuzz run --plan plan.json --now 2028-02-29T23:59:00",
             "appfuzz run --plan '{\"bench:web/items#all\": {\"return\": []}}'",
         ],
-        output: "run id, outcome, result, totals (fuel, memory, virtual ms, host calls, cost), calls per function, over_limits, findings",
+        output: "run id, outcome, result, totals (fuel, memory, virtual ms, host calls, cost), calls per function, over_limits, findings, asserts (each saved assert's verdict; exit 2 when one breaks)",
         next: "`timeline <run>` for the calls; `explain <run>`; `confirm <finding>`",
     },
     Doc {
@@ -141,8 +141,8 @@ pub const DOCS: &[Doc] = &[
     Doc {
         path: "fuzz",
         examples: &["appfuzz fuzz", "appfuzz fuzz --time 5m", "appfuzz fuzz --runs 20000 --until plateau", "appfuzz fuzz --fresh -j 1 --rng 7"],
-        output: "runs, stages, corpus, maxima (worst runs per metric), observed findings (including known ones)",
-        next: "`confirm <finding>` for each fail/warn; `findings`; `unexplored` for code no run reached",
+        output: "runs, stages, corpus, maxima (worst runs per metric), observed findings (including known ones), asserts (per saved assert: runs judged, first break, closest approach)",
+        next: "`confirm <finding>` for each fail/warn; `findings`; `unexplored` for code no run reached; `acceptance run <name>` to shrink a broken assert",
     },
     Doc {
         path: "confirm",
@@ -158,9 +158,8 @@ pub const DOCS: &[Doc] = &[
             "appfuzz check not_contains 'panicked|undefined'",
             "appfuzz check max virtual_ms 200",
             "appfuzz check no_crash --set '{\"path\": \"/admin\"}'",
-            "appfuzz check assert 'size(rows) == size(items)' --let rows='select .row' --let items=host.items#all.result",
         ],
-        output: "holds (no run broke it: evidence, not proof), or a shrunk counterexample: why, request changes, plan, host results; for assert the failing conjunct and its values",
+        output: "holds (no run broke it: evidence, not proof), or a shrunk counterexample: why, request changes, plan, host results",
         next: "`explain <counterexample run>`; `diff <original run> <counterexample run>`",
     },
     Doc {
@@ -191,7 +190,7 @@ pub const DOCS: &[Doc] = &[
         path: "eval",
         examples: &["appfuzz eval last 'size(rows)' --let rows='select .row'", "appfuzz eval last 'total == sum(prices)' --let total=out.json.total --let prices=host.items#all.result"],
         output: "each binding's value (or why it is undefined), the expression's value, and the verdict a saved assert would give on this run",
-        next: "save it as an `[acceptance.checks.NAME]` with `let` and `assert`; `check assert ...` to search for a counterexample",
+        next: "save it as an `[acceptance.checks.NAME]` with `let` and `assert`; `fuzz` and `review` then judge it on every run",
     },
     Doc {
         path: "bindings",

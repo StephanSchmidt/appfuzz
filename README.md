@@ -641,13 +641,34 @@ What it reports:
   perturbed (a number +1, a list missing its last item, two items swapped). An
   assert like that restates the code or tests nothing.
 
-Try an expression on a stored run before saving it, and search for a
-counterexample without editing the manifest:
+Saved asserts need no command of their own. `run` reports each one's verdict
+(and exits 2 when one breaks); `fuzz` and `review` judge every assert on every
+run, so an assert sees thousands of inputs, not a handful of examples. The
+search closes in on them:
+
+- **Closer is better.** A holding comparison has a margin: `size(rows) <= 20`
+  with 17 rows is 3 away from breaking. Inputs that bring an assert closer than
+  any before are kept and mutated more, the way targeted property testing hones
+  in on a failure.
+- **Its numbers are boundaries.** Literals in the assert become values to try,
+  with their neighbours: `days <= 31` makes 30, 31 and 32 likely inputs.
+- **What it reads is mutated first.** Request fields named in `let` get more
+  of the mutations.
+
+The fuzz report shows per assert how many runs judged it, the first break, and
+the closest approach (`"closest": {"margin": 1, "left": 123456, "right":
+123457}`), so a holding assert shows how hard it was pushed. A broken run is
+kept; `acceptance run NAME` (and `review`) starts from it, shrinks it and writes
+the case. Checks with their own `request`, `plan`, `when` or input class keep
+a separate search. Judging is cheap (microseconds per assert); when it takes
+more than a quarter of worker time, runs are sampled, but every run that showed
+something new is still judged. `assert_cost_pct` reports the share.
+
+Try an expression on a stored run before saving it:
 
 ```sh
 appfuzz bindings --run last
 appfuzz eval last 'size(rows)' --let rows='select .row'
-appfuzz check assert 'size(rows) == size(items)' --let rows='select .row' --let items=host.items#all.result
 ```
 
 Acceptance checks are requirements, not platform contract: editing one keeps

@@ -152,7 +152,9 @@ fn check_one(app: &App, state: &Path, name: &str, check: &Check, base: &RunSpec,
                 _ => o.invalid += 1,
             }
         };
-        let opts = fuzz::FuzzOpts { runs: Some(runs), time: None, seed, discover: false, property: check.property()?, ..Default::default() };
+        // An assert steers its own search: inputs closer to breaking it breed more.
+        let asserts = check.assertion()?.map(|a| vec![(name.to_string(), a)]).unwrap_or_default();
+        let opts = fuzz::FuzzOpts { runs: Some(runs), time: None, seed, discover: false, property: check.property()?, asserts, ..Default::default() };
         let (_report, _corpus) = fuzz::fuzz(app, &spec, vec![], Default::default(), &opts, &on_run)?;
         let mut observed = lock(&observed);
         if let Some(e) = observed.error.take() {
@@ -284,6 +286,23 @@ pub(super) fn run(app: &App, state: &Path, base: &RunSpec, name: Option<&str>, r
     let failed = checks.iter().any(|c| c["status"] == "broken");
     Ok(json!({"suite_version":suite.version,"checks":checks,"findings":findings,"status":if incomplete{"incomplete"}else{"complete"},
         "verdict":if incomplete{"incomplete"}else if failed{"fail"}else{"pass"},"exit_code":if incomplete{3}else if failed{2}else{0}}))
+}
+/// Every saved assert on one run, for `run`: name to status and evidence.
+pub(super) fn asserts_on(app: &App, r: &RunRecord) -> Option<Value> {
+    let suite = app.manifest.acceptance.as_ref()?;
+    let default = app.manifest.entry.as_ref().map(|e| e.export.as_str());
+    let mut out = serde_json::Map::new();
+    for (name, check) in suite.expanded() {
+        if check.assert.is_none() || check.export.as_deref().or(default) != Some(r.spec.export.as_str()) {
+            continue;
+        }
+        let v = match core::evaluate_record(app, &check, r.clone()) {
+            Ok(e) => json!({"status": e.status, "property": check.assertion().ok().flatten().map(|a| a.expr.text.clone()), "evidence": e.detail}),
+            Err(e) => json!({"status": "error", "evidence": {"reason": format!("{e:#}")}}),
+        };
+        out.insert(name, v);
+    }
+    (!out.is_empty()).then_some(Value::Object(out))
 }
 pub(super) fn replay(app: &App, store: &RunStore, path: &str, current: bool) -> Result<Value> {
     let mut case: Case = serde_json::from_slice(&std::fs::read(path)?)?;
