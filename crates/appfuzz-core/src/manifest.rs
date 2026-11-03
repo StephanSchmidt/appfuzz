@@ -276,6 +276,10 @@ pub struct FunctionSpec {
     /// failure as impossible), so no failure is injected (platform only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fails: Option<bool>,
+    /// Its error texts are written for the people using the app: an app
+    /// that shows them leaks nothing (no `leaky_error` for them).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub user_errors: bool,
     /// Platform-declared requirements on actual guest-to-host arguments.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub param_values: BTreeMap<String, crate::value_contract::Domain>,

@@ -218,7 +218,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
                 errors.push(format!("historical case {} could not execute", f.id));
                 continue;
             }
-            findings.add(&appfuzz_core::detect::per_run(&r, &app.manifest))?;
+            findings.add(&appfuzz_core::detect::per_run_checked(&app, &r))?;
             if let Some(across) = appfuzz_core::shrink::Across::of(&f) {
                 let source = match across.start_run(&f).map(|id| root_store.load(id)) {
                     Some(Ok(source)) => source,

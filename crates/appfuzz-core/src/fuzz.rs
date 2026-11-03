@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use wasmtime::component::Type;
 
-use crate::detect::{Finding, panic_text, per_run};
+use crate::detect::{Finding, panic_text};
 use crate::harness::{App, field, fn_key_eq, set_clock_fields};
 use crate::assertion::{Assertion, Margin, Verdict};
 use crate::check::Property;
@@ -445,7 +445,7 @@ fn execute(app: &App, st: &Statics, spec: &RunSpec, prop: Option<&Property>, pro
         return Executed { feedback:Default::default(), asserts: None, r, findings: vec![], features: BTreeSet::new(), metrics: vec![] };
     }
     let asserts = (!judge.list.is_empty() && r.outcome.kind == OutcomeKind::Ok && judge.sample()).then(|| judge.judge(&r, &app.manifest));
-    let mut findings = per_run(&r, &app.manifest);
+    let mut findings = crate::detect::per_run_checked(app, &r);
     findings.extend(prop.and_then(|p| p.finding(&r, &app.manifest)));
     let feedback=if r.outcome.kind==OutcomeKind::Ok {probe.collect(spec)}else{Default::default()};
     let mut features = features(&r, st, app);
@@ -670,7 +670,46 @@ struct Mutator<'a> {
     keys: &'a [String],
     /// Platform functions with their result type.
     funcs: &'a [(String, Type)],
+    /// Route prefixes from the binary's strings (`/bookings`, `/bookings/`).
+    routes: &'a [String],
     rng: StdRng,
+}
+
+/// The methods a field with the `http.method` role can hold.
+const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+/// Route prefixes in the binary's strings: a `/` and a name, not a
+/// closing tag (`</p>`) or `//`. Routers compare paths with them, often
+/// packed into one literal (`GETDELETE/bookings/`). Not file paths
+/// (`/src/lib.rs`) or interface names (`/bookings-read@0.1.0`).
+pub(crate) fn routes(st: &Statics, limit: usize) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    for m in &st.modules {
+        let consts = m.funcs.iter().flat_map(|f| f.text_consts.iter());
+        for (_, s) in m.strings.iter().chain(consts) {
+            let b = s.as_bytes();
+            for i in (0..b.len()).filter(|&i| b[i] == b'/' && (i == 0 || !matches!(b[i - 1], b'<' | b'/' | b':'))) {
+                let name = b[i + 1..].iter().take_while(|c| c.is_ascii_alphanumeric() || **c == b'_' || **c == b'-').count();
+                if !(2..=40).contains(&name) || !b[i + 1].is_ascii_alphabetic() {
+                    continue;
+                }
+                let end = i + 1 + name;
+                let token = &b[i..i + b[i..].iter().take_while(|c| c.is_ascii_alphanumeric() || b"_-./@:".contains(c)).count()];
+                let file = token.windows(2).any(|w| w[0] == b'.' && w[1].is_ascii_alphabetic());
+                if file || token.contains(&b'@') {
+                    continue;
+                }
+                out.insert(s[i..end].to_string());
+                if b.get(end) == Some(&b'/') {
+                    out.insert(s[i..=end].to_string());
+                }
+            }
+        }
+    }
+    let mut v: Vec<String> = out.into_iter().collect();
+    v.sort_by_key(|r| (r.len(), r.clone()));
+    v.truncate(limit);
+    v
 }
 
 impl Mutator<'_> {
@@ -722,6 +761,28 @@ impl Mutator<'_> {
         }
     }
 
+    /// A path for an `http.path` field: a route prefix from the binary, as
+    /// it is or with an id or a word after it.
+    fn route(&mut self) -> String {
+        let Some(r) = self.pick(self.routes).cloned() else { return format!("/{}", self.word()) };
+        let sep = if r.ends_with('/') { "" } else { "/" };
+        match self.rng.random_range(0..4u8) {
+            0 => r,
+            1 => format!("{r}{sep}{}", self.word()),
+            _ => format!("{r}{sep}{}", self.number(None).max(1)),
+        }
+    }
+
+    /// JSON pointers of the request's `http.method` and `http.path` fields.
+    fn http_ptrs(&self, args: &[Value]) -> (Option<String>, Option<String>) {
+        let Some(req) = args.first() else { return (None, None) };
+        let fields = self.app.manifest.entry.as_ref().map(|e| e.fields.clone()).unwrap_or_default();
+        let ptr = |role| {
+            role_path(&fields, req, role).filter(|p| crate::harness::field(req, p).is_some_and(Value::is_string)).map(|p| format!("/0/{}", p.replace('.', "/")))
+        };
+        (ptr("method"), ptr("path"))
+    }
+
     /// Mutates one node of the request.
     fn mutate_request(&mut self, args: &mut [Value]) -> bool {
         let mut ptrs = Vec::new();
@@ -730,6 +791,31 @@ impl Mutator<'_> {
         }
         let Some(p) = self.pick(&ptrs).cloned() else { return false };
         let mut root = Value::Array(args.to_vec());
+        // A method and a route: a router dispatches on both.
+        let (method, path) = self.http_ptrs(args);
+        let http = (method.is_some() || path.is_some()) && self.rng.random_bool(0.15);
+        if http || method.as_deref() == Some(p.as_str()) || path.as_deref() == Some(p.as_str()) {
+            let both = http || self.rng.random_bool(0.5);
+            let mut changed = false;
+            if let Some(mp) = method.filter(|mp| both || *mp == p) {
+                let m = json!(*self.pick(&METHODS).expect("non-empty"));
+                if let Some(node) = root.pointer_mut(&mp) {
+                    changed |= *node != m;
+                    *node = m;
+                }
+            }
+            if let Some(pp) = path.filter(|pp| both || *pp == p) {
+                let r = json!(self.route());
+                if let Some(node) = root.pointer_mut(&pp) {
+                    changed |= *node != r;
+                    *node = r;
+                }
+            }
+            if let Value::Array(v) = root {
+                args.clone_from_slice(&v);
+            }
+            return changed;
+        }
         let Some(node) = root.pointer_mut(&p) else { return false };
         let old = node.clone();
         let new = match &old {
@@ -1216,6 +1302,7 @@ pub fn fuzz(
     let probe=crate::feedback::Probe::new(app,opts.internal_feedback);
     let st = Statics::parse(&app.bytes)?;
     let words = dictionary(&st, opts.dict_limit);
+    let routes = routes(&st, 32);
     let mut consts = compare_constants(&st, 32);
     // Numbers in an assert are its boundaries: `days <= 31` makes 30, 31, 32 worth trying.
     for (_, a) in &opts.asserts {
@@ -1326,7 +1413,7 @@ pub fn fuzz(
         anyhow::bail!("the seed request does not run; check it with `appfuzz run`");
     }
     let worker = |i: usize| {
-        let mut m = Mutator { app, words: &words, consts: &consts, keys: &keys, funcs: &funcs, rng: StdRng::seed_from_u64(opts.seed.wrapping_add((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))) };
+        let mut m = Mutator { app, words: &words, consts: &consts, keys: &keys, funcs: &funcs, routes: &routes, rng: StdRng::seed_from_u64(opts.seed.wrapping_add((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))) };
         loop {
             let (stage, parent, other, fault) = {
                 let mut s = lock(&state);

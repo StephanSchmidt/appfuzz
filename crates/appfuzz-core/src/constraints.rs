@@ -23,6 +23,9 @@ pub enum Constraint {
     Len(Option<usize>, Option<usize>),
     Enum(Vec<String>),
     Format(Format),
+    /// No two elements of a list alike, as a whole or by these fields
+    /// together (`unique:pod,date,hour`, a unique key of the platform).
+    Unique(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +65,7 @@ impl Constraint {
                 };
                 Constraint::Len(num(lo)?, num(hi)?)
             }
+            "unique" => Constraint::Unique(arg.split(',').map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect()),
             "enum" if !arg.is_empty() => Constraint::Enum(arg.split(',').map(|x| x.trim().to_string()).collect()),
             "format" => Constraint::Format(match arg {
                 "date" => Format::Date,
@@ -74,7 +78,7 @@ impl Constraint {
                 "token" => Format::Token,
                 _ => bail!("{s:?}: a format is one of date, time, datetime, email, int, uuid, url, token"),
             }),
-            _ => bail!("{s:?}: a value constraint is range:a..b, len:a..b, enum:x,y or format:<f>"),
+            _ => bail!("{s:?}: a value constraint is range:a..b, len:a..b, enum:x,y, format:<f> or unique[:fields]"),
         })
     }
 
@@ -91,6 +95,10 @@ impl Constraint {
             (Constraint::Enum(xs), Value::String(s)) => xs.contains(s),
             (Constraint::Enum(xs), x @ Value::Number(_)) => xs.contains(&x.to_string()),
             (Constraint::Format(f), Value::String(s)) => format_ok(*f, s),
+            (Constraint::Unique(fields), Value::Array(a)) => {
+                let mut seen = std::collections::BTreeSet::new();
+                a.iter().all(|x| seen.insert(unique_key(x, fields)))
+            }
             _ => true,
         }
     }
@@ -127,9 +135,21 @@ impl Constraint {
             (Constraint::Enum(xs), Value::Number(_)) => xs[(seed % xs.len() as u64) as usize].parse::<i64>().map(Value::from).unwrap_or(v.clone()),
             (Constraint::Enum(xs), _) => json!(xs[(seed % xs.len() as u64) as usize]),
             (Constraint::Format(f), _) => json!(example(*f, seed)),
-            (Constraint::Len(..), _) => v.clone(),
+            (Constraint::Unique(fields), Value::Array(a)) => {
+                let mut seen = std::collections::BTreeSet::new();
+                Value::Array(a.iter().filter(|x| seen.insert(unique_key(x, fields))).cloned().collect())
+            }
+            (Constraint::Len(..) | Constraint::Unique(_), _) => v.clone(),
         }
     }
+}
+
+/// What makes a list element unique: the element, or its `fields`.
+fn unique_key(x: &Value, fields: &[String]) -> String {
+    if fields.is_empty() {
+        return x.to_string();
+    }
+    fields.iter().map(|f| x.get(f).map(Value::to_string).unwrap_or_default()).collect::<Vec<_>>().join("\0")
 }
 
 fn in_len(n: usize, lo: Option<usize>, hi: Option<usize>) -> bool {
@@ -204,6 +224,8 @@ impl fmt::Display for Constraint {
             Constraint::Range(lo, hi) => write!(f, "range:{}", b(lo.map(fmt_num), hi.map(fmt_num))),
             Constraint::Len(lo, hi) => write!(f, "len:{}", b(lo.map(|x| x.to_string()), hi.map(|x| x.to_string()))),
             Constraint::Enum(xs) => write!(f, "enum:{}", xs.join(",")),
+            Constraint::Unique(xs) if xs.is_empty() => write!(f, "unique"),
+            Constraint::Unique(xs) => write!(f, "unique:{}", xs.join(",")),
             Constraint::Format(x) => write!(
                 f,
                 "format:{}",
@@ -241,14 +263,14 @@ pub fn conform_at(v: &mut Value, constraints: &[(String, Constraint)], seed: u64
     for (p, c) in constraints {
         let segs: Vec<&str> = p.split('.').filter(|s| !s.is_empty()).collect();
         let mut n = 0u64;
-        // A `len` on a list applies to the list, not its elements.
+        // A `len` or `unique` on a list applies to the list, not its elements.
         conform_node(v, &segs, c, seed, &mut n);
     }
 }
 
 fn conform_node(v: &mut Value, segs: &[&str], c: &Constraint, seed: u64, n: &mut u64) {
     if segs.is_empty()
-        && let (Constraint::Len(..), Value::Array(_)) = (c, &v)
+        && let (Constraint::Len(..) | Constraint::Unique(_), Value::Array(_)) = (c, &v)
     {
         *v = c.conform(v, seed);
         return;
@@ -325,5 +347,13 @@ mod tests {
         let mut v = json!([1, 2, 3, 4, 5]);
         conform_at(&mut v, &[(String::new(), Constraint::parse("len:..2").unwrap())], 1);
         assert_eq!(v, json!([1, 2]));
+        // A unique key: the second booking of pod 1 at 9 goes.
+        let u = Constraint::parse("unique:pod,hour").unwrap();
+        assert_eq!(u.to_string(), "unique:pod,hour");
+        let mut v = json!({"ok": [{"pod": 1, "hour": 9, "by": "a"}, {"pod": 1, "hour": 9, "by": "b"}, {"pod": 2, "hour": 9, "by": "a"}]});
+        assert!(!u.holds(&v["ok"]));
+        conform_at(&mut v, &[(String::new(), u)], 1);
+        assert_eq!(v, json!({"ok": [{"pod": 1, "hour": 9, "by": "a"}, {"pod": 2, "hour": 9, "by": "a"}]}));
+        assert!(Constraint::parse("unique").unwrap().holds(&json!([1, 2])) && !Constraint::parse("unique").unwrap().holds(&json!([1, 1])));
     }
 }

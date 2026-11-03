@@ -89,12 +89,14 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
 
     // A change that stays after a later one failed, and a response that
     // says all went well.
-    let status = crate::output::response(r, m).status;
+    let resp = crate::output::response(r, m);
+    let status = resp.status;
     if r.outcome.kind == OutcomeKind::Ok && status.is_some_and(|s| s < 400) {
         let changes: Vec<&crate::record::HostCall> = r.events.iter().filter(|e| m.effect_of(&e.func).is_some_and(|x| x.changes())).collect();
         if let Some(fail) = changes.iter().find(|e| is_err(e)
             && !changes.iter().any(|later| later.n > e.n && later.func == e.func && later.args == e.args && !is_err(later)))
             && let Some(done) = changes.iter().find(|e| e.n < fail.n && !is_err(e) && (e.func != fail.func || e.args != fail.args))
+            && !tells(&resp, fail)
         {
             out.push(Finding::new(
                 "partial_write",
@@ -112,6 +114,75 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// Whether the response passes the failed call's error text on, in the body
+/// or in a header such as a redirect's `location` (percent-encoded there):
+/// then the user is told what stayed.
+fn tells(resp: &crate::output::Response, fail: &crate::record::HostCall) -> bool {
+    let Some(Value::String(e)) = fail.result.as_ref().and_then(|v| v.get("err")) else { return false };
+    let e = e.trim();
+    if e.chars().count() < 3 {
+        return false;
+    }
+    let texts = resp.body.iter().map(String::as_str).chain(resp.headers.iter().map(|(_, v)| v.as_str()));
+    texts.into_iter().any(|t| t.contains(e) || percent_decode(t).contains(e))
+}
+
+/// The error text for `drop_told`: one no page holds by chance.
+const MARKER: &str = "appfuzz partial write marker";
+
+/// Drops `partial_write` findings where the app passes the error on, but
+/// its text was too short or too common to see (an empty error). Reruns
+/// with the failed call's error text set to a marker: the app tells the
+/// user if the marker shows in the body or a header.
+pub fn drop_told(app: &crate::harness::App, r: &RunRecord, findings: &mut Vec<Finding>) {
+    let Some(i) = findings.iter().position(|f| f.kind == "partial_write") else { return };
+    let Some(fail) = findings[i].detail["failed_n"].as_u64().and_then(|n| r.events.iter().find(|e| u64::from(e.n) == n)) else { return };
+    if !matches!(fail.result.as_ref().and_then(|v| v.get("err")), Some(Value::String(_))) {
+        return;
+    }
+    let mut spec = r.spec.clone();
+    if !spec.plan.0.contains_key(&fail.func)
+        && let Some(effective) = spec.plan.get(&fail.func).cloned()
+    {
+        spec.plan.0.insert(fail.func.clone(), effective);
+    }
+    let ret = json!({"err": MARKER});
+    let resp = spec.plan.0.entry(fail.func.clone()).or_default().on_call.entry(fail.call.to_string()).or_default();
+    *resp = crate::plan::Response { ret: Some(ret.clone()), latency_ms: resp.latency_ms, ..Default::default() };
+    let vr = app.run(&spec);
+    let Some(got) = vr.events.iter().find(|e| e.func == fail.func && e.call == fail.call && e.result.as_ref() == Some(&ret)) else { return };
+    if vr.outcome.kind == OutcomeKind::Ok && tells(&crate::output::response(&vr, &app.manifest), got) {
+        findings.remove(i);
+    }
+}
+
+/// `%XX` escapes and `+` as a space, as in a query string. Invalid escapes
+/// stay as they are.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => {
+                let hex = |c: u8| (c as char).to_digit(16);
+                match (hex(b[i + 1]), hex(b[i + 2])) {
+                    (Some(h), Some(l)) => {
+                        out.push((h * 16 + l) as u8);
+                        i += 3;
+                        continue;
+                    }
+                    _ => out.push(b'%'),
+                }
+            }
+            b'+' => out.push(b' '),
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Whether a host list returned before call `n` holds the same element
@@ -135,7 +206,7 @@ mod tests {
             wasm = "a.wasm"
             [entry]
             export = "h"
-            output = { status = "status", body = "body" }
+            output = { status = "status", body = "body", headers = "headers" }
             [functions."x:y/store#save"]
             effect = "write"
             [functions."x:y/store#put"]
@@ -215,6 +286,13 @@ mod tests {
         let mail = call(2, "x:y/mail#send", json!({"to": "a"}), json!({"err": "down"}));
         let f = check(&run("POST", vec![save(1, "a", json!({"ok": 1})), mail]), &m);
         assert_eq!(kinds(&f), ["partial_write"]);
+        // The error is passed on, in a redirect or in the page: the user is told.
+        let full = |n| call(n, "x:y/mail#send", json!({"to": "a"}), json!({"err": "pod is full"}));
+        let mut r = run("POST", vec![save(1, "a", json!({"ok": 1})), full(2)]);
+        r.result = Some(json!({"status": 303, "body": "", "headers": [["location", "/grid?error=pod%20is+full"]]}));
+        assert!(check(&r, &m).is_empty());
+        r.result = Some(json!({"status": 200, "body": "<p>pod is full</p>"}));
+        assert!(check(&r, &m).is_empty());
         assert_eq!(m.batch_for("x:y/items#get").as_deref(), Some("x:y/items#get-many"));
         assert!(m.unrepeatable("x:y/store#save") && !m.unrepeatable("x:y/store#put"));
     }

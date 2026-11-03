@@ -98,6 +98,14 @@ fn byte_pattern(u: u64, width: u32) -> bool {
     (0..w).all(|i| b[i] == b[i % 2]) || (0..w).all(|i| b[i] == b[i % 4]) && w == 8
 }
 
+/// Text read as a number: a compiler compares a short string such as
+/// `"POST"` (`0x54534f50`) with one integer instruction. Routers and
+/// parsers do that all the time; the text is in plain sight, not hidden.
+fn ascii_word(u: u64) -> bool {
+    let b: Vec<u8> = u.to_le_bytes().into_iter().rev().skip_while(|b| *b == 0).collect();
+    b.len() >= 3 && b.iter().all(|c| c.is_ascii_graphic() || *c == b' ') && b.iter().any(u8::is_ascii_alphabetic)
+}
+
 /// About `2^k / d` for a small `d`: how compilers divide by a constant.
 fn division_magic(u: u64) -> bool {
     (24..=66).any(|k| {
@@ -110,10 +118,15 @@ fn division_magic(u: u64) -> bool {
 fn odd_large(n: i64) -> bool {
     let w32 = n.unsigned_abs() < 1 << 32;
     let bits = if w32 { n as u32 as u64 } else { n as u64 };
-    if byte_pattern(bits, if w32 { 32 } else { 64 }) || division_magic(bits) || division_magic(n.unsigned_abs()) {
+    if byte_pattern(bits, if w32 { 32 } else { 64 }) || division_magic(bits) || division_magic(n.unsigned_abs()) || ascii_word(bits) {
         return false;
     }
     let u = n.unsigned_abs();
+    // Just below or above a power of two: a bound such as `i32::MAX - 3`.
+    let p = u.checked_next_power_of_two().unwrap_or(u64::MAX);
+    if p - u <= 64 || u - p / 2 <= 64 {
+        return false;
+    }
     if u >= 1 << 32 {
         return !(u.trailing_zeros() >= 24 || (u + 1).is_power_of_two() || u == i64::MAX as u64);
     }
@@ -123,7 +136,9 @@ fn odd_large(n: i64) -> bool {
 
 /// Unix time in seconds or milliseconds, 2017 to 2049.
 fn is_time(n: i64) -> bool {
-    (1_500_000_000..2_500_000_000).contains(&n) || (1_500_000_000_000..2_500_000_000_000).contains(&n)
+    // Not just under 2^31: `i32::MAX - 3` is a bound, not 2038.
+    let near_max = (i32::MAX as i64 - 64..=i32::MAX as i64 + 64).contains(&n);
+    !near_max && (1_500_000_000..2_500_000_000).contains(&n) || (1_500_000_000_000..2_500_000_000_000).contains(&n)
 }
 
 #[derive(Default)]
@@ -259,7 +274,10 @@ mod tests {
         assert!(!odd_large(0xcccccccdu32 as i32 as i64));
         assert!(odd_large(0xd0e9e127a11608c7u64 as i64));
         assert!(!odd_large(1_800_000_000));
+        assert!(!odd_large(0x54534f50)); // "POST"
+        assert!(!odd_large(0x4554454c4544)); // "DELETE"
         assert!(is_time(1_800_000_000));
+        assert!(!is_time(2147483644) && !odd_large(2147483644));
         assert!(DATE.is_match("2027-06-15 03:17"));
         assert!(!DATE.is_match("v2027"));
     }

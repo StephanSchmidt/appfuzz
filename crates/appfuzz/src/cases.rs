@@ -3,7 +3,7 @@ use super::*;
 use appfuzz_core::{record::OutcomeKind, shrink::Across};
 
 pub(super) fn matches(f: &Finding, r: &RunRecord, app: &App) -> bool {
-    let found = detect::per_run(r, &app.manifest);
+    let found = detect::per_run_checked(app, r);
     if found.iter().any(|x| x.id == f.id) {
         return true;
     }

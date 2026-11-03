@@ -101,7 +101,9 @@ pub fn variants(app: &App, r: &RunRecord) -> Vec<Variant> {
         set(&mut s, e, v);
         out.push(Variant { change: Change::Reverse, func: Some(e.func.clone()), call: Some(e.call), spec: s });
     }
-    for e in r.events.iter().filter(|e| !app.manifest.function(&e.func).is_some_and(|s| s.query.is_some())).filter(|e| e.result.as_ref().and_then(list_in).is_some_and(|a| !a.is_empty())).take(PER_KIND) {
+    // Not for lists the host promises are unique.
+    let unique = |f: &str| app.manifest.function(f).is_some_and(|s| s.values.values().any(|c| matches!(c, crate::constraints::Constraint::Unique(_))));
+    for e in r.events.iter().filter(|e| !app.manifest.function(&e.func).is_some_and(|s| s.query.is_some()) && !unique(&e.func)).filter(|e| e.result.as_ref().and_then(list_in).is_some_and(|a| !a.is_empty())).take(PER_KIND) {
         let mut v = e.result.clone().unwrap_or_default();
         if let Some(a) = list_mut(&mut v) {
             let x = a[0].clone();
@@ -313,7 +315,7 @@ pub fn pairs(app: &App, r: &RunRecord, run: Runner) -> (Vec<RunRecord>, Vec<Pair
     let mut findings = Vec::new();
     for (v, vr) in vs.iter().zip(&recs) {
         findings.extend(compare(app, r, v, vr));
-        findings.extend(crate::detect::per_run(vr, &app.manifest).into_iter().filter(|f| !expected(v, f)));
+        findings.extend(crate::detect::per_run_checked(app, vr).into_iter().filter(|f| !expected(v, f)));
         lines.push(PairResult { variant: v.clone(), run: vr.id.clone(), outcome: vr.outcome.kind, same_output: vr.result == r.result });
     }
     (recs, lines, findings)

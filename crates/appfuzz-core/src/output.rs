@@ -169,9 +169,9 @@ fn header_name_ok(n: &str) -> bool {
 }
 
 /// Host error texts of a run (strings inside `err` results, 8+ chars).
-fn host_errors(r: &RunRecord) -> Vec<(String, String)> {
+fn host_errors(r: &RunRecord, m: &Manifest) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for e in &r.events {
+    for e in r.events.iter().filter(|e| !m.function(&e.func).is_some_and(|f| f.user_errors)) {
         if let Some(Value::Object(o)) = &e.result
             && let Some(err) = o.get("err")
         {
@@ -271,31 +271,18 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut other = BTreeSet::new();
     r.spec.args.iter().for_each(|a| strings(a, &mut other));
     r.events.iter().filter_map(|e| e.result.as_ref()).filter(|v| v.get("err").is_none()).for_each(|v| strings(v, &mut other));
-    let errs = host_errors(r);
+    let errs = host_errors(r, m);
     // In HTML only the text counts: a short error text like `progress`
     // (generated from a string in the binary) is in `<progress>` too.
     // Most runs have no error texts: skip the scan of the whole body.
-    let text = if errs.is_empty() {
-        String::new()
-    } else if resp.html {
-        visible_text(body)
-    } else {
-        body.to_string()
-    };
+    let text = if errs.is_empty() { String::new() } else { error_view(&resp, body) };
     let shown: Vec<&(String, String)> =
         errs.iter().filter(|(_, t)| text.contains(t.as_str()) && !other.iter().any(|o| o.contains(t.as_str()))).collect();
     if let Some((f, t)) = shown.first() {
         leaks.push(format!("the error text {f} returned ({:?})", t.chars().take(60).collect::<String>()));
     }
     if !leaks.is_empty() {
-        out.push(Finding::new(
-            "leaky_error",
-            &format!("{ex}\0{}", leaks.iter().map(|l| l.split(' ').next().unwrap_or("")).collect::<Vec<_>>().join(",")),
-            Severity::Warn,
-            format!("{ex} shows internal error details in its output: {}", leaks.join("; ")),
-            json!({"leaks": leaks}),
-            run,
-        ));
+        out.push(leaky(ex, leaks, shown.first().map(|x| (x.0.as_str(), x.1.as_str())), run));
     }
     if let (Some(s), Some((f, t))) = (resp.status, shown.first())
         && (200..300).contains(&s)
@@ -311,6 +298,139 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     out.extend(flow(r, m, &resp, body));
     out
+}
+
+fn leaky(ex: &str, leaks: Vec<String>, error: Option<(&str, &str)>, run: Option<&str>) -> Finding {
+    let mut detail = json!({"leaks": leaks});
+    if let Some((f, t)) = error {
+        detail["error"] = json!({"func": f, "text": t});
+    }
+    Finding::new(
+        "leaky_error",
+        &format!("{ex}\0{}", leaks.iter().map(|l| l.split(' ').next().unwrap_or("")).collect::<Vec<_>>().join(",")),
+        Severity::Warn,
+        format!("{ex} shows internal error details in its output: {}", leaks.join("; ")),
+        detail,
+        run,
+    )
+}
+
+/// The part of a body where an error text counts as shown: in HTML the
+/// text and attribute values, without style sheets.
+fn error_view(resp: &Response, body: &str) -> String {
+    if resp.html { visible_text(&STYLE.replace_all(body, " ")) } else { body.to_string() }
+}
+
+static STYLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<style\b[^>]*>.*?</style\s*>").unwrap());
+
+/// The error text a finding is about, for `leaky_error` and the
+/// `inconsistent_response` of a page that shows an error.
+fn error_text(f: &Finding) -> Option<&str> {
+    match f.kind.as_str() {
+        "leaky_error" => f.detail.get("error")?.get("text")?.as_str(),
+        "inconsistent_response" => f.detail.get("error")?.as_str(),
+        _ => None,
+    }
+}
+
+/// Drops error-text findings whose text the page shows anyway. A generated
+/// error text can be a word the app writes itself, such as a CSS class or a
+/// heading. Reruns `r` with each such text changed in the host errors; a
+/// text that still shows did not come from the error. Keeps the findings
+/// when the rerun does not get the changed errors or does not finish.
+pub fn drop_echoes(app: &crate::harness::App, r: &RunRecord, findings: &mut Vec<Finding>) {
+    let texts: BTreeSet<String> = findings.iter().filter_map(error_text).map(str::to_string).collect();
+    if texts.is_empty() || r.outcome.kind != crate::record::OutcomeKind::Ok {
+        return;
+    }
+    let mut spec = r.spec.clone();
+    let mut changed = Vec::new();
+    for e in &r.events {
+        let Some(err) = e.result.as_ref().and_then(|v| v.get("err")) else { continue };
+        let swapped = swap(err, &texts);
+        if &swapped == err {
+            continue;
+        }
+        if !spec.plan.0.contains_key(&e.func)
+            && let Some(effective) = spec.plan.get(&e.func).cloned()
+        {
+            spec.plan.0.insert(e.func.clone(), effective);
+        }
+        let ret = json!({"err": swapped});
+        let fp = spec.plan.0.entry(e.func.clone()).or_default();
+        let resp = fp.on_call.entry(e.call.to_string()).or_default();
+        resp.ret = Some(ret.clone());
+        resp.generate = None;
+        resp.trap = None;
+        resp.commit_then_trap = None;
+        changed.push((e.func.clone(), e.call, ret));
+    }
+    if changed.is_empty() {
+        return;
+    }
+    let vr = app.run(&spec);
+    let got = |(f, c, ret): &(String, u32, Value)| vr.events.iter().any(|e| &e.func == f && e.call == *c && e.result.as_ref() == Some(ret));
+    if vr.outcome.kind != crate::record::OutcomeKind::Ok || !changed.iter().all(got) {
+        return;
+    }
+    let resp = response(&vr, &app.manifest);
+    let Some(body) = resp.body.as_deref() else { return };
+    let view = error_view(&resp, body);
+    let echoes: BTreeSet<&String> = texts.iter().filter(|t| view.contains(t.as_str())).collect();
+    if echoes.is_empty() {
+        return;
+    }
+    let ex = &r.spec.export;
+    let mut out = Vec::new();
+    for f in findings.drain(..) {
+        match error_text(&f) {
+            Some(t) if echoes.contains(&t.to_string()) => {
+                if f.kind == "leaky_error" {
+                    let leaks: Vec<String> = f.detail["leaks"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .filter(|l| !l.starts_with("the error text "))
+                        .map(str::to_string)
+                        .collect();
+                    if !leaks.is_empty() {
+                        out.push(leaky(ex, leaks, None, f.run.as_deref()));
+                    }
+                }
+            }
+            _ => out.push(f),
+        }
+    }
+    *findings = out;
+}
+
+/// The strings of `v` with each of `texts` in them changed: letters by 13
+/// places, digits by 5. Same length and kind of characters, another text.
+fn swap(v: &Value, texts: &BTreeSet<String>) -> Value {
+    match v {
+        Value::String(s) => {
+            let mut s = s.clone();
+            for t in texts {
+                s = s.replace(t.as_str(), &rot(t));
+            }
+            Value::String(s)
+        }
+        Value::Array(a) => Value::Array(a.iter().map(|x| swap(x, texts)).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), swap(x, texts))).collect()),
+        x => x.clone(),
+    }
+}
+
+fn rot(t: &str) -> String {
+    t.chars()
+        .map(|c| match c {
+            'a'..='z' => (((c as u8 - b'a' + 13) % 26) + b'a') as char,
+            'A'..='Z' => (((c as u8 - b'A' + 13) % 26) + b'A') as char,
+            '0'..='9' => (((c as u8 - b'0' + 5) % 10) + b'0') as char,
+            c => c,
+        })
+        .collect()
 }
 
 pub(crate) static CANARY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"cnry[0-9a-f]{4}\d+").unwrap());

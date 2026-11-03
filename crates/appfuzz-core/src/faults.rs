@@ -1,7 +1,7 @@
 //! Systematic, position-specific host failures. A lazy cursor avoids making one
 //! full input copy for every call in a long trace.
 use crate::{
-    detect::{Finding, per_run},
+    detect::Finding,
     harness::App,
     metamorphic::{self, Change, Variant},
     par::Runner,
@@ -245,7 +245,7 @@ pub fn probe(app: &App, base: &RunRecord, only: Option<&str>, budget: u64, run: 
         };
         let variant = recipe.variant(app, base).expect("cursor yielded applicable fault");
         let actual = run(&variant.spec);
-        found.extend(per_run(&actual, &app.manifest));
+        found.extend(crate::detect::per_run_checked(app, &actual));
         found.extend(compare(app, base, &recipe, &variant, &actual));
         probes.push(Probe {
             position: base.events.iter().find(|e| e.func == recipe.func && e.call == recipe.call).expect("event").n,

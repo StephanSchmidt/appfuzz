@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::json;
 use wasmtime::component::Type;
 
-use crate::detect::{Finding, Severity, per_run};
+use crate::detect::{Finding, Severity};
 use crate::harness::App;
 use crate::par::{self, Runner};
 use crate::plan::{FnPlan, Response};
@@ -139,7 +139,7 @@ pub fn values(
     let runs = par::map(&tries, |(_, _, s)| run(s));
     for ((f, variant, _), r) in tries.into_iter().zip(runs) {
         probes.push(ValueProbe { func: f.key.clone(), variant: variant.into(), run: r.id.clone(), outcome: r.outcome.kind, host_calls: r.totals.host_calls });
-        for mut x in per_run(&r, &app.manifest) {
+        for mut x in crate::detect::per_run_checked(app, &r) {
             // Name the value that caused it.
             if matches!(x.kind.as_str(), "crash" | "hang") {
                 let kind = format!("{}_on_host_value", x.kind);
@@ -211,7 +211,7 @@ pub fn times(app: &App, base: &RunSpec, run: Runner) -> (Vec<TimeProbe>, Vec<Fin
     let runs = par::map(&specs, |s| run(s));
     for ((now, what), r) in EDGE_TIMES.iter().zip(runs) {
         probes.push(TimeProbe { now: now.to_string(), what: what.to_string(), run: r.id.clone(), outcome: r.outcome.kind });
-        for mut x in per_run(&r, &app.manifest) {
+        for mut x in crate::detect::per_run_checked(app, &r) {
             if matches!(x.kind.as_str(), "crash" | "hang") {
                 let kind = format!("{}_at_time", x.kind);
                 x = Finding::new(

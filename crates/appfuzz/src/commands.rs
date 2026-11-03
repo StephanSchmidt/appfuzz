@@ -55,7 +55,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let app = load()?;
             let r = execute(app, &store, a)?;
             let mut s = summary(app, &r);
-            s["findings"] = record_findings(&cli, app, detect::per_run(&r, &app.manifest))?;
+            s["findings"] = record_findings(&cli, app, detect::per_run_checked(app, &r))?;
             if !cli.fast
                 && let Some(asserts) = crate::acceptance::asserts_on(app, &r)
             {
@@ -70,7 +70,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let app = load()?;
             let r = execute(app, &store, a)?;
             let mut s = summary(app, &r);
-            s["findings"] = record_findings(&cli, app, detect::per_run(&r, &app.manifest))?;
+            s["findings"] = record_findings(&cli, app, detect::per_run_checked(app, &r))?;
             s["host_calls"] = timeline(&r, &Statics::parse(&app.bytes)?);
             Ok(s)
         }
@@ -147,7 +147,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let per_run = Mutex::new(Vec::new());
             let runner = |s: &RunSpec| {
                 let r = run_cached(app, &store, s).unwrap_or_else(|_| app.run(s));
-                lock(&per_run).extend(detect::per_run(&r, &app.manifest).into_iter().map(|f| ((r.totals.host_calls, r.totals.fuel), f)));
+                lock(&per_run).extend(detect::per_run_checked(app, &r).into_iter().map(|f| ((r.totals.host_calls, r.totals.fuel), f)));
                 r
             };
             let rep = scale::scale(app, &base, knob, &sizes, &runner)?;
@@ -174,7 +174,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let per_run = Mutex::new(Vec::new());
             let runner = |s: &RunSpec| {
                 let r = app.run(s);
-                lock(&per_run).extend(detect::per_run(&r, &app.manifest).into_iter().map(|f| ((r.totals.host_calls, r.totals.fuel), f)));
+                lock(&per_run).extend(detect::per_run_checked(app, &r).into_iter().map(|f| ((r.totals.host_calls, r.totals.fuel), f)));
                 let _ = store.save(&r);
                 r
             };
@@ -420,7 +420,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 None => (target.clone(), finding.clone()),
             };
             let orig = store.load(&run_id)?;
-            let shown = detect::per_run(&orig, &app.manifest);
+            let shown = detect::per_run_checked(app, &orig);
             let mut f = match &wanted {
                 Some(id) => all.iter().find(|f| f.id == *id).cloned().or_else(|| shown.iter().find(|f| f.id == *id).cloned()),
                 None => shown.iter().max_by_key(|f| f.severity).cloned(),

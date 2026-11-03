@@ -195,8 +195,11 @@ classes are incomplete. These new domain maps also support conjunctive arrays,
 Value constraints say what the platform promises: `values = { score =
 "range:0..100" }` on a host function (results), `[entry] values = {
 "query.days" = "range:1..31" }` (requests the platform lets through). Also
-`len:a..b`, `enum:x,y`, `format:date|time|datetime|email|int|uuid`. Generated
+`len:a..b`, `enum:x,y`, `format:date|time|datetime|email|int|uuid`, and
+`unique[:fields]` for a list without repeats (a unique key). Generated
 values keep to them, so a finding is about a value that can happen.
+`user_errors = true` on a function says its error texts are written for
+users: showing them is no `leaky_error`.
 
 Rules say what the host always answers for some arguments, the
 platform's business rules: `rules = [{ when = { hour = { not = { range =

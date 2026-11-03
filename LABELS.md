@@ -133,7 +133,7 @@ What a call does to the world.
 | `repeated_write` (fail) | a change that is not `idempotent` is made twice with the same arguments in one request, after the first one worked (and not because a host list held the same element twice) |
 | `retry_storm` (fail, else warn) | a failed change that is not `idempotent` is retried again and again; it may have happened anyway |
 | `n_plus_1`, `input_amplification` (fail, else warn) | one change per element of a host list or per unit of a request field |
-| `partial_write` (warn) | one change succeeds, a later different change fails, and the response still says all went well |
+| `partial_write` (warn) | one change succeeds, a later different change fails, and the response still says all went well: a status below 400, and the failed call's error text neither in the body nor in a header (a redirect's `location`, percent-encoded there). appfuzz checks this once more with another error text, so an empty error the app passes on counts as told |
 
 `idempotent = true` (only with a change) says the same call twice is
 harmless, for example a write that sets a value rather than adding one. It
@@ -146,6 +146,26 @@ example `items#get-many` for `items#get`. If the app calls `<function>` in
 a loop, `n_plus_1`, `input_amplification` and `chatty` name the batch
 function, and the n+1 is a fail. The batch function need not be imported:
 it's enough that the platform offers it.
+
+## Errors for users: `user_errors = true`
+
+The function's error texts are written for the people using the app, for
+example "Bookings start between 08:00 and 16:00", and the platform says
+the app may show them as they are. Showing them is then no `leaky_error`,
+and a page with status 200 that shows one is no `inconsistent_response`.
+Leave it off for functions whose errors carry internals (SQL, paths, stack
+traces).
+
+```toml
+[functions."acme:web/bookings#create"]
+user_errors = true
+```
+
+Without it, a host error text in the page counts only if the page doesn't
+show the same text when the error says something else: appfuzz runs the
+request once more with the error text changed. A generated error text that
+happens to be a word the app writes itself (a CSS class, a heading) is not
+reported.
 
 ## The response: `[entry] result = { <path> = "<label>" }`
 
@@ -219,6 +239,7 @@ app sees them.
 | `len:a..b` | characters of text, or elements of a list |
 | `enum:x,y,z` | one of these |
 | `format:date`, `format:time`, `format:datetime`, `format:email`, `format:int`, `format:uuid` | `2026-11-02`, `10:00`, `2026-11-02T10:00:00`, `a@b.c`, `-12`, `00000000-0000-4000-8000-000000000001` |
+| `unique`, `unique:a,b` | no two elements of a list alike, as a whole or by these fields together: a unique key of the platform's database |
 
 Generated host values keep to the constraints, and so do plan values (the
 host keeps its promises). Fuzzed requests mostly keep to them, and `scale`
@@ -227,12 +248,20 @@ constraint has its findings lowered to info, with `detail.invalid_request`.
 A crash on a value the platform never produces is not a finding; a crash
 on one it does produce stays a fail.
 
+A `unique` list never holds the same element twice: generated and plan
+values drop the repeats, and the duplicate probe skips the function, so
+there is no `duplicate_sensitivity` for a duplicate the database can't
+hold. Use the path of the list; `""` is the whole result.
+
 ```toml
 [entry]
 values = { "query.days" = "range:1..31", "query.sort" = "enum:name,date" }
 
 [functions."acme:web/items#all"]
 values = { score = "range:0..100", name = "len:1..80" }
+
+[functions."acme:web/bookings#list-for-day"]
+values = { "" = "unique:pod_id,date,hour" }
 ```
 
 ## Rules: `rules = [ { when = {…}, return = … } ]`
