@@ -11,6 +11,7 @@
 !/Cargo.lock
 !/crates/
 !/website/
+!/demos/
 
 /bench/*
 !/bench/

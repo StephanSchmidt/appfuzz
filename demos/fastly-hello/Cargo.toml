@@ -1,0 +1,19 @@
+[package]
+name = "fastly-hello"
+version = "0.1.0"
+authors = []
+edition = "2021"
+# Remove this line if you want to be able to publish this crate on crates.io.
+# Otherwise, `publish = false` prevents an accidental `cargo publish` from revealing private source.
+publish = false
+
+# Standalone: not part of the appfuzz workspace above.
+[workspace]
+
+[profile.release]
+debug = 1
+codegen-units = 1
+lto = "fat"
+
+[dependencies]
+fastly = "0.13.0"
