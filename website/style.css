@@ -58,9 +58,18 @@ h3 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: -.005em; }
 .bar-in { display: flex; align-items: center; gap: 40px; height: 64px; }
 .logo { display: inline-flex; align-items: center; gap: 10px; font-weight: 800; font-stretch: 75%; font-size: 24px; text-decoration: none; letter-spacing: -.01em; }
 .mark { width: 20px; height: 20px; background: var(--hi); border: 2px solid var(--ink); box-shadow: 3px 3px 0 var(--ink); }
-.links { display: flex; gap: 28px; flex: 1; }
+.links { display: flex; gap: 28px; flex: 1; align-self: stretch; list-style: none; margin: 0; padding: 0; }
+.links > li { position: relative; display: flex; align-items: center; }
 .links a { text-decoration: none; color: var(--ink2); font-size: 15px; }
 .links a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
+.drop-btn { width: 18px; height: 24px; margin-left: 2px; padding: 0; border: 0; background: none; cursor: pointer; }
+.drop-btn::before { content: ""; display: block; width: 6px; height: 6px; margin: 0 auto; border: solid var(--mute); border-width: 0 1.5px 1.5px 0; transform: translateY(-2px) rotate(45deg); }
+.drop { display: none; position: absolute; top: 100%; left: -18px; min-width: 250px; list-style: none; margin: 0; padding: 6px 0; background: #fff; border: 1px solid var(--ink); }
+.has-drop:hover .drop, .has-drop:focus-within .drop, .has-drop.open .drop { display: block; }
+.has-drop.shut .drop { display: none; }
+.drop a { display: block; padding: 10px 18px; color: var(--ink); }
+.drop a:hover, .drop a:focus { background: var(--hi); text-decoration: none; }
+.menu-btn { display: none; }
 .gh { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); text-decoration: none; font-size: 15px; font-weight: 600; margin-right: -16px; }
 .gh:hover .gh-text { text-decoration: underline; text-underline-offset: 4px; }
 .stars { display: inline-flex; align-items: center; gap: 4px; font: 500 13px/1 var(--mono); border: 1px solid var(--rule); background: var(--soft); padding: 5px 7px; }
@@ -323,7 +332,16 @@ footer { border-top: 1px solid var(--rule); }
   :root { --pad: 16px; }
   .frame { border-left: 0; border-right: 0; }
   .links { display: none; }
-  .bar-in { justify-content: space-between; gap: 16px; }
+  .bar-in { justify-content: space-between; gap: 16px; position: relative; }
+  .menu-btn { display: block; order: 3; padding: 8px 12px; border: 1px solid var(--ink); background: #fff; font: 600 15px var(--sans); color: var(--ink); cursor: pointer; }
+  .bar.open .menu-btn { background: var(--hi); }
+  .bar.open .links { display: block; position: absolute; top: 64px; left: 0; right: 0; padding: 8px var(--pad) 18px; background: #fff; border-bottom: 1px solid var(--ink); }
+  .bar.open .links > li { display: block; padding: 10px 0 0; }
+  .bar.open .links > li > a { font-weight: 650; color: var(--ink); font-size: 17px; }
+  .bar.open .drop-btn { display: none; }
+  .bar.open .drop { display: block; position: static; border: 0; padding: 2px 0 6px; min-width: 0; }
+  .bar.open .drop a { padding: 7px 0 7px 14px; color: var(--ink2); }
+  .go { order: 4; }
   .gh { margin-left: auto; margin-right: 0; }
   .gh-text { display: none; }
   .hero { padding-top: 44px; padding-bottom: 56px; }
