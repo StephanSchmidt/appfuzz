@@ -390,6 +390,25 @@ footer { border-top: 1px solid var(--rule); }
   .foot-in { flex-direction: column; align-items: flex-start; gap: 8px; }
 }
 
+/* Why teams review code: ranked reasons, who covers each. */
+.why { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--ink); }
+.why li { display: grid; grid-template-columns: 44px minmax(0, 1fr) 300px; gap: 24px; align-items: start; padding: 20px 0; border-bottom: 1px solid var(--rule); }
+.why-n { font: 600 22px/1.2 var(--mono); color: var(--mute); }
+.why h3 { margin: 0 0 4px; font-size: 18px; }
+.why li p { margin: 0; color: var(--ink2); font-size: 15.5px; line-height: 1.55; }
+.why .why-st { border-left: 3px solid var(--rule); padding-left: 14px; font-size: 14.5px; }
+.why-st b { display: block; font: 600 13px/1.4 var(--mono); text-transform: uppercase; letter-spacing: .04em; color: var(--mute); }
+.why-how { display: block; margin-top: 4px; }
+.why-yes .why-st { border-left-color: var(--green); }
+.why-yes .why-st b { color: var(--green); }
+.why-part .why-st { border-left-color: var(--amber); }
+.why-part .why-st b { color: var(--amber); }
+.why-yes .why-n, .why-part .why-n { color: var(--ink); }
+@media (max-width: 700px) {
+  .why li { grid-template-columns: 32px minmax(0, 1fr); gap: 8px 14px; }
+  .why .why-st { grid-column: 2; }
+}
+
 /* Tab panels stacked in one grid cell: the box is as tall as its tallest
    panel, so switching tabs never moves the page. */
 .stack { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; }
