@@ -85,7 +85,7 @@ the app's world, and each WIT export is one export to review with
 Fuzzing also mutates JSON/CSV inside strings. Supply a valid encoded payload in
 the request or plan to seed structured search. `structured` stage statistics
 appear in fuzz reports; findings still come from the original binary and use
-ordinary confirmation and replay. See [search details](README.md#structured-payload-search).
+ordinary confirmation and replay. See [search details](REFERENCE.md#structured-payload-search).
 
 ## 3. Host plans: telling appfuzz what the host returns
 
@@ -123,7 +123,7 @@ and defaults. Manifest rules still override the plan. `probe faults` uses these
 ranges to distinguish one-call failures from continuing outages.
 
 For related records, use manifest `[datasets.NAME]` definitions and function
-`query` bindings ([syntax](README.md#coherent-host-datasets)). They share one
+`query` bindings ([syntax](REFERENCE.md#coherent-host-datasets)). They share one
 generated world per ordinary request: keys stay unique, references stay valid,
 and equality filters agree with lookups. `_defaults.dataset_rows` in a plan
 resizes collections; fuzzing, scaling and shrinking preserve their relationships.
@@ -197,7 +197,7 @@ describes accepted domains without excluding invalid incoming values. Saved
 single-run acceptance checks can use `input_class`, `input_fields`, exact `when`
 matches and `forbid_effects` to state valid/invalid input behavior. Unexercised
 classes are incomplete. These new domain maps also support conjunctive arrays,
-`required`, UTF-8 `bytes:a..b`, and `format:uuid`; see README for exact semantics.
+`required`, UTF-8 `bytes:a..b`, and `format:uuid`; see [REFERENCE.md](REFERENCE.md#declared-value-contracts) for exact semantics.
 
 Value constraints say what the platform promises: `values = { score =
 "range:0..100" }` on a host function (results), `[entry] values = {
@@ -260,7 +260,7 @@ exactly one of `property = ["value_range", ".usage", "0", "100"]`,
 `assert = "total == sum(items.map(i, i.price))"` (CEL over the `let` names; a
 table of named asserts runs one check each),
 `expect = { selector = "$.status", equals = 200 }`, or a declared two-run
-`relation`. See [saved acceptance checks](README.md#saved-acceptance-checks).
+`relation`. See [saved acceptance checks](REFERENCE.md#saved-acceptance-checks).
 `acceptance run [NAME]` executes saved checks; ordinary `review` includes them.
 Fixed examples preserve their inputs; searches shrink counterexamples. Missing
 selector matches are incomplete, not passing. Use ordinary `replay` for their
@@ -310,7 +310,7 @@ refuses findings it cannot reproduce.
 
 - Concurrent requests and live external services are not simulated. Sequential
   requests can share modeled datasets with mutation bindings and explicit
-  invariants; see [request sequences](README.md#request-sequences). `sequence fuzz`
+  invariants; see [request sequences](REFERENCE.md#request-sequences). `sequence fuzz`
   searches action orderings/repetitions and shrinks failures. Manifest
   `[sequences.NAME]` scenarios participate in `review`. Use `sequence replay`
   for their case files; ordinary `replay` handles isolated requests.

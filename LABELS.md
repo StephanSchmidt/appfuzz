@@ -224,7 +224,7 @@ numeric integer bounds exact. Dates use years 0001–9999 with real calendar
 validation; time/date-time use local hours/minutes and optional seconds, without
 offsets, fractions or leap seconds. Integer text allows one optional minus sign
 and one or more ASCII digits. Types are never inferred from names or values.
-See README's declared value contracts for paths, examples and replay semantics.
+See [REFERENCE.md](REFERENCE.md#declared-value-contracts) for paths, examples and replay semantics.
 
 ## Value constraints: `values = { <path> = "<constraint>" }`
 
