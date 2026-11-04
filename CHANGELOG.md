@@ -73,6 +73,11 @@
   instead of "error while executing at wasm backtrace:".
 - `last` is the run a command just showed, also when that run was stored
   before.
+- A confirmed finding points at its shrunk run, so `explain` and the next
+  steps of `review` show the small input instead of the one the fuzzer
+  found. Shrinking also drops test strings and parts of long text the
+  finding doesn't need, and text it doesn't need changed stays as the
+  example request has it.
 
 ## 0.5.0
 

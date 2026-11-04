@@ -495,6 +495,16 @@ fn rot(t: &str) -> String {
 pub(crate) static CANARY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"cnry[0-9a-f]{4}\d+").unwrap());
 static CANARY_TAIL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(cnry[0-9a-f]{4}\d+)<i>").unwrap());
 
+/// A whole canary as the fuzzer writes it: with its markup and sink tail,
+/// or as the host of a URL.
+static WHOLE_CANARY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"https://cnry[0-9a-f]{4}\d+\.example/|cnry[0-9a-f]{4}\d+(<i>'"(\.\./;\$\(x\))?)?"#).unwrap());
+
+/// The text without one of its canaries, for each canary in it.
+pub(crate) fn without_canaries(t: &str) -> Vec<String> {
+    WHOLE_CANARY.find_iter(t).map(|m| format!("{}{}", &t[..m.start()], &t[m.end()..])).collect()
+}
+
 /// Canary text for a request field or a host string: an id, then markup
 /// and quotes that must come out escaped.
 pub fn canary(n: u64) -> String {

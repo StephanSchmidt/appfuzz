@@ -138,3 +138,107 @@ pub(super) fn replay_run(cli: &Cli, app: &App, store: &RunStore, run: &str) -> R
     Ok(json!({"run": old.id, "rerun": new.id, "mode": "regression", "outcome": new.outcome.kind, "before": rows, "findings": now,
         "reproduced": reproduced, "exit_code": if reproduced { 2 } else { 0 }}))
 }
+
+/// Replays a finding's run, shrinks it to a small spec that still shows
+/// the finding and writes the case file.
+pub(super) fn confirm(cli: &Cli, app: &App, store: &RunStore, target: &str, finding: Option<&str>, times: u32, max_runs: u32) -> Result<Value> {
+    let fstore = FindingStore::new(&cli.state, &app.state_key);
+    let all = fstore.all()?;
+    let (run_id, wanted) = match all.iter().find(|f| f.id == *target) {
+        Some(f) => (f.run.clone().ok_or_else(|| anyhow!("finding {target} has no run"))?, Some(f.id.clone())),
+        None => (target.to_string(), finding.map(str::to_string)),
+    };
+    let orig = store.load(&run_id)?;
+    let shown = detect::per_run_checked(app, &orig);
+    let mut f = match &wanted {
+        Some(id) => all.iter().find(|f| f.id == *id).cloned().or_else(|| shown.iter().find(|f| f.id == *id).cloned()),
+        None => shown.iter().max_by_key(|f| f.severity).cloned(),
+    }
+    .ok_or_else(|| anyhow!("no such finding for run {run_id}"))?;
+    // Deterministic: N replays give the same record.
+    let key = |r: &RunRecord| strip_wall(serde_json::to_value(r).unwrap_or_default());
+    let want = key(&orig);
+    let replays: Vec<u32> = (0..times).collect();
+    let same = appfuzz_core::par::map(&replays, |_| key(&app.run(&orig.spec)) == want).into_iter().filter(|s| *s).count() as u32;
+    let deterministic = same == times;
+    let per_run = cases::matches(&f, &orig, app);
+    let mut out = json!({"finding": finding_json(&f), "run": orig.id, "replays": times, "identical": same, "deterministic": deterministic, "per_run": per_run});
+    if !deterministic {
+        out["confirmed"] = json!(false);
+        out["why"] = json!("replays differ; see `appfuzz replay`");
+        return Ok(out);
+    }
+    use appfuzz_core::shrink::{self, Across};
+    let runner = |s: &RunSpec| app.run(s);
+    let base = app.default_args(app.export(&orig.spec.export)?, &orig.spec.now)?;
+    // A finding from comparing runs shrinks by rerunning the
+    // comparison, from the run it compared.
+    let across = if per_run { None } else { Across::of(&f) };
+    let start = match across.as_ref().and_then(|a| a.start_run(&f)) {
+        Some(id) if id != orig.id => store.load(id).ok().map(|r| r.spec),
+        _ => Some(orig.spec.clone()),
+    };
+    let across = across.zip(start).filter(|(a, s)| a.shows(app, &f.id, s, &runner).is_some());
+    let (from, spec, shrink_runs, min, shrunk) = if per_run {
+        let keeps = |r: &RunRecord| cases::matches(&f, r, app);
+        let (spec, n) = shrink::minimise(app, &orig.spec, &base, &keeps, max_runs, &runner);
+        let min = app.run(&spec);
+        store.save(&min)?;
+        let shrunk = detect::per_run_checked(app, &min).into_iter().find(|g| g.id == f.id);
+        (orig.spec.clone(), spec, n, min.id, shrunk)
+    } else if let Some((a, start)) = &across {
+        let per = a.runs_per_test();
+        let (spec, n) = shrink::shrink(app, start, &base, &|c| a.shows(app, &f.id, c, &runner).is_some(), (max_runs / per).max(1));
+        // Once more, keeping the runs: the finding's run is one of them.
+        let saving = |s: &RunSpec| {
+            let r = app.run(s);
+            let _ = store.save(&r);
+            r
+        };
+        let shown = a.shows(app, &f.id, &spec, &saving);
+        let run = shown.as_ref().and_then(|x| x.run.clone()).unwrap_or_else(|| orig.id.clone());
+        (start.clone(), spec, n * per, run, shown)
+    } else {
+        return Ok(json!({"confirmed": false, "why": "no executable predicate reproduces this finding"}));
+    };
+    // From now on the finding points at the small run, with the
+    // title and evidence that run gives it.
+    match shrunk {
+        Some(g) if g.severity >= f.severity => f = g,
+        Some(_) => {}
+        None if per_run => f.run = Some(min.clone()),
+        None => {}
+    }
+    let dir = cli.state.join("cases");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.json", f.id));
+    f.confirmed = Some(path.display().to_string());
+    let reproduce = across.as_ref().map(|(a, _)| a.describe());
+    let note = if per_run {
+        "minimised: the finding still shows in this run"
+    } else if across.is_some() {
+        "minimised: comparing runs from this spec as `reproduce` says still shows the finding"
+    } else {
+        "found by an analysis across runs; the run is replayed, not minimised"
+    };
+    let (size_before, size_after) = (shrink::size(&from), shrink::size(&spec));
+    let case = json!({
+        "version": 1, "finding": f, "per_run": per_run, "spec": spec, "reproduce": reproduce, "recipe": across.as_ref().map(|(a, _)| a), "original_run": orig.id, "run": min,
+        "size_before": size_before, "size_after": size_after, "plan_size": shrink::plan_size(&spec), "note": note,
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&case)?)?;
+    fstore.update(&f)?;
+    out["finding"] = finding_json(&f);
+    out["confirmed"] = json!(true);
+    out["case"] = json!(path);
+    out["minimised_run"] = json!(min);
+    out["shrink_runs"] = json!(shrink_runs);
+    out["size_before"] = json!(size_before);
+    out["size_after"] = json!(size_after);
+    out["plan_size"] = json!(shrink::plan_size(&spec));
+    if let Some(r) = reproduce {
+        out["reproduce"] = r;
+    }
+    out["spec"] = json!({"args": spec.args, "plan": spec.plan, "now": spec.now, "seed": spec.seed});
+    Ok(out)
+}

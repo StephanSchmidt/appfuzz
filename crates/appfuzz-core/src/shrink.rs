@@ -446,6 +446,25 @@ fn response_edits(r: &Response, at: &str, lows: &Lows) -> Vec<Step> {
     edits.into_iter().map(|(t, e)| (t, e, None)).chain(steps).collect()
 }
 
+/// Long text without a chunk of it (halves, quarters, …), where what
+/// matters is not at its start: no shorter than 16 characters.
+fn text_chunks(t: &str) -> Vec<String> {
+    let chars: Vec<char> = t.chars().collect();
+    let len = chars.len();
+    let mut out = Vec::new();
+    let mut size = len / 2;
+    while size > 0 && len - size >= 16 && out.len() < CHUNKS {
+        let mut at = 0;
+        while at < len && out.len() < CHUNKS {
+            let to = (at + size).min(len);
+            out.push(chars[..at].iter().chain(&chars[to..]).collect());
+            at += size;
+        }
+        size /= 2;
+    }
+    out
+}
+
 /// Removes chunks of a literal list (halves, quarters, … single
 /// elements), then simplifies the elements of a short one.
 fn list_edits(a: &[Value], out: &mut Vec<(usize, Edit)>) {
@@ -532,11 +551,13 @@ fn request_edits(app: &App, s: &RunSpec, base: &[Value], lows: &Lows, out: &mut 
             continue;
         }
         let mut variants: Vec<(Value, Option<(String, u64)>)> = Vec::new();
-        // Back to the example request's value.
-        if let Some(b) = base_root.pointer(&p)
-            && b != node
-        {
-            variants.push((b.clone(), None));
+        // Back to the example request's value. Text that has it stays as
+        // the example has it: cut further, it would only be harder to read.
+        // (Numbers and lists go on down to their boundary.)
+        match base_root.pointer(&p) {
+            Some(b) if b == node && node.as_str().is_some_and(|t| t.parse::<u64>().is_err()) => continue,
+            Some(b) if b != node => variants.push((b.clone(), None)),
+            _ => {}
         }
         let len_key = format!("{p}\0len");
         let num = |n: u64, text: bool| -> Vec<(Value, Option<(String, u64)>)> {
@@ -564,6 +585,8 @@ fn request_edits(app: &App, s: &RunSpec, base: &[Value], lows: &Lows, out: &mut 
                         inner.push((json!(text), None));
                     }
                 }
+                // A canary the finding doesn't need goes as a whole.
+                inner.extend(crate::output::without_canaries(t).into_iter().map(|text| (json!(text), None)));
                 inner.extend(match t.parse::<u64>() {
                     Ok(n) => num(n, true),
                     // Only long text is cut, to no less than 16 characters:
@@ -571,6 +594,7 @@ fn request_edits(app: &App, s: &RunSpec, base: &[Value], lows: &Lows, out: &mut 
                     Err(_) => down(t.chars().count() as u64, 16, &len_key, lows)
                         .into_iter()
                         .map(|n| (json!(t.chars().take(n as usize).collect::<String>()), Some((len_key.clone(), n))))
+                        .chain(text_chunks(t).into_iter().map(|t| (json!(t), None)))
                         .collect(),
                 });
                 inner
@@ -603,6 +627,29 @@ mod tests {
         assert_eq!(a.runs_per_test(), 27);
         let back: Across = serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap();
         assert_eq!(back.describe(), json!({"auth": {"check": "timing", "forged": "a made-up API key"}}));
+    }
+
+    #[test]
+    fn canaries_go_whole() {
+        let uri = "https://app.example/cnry278d2<i>'\"../;$(x)?name=cnry3b543<i>'\"&u=https://cnry1a2b7.example/";
+        assert_eq!(
+            crate::output::without_canaries(uri),
+            [
+                "https://app.example/?name=cnry3b543<i>'\"&u=https://cnry1a2b7.example/",
+                "https://app.example/cnry278d2<i>'\"../;$(x)?name=&u=https://cnry1a2b7.example/",
+                "https://app.example/cnry278d2<i>'\"../;$(x)?name=cnry3b543<i>'\"&u=",
+            ]
+        );
+    }
+
+    #[test]
+    fn long_text_loses_chunks() {
+        let t = format!("{}{}", "a".repeat(32), "b".repeat(32));
+        let cuts = text_chunks(&t);
+        assert_eq!(cuts[0], "b".repeat(32));
+        assert_eq!(cuts[1], "a".repeat(32));
+        assert!(cuts.iter().all(|c| c.len() >= 16 && c.len() < 64));
+        assert!(text_chunks("short text, kept").is_empty());
     }
 
     #[test]

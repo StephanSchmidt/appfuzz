@@ -263,6 +263,27 @@ fn crashes_are_named_by_their_cause() {
 }
 
 #[test]
+fn confirmed_findings_point_at_the_minimised_run() {
+    let f = Fixture::new(true);
+    let long = format!(r#"["{} cnry1a2b7<i>'\" {} cnry3c4d9<i>'\""]"#, "a".repeat(200), "b".repeat(200));
+    let (_, run) = f.cli(&["run", "--args", &long]);
+    let found = run["findings"].as_array().unwrap().iter().find(|v| v["kind"] == "reflection").unwrap_or_else(|| panic!("{run}")).clone();
+    let (_, confirmed) = f.cli(&["confirm", found["id"].as_str().unwrap()]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let min = confirmed["minimised_run"].as_str().unwrap();
+    assert_ne!(min, run["run"].as_str().unwrap());
+    assert_eq!(confirmed["finding"]["run"], min, "{confirmed}");
+    // The text lost a canary it didn't need, not just its end.
+    let arg = confirmed["spec"]["args"][0].as_str().unwrap();
+    assert_eq!(arg.matches("cnry").count(), 1, "{arg}");
+    assert!(arg.len() < 60, "{arg}");
+    let (_, listed) = f.cli(&["findings"]);
+    let listed = listed["findings"].as_array().unwrap().iter().find(|v| v["id"] == found["id"]).unwrap().clone();
+    assert_eq!(listed["run"], min, "{listed}");
+    assert!(listed["case"].is_string());
+}
+
+#[test]
 fn last_is_the_run_just_shown() {
     // A run already in the store is not run again, but it is the latest.
     let f = Fixture::new(false);
