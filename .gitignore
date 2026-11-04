@@ -11,6 +11,7 @@
 !/REFERENCE.md
 !/Cargo.toml
 !/Cargo.lock
+!/Makefile
 !/rustfmt.toml
 !/clippy.toml
 !/deny.toml
