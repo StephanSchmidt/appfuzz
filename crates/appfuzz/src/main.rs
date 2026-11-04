@@ -421,6 +421,7 @@ fn build_spec(app: &App, export: Option<&str>, a: &SpecArgs) -> Result<RunSpec> 
         Some(s) if s.trim_start().starts_with('{') => Plan::parse(s)?,
         Some(s) => Plan::load(Path::new(s))?,
     };
+    plan.check_wit(&app.imports)?;
     let mut spec = app.spec(&export, args, plan, a.seed);
     spec.now = now;
     if let Some(f) = a.fuel {

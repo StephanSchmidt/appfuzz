@@ -127,7 +127,9 @@ appfuzz run --plan '{"acme:web/items#all": {"return": []}}'
 Precedence per call: `on_call[n]` > the first matching rule > `default` >
 the function's `return`/`generate`/`trap` > `_defaults` > generated values.
 Results are WIT-shaped JSON: `{"ok": …}` or `{"err": …}` for results, and
-`null` or the value for options.
+`null` or the value for options. A plan may describe functions the app
+doesn't import, so one plan serves several apps. A key that misspells one it
+imports, or a rule on a parameter the function doesn't have, is an error.
 
 An `on_call` key such as `"3+"` applies from call 3 onward. Exact call numbers
 win; otherwise the greatest applicable starting number wins, before plan rules
@@ -241,8 +243,8 @@ batch_of = "acme:web/items#get"
 Generated values at `pii` and `secret` paths are traceable markers
 (`p…@mail.example`, `sk_…`). With sink labels, canaries carry `../;$(x)`
 as well, and the fuzzer tries attack strings. A labelled function the app
-doesn't import is skipped; a labelled parameter or path it doesn't have is
-an error.
+doesn't import is skipped; a misspelt name of one it imports, or a labelled
+parameter or path it doesn't have, is an error.
 
 ## 5. Turning a suspicion into evidence
 

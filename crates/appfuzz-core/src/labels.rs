@@ -173,12 +173,8 @@ pub fn check_wit(m: &Manifest, imports: &[Interface]) -> Result<()> {
             if !r.response.decides() && r.result.is_none() {
                 bail!("[functions.\"{k}\"] rule {i} needs a `return`, `generate`, `trap` or `result` labels");
             }
-            for p in r.when.keys() {
-                let named = f.ty.params().any(|(n, _)| n == p || n.replace('-', "_") == *p);
-                let indexed = p.parse::<usize>().is_ok_and(|n| n < f.ty.params().count());
-                if !named && !indexed {
-                    bail!("[functions.\"{k}\"] rule {i} matches the parameter {p}, but {} has no such parameter", f.signature());
-                }
+            if let Some(p) = r.when.keys().find(|p| !names_param(f, p)) {
+                bail!("[functions.\"{k}\"] rule {i} matches the parameter {p}, but {} has no such parameter", f.signature());
             }
         }
         for p in spec.values.keys() {
@@ -189,6 +185,49 @@ pub fn check_wit(m: &Manifest, imports: &[Interface]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether a rule's `when` key names a parameter of `f`: by name (`user-id`
+/// or `user_id`) or by position.
+pub(crate) fn names_param(f: &crate::wit::FuncInfo, p: &str) -> bool {
+    f.ty.params().any(|(n, _)| n == p || n.replace('-', "_") == p) || p.parse::<usize>().is_ok_and(|n| n < f.ty.params().count())
+}
+
+/// Refuses a `[functions]` key that is a misspelling of a function the app
+/// imports: its labels, rules and effects would apply to nothing. `keys`
+/// are the keys as written, before built-in labels are added.
+pub fn check_names(keys: &[String], imports: &[Interface]) -> Result<()> {
+    match misspelling(keys, imports) {
+        Some((k, real)) => bail!("[functions.\"{k}\"] names no function the app imports: did you mean {real}?"),
+        None => Ok(()),
+    }
+}
+
+/// The first key that names no import but is a misspelling of one that no
+/// key names, with that import. A key near no import is fine: a platform
+/// (or a plan for its apps) describes all of its functions, and an app
+/// imports only those it calls.
+pub(crate) fn misspelling(keys: &[String], imports: &[Interface]) -> Option<(String, String)> {
+    let funcs: Vec<&str> = imports.iter().flat_map(|i| &i.funcs).map(|f| f.key.as_str()).collect();
+    let written: Vec<String> = keys.iter().map(|k| strip_key(k)).collect();
+    keys.iter().zip(&written).filter(|(_, w)| !funcs.contains(&w.as_str())).find_map(|(k, w)| {
+        let real = funcs.iter().find(|f| !written.iter().any(|x| x == *f) && misspelt(w, f))?;
+        Some((k.clone(), (*real).to_string()))
+    })
+}
+
+/// Whether `written` is the key `real` written wrongly: in other case, with
+/// `_` for `-`, without its package or in another one, or one edit off in
+/// an interface or in a function name of five or more letters (`get` and
+/// `set` are both real names).
+fn misspelt(written: &str, real: &str) -> bool {
+    let norm = |s: &str| s.to_lowercase().replace('_', "-");
+    let (w, r) = (norm(written), norm(real));
+    let (wi, wf) = w.split_once('#').unwrap_or(("", &w));
+    let (ri, rf) = r.split_once('#').unwrap_or(("", &r));
+    let base = |i: &'_ str| i.rsplit(['/', ':']).next().unwrap_or_default().to_string();
+    let close = |a: &str, b: &str| b.chars().count() >= 5 && crate::assertion::distance(a, b) <= 1;
+    if wf == rf { wi.is_empty() || base(wi) == base(ri) || close(wi, ri) } else { wi == ri && close(wf, rf) }
 }
 
 fn strip_key(k: &str) -> String {
@@ -920,6 +959,22 @@ fn toml_key(k: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn misspelt_keys_are_told_from_other_functions() {
+        let real = "bench:web/db#query";
+        for typo in ["bench:web/db#qeury", "bench:web/db#quer", "Bench:web/db#Query", "db#query", "query", "acme:shop/db#query", "bench:web/dbs#query"] {
+            assert!(misspelt(&strip_key(typo), real), "{typo}");
+        }
+        assert!(misspelt("bench:web/db#get-many", "bench:web/db#get_many"));
+        // Short names one letter apart are both real; so are other functions.
+        for other in ["bench:web/db#set", "bench:web/db#count", "bench:web/files#read"] {
+            assert!(!misspelt(other, if other.ends_with("set") { "bench:web/db#get" } else { real }), "{other}");
+        }
+        assert!(!misspelt("bench:web/users#current", "bench:web/users#get"));
+        assert_eq!(crate::assertion::distance("qeury", "query"), 1);
+        assert_eq!(crate::assertion::distance("kitten", "sitting"), 3);
+    }
 
     #[test]
     fn walks_results() {

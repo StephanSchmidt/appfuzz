@@ -22,8 +22,10 @@ appfuzz still runs the generic behavioral checks (AGENTS.md §6).
 Labels sit under `[functions."<interface>#<function>"]`. The interface
 version may be left out. A function the app doesn't import is skipped, so a
 platform can label all of its functions once and use the same block for
-every app. A label on a parameter or result path the function doesn't have
-is an error.
+every app. A name that misspells one the app imports (`db#qeury`,
+`items#get` without its package, `get_many` for `get-many`) is an error that
+names the function meant. So is a label on a parameter or result path the
+function doesn't have.
 
 ## Parameters: `params = { <name> = "<label>" }`
 

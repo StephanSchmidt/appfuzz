@@ -282,6 +282,7 @@ impl App {
         // findings never load the component to add them.
         let contract = manifest.fingerprint();
         let state_key = manifest.state_key(&hash);
+        let written: Vec<String> = manifest.functions.keys().cloned().collect();
         let extism_abi = manifest.host.as_ref().is_some_and(|h| h.platform.abi.as_deref() == Some("extism"));
         let mut plugin = None;
         let (component, core, imports, exports) = if wasmparser::Parser::is_core_wasm(&bytes) && extism_abi {
@@ -319,6 +320,7 @@ impl App {
             handles: None,
             infallible: BTreeSet::new(),
         };
+        crate::labels::check_names(&written, &imports)?;
         crate::labels::check_wit(&manifest, &imports)?;
         if let Some(entry) = &mut manifest.entry
             && !entry.input_values.is_empty()

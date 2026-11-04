@@ -49,6 +49,11 @@
 
 **Clearer reports**
 
+- A misspelt function name in `[functions."…"]` or a plan (`db#qeury`,
+  `items#get` without its package, `get_many` for `get-many`) is an error
+  that names the function meant. Before, its labels and rules did nothing,
+  and an app with SQL injection could pass. A plan rule on a parameter the
+  function doesn't have is an error too.
 - A crash's title and `explain` name the cause ("Buffer too large for
   blocking-write-and-flush", "wasm `unreachable` instruction executed")
   instead of "error while executing at wasm backtrace:".

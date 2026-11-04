@@ -451,22 +451,40 @@ fn wit_path(ty: &Type, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn suggest<'a>(word: &str, candidates: impl Iterator<Item = &'a str>) -> String {
+pub(crate) fn suggest<'a>(word: &str, candidates: impl Iterator<Item = &'a str>) -> String {
     let best = candidates.map(|c| (distance(word, c), c)).filter(|(d, c)| *d <= 2.max(c.len() / 3)).min();
     best.map_or_else(String::new, |(_, c)| format!(" (did you mean {c}?)"))
 }
 
-fn distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut cur = vec![i + 1];
-        for (j, cb) in b.iter().enumerate() {
-            cur.push((prev[j] + usize::from(ca != *cb)).min(prev[j + 1] + 1).min(cur[j] + 1));
+/// Edits between two words: a letter added, dropped, changed, or two
+/// neighbours swapped (`qeury` is one edit from `query`).
+pub(crate) fn distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut d: Vec<Vec<usize>> = (0..=a.len())
+        .map(|i| {
+            (0..=b.len())
+                .map(|j| {
+                    if i == 0 {
+                        j
+                    } else if j == 0 {
+                        i
+                    } else {
+                        0
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let mut best = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + usize::from(a[i - 1] != b[j - 1]));
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(d[i - 2][j - 2] + 1);
+            }
+            d[i][j] = best;
         }
-        prev = cur;
     }
-    prev[b.len()]
+    d[a.len()][b.len()]
 }
 
 // ------------------------------------------------------------- expressions

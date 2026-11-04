@@ -167,6 +167,28 @@ impl Plan {
         Ok(())
     }
 
+    /// Checks the plan against the app's imports: a key that misspells a
+    /// function the app imports, or a rule on a parameter the function
+    /// doesn't have, would never apply. Other keys may describe functions
+    /// of the platform the app doesn't call.
+    pub fn check_wit(&self, imports: &[crate::wit::Interface]) -> Result<()> {
+        let keys: Vec<String> = self.0.keys().filter(|k| !k.starts_with('_')).cloned().collect();
+        if let Some((k, real)) = crate::labels::misspelling(&keys, imports) {
+            bail!("the plan names {k}, which the app doesn't import: did you mean {real}?");
+        }
+        let funcs: Vec<&crate::wit::FuncInfo> = imports.iter().flat_map(|i| &i.funcs).collect();
+        for (key, f) in self.0.iter().filter(|(k, _)| !k.starts_with('_')) {
+            let (i, n) = key.split_once('#').unwrap_or(("", key));
+            let Some(func) = funcs.iter().find(|x| x.key == fn_key(i, n)) else { continue };
+            for (i, r) in f.rules.iter().enumerate() {
+                if let Some(p) = r.when.keys().find(|p| !crate::labels::names_param(func, p)) {
+                    bail!("{key}: rule {i} matches the parameter {p}, but {} has no such parameter", func.signature());
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn get(&self, key: &str) -> Option<&FnPlan> {
         self.0.get(key).or_else(|| {
             self.0

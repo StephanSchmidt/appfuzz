@@ -1148,3 +1148,33 @@ fn a_url_is_downloaded_with_its_manifest_and_reviewed() {
     assert_eq!(code, 3);
     assert!(v["error"].as_str().unwrap().contains("bundled platform"), "{v}");
 }
+#[test]
+fn misspelt_function_names_are_refused() {
+    let f = Fixture::new(false);
+    // A platform describes functions the app doesn't call: no error.
+    let mut text = std::fs::read_to_string(&f.manifest).unwrap();
+    text.push_str("\n[functions.\"test:workflow/db#put\"]\neffect = \"write\"\n");
+    std::fs::write(&f.manifest, &text).unwrap();
+    assert_eq!(f.cli(&["inspect"]).0, 0);
+    // One without its package names nothing; the app imports db#get.
+    std::fs::write(&f.manifest, format!("{text}[functions.\"workflow/db#get\"]\nlatency_ms = 40\n")).unwrap();
+    let (code, r) = f.cli(&["inspect"]);
+    assert_eq!(code, 3, "{r}");
+    assert!(r["error"].as_str().unwrap().contains("did you mean test:workflow/db#get?"), "{r}");
+    // With an entry of its own, the near key is another function.
+    std::fs::write(&f.manifest, format!("{text}[functions.\"workflow/db#get\"]\nlatency_ms = 40\n[functions.\"test:workflow/db#get\"]\ncost = 2\n")).unwrap();
+    assert_eq!(f.cli(&["inspect"]).0, 0);
+    std::fs::write(&f.manifest, &text).unwrap();
+    // Plans too: a misspelt key or a rule on a parameter the function lacks.
+    let (code, r) = f.cli(&["run", "--plan", r#"{"_defaults": {"latency_ms": 2}, "db#get": {"return": 1}}"#]);
+    assert_eq!(code, 3, "{r}");
+    assert!(r["error"].as_str().unwrap().contains("did you mean test:workflow/db#get?"), "{r}");
+    let (code, r) = f.cli(&["run", "--plan", r#"{"test:workflow/db#get": {"rules": [{"when": {"idd": 1}, "return": 2}]}}"#]);
+    assert_eq!(code, 3, "{r}");
+    assert!(r["error"].as_str().unwrap().contains("parameter idd"), "{r}");
+    // One plan can describe the platform for several apps.
+    let plan = r#"{"test:workflow/db#put": {"return": 0}, "test:workflow/db#get": {"rules": [{"when": {"id": 1}, "return": 2}]}}"#;
+    let (code, r) = f.cli(&["run", "--plan", plan]);
+    assert_eq!(code, 0, "{r}");
+    assert_eq!(r["result"], 2, "{r}");
+}
