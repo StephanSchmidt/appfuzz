@@ -44,6 +44,14 @@
 - Invisible characters the request sent percent-encoded (`%E2%80%AE` in a
   query) are no `hidden_text` when the page shows them decoded.
 
+**Clearer reports**
+
+- A crash's title and `explain` name the cause ("Buffer too large for
+  blocking-write-and-flush", "wasm `unreachable` instruction executed")
+  instead of "error while executing at wasm backtrace:".
+- `last` is the run a command just showed, also when that run was stored
+  before.
+
 ## 0.5.0
 
 **Try it without an app of your own**

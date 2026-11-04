@@ -215,17 +215,16 @@ fn base_config() -> Config {
 
 const BACKTRACE_FRAMES: usize = 1000;
 
-/// An error message with its backtrace cut to the innermost frames and
-/// the trap reason (the last line).
+/// An error message: the cause on the first line, which titles and
+/// `explain` show, then the backtrace cut to its innermost frames.
 fn short_message(err: &wasmtime::Error) -> String {
-    let full = format!("{err:#}");
-    let lines: Vec<&str> = full.lines().collect();
-    if lines.len() <= 24 {
-        return full;
-    }
-    let mut out = lines[..20].join("\n");
-    out.push_str(&format!("\n    … {} more frames\n{}", lines.len() - 21, lines[lines.len() - 1]));
-    out
+    let Some(bt) = err.downcast_ref::<WasmBacktrace>() else { return format!("{err:#}") };
+    let frames = bt.to_string();
+    let header = frames.lines().next().unwrap_or_default();
+    let cause: Vec<String> = err.chain().map(|e| e.to_string()).filter(|e| !e.starts_with(header)).collect();
+    let lines: Vec<&str> = frames.lines().collect();
+    let frames = if lines.len() <= 21 { frames.clone() } else { format!("{}\n    … {} more frames", lines[..21].join("\n"), lines.len() - 21) };
+    if cause.is_empty() { frames } else { format!("{}\n{frames}", cause.join(": ")) }
 }
 
 /// An engine that reuses instance memory across runs. Mapping fresh

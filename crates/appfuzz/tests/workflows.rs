@@ -251,6 +251,18 @@ fn findings_are_listed_for_apps_with_built_in_labels() {
 }
 
 #[test]
+fn crashes_are_named_by_their_cause() {
+    let f = Fixture::new(false);
+    let wat = r#"(module (memory (export "memory") 1) (func (export "run") (param i32) (result i32) unreachable))"#;
+    std::fs::write(f.dir.join("app.wasm"), component("package test:workflow; world app { export run: func(n: u32) -> u32; }", wat)).unwrap();
+    let (_, run) = f.cli(&["run"]);
+    let crash = run["findings"].as_array().unwrap().iter().find(|v| v["kind"] == "crash").unwrap_or_else(|| panic!("{run}"));
+    assert!(crash["title"].as_str().unwrap().ends_with("crashes: wasm trap: wasm `unreachable` instruction executed"), "{crash}");
+    let (_, explained) = f.cli(&["explain", "last"]);
+    assert_eq!(explained["message"], "wasm trap: wasm `unreachable` instruction executed", "{explained}");
+}
+
+#[test]
 fn last_is_the_run_just_shown() {
     // A run already in the store is not run again, but it is the latest.
     let f = Fixture::new(false);
