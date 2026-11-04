@@ -171,6 +171,7 @@ fn from_str(text: &str, dir: &Path, component: Option<&str>) -> Result<Manifest>
     for key in ["fermyon:spin/key-value#[static]store.open", "spin:key-value/key-value#[static]store.open"] {
         m.functions.insert(key.into(), FunctionSpec { rules: denied("label", &c.key_value_stores), ..Default::default() });
     }
+    m.functions.insert("wasi:keyvalue/store#open".into(), FunctionSpec { rules: denied("identifier", &c.key_value_stores), ..Default::default() });
     for key in ["fermyon:spin/sqlite#[static]connection.open", "spin:sqlite/sqlite#[static]connection.open"] {
         m.functions.insert(key.into(), FunctionSpec { rules: denied("database", &c.sqlite_databases), ..Default::default() });
     }
@@ -353,6 +354,9 @@ greeting = "{{ greeting }}, world"
         let label = |l: &str| crate::plan::resolve_rules(&open.rules, &[("label".to_string(), json!(l))], None).is_some();
         assert!(!label("default"));
         assert!(label("other"));
+        let open = &m.functions["wasi:keyvalue/store#open"];
+        let opens = |l: &str| crate::plan::resolve_rules(&open.rules, &[("identifier".to_string(), json!(l))], None).is_none();
+        assert!(opens("default") && !opens("other"));
         let out = &m.functions[crate::wasi_http::CLIENT_KEY];
         let denied = |url: &str| crate::plan::resolve_rules(&out.rules, &[("url".to_string(), json!(url))], None).is_some();
         for ok in

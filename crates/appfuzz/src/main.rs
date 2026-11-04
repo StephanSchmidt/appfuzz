@@ -618,7 +618,7 @@ fn inspect(app: &App, with_wit: bool) -> Result<Value> {
         .filter(|i| !i.funcs.is_empty())
         .map(|i| {
             let granted = match i.kind {
-                ImportKind::Platform => i.name.is_empty() || m.grants_import(&i.name),
+                ImportKind::Platform => i.name.is_empty() || m.grants_interface(&i.name),
                 ImportKind::Wasi => m.grants_wasi(&i.name),
             };
             let funcs: Vec<Value> = i
@@ -651,7 +651,7 @@ fn inspect(app: &App, with_wit: bool) -> Result<Value> {
         .iter()
         .filter(|i| !i.funcs.is_empty())
         .filter(|i| match i.kind {
-            ImportKind::Platform => !i.name.is_empty() && !m.grants_import(&i.name),
+            ImportKind::Platform => !i.name.is_empty() && !m.grants_interface(&i.name),
             ImportKind::Wasi => !m.grants_wasi(&i.name),
         })
         .map(|i| i.name.as_str())

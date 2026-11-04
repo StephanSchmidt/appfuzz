@@ -627,6 +627,12 @@ a path). `appfuzz platform docs` prints the host API reference;
 `appfuzz platform check` checks a `platform.toml` against its WIT or witx and
 lists functions without a description.
 
+WASI's clocks, streams, files, sockets, random numbers and HTTP run in the
+sandbox. Other `wasi:` interfaces, such as `wasi:keyvalue`, `wasi:config` and
+`wasi:blobstore`, are services of the platform: each function is a host call
+like the platform's own, with generated results that a plan or rules can
+replace. `[grants] wasi` grants them like the rest of WASI.
+
 ### wasi:http handlers
 
 A component that exports `wasi:http/incoming-handler` (0.2.x) needs no
@@ -762,7 +768,7 @@ else the only one. Its `source` must be a local path.
 | HTTP trigger `route` (`/shop/...`) | `[app] base = "/shop"`; the request is `GET https://app.example/shop/` |
 | `allowed_outbound_hosts` | `[grants] hosts`: the host of each entry, `*.example.com` as `example.com` and its subdomains, `*` as any host; `self` and `localhost` are skipped, `{{ var }}` is filled from the component's variables or the entry skipped |
 | `[component.X.variables]` | rules on `fermyon:spin/variables#get`, `spin:variables/variables#get` (`name`) and `wasi:config/store#get` (`key`): a variable whose template uses an application variable with `secret = true` has `result = "secret"` and a generated value; one whose template resolves through defaults returns that text; an undeclared name is `undefined` (`ok(none)` for `wasi:config`) |
-| `key_value_stores` | rules on `store.open` (`label`): any other store is `access-denied` |
+| `key_value_stores` | rules on `store.open` (`label`) and `wasi:keyvalue/store#open` (`identifier`): any other store is `access-denied` |
 | `sqlite_databases` | rules on `connection.open` (`database`): any other database is `access-denied` |
 
 No `[grants] imports` or `wasi`: Spin links all of WASI and its own

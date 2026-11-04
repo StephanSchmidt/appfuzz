@@ -18,6 +18,10 @@
 
 **Spin**
 
+- Apps that call `wasi:keyvalue` or `wasi:config` (Spin 3, wasmCloud) run:
+  each call is a host call that plans and rules answer, the key-value
+  labels apply, and `key_value_stores` limits `wasi:keyvalue` stores too.
+  Before, the first call was reported as a crash.
 - `allowed_outbound_hosts` is enforced: a request to a host no entry allows
   is refused with `http-request-denied`, as on Spin. An `ssrf` whose request
   Spin refused is a warning that names the hosts the client can still pick;

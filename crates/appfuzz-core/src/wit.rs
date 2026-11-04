@@ -32,8 +32,10 @@ impl FuncInfo {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ImportKind {
-    /// A platform interface (anything not WASI).
+    /// A platform interface: simulated host functions. Also the WASI
+    /// interfaces the platform provides (`wasi:keyvalue`, `wasi:config`).
     Platform,
+    /// WASI the runtime provides: clocks, streams, files, sockets, HTTP.
     Wasi,
 }
 
@@ -49,6 +51,16 @@ pub fn is_wasi(name: &str) -> bool {
     name.starts_with("wasi:")
 }
 
+/// WASI packages the runtime provides (wasmtime-wasi, and appfuzz's
+/// wasi:http). Other WASI interfaces (`wasi:keyvalue`, `wasi:config`,
+/// `wasi:blobstore`) are the platform's services, simulated like its own.
+const RUNTIME_WASI: [&str; 7] = ["wasi:cli", "wasi:clocks", "wasi:filesystem", "wasi:http", "wasi:io", "wasi:random", "wasi:sockets"];
+
+/// Whether an import is WASI the runtime provides, not a platform service.
+pub fn is_runtime_wasi(name: &str) -> bool {
+    RUNTIME_WASI.contains(&name.split(['/', '@']).next().unwrap_or(name))
+}
+
 pub fn imports(engine: &Engine, component: &Component) -> Vec<Interface> {
     let mut out = Vec::new();
     let mut top = Vec::new();
@@ -62,7 +74,7 @@ pub fn imports(engine: &Engine, component: &Component) -> Vec<Interface> {
                         _ => None,
                     })
                     .collect();
-                let kind = if is_wasi(name) { ImportKind::Wasi } else { ImportKind::Platform };
+                let kind = if is_runtime_wasi(name) { ImportKind::Wasi } else { ImportKind::Platform };
                 out.push(Interface { name: name.to_string(), kind, funcs });
             }
             ComponentItem::ComponentFunc(ty) => {

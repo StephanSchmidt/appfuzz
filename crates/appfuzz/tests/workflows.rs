@@ -1178,3 +1178,30 @@ fn misspelt_function_names_are_refused() {
     assert_eq!(code, 0, "{r}");
     assert_eq!(r["result"], 2, "{r}");
 }
+#[test]
+fn platform_wasi_is_simulated() {
+    // wasi:keyvalue and wasi:config are the platform's services (Spin 3,
+    // wasmCloud): host functions like its own, not a crash.
+    let f = Fixture::new(false);
+    let wit = "package test:workflow;
+        package wasi:keyvalue@0.2.0-draft { interface atomics { increment: func(key: string, delta: u64) -> u64; } }
+        package wasi:config@0.2.0-draft { interface store { variant error { upstream(string), io(string) } get: func(key: string) -> result<option<string>, error>; } }
+        world app { import wasi:keyvalue/atomics@0.2.0-draft; import wasi:config/store@0.2.0-draft; export run: func(n: u32) -> u32; }";
+    let wat = r#"
+        (module
+          (import "wasi:keyvalue/atomics@0.2.0-draft" "increment" (func $inc (param i32 i32 i64) (result i64)))
+          (import "wasi:config/store@0.2.0-draft" "get" (func $get (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 16) "hits")
+          (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
+          (func (export "run") (param i32) (result i32)
+            (call $get (i32.const 16) (i32.const 4) (i32.const 64))
+            (i32.wrap_i64 (call $inc (i32.const 16) (i32.const 4) (i64.const 1)))))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    let (code, r) = f.cli(&["run", "--plan", r#"{"wasi:keyvalue/atomics#increment": {"return": 41}}"#]);
+    assert_eq!(code, 0, "{r}");
+    assert_eq!(r["result"], 41, "{r}");
+    assert_eq!(r["totals"]["host_calls"], 2, "{r}");
+    let (_, i) = f.cli(&["inspect"]);
+    assert!(i["imports"].as_array().unwrap().iter().all(|i| i["kind"] == "platform"), "{i}");
+}
