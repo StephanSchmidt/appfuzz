@@ -233,7 +233,19 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 .filter(|p| p.outcome != appfuzz_core::record::OutcomeKind::Ok)
                 .map(|p| json!({"func": p.func, "variant": p.variant, "outcome": p.outcome, "run": p.run}))
                 .collect();
-            Ok(json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, app, found)?}))
+            let mut out = json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, app, found)?});
+            if probes.is_empty() {
+                match func {
+                    // Asked for a function it doesn't call: nothing was checked.
+                    Some(f) => {
+                        out["note"] = json!(format!("no host function the app imports matches --fn {f}"));
+                        out["status"] = json!("incomplete");
+                        out["exit_code"] = json!(3);
+                    }
+                    None => out["note"] = json!("doesn't apply: the app imports no host functions whose values could vary"),
+                }
+            }
+            Ok(out)
         }
         Cmd::Probe { cmd: ProbeCmd::Pairs { run, export, spec } } => {
             let app = load()?;
@@ -273,7 +285,11 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 .filter(|p| p.outcome != appfuzz_core::record::OutcomeKind::Ok)
                 .map(|p| json!({"what": p.what, "outcome": p.outcome, "run": p.run}))
                 .collect();
-            Ok(json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, app, found)?}))
+            let mut out = json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, app, found)?});
+            if probes.is_empty() {
+                out["note"] = json!(format!("doesn't apply: {} takes no HTTP request (a uri and headers)", base.export));
+            }
+            Ok(out)
         }
         Cmd::Probe { cmd: ProbeCmd::Auth { export, spec } } => {
             let app = load()?;
@@ -303,7 +319,13 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 .filter(|p| p.outcome != appfuzz_core::record::OutcomeKind::Ok)
                 .map(|p| json!({"path": p.path, "what": p.what, "outcome": p.outcome, "run": p.run}))
                 .collect();
-            Ok(json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, app, found)?}))
+            let mut out = json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, app, found)?});
+            if probes.is_empty() {
+                out["note"] = json!(format!("doesn't apply: {} takes no HTTP request (headers that could carry credentials)", base.export));
+            } else if probes.iter().all(|p| p.what == "no credentials") {
+                out["note"] = json!("no path turned a request without credentials away, so there was nothing to forge");
+            }
+            Ok(out)
         }
         Cmd::Envelope { cmd: None, out, review, allow_warnings } => {
             let app = load()?;

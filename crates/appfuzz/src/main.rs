@@ -209,6 +209,8 @@ fn main() {
         "review" | "envelope check" | "check" | "replay" | "sequence run" | "sequence fuzz" | "sequence replay" | "acceptance run" | "probe faults" => {
             out["exit_code"].as_i64().unwrap_or(3) as i32
         }
+        // `--fn` that names no function: nothing was checked.
+        "probe values" => out["exit_code"].as_i64().unwrap_or(0) as i32,
         "run" | "call" if matches!(out["outcome"]["kind"].as_str(), Some("error" | "plan_error")) => 3,
         "run" if out["asserts"].as_object().is_some_and(|a| a.values().any(|v| v["status"] == "broken")) => 2,
         _ => 0,

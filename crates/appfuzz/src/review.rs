@@ -204,6 +204,12 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
                         row[k] = x.clone();
                     }
                 }
+                // Why a probe tried nothing (it doesn't apply to this app).
+                if name.starts_with("probe")
+                    && let Some(x) = v.get("note")
+                {
+                    row["note"] = x.clone();
+                }
                 if v["status"] == "incomplete" {
                     errors.push(format!("{name}: required analysis did not complete"));
                 }

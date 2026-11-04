@@ -87,6 +87,9 @@
 - `--human` shows a timeline with each host call's arguments in full, so
   the URL or SQL text of a finding is no longer cut off. `--view stack`
   without `--call` says which calls the run made.
+- A probe that tried nothing says why: `probe web` on an app that isn't an
+  HTTP handler, `probe auth` where no page needs credentials. `probe values
+  --fn` naming no function the app calls exits 3, as `probe faults` does.
 
 ## 0.5.0
 

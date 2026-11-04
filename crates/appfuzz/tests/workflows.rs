@@ -284,6 +284,31 @@ fn confirmed_findings_point_at_the_minimised_run() {
 }
 
 #[test]
+fn probes_that_do_not_apply_say_so() {
+    let f = Fixture::new(true);
+    for probe in ["web", "auth"] {
+        let (code, out) = f.cli(&["probe", probe]);
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(out["probes"], 0);
+        assert!(out["note"].as_str().unwrap().starts_with("doesn't apply: run takes no HTTP request"), "{out}");
+    }
+    let (code, out) = f.cli(&["probe", "values"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out["note"].as_str().unwrap().starts_with("doesn't apply"), "{out}");
+    let (_, review) = f.review();
+    let web = review["steps"].as_array().unwrap().iter().find(|s| s["step"] == "probe web").unwrap().clone();
+    assert!(web["note"].is_string(), "{web}");
+    // A function the app doesn't call: nothing was checked.
+    let f = Fixture::new(false);
+    let (code, out) = f.cli(&["probe", "values", "--fn", "missing"]);
+    assert_eq!(code, 3, "{out}");
+    assert_eq!(out["note"], "no host function the app imports matches --fn missing");
+    let (code, out) = f.cli(&["probe", "values", "--fn", "get"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out["note"].is_null(), "{out}");
+}
+
+#[test]
 fn last_is_the_run_just_shown() {
     // A run already in the store is not run again, but it is the latest.
     let f = Fixture::new(false);

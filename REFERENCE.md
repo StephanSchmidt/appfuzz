@@ -630,6 +630,12 @@ Commands print lossless JSON with suggested `next` commands. Exported artifacts
 command can read them unchanged. The old `--full` flag remains a compatibility
 no-op.
 
+A probe that tried nothing says why in `note`: `probe web` and `probe auth` on
+an export that takes no HTTP request, `probe auth` where no path turned away a
+request without credentials, `probe values` on an app without host functions.
+Those exit 0, and `review` copies the note into its step. A `--fn` that matches
+no host function (`probe values`, `probe faults`) checked nothing and exits 3.
+
 ## Platform files
 
 A component carries its own WIT. A plain module doesn't: its platform's
