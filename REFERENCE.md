@@ -775,7 +775,7 @@ the internal network are a fail either way.
 
 Without `appfuzz.toml`, appfuzz reads `spin.toml` from the current
 directory (`-m spin.toml` names it). An `appfuzz.toml` wins, and every
-command then carries a `warning` that `spin.toml` is ignored, until one of
+command then carries a `warnings` entry that `spin.toml` is ignored, until one of
 them goes or `-m appfuzz.toml` picks it; `--wasm` alone skips `spin.toml`. Only `spin_manifest_version = 2` is read. The
 component is `--component NAME`, else the only one with an HTTP trigger,
 else the only one. Its `source` must be a local path.

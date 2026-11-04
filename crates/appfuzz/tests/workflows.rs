@@ -317,13 +317,34 @@ fn an_ignored_spin_toml_is_named() {
         serde_json::from_slice(&out.stdout).unwrap()
     };
     let out = here(&["inspect"]);
-    assert!(out["warning"].as_str().unwrap().starts_with("spin.toml is ignored because appfuzz.toml is here"), "{out}");
+    assert!(out["warnings"][0].as_str().unwrap().starts_with("spin.toml is ignored because appfuzz.toml is here"), "{out}");
     let status = here(&[]);
     assert_eq!(status["state"]["manifest"], "appfuzz.toml", "{status}");
     // Picked on purpose: no warning.
-    assert!(here(&["--manifest", "appfuzz.toml", "inspect"])["warning"].is_null());
+    assert!(here(&["--manifest", "appfuzz.toml", "inspect"])["warnings"].is_null());
     std::fs::remove_file(f.dir.join("spin.toml")).unwrap();
-    assert!(here(&["inspect"])["warning"].is_null());
+    assert!(here(&["inspect"])["warnings"].is_null());
+}
+
+#[test]
+fn an_unreadable_run_file_is_left_out_with_a_warning() {
+    let f = Fixture::new(false);
+    let (_, run) = f.cli(&["run"]);
+    std::fs::write(f.dir.join("state/runs/0000broken.json"), b"{\"id\": \"0000broken\"}").unwrap();
+    let (code, status) = f.cli(&[]);
+    assert_eq!(code, 0, "{status}");
+    assert_eq!(status["state"]["runs"], 1, "{status}");
+    let w = status["warnings"][0].as_str().unwrap();
+    assert!(w.starts_with("1 stored run can't be read and was left out: ") && w.contains("0000broken.json"), "{w}");
+    let (code, shown) = f.cli(&["explain", "last"]);
+    assert_eq!(code, 0, "{shown}");
+    assert_eq!(shown["run"], run["run"]);
+    let (code, unexplored) = f.cli(&["unexplored"]);
+    assert_eq!(code, 0, "{unexplored}");
+    assert!(unexplored["warnings"][0].as_str().unwrap().contains("0000broken.json"), "{unexplored}");
+    // Asked for by name, the file is an error.
+    let (code, err) = f.cli(&["explain", "0000broken"]);
+    assert_eq!(code, 3, "{err}");
 }
 
 #[test]

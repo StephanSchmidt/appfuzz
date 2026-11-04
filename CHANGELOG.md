@@ -93,6 +93,10 @@
 - A probe that tried nothing says why: `probe web` on an app that isn't an
   HTTP handler, `probe auth` where no page needs credentials. `probe values
   --fn` naming no function the app calls exits 3, as `probe faults` does.
+- A stored run file appfuzz can't read (another version wrote it, or it is
+  damaged) is left out with a warning that names it. Before, every command
+  that reads stored runs failed on it, and the status showed no runs.
+  Warnings are a `warnings` list.
 
 ## 0.5.0
 

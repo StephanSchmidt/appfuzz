@@ -91,6 +91,9 @@ pub(crate) fn summary(path: &str, out: &Value) -> String {
 
 fn render(st: &Style, path: &str, out: &Value) -> String {
     let mut s = String::new();
+    for w in out["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        let _ = writeln!(s, "{} {}\n", st.badge("1;30;43", "WARNING"), wrap(w, 10, st.cols));
+    }
     if let Some(e) = out["error"].as_str() {
         let _ = writeln!(s, "{} {e}", st.badge("1;30;41", "ERROR"));
         for sub in out["subcommands"].as_array().into_iter().flatten() {
@@ -104,9 +107,6 @@ fn render(st: &Style, path: &str, out: &Value) -> String {
             }
         }
         return s;
-    }
-    if let Some(w) = out["warning"].as_str() {
-        let _ = writeln!(s, "{} {}\n", st.badge("1;30;43", "WARNING"), wrap(w, 10, st.cols));
     }
     match path {
         "review" => review(st, out, &mut s),

@@ -191,15 +191,20 @@ fn main() {
             if let Some(d) = guide::doc(&path) {
                 o["examples"] = json!(d.examples);
             }
+            let w = warnings(&cli_manifest, cli_remote);
+            if !w.is_empty() {
+                o["warnings"] = json!(w);
+            }
             emit(human, &path, &o);
             std::process::exit(3);
         }
     };
+    let w = warnings(&cli_manifest, cli_remote);
     if let Value::Object(o) = &mut out
         && !raw_output
-        && shadows_spin(&cli_manifest, cli_remote)
+        && !w.is_empty()
     {
-        o.insert("warning".into(), json!(SPIN_IGNORED));
+        o.insert("warnings".into(), json!(w));
     }
     if !path.is_empty()
         && let Value::Object(o) = &mut out
@@ -318,6 +323,30 @@ fn state(cli: &Cli) -> Value {
 
 const SPIN_IGNORED: &str = "spin.toml is ignored because appfuzz.toml is here: its allowed hosts, stores and secret variables don't apply. \
 Delete appfuzz.toml to review the Spin app as spin.toml describes it, or pass --manifest appfuzz.toml to keep this one.";
+
+/// What the reader should know about this command's inputs: a manifest
+/// ignored, stored runs left out.
+fn warnings(manifest: &Option<PathBuf>, remote: bool) -> Vec<String> {
+    let mut w = Vec::new();
+    if shadows_spin(manifest, remote) {
+        w.push(SPIN_IGNORED.to_string());
+    }
+    let skipped = appfuzz_core::store::skipped();
+    if !skipped.is_empty() {
+        let mut names: Vec<String> = skipped.iter().take(3).map(|p| p.display().to_string()).collect();
+        if skipped.len() > 3 {
+            names.push(format!("and {} more", skipped.len() - 3));
+        }
+        let (n, them) = if skipped.len() == 1 { ("1 stored run".to_string(), "it") } else { (format!("{} stored runs", skipped.len()), "them") };
+        w.push(format!(
+            "{n} can't be read and {} left out: {}. Another appfuzz version wrote {them}, or {} damaged; delete {them} to get rid of this warning.",
+            if skipped.len() == 1 { "was" } else { "were" },
+            names.join(", "),
+            if skipped.len() == 1 { "it is" } else { "they are" },
+        ));
+    }
+    w
+}
 
 /// appfuzz.toml was picked over a spin.toml next to it, without asking.
 fn shadows_spin(manifest: &Option<PathBuf>, remote: bool) -> bool {

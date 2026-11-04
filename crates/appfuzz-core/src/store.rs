@@ -33,7 +33,10 @@ impl RunStore {
         if !path.exists() {
             return Ok(None);
         }
-        Ok(Some(serde_json::from_slice(&std::fs::read(&path)?).with_context(|| format!("reading {}", path.display()))?))
+        Ok(Some(
+            serde_json::from_slice(&std::fs::read(&path)?)
+                .with_context(|| format!("{} is not a run this appfuzz can read (another version wrote it, or it is damaged)", path.display()))?,
+        ))
     }
 
     /// A run by id, unique id prefix, or `last`.
@@ -74,9 +77,29 @@ impl RunStore {
         Ok(out)
     }
 
+    /// Every stored run. A file that doesn't read as a run (another
+    /// appfuzz version wrote it, or it is damaged) is left out and noted
+    /// for [`skipped`], so one bad file doesn't stop every command.
     pub fn all(&self) -> Result<Vec<RunRecord>> {
-        self.ids()?.iter().filter_map(|id| self.get(id).transpose()).collect()
+        let mut out = Vec::new();
+        for id in self.ids()? {
+            match self.get(&id) {
+                Ok(Some(r)) => out.push(r),
+                Ok(None) => {}
+                Err(_) => {
+                    SKIPPED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(self.dir.join(format!("{id}.json")));
+                }
+            }
+        }
+        Ok(out)
     }
+}
+
+static SKIPPED: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// The run files [`RunStore::all`] left out in this process.
+pub fn skipped() -> Vec<PathBuf> {
+    SKIPPED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().cloned().collect()
 }
 
 /// Writes through a temporary file and a rename, so parallel runs never
