@@ -4,7 +4,7 @@
 # Downloads the prebuilt binary for this OS and CPU from the latest GitHub
 # release, checks its SHA-256 and puts it in ~/.local/bin.
 #
-#   APPFUZZ_VERSION=v0.1.0   install this release instead of the latest
+#   APPFUZZ_VERSION=v0.5.0   install this release instead of the latest
 #   APPFUZZ_INSTALL_DIR=dir  install here instead of ~/.local/bin
 #
 # Source: https://github.com/StephanSchmidt/appfuzz/blob/main/website/install.sh

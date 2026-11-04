@@ -4,8 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Try appfuzz on five small apps</title>
-<meta name="description" content="Five small WebAssembly apps with a bug each, hosted on appfuzz.dev. Install appfuzz and review one with a single command: an n+1, an XSS, two crashes and one that passes.">
+<meta name="description" content="Four small WebAssembly apps with a bug each and one without, hosted on appfuzz.dev. Install appfuzz and review one with a single command: an n+1, an XSS, two crashes and one that passes.">
 <link rel="canonical" href="https://appfuzz.dev/demo/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="appfuzz">
+<meta property="og:url" content="https://appfuzz.dev/demo/">
+<meta property="og:title" content="Try appfuzz on five small apps">
+<meta property="og:description" content="Install appfuzz and review a hosted WebAssembly app with one command: an n+1, an XSS, two crashes and one that passes.">
+<meta property="og:image" content="https://appfuzz.dev/og.png">
+<meta name="twitter:card" content="summary_large_image">
 <meta name="color-scheme" content="light">
 <meta name="theme-color" content="#ffffff">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -42,7 +49,7 @@
 
 <header class="frame demo-hero">
   <h1>Try it on an app with a bug.</h1>
-  <p class="sub">Each app below is a few lines of Rust with one bug that looks fine in a code review. Install appfuzz, paste a command, and watch it find the bug. No app, toolchain or config of your own needed.</p>
+  <p class="sub">Each app below is a few lines of Rust. Four have a bug that looks fine in a code review; one has none. Install appfuzz, paste a command, and watch it find the bug. No app, toolchain or config of your own needed.</p>
   <p class="install-label">1. Install on Linux or macOS</p>
   <div class="install">
     <code id="install-cmd"><span class="p">$</span> curl -fsSL https://appfuzz.dev/install.sh | sh</code>

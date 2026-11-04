@@ -91,12 +91,12 @@ curl -fsSL https://appfuzz.dev/install.sh | sh
 
 The script ([website/install.sh](website/install.sh)) downloads the binary
 from the latest [GitHub release](https://github.com/StephanSchmidt/appfuzz/releases),
-checks its SHA-256 and puts it in `~/.local/bin`. Set `APPFUZZ_VERSION=v0.4.0`
+checks its SHA-256 and puts it in `~/.local/bin`. Set `APPFUZZ_VERSION=v0.5.0`
 for a specific release or `APPFUZZ_INSTALL_DIR` for another directory.
 
 Or with Homebrew: `brew install stephanschmidt/appfuzz/appfuzz`
 
-Or build it with Rust:
+Or build it with Rust (1.85 or newer):
 
 ```sh
 cargo install --git https://github.com/StephanSchmidt/appfuzz appfuzz
@@ -192,13 +192,15 @@ Details: [REFERENCE.md](REFERENCE.md#review-budgets-and-exit-codes).
 Every finding comes with the request and backend answers that cause it.
 Time is simulated, so a backend that takes 200 ms or a timeout of ten
 minutes costs nothing real, and the same input always gives the same run.
+The search itself is random, so two reviews can list a few different
+warnings; every finding replays exactly.
 
 ## Digging into a finding
 
 ```sh
 appfuzz show last --view explanation         # what happened, in plain terms
 appfuzz show last --view calls --fn items    # the host calls it made
-appfuzz show last --view provenance --call 3 # where call 3's argument came from
+appfuzz show last --view provenance --call 2 # where call 2's argument came from
 appfuzz confirm <finding-id>                 # shrink it, save a case file
 appfuzz replay path/to/case.json --against-current   # is it fixed?
 ```
@@ -229,8 +231,8 @@ Without any configuration, every host function answers with values generated
 from its types, and the fuzzer varies them. That finds crashes, n+1 queries
 and unescaped output. To find more, tell appfuzz what your platform knows.
 
-**The manifest** (`appfuzz.toml`) says which export handles requests, what
-the app may import, and your production limits:
+**The manifest** (`appfuzz.toml`) says which file to review, what the app
+may import, and your production limits:
 
 ```toml
 [app]
@@ -361,7 +363,7 @@ version = 1
 
 [acceptance.checks.home]
 origin = "marketing"
-request = { method = "GET", path = "/", query = [], form = [], today = "2026-11-02", now = "08:00:00" }
+request = { method = "GET", path = "/", query = [], form = [], today = "2026-11-02", now = "08:00:00" }  # the fields of this app's request type
 expect = { selector = "$.status", equals = 200 }
 ```
 
@@ -570,7 +572,7 @@ adds a feature, and the review refuses it.
 | `crates/appfuzz-core` | engine: harness, simulated host, fuzzer, detectors |
 | `crates/appfuzz-core/platforms` | bundled platforms (Fastly) |
 | `crates/appfuzz` | the CLI |
-| `bench/apps` | 76 small apps, each with one bad pattern (or none) and its expected findings |
+| `bench/apps` | 77 small apps, each with one bad pattern (or none) and its expected findings |
 | `bench/lang` | the same app in Zig, TypeScript, JavaScript, Go, C# and Python |
 | `demos/fastly-hello` | Fastly's Rust starter kit, with a `Makefile` to build, serve and deploy it |
 | `website` | appfuzz.dev and its `install.sh` |

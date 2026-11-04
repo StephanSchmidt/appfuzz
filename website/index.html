@@ -33,7 +33,7 @@
   "url": "https://appfuzz.dev/",
   "description": "Fuzzer for WebAssembly components: runs an app against a simulated backend and reports crashes, XSS, n+1 queries and other bad patterns.",
   "applicationCategory": "DeveloperApplication",
-  "operatingSystem": "Linux, macOS, Windows",
+  "operatingSystem": "Linux, macOS",
   "license": "https://opensource.org/licenses/MIT",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
 }
@@ -251,7 +251,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
       <p>Each function runs in its own microVM that handles one request at a time. Not WebAssembly, but the same idea: isolation per tenant and request is the default, not a luxury.</p>
     </article>
   </div>
-  <p class="aside">Why this matters with agents: an app an agent wrote, or one a prompt injection talked into misbehaving, can only call what its WASM shell grants. No file system, no network, no other app's memory unless you gave it, and nothing left in memory for the next request. appfuzz checks what the app does with the grants it has.</p>
+  <p class="aside">Why this matters with agents: an app an agent wrote, or one a prompt injection talked into misbehaving, can only call what its Wasm sandbox grants. No file system, no network, no other app's memory unless you gave it, and nothing left in memory for the next request. appfuzz checks what the app does with the grants it has.</p>
 </section>
 
 <section id="search" class="frame sec speed">
@@ -272,7 +272,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 <pre><code><span class="p">$</span> appfuzz -j 1 fuzz --fresh --time 10s
 <span class="p">$</span> appfuzz -j 1 fuzz --fresh --time 10s \
     --internal-feedback</code></pre>
-      <p class="note">Internal feedback is off by default: it runs fewer requests a second, and on the 74 test apps it found nothing extra. Turn it on for parsers, checksums and computed checks. Reports show instrumented modules, skipped code and fallback reasons. Findings replay on the original Wasm.</p>
+      <p class="note">Internal feedback is off by default: it runs fewer requests a second, and on the 77 test apps it found nothing extra. Turn it on for parsers, checksums and computed checks. Reports show instrumented modules, skipped code and fallback reasons. Findings replay on the original Wasm.</p>
     </div>
   </div>
 </section>
@@ -319,7 +319,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
       <li><button role="tab" id="st-1" aria-controls="sp-1" aria-selected="true"><code>appfuzz inspect</code><span>What can this app touch? Its imports against what your platform grants, and risky code found without running it, like a database call inside a loop.</span></button></li>
       <li><button role="tab" id="st-2" aria-controls="sp-2" aria-selected="false" tabindex="-1"><code>appfuzz run</code><span>Does it work at all? One request against a fake backend: the page it returns and every call it makes. A quick check before the long search.</span></button></li>
       <li><button role="tab" id="st-3" aria-controls="sp-3" aria-selected="false" tabindex="-1"><code>appfuzz review</code><span>The one for CI. Search with empty lists, huge lists, errors and odd text, guided by host calls and output. Pass, warn, fail or incomplete, with an exit code for the build.</span></button></li>
-      <li><button role="tab" id="st-4" aria-controls="sp-4" aria-selected="false" tabindex="-1"><code>appfuzz explain</code><span>What do I fix? The worst run next to all the others: 64 times the calls of a normal request, one lookup per item. That loop is the bug.</span></button></li>
+      <li><button role="tab" id="st-4" aria-controls="sp-4" aria-selected="false" tabindex="-1"><code>appfuzz show</code><span>What do I fix? The worst run next to all the others: 64 times the calls of a normal request, one lookup per item. That loop is the bug.</span></button></li>
     </ol>
 
     <div class="term stack">
@@ -327,23 +327,24 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 <pre role="tabpanel" id="sp-1" aria-labelledby="st-1"><code><span class="p">$</span> appfuzz inspect
 {
   <span class="k">"exports"</span>: [ <span class="json-note" role="note">The function appfuzz runs</span>
-    "bench:web/handler#handle"
+    { "key": "bench:web/handler#handle", "sig": "handle: func(req: …) -> …" }
   ],
   <span class="k">"imports"</span>: [ <span class="json-note" role="note">The app's host dependencies</span>
-    "bench:web/items@0.1.0", "wasi:cli", "wasi:io", …
+    { "interface": "bench:web/items@0.1.0", "granted": true, "funcs": [ "all", "get" ] },
+    { "interface": "wasi:io/streams@0.2.12", … }, …
   ],
   <span class="k">"findings"</span>: [
     { <span class="k">"severity"</span>: <span class="info">"info"</span>, <span class="json-note" role="note">A clue to investigate</span>
       <span class="k">"kind"</span>: <span class="s">"host_call_in_loop"</span>,
-      <span class="k">"title"</span>: "handle calls bench:web/items#get inside a loop
-               (static; check with `scale`)" }
+      <span class="k">"title"</span>: "bench:web/handler@0.1.0#handle calls bench:web/items#get
+               inside a loop (static; check with `scale`)" }
   ],
-  <span class="k">"next"</span>: [ "appfuzz run", "appfuzz fuzz --time 2m" ]
+  <span class="k">"next"</span>: [ "appfuzz plan template > plan.json", "appfuzz run", … ]
 }</code></pre>
 <pre role="tabpanel" id="sp-2" aria-labelledby="st-2" hidden><code><span class="p">$</span> appfuzz run
 {
-  <span class="k">"run"</span>: "rd6d5fddc2a",
-  <span class="k">"outcome"</span>: <span class="ok">"ok"</span>, <span class="json-note" role="note">Finished without a crash</span>
+  <span class="k">"run"</span>: "ra84b5f1c9d",
+  <span class="k">"outcome"</span>: { <span class="k">"kind"</span>: <span class="ok">"ok"</span> }, <span class="json-note" role="note">Finished without a crash</span>
   <span class="k">"result"</span>: { <span class="k">"status"</span>: 200, <span class="k">"body"</span>: "&lt;ul&gt;&lt;li&gt;alpha grove&lt;/li&gt;&lt;/ul&gt;" },
   <span class="k">"totals"</span>: {
     <span class="k">"host_calls"</span>: 2, <span class="json-note" role="note">Calls to the backend</span>
@@ -351,31 +352,32 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
     <span class="k">"fuel"</span>: 10477, <span class="json-note" role="note">CPU work, in Wasm fuel</span>
     <span class="k">"virtual_ms"</span>: 2.01 <span class="json-note" role="note">Simulated request time</span>
   },
-  <span class="k">"next"</span>: [ "appfuzz explain rd6d5fddc2a", "appfuzz probe pairs rd6d5fddc2a" ]
+  <span class="k">"next"</span>: [ "appfuzz show ra84b5f1c9d --view explanation", … ]
 }</code></pre>
 <pre role="tabpanel" id="sp-3" aria-labelledby="st-3" hidden><code><span class="p">$</span> appfuzz review --time 10s
 {
   <span class="k">"verdict"</span>: <span class="fail">"fail"</span>, <span class="json-note" role="note">A failure was found</span>
   <span class="k">"exit_code"</span>: 2, <span class="json-note" role="note">Fails the CI build</span>
   <span class="k">"counts"</span>: {
-    <span class="k">"fail"</span>: 2, <span class="k">"warn"</span>: 3, <span class="k">"info"</span>: 1,
-    <span class="k">"confirmed"</span>: 5 <span class="json-note" role="note">Five reproducible cases</span>
+    <span class="k">"fail"</span>: 2, <span class="k">"warn"</span>: 4, <span class="k">"info"</span>: 1,
+    <span class="k">"confirmed"</span>: 6 <span class="json-note" role="note">Six reproducible cases</span>
   },
-  <span class="k">"coverage"</span>: { <span class="k">"kind"</span>: "internal_and_boundary_features", <span class="k">"unreached_call_sites"</span>: 0 },
+  <span class="k">"coverage"</span>: { <span class="k">"kind"</span>: "host_boundary_and_output_features", <span class="k">"unreached_call_sites"</span>: 0 },
   <span class="k">"findings"</span>: [
     { <span class="k">"id"</span>: "f62ff690b", <span class="k">"severity"</span>: <span class="fail">"fail"</span>, <span class="k">"kind"</span>: <span class="s">"n_plus_1"</span>,
-      <span class="k">"title"</span>: "calls to items#get grow as 1·n with n = length of
-               the list items#all returns; cost breaks its limit at n = 100" },
+      <span class="k">"title"</span>: "calls to bench:web/items#get grow as 1·n with n = length
+               of the list bench:web/items#all returns; cost breaks its
+               limit at n = 100" },
     { <span class="k">"id"</span>: "fad47d743", <span class="k">"severity"</span>: <span class="fail">"fail"</span>, <span class="k">"kind"</span>: <span class="s">"over_budget"</span>,
-      <span class="k">"title"</span>: "handle uses 129 cost, the limit is 100" },
+      <span class="k">"title"</span>: "bench:web/handler#handle uses 129 cost, the limit is 100" },
     { <span class="k">"id"</span>: "fe035e3e3", <span class="k">"severity"</span>: <span class="warn">"warn"</span>, <span class="k">"kind"</span>: <span class="s">"redundant_calls"</span>,
-      <span class="k">"title"</span>: "items#get: 13 of 50 calls repeat earlier calls
+      <span class="k">"title"</span>: "bench:web/items#get: 2 of 4 calls repeat earlier calls
                with the same arguments" },
     …
   ],
-  <span class="k">"next"</span>: [ "appfuzz explain rff6825faed" ]
+  <span class="k">"next"</span>: [ "appfuzz show rb8ddf8cf14 --view explanation", … ]
 }</code></pre>
-<pre role="tabpanel" id="sp-4" aria-labelledby="st-4" hidden><code><span class="p">$</span> appfuzz explain rff6825faed
+<pre role="tabpanel" id="sp-4" aria-labelledby="st-4" hidden><code><span class="p">$</span> appfuzz show rb8ddf8cf14 --view explanation
 {
   <span class="k">"status"</span>: 200,
   <span class="k">"calls"</span>: {
@@ -383,7 +385,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
     <span class="k">"bench:web/items#get"</span>: 128 <span class="json-note" role="note">One extra lookup per item</span>
   },
   <span class="k">"vs_stored_runs"</span>: {
-    <span class="k">"runs"</span>: 1863, <span class="json-note" role="note">Compared with stored runs</span>
+    <span class="k">"runs"</span>: 1876, <span class="json-note" role="note">Compared with stored runs</span>
     <span class="k">"unusual"</span>: [
       "host_calls is 64.5× the median",
       "virtual_ms is 64.34× the median",
@@ -392,10 +394,11 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
   },
   <span class="k">"findings"</span>: [
     { <span class="k">"severity"</span>: <span class="fail">"fail"</span>, <span class="k">"kind"</span>: <span class="s">"over_budget"</span>,
-      <span class="k">"title"</span>: "handle uses 129 cost, the limit is 100" },
+      <span class="k">"title"</span>: "bench:web/handler#handle uses 129 cost, the limit is 100" },
     { <span class="k">"severity"</span>: <span class="warn">"warn"</span>, <span class="k">"kind"</span>: <span class="s">"chatty"</span>,
-      <span class="k">"title"</span>: "items#get is called for each element items#all
-               returned (128 calls for 128 elements)" }
+      <span class="k">"title"</span>: "bench:web/items#get is called for each element
+               bench:web/items#all returned (128 calls for 128 elements)" },
+    …
   ]
 }</code></pre>
     </div>
@@ -535,7 +538,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
 <section class="frame sec">
   <div class="sec-head">
     <h2>Bugs you would approve in a review.</h2>
-    <p>Each looks fine at a glance. Below each one is what appfuzz tells you, word for word. They come from appfuzz's bench of 76 test apps, most with one planted bug.</p>
+    <p>Each looks fine at a glance. Below each one is what appfuzz tells you, with names shortened. They come from appfuzz's bench of 77 test apps, most with one planted bug.</p>
   </div>
   <div class="ex-list">
     <div class="ex">
@@ -583,7 +586,7 @@ assert = <span class="str">"size(rows) == size(items)"</span></code></pre>
   </div>
   <dl class="facts-list">
     <div><dt>Checked on every request</dt><dd>Not one test at the end. <code>fuzz</code> and <code>review</code> check each assert against every request they try, so it breaks wherever the search finds the input.</dd></div>
-    <div><dt>Goes for the edge</dt><dd>An assert that holds at 99 but not at 101 tells the search where to look. appfuzz keeps the inputs that come closest to breaking it and tries the limit and its neighbours.</dd></div>
+    <div><dt>Goes for the edge</dt><dd>An assert that holds at 99 but not at 101 tells the search where to look. appfuzz keeps the inputs that come closest to breaking it and tries the limit and its neighbors.</dd></div>
     <div><dt>Flags asserts that test nothing</dt><dd>appfuzz changes the values an assert reads. If it still holds, the assert only restates the code, and you get a warning instead of a false sense of safety.</dd></div>
   </dl>
 </section>
