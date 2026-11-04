@@ -263,14 +263,18 @@ pub const DOCS: &[Doc] = &[
     },
     Doc {
         path: "envelope",
-        examples: &["appfuzz envelope", "appfuzz envelope --out shipped/envelope.json"],
-        output: "envelope.json from every stored run: per host function the most calls, call sites and destinations; output destinations; scripts; the most fuel, cost, latency and memory; call sites no run reached",
+        examples: &[
+            "appfuzz envelope --out shipped/envelope.json",
+            "appfuzz envelope --review <review id> --out shipped/envelope.json",
+            "appfuzz envelope --allow-warnings",
+        ],
+        output: "envelope.json from the runs of one complete review of this build and contract, the latest unless --review names its id (`session` in the review output); the review must pass (--allow-warnings accepts warn). Per host function the most calls, call sites and destinations; output destinations; scripts; the most fuel, cost, latency and memory; call sites no run reached",
         next: "ship envelope.json with the app; `envelope check <trace>` on production traces",
     },
     Doc {
         path: "envelope check",
         examples: &["appfuzz envelope check last", "appfuzz envelope check trace.json --envelope shipped/envelope.json"],
-        output: "outside_envelope findings for a trace (a stored run or a JSON trace) and a verdict; exit code 0 pass, 1 warn, 2 fail",
+        output: "outside_envelope findings for a trace (a stored run or a JSON trace) and a verdict; exit code 0 pass, 1 warn, 2 fail, 3 incomplete/error",
         next: "a new destination or call site: `provenance <run> --call <n>`; `unexplored` for the code behind it",
     },
     Doc {
@@ -338,7 +342,7 @@ pub const DOCS: &[Doc] = &[
 
 pub const WORKFLOWS: &[(&str, &[&str])] = &[
     ("review in one go (CI)", &["appfuzz review --time 2m", "appfuzz show <run> --view explanation"]),
-    ("start", &["appfuzz inspect", "appfuzz run", "appfuzz fuzz --time 2m", "appfuzz findings --min warn", "appfuzz confirm <finding id>"]),
+    ("step by step", &["appfuzz inspect", "appfuzz run", "appfuzz fuzz --time 2m", "appfuzz findings --min warn", "appfuzz confirm <finding id>"]),
     (
         "understand a finding",
         &[

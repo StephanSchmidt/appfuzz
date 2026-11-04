@@ -304,16 +304,20 @@ fn state(cli: &Cli) -> Value {
     st["runs"] = json!(runs.len());
     st["corpus"] = json!(corpus);
     st["findings"] = json!({"fail": count(Severity::Fail), "warn": count(Severity::Warn), "info": count(Severity::Info), "confirmed": findings.iter().filter(|f| f.confirmed.is_some()).count()});
+    let contract = m.fingerprint();
+    let reviewed =
+        review::sessions(&cli.state, &review::wasm_id(m.wasm_path())).unwrap_or_default().iter().any(|s| s.component == hash && s.contract == contract);
     let mut next = Vec::new();
+    if !reviewed {
+        next.push("appfuzz review".to_string());
+    }
     if runs.is_empty() {
-        next.extend(["appfuzz inspect".to_string(), "appfuzz run".into(), "appfuzz fuzz --time 2m".into()]);
+        // Step by step instead.
+        next.extend(["appfuzz inspect".to_string(), "appfuzz run".into()]);
     } else {
         let mut open: Vec<&Finding> = findings.iter().filter(|f| f.confirmed.is_none() && f.severity > Severity::Info && f.run.is_some()).collect();
         open.sort_by_key(|f| std::cmp::Reverse(f.severity));
         next.extend(open.iter().take(2).map(|f| format!("appfuzz confirm {}", f.id)));
-        if corpus == 0 {
-            next.push("appfuzz fuzz --time 2m".into());
-        }
         next.push("appfuzz findings --min warn".into());
         next.push("appfuzz unexplored".into());
     }
@@ -848,7 +852,13 @@ mod tests {
         let all = guide::DOCS.iter().flat_map(|d| d.examples.iter()).chain(guide::WORKFLOWS.iter().flat_map(|(_, s)| s.iter()));
         for e in all {
             // Placeholders stand for ids.
-            let e = e.replace("<finding id>", "f1").replace("<run a>", "r1").replace("<run b>", "r2").replace("<run>", "r1").replace("<n>", "3");
+            let e = e
+                .replace("<finding id>", "f1")
+                .replace("<review id>", "review-1-2")
+                .replace("<run a>", "r1")
+                .replace("<run b>", "r2")
+                .replace("<run>", "r1")
+                .replace("<n>", "3");
             let e = e.replace("<first different call>", "3").replace("<host fn>", "x").replace("<key>", "k").replace("<hinted value>", "v");
             let words = remote::rewrite_args(guide::words(e.trim_end_matches(" > plan.json")));
             let m = command().try_get_matches_from(&words).unwrap_or_else(|err| panic!("example `{e}` does not parse: {err}"));

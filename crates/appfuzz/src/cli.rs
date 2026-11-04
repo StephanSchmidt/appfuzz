@@ -49,10 +49,13 @@ pub(crate) struct Cli {
 pub(crate) enum Cmd {
     /// Everything in one go: a verdict, confirmed findings, exit code 0/1/2/3.
     ///
-    /// Runs inspect, run, probe values, probe times, amplify and a
-    /// time-boxed fuzz (with pair checks), confirms the worst findings, and
-    /// reports coverage and the domains the output refers to. Exit code 0:
-    /// pass, 1: warn findings, 2: fail findings, 3: incomplete/error.
+    /// Runs inspect, run, the manifest's request sequences, probe values,
+    /// probe times, probe web, amplify, a time-boxed fuzz (with pair
+    /// checks), probe auth and the saved acceptance checks. It tries the
+    /// failing inputs of earlier reviews again, confirms the worst
+    /// findings, and reports coverage and the domains the output refers
+    /// to. Exit code 0: pass, 1: warn findings, 2: fail findings, 3:
+    /// incomplete/error.
     Review {
         /// Fuzzing time budget, excluding sequences, probes, scaling and confirmation.
         #[arg(long, default_value = "60s")]

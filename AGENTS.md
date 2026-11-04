@@ -74,14 +74,16 @@ the app's world, and each WIT export is one export to review with
 
 ## 2. Order of work
 
-1. **`inspect`**: exports, imports, grants, static findings (ungranted or
-   unused imports, host calls inside loops).
+1. **`inspect`**: exports, imports, grants, static findings (ungranted
+   imports, unused grants, host calls inside loops).
 2. **`run`**: one request. Does it work at all? Read `result`, `calls`,
    `totals`.
-3. **`review --time 2m`**: everything in one go. It runs probe values and
-   times, amplify, and a fuzz campaign, then confirms the worst findings.
-   The verdict and exit code are 0 pass, 1 warn, 2 fail, 3 incomplete/error. In CI this is all
-   you need.
+3. **`review --time 2m`**: everything in one go. It runs the manifest's
+   request sequences, probe values, times and web, amplify, a fuzz
+   campaign, probe auth and the saved acceptance checks, then confirms the
+   worst findings. `--time` is the fuzzing budget, 60s without it. The
+   verdict and exit code are 0 pass, 1 warn, 2 fail, 3 incomplete/error.
+   In CI this is all you need.
 4. For each fail or warn finding: **`explain <run>`**, then the drill-down
    commands below. `confirm <id>` makes it reproducible and small and
    writes a case file; the finding then points at the small run. Lists shrink to `generate: {list_len: N}` with
@@ -291,7 +293,8 @@ and `confirm <id>` makes it reproducible.
 
 | Kind | Means |
 |------|-------|
-| `crash`, `crash_on_host_value`, `stack_overflow`, `hang` | the app traps (on a request, or on an odd value a host function returned), recurses too deep, or never returns |
+| `crash`, `crash_on_host_value`, `crash_at_time`, `stack_overflow`, `hang`, `hang_on_host_value`, `hang_at_time` | the app traps, recurses too deep, or never returns: on a request, on an odd value a host function returned, or at some clock time |
+| `fails_at_size` | the app crashes or hangs once a host list or request field reaches some size, and works below it |
 | `over_budget` | fuel, memory, cost or latency above the manifest's limits |
 | `n_plus_1`, `input_amplification`, `nested_fan_out` | host calls grow with a host list or a request field (one loop, or a loop in a loop) |
 | `cpu_blowup`, `memory_blowup`, `output_amplification`, `payload_amplification` | superlinear growth of fuel, memory, output or host arguments |
@@ -309,9 +312,20 @@ and `confirm <id>` makes it reproducible.
 | `foreign_user_access`, `missing_owner_check` | a user id that is not the caller's goes to a host call; another user's record shows in a page (§4 identity) |
 | `write_on_safe_method`, `repeated_write`, `partial_write` | a change on GET, the same change twice, a change that stays when a later one fails (§4 effects) |
 | `ungranted_import`, `ungranted_call`, `unused_grant` | imports versus the manifest's grants |
-| `check_failed` | a property from `check` broke |
+| `check_failed`, `acceptance_failed`, `sequence_check_failed` | a property from `check`, a saved `[acceptance]` check or a sequence invariant broke |
 | `weak_assert` | a saved assert still holds when its values change: it restates the code or tests nothing |
 | `invalid_host_argument` | an actual guest-to-host argument violates its platform-declared semantic domain |
+
+Experimental kinds, marked `experimental` in reports, look for hostile code:
+
+| Kind | Means |
+|------|-------|
+| `agent_directed_text`, `hidden_text` | text in the output, logs or host arguments that addresses an AI agent or reviewer, or hides in invisible characters |
+| `encoded_flow` | a request or host value leaves encoded (base64, hex, reversed) where its plain form would be a finding, or goes into a write or external call |
+| `constant_payload` | a write or external call carries a random-looking blob from the app's own code (needs `effect` labels) |
+| `unexpected_destination`, `probing` | a URL or host call aimed at a host the grants don't list or at the internal network; one run that names many destinations of its own |
+| `dormant_code` | host calls in code no run reached, near odd large constants, hash constants or times |
+| `outside_envelope` | a trace does more than the reviewed envelope allows (`envelope check`) |
 
 Findings are judged against the manifest's limits. If a limit is wrong,
 fix the manifest. Don't explain the finding away.

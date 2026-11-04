@@ -160,7 +160,8 @@ appfuzz review --time 2m
 | 2 | failures |
 | 3 | incomplete, or a tool or configuration error: never a pass |
 
-`--time` is the fuzzing budget; probes and confirming findings come on top.
+`--time` is the fuzzing budget (60s without it); probes and confirming
+findings come on top.
 Repeated reviews of the same build re-test every failure found before, so a
 bug that was found once doesn't slip through on a later run. For
 reproducible search, run `appfuzz -j 1 review --fresh --search-seed 7 --runs 2000`.
@@ -577,7 +578,7 @@ adds a feature, and the review refuses it.
 | `crates/appfuzz-core` | engine: harness, simulated host, fuzzer, detectors |
 | `crates/appfuzz-core/platforms` | bundled platforms (Fastly) |
 | `crates/appfuzz` | the CLI |
-| `bench/apps` | 77 small apps, each with one bad pattern (or none) and its expected findings |
+| `bench/apps` | 91 small apps, each with one bad pattern (or none) and its expected findings |
 | `bench/lang` | the same app in Zig, TypeScript, JavaScript, Go, C# and Python |
 | `demos/fastly-hello` | Fastly's Rust starter kit, with a `Makefile` to build, serve and deploy it |
 | `website` | appfuzz.dev and its `install.sh` |

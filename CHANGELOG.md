@@ -97,6 +97,10 @@
   damaged) is left out with a warning that names it. Before, every command
   that reads stored runs failed on it, and the status showed no runs.
   Warnings are a `warnings` list.
+- `appfuzz` alone suggests `review` until this build has had one, before
+  the step-by-step commands. `review --help` and AGENTS.md list every step
+  review runs, and AGENTS.md lists every finding kind, the experimental
+  ones too.
 
 ## 0.5.0
 
