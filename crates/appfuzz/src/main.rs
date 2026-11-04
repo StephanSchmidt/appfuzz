@@ -169,9 +169,6 @@ fn main() {
     if let Some(n) = cli.jobs {
         let _ = rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global();
     }
-    if human && let Some(Cmd::Review { time, .. }) = &cli.cmd {
-        human::starting(time);
-    }
     let out = if cli.cmd.is_none() { Ok(guide::overview(state(&cli), commands(&command, ""))) } else { run(cli) };
     let mut out = match out {
         Ok(v) => v,

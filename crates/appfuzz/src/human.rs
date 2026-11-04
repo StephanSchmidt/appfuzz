@@ -112,6 +112,7 @@ fn render(st: &Style, path: &str, out: &Value) -> String {
             findings(st, out, &mut s);
         }
         "explain" | "show" if out.get("vs_stored_runs").is_some() => explain(st, out, &mut s),
+        "" if out.get("workflows").is_some() => overview(st, out, &mut s),
         _ => generic(st, path, out, &mut s),
     }
     next(st, out, &mut s);
@@ -291,6 +292,46 @@ fn next(st: &Style, out: &Value, s: &mut String) {
     for n in list {
         let _ = writeln!(s, "  {} {}", st.dim("›"), st.cmd(n));
     }
+}
+
+/// `appfuzz` alone: what to run next, the usual workflows, every command.
+fn overview(st: &Style, out: &Value, s: &mut String) {
+    let _ = writeln!(
+        s,
+        "{} {}  {}",
+        st.badge("1;30;46", "APPFUZZ"),
+        st.bold(out["appfuzz"].as_str().unwrap_or("")),
+        st.dim("fuzzes WebAssembly apps against a simulated backend")
+    );
+    let suggested: Vec<&str> = out["state"]["suggested"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    if !suggested.is_empty() {
+        let _ = writeln!(s, "\n{}", st.bold("Start"));
+        for x in suggested {
+            let _ = writeln!(s, "  {} {}", st.dim("›"), st.cmd(x));
+        }
+        let _ = writeln!(s, "  {} {}", st.dim("›"), st.cmd("appfuzz --human https://appfuzz.dev/demo/chatty.wasm"));
+    }
+    let workflows: Vec<&Value> = out["workflows"].as_array().into_iter().flatten().collect();
+    if !workflows.is_empty() {
+        let _ = writeln!(s, "\n{}", st.bold("Workflows"));
+        let width = workflows.iter().filter_map(|w| w["name"].as_str()).map(|n| n.chars().count()).max().unwrap_or(0);
+        for w in workflows {
+            let steps: Vec<&str> = w["steps"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            let name = w["name"].as_str().unwrap_or("");
+            let _ = writeln!(s, "  {}  {}", st.bold(&format!("{name:<width$}")), st.cmd(&wrap(&steps.join(" → "), 2 + width + 2, st.cols)));
+        }
+    }
+    let commands: Vec<&Value> = out["commands"].as_array().into_iter().flatten().collect();
+    if !commands.is_empty() {
+        let _ = writeln!(s, "\n{}", st.bold("Commands"));
+        let width = commands.iter().filter_map(|c| c["command"].as_str()).map(|n| n.chars().count()).max().unwrap_or(0);
+        for c in commands {
+            let name = c["command"].as_str().unwrap_or("");
+            let what = c["what"].as_str().unwrap_or("");
+            let _ = writeln!(s, "  {}  {}", st.cmd(&format!("{name:<width$}")), wrap(what, 2 + width + 2, st.cols));
+        }
+    }
+    let _ = writeln!(s, "\n{}", st.dim("Details and examples: appfuzz <command> --help. Without --human, every command prints JSON."));
 }
 
 /// Any other command: its JSON laid out for reading.
@@ -585,6 +626,24 @@ mod tests {
         let mut s = String::new();
         findings(&st, &out, &mut s);
         assert_eq!(s, "\n  ✗ fail  slow_host_sensitivity\n          handle takes 321 ms (limit 200) when\n          get answers in 20 ms\n");
+    }
+
+    #[test]
+    fn the_overview_lists_where_to_start_workflows_and_commands() {
+        let out = json!({
+            "appfuzz": "0.5.0", "state": {"suggested": ["appfuzz review"]},
+            "workflows": [{"name": "start", "steps": ["appfuzz inspect", "appfuzz run"]}],
+            "commands": [{"command": "review", "what": "Everything in one go"}, {"command": "run", "what": "One request"}]
+        });
+        let plain = render(&PLAIN, "", &out);
+        for line in [
+            "[APPFUZZ] 0.5.0  fuzzes WebAssembly apps against a simulated backend\n",
+            "Start\n  › appfuzz review\n",
+            "  start  appfuzz inspect → appfuzz run\n",
+            "  review  Everything in one go\n  run     One request\n",
+        ] {
+            assert!(plain.contains(line), "{line:?} in\n{plain}");
+        }
     }
 
     #[test]

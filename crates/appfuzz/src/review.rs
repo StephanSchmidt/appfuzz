@@ -42,6 +42,9 @@ pub struct Session {
 
 pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
     let app = App::load(load_manifest(cli)?)?;
+    if crate::human::wanted(cli.human) {
+        crate::human::starting(&o.time);
+    }
     let id = format!("review-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos());
     let state = cli.state.join("review-runs").join(&id);
     let store = RunStore::new(&state);
