@@ -20,11 +20,17 @@ fn component(wit: &str, wat: &str) -> Vec<u8> {
     wit_component::embed_component_metadata(&mut module, &resolve, world, wit_component::StringEncoding::UTF8, false).unwrap();
     wit_component::ComponentEncoder::default().module(&module).unwrap().validate(true).encode().unwrap()
 }
-fn app(wit: &str, wat: &str) -> App {
+/// One search thread, so seeds decide what a campaign finds. Every test
+/// calls it before its first `App`: building one asks rayon for its thread
+/// count, which starts the global pool with the default size.
+fn one_thread() {
     static POOL: std::sync::Once = std::sync::Once::new();
     POOL.call_once(|| {
-        rayon::ThreadPoolBuilder::new().num_threads(1).build_global().unwrap();
+        let _ = rayon::ThreadPoolBuilder::new().num_threads(1).build_global();
     });
+}
+fn app(wit: &str, wat: &str) -> App {
+    one_thread();
     let mut manifest = Manifest::for_wasm(Path::new("test.wasm"));
     manifest.limits.fuel = 100_000;
     App::from_bytes(manifest, component(wit, wat)).unwrap()
@@ -141,6 +147,7 @@ fn opaque_nested_components_report_fallback_and_keep_fuzzing_original() {
       (export "run" (func $run)))"#,
     )
     .unwrap();
+    one_thread();
     let app = App::from_bytes(Manifest::for_wasm(Path::new("nested.wasm")), bytes).unwrap();
     let (report, _) = campaign(&app, vec![json!(1)], true, 1, 10, None);
     assert_eq!(report.feedback.mode, "boundary");
