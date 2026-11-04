@@ -401,9 +401,9 @@ footer { border-top: 1px solid var(--rule); }
 .why-how { display: block; margin-top: 4px; }
 .why-yes .why-st { border-left-color: var(--green); }
 .why-yes .why-st b { color: var(--green); }
-.why-part .why-st { border-left-color: var(--amber); }
-.why-part .why-st b { color: var(--amber); }
-.why-yes .why-n, .why-part .why-n { color: var(--ink); }
+.why-gate .why-st { border-left-color: var(--ink); }
+.why-gate .why-st b { color: var(--ink); }
+.why-yes .why-n { color: var(--ink); }
 @media (max-width: 700px) {
   .why li { grid-template-columns: 32px minmax(0, 1fr); gap: 8px 14px; }
   .why .why-st { grid-column: 2; }
