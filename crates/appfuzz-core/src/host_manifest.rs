@@ -100,6 +100,11 @@ pub struct Capability {
 /// Platforms bundled with appfuzz, by name.
 const BUILTIN: &[(&str, &str)] = &[("fastly", include_str!("../platforms/fastly/platform.toml"))];
 
+/// Whether `name` is a platform bundled with appfuzz (`fastly`).
+pub fn is_bundled(name: &str) -> bool {
+    BUILTIN.iter().any(|(n, _)| *n == name)
+}
+
 impl HostManifest {
     pub fn parse(text: &str, dir: &Path) -> Result<Self> {
         let mut h: HostManifest = toml::from_str(text)?;

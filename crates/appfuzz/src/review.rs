@@ -63,6 +63,8 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
             full: true,
             jobs: cli.jobs,
             fast: cli.fast,
+            allow_http: cli.allow_http,
+            remote: cli.remote,
             cmd: Some(cmd),
         };
         let result = crate::run_with_app(c, Some(&app));
@@ -276,6 +278,8 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
             full: true,
             jobs: cli.jobs,
             fast: cli.fast,
+            allow_http: cli.allow_http,
+            remote: cli.remote,
             cmd: Some(Cmd::Confirm { target: f.id.clone(), finding: None, times: 3, max_runs: 500 }),
         };
         match crate::run_with_app(c, Some(&app)) {

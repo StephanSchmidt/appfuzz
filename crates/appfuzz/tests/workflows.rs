@@ -1014,3 +1014,86 @@ fn envelopes_are_bound_to_the_acceptance_suite_they_were_reviewed_with() {
     assert_eq!(f.cli(&["envelope", "--review", &id, "--out", path]).0, 3);
     assert_eq!(f.cli(&["envelope", "check", "last", "--envelope", path]).0, 3);
 }
+
+/// Serves `files` over plain HTTP on a free port; unknown paths are 404.
+fn serve(files: Vec<(&'static str, Vec<u8>)>) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let path = line.split(' ').nth(1).unwrap_or("").to_string();
+            loop {
+                let mut h = String::new();
+                if reader.read_line(&mut h).unwrap() <= 2 {
+                    break;
+                }
+            }
+            let mut s = stream;
+            match files.iter().find(|(p, _)| *p == path) {
+                Some((_, body)) => {
+                    write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                    s.write_all(body).unwrap();
+                }
+                None => write!(s, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap(),
+            }
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[test]
+fn a_url_is_downloaded_with_its_manifest_and_reviewed() {
+    let f = Fixture::new(false);
+    let wasm = std::fs::read(f.dir.join("app.wasm")).unwrap();
+    let manifest = std::fs::read_to_string(&f.manifest).unwrap().replace("cost_per_request = 100", "cost_per_request = 0");
+    let base = serve(vec![
+        ("/app.wasm", wasm.clone()),
+        ("/app.toml", manifest.into_bytes()),
+        ("/bare.wasm", wasm),
+        ("/text.wasm", b"hello".to_vec()),
+        ("/local.wasm", std::fs::read(f.dir.join("app.wasm")).unwrap()),
+        ("/local.toml", b"[app]\nwasm = \"x.wasm\"\nplatform = \"/etc/platform.toml\"\n".to_vec()),
+    ]);
+    let cache = f.dir.join("cache");
+    let cli = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_appfuzz")).env("APPFUZZ_CACHE", &cache).current_dir(&f.dir).args(args).output().unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{args:?}: {e}: {}", String::from_utf8_lossy(&out.stderr)));
+        (out.status.code().unwrap(), v, String::from_utf8_lossy(&out.stderr).to_string())
+    };
+    let url = format!("{base}/app.wasm");
+
+    // Plain http needs --allow-http.
+    let (code, v, _) = cli(&[&url]);
+    assert_eq!(code, 3, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("--allow-http"), "{v}");
+
+    // A URL in place of a command reviews it, with the manifest next to it:
+    // its cost limit of 0 fails the one host call. ./appfuzz.toml is ignored.
+    let (code, v, err) = cli(&["-j", "1", "--allow-http", &url, "--runs", "20", "--time", "1s"]);
+    assert_eq!(code, 2, "{v}");
+    assert!(err.contains("manifest: ") && err.contains("/app.toml"), "{err}");
+    assert!(v["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "over_budget"), "{v}");
+    assert!(v["next"][0].as_str().unwrap().contains(&format!("--wasm '{url}' --allow-http")), "follow-ups download again: {v}");
+    assert!(!f.dir.join(".appfuzz").exists(), "runs of a URL go to the cache, not the current folder");
+    assert!(cache.join("state").is_dir());
+
+    // No manifest (404): the bare component runs.
+    let (code, v, err) = cli(&["--allow-http", "--wasm", &format!("{base}/bare.wasm"), "run"]);
+    assert_eq!(code, 0, "{v}");
+    assert!(err.contains("manifest: none"), "{err}");
+
+    // Not Wasm, missing, and a manifest that reaches into local files.
+    let (code, v, _) = cli(&["--allow-http", &format!("{base}/text.wasm")]);
+    assert_eq!(code, 3);
+    assert!(v["error"].as_str().unwrap().contains("not a WebAssembly file"), "{v}");
+    let (code, v, _) = cli(&["--allow-http", &format!("{base}/missing.wasm")]);
+    assert_eq!(code, 3);
+    assert!(v["error"].as_str().unwrap().contains("404"), "{v}");
+    let (code, v, _) = cli(&["--allow-http", &format!("{base}/local.wasm")]);
+    assert_eq!(code, 3);
+    assert!(v["error"].as_str().unwrap().contains("bundled platform"), "{v}");
+}

@@ -38,6 +38,7 @@ use commands::{run, run_with_app};
 mod acceptance;
 mod cases;
 mod cli;
+mod remote;
 mod sequences;
 use cli::*;
 
@@ -88,7 +89,7 @@ fn argv_command(cmd: &mut clap::Command, args: &[String]) -> (String, String) {
 
 fn main() {
     let mut command = command();
-    let args: Vec<String> = std::env::args().collect();
+    let args = remote::rewrite_args(std::env::args().collect());
     let matches = match command.clone().try_get_matches_from(&args) {
         Ok(m) => m,
         Err(e) => {
@@ -122,7 +123,7 @@ fn main() {
         }
     };
     let path = cmd_path(&matches);
-    let cli = match Cli::from_arg_matches(&matches) {
+    let mut cli = match Cli::from_arg_matches(&matches) {
         Ok(c) => c,
         Err(e) => e.exit(),
     };
@@ -135,8 +136,30 @@ fn main() {
     if let Some(w) = &cli.wasm {
         prefix += &format!(" --wasm {}", quote(&w.to_string_lossy()));
     }
+    if cli.allow_http {
+        prefix += " --allow-http";
+    }
     if cli.state != Path::new(".appfuzz") {
         prefix += &format!(" --state {}", quote(&cli.state.to_string_lossy()));
+    }
+    if let Some(url) = cli.wasm.as_ref().map(|w| w.to_string_lossy().to_string()).filter(|w| remote::is_url(w)) {
+        match remote::fetch(&url, cli.allow_http) {
+            Ok(f) => {
+                cli.wasm = Some(f.wasm);
+                cli.remote = true;
+                if cli.manifest.is_none() {
+                    cli.manifest = f.manifest;
+                }
+                if remote::is_default_state(&cli.state) {
+                    cli.state = f.state;
+                }
+            }
+            Err(e) => {
+                let o = json!({"error": format!("{e:#}"), "exit_code": 3});
+                println!("{}", serde_json::to_string_pretty(&o).expect("json"));
+                std::process::exit(3);
+            }
+        }
     }
     if let Some(n) = cli.jobs {
         let _ = rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global();
@@ -199,7 +222,7 @@ fn commands(c: &clap::Command, prefix: &str) -> Vec<(String, String)> {
 
 /// What is in the state directory, and what to run next.
 fn state(cli: &Cli) -> Value {
-    let manifest = cli.manifest.clone().or_else(|| Some(PathBuf::from("appfuzz.toml")).filter(|p| p.exists()));
+    let manifest = cli.manifest.clone().or_else(|| Some(PathBuf::from("appfuzz.toml")).filter(|p| !cli.remote && p.exists()));
     let mut st = json!({
         "manifest": manifest.as_ref().map(|p| p.display().to_string()),
         "wasm": cli.wasm.as_ref().map(|p| p.display().to_string()),
@@ -257,7 +280,13 @@ fn load_manifest(cli: &Cli) -> Result<Manifest> {
     let path = cli.manifest.clone().or_else(|| {
         let p = PathBuf::from("appfuzz.toml");
         let spin = PathBuf::from("spin.toml");
-        if p.exists() { Some(p) } else { (cli.wasm.is_none() && spin.exists()).then_some(spin) }
+        if cli.remote {
+            None
+        } else if p.exists() {
+            Some(p)
+        } else {
+            (cli.wasm.is_none() && spin.exists()).then_some(spin)
+        }
     });
     let mut m = match (&path, &cli.wasm) {
         (Some(p), _) if appfuzz_core::spin::is_spin(p) => appfuzz_core::spin::load(p, cli.component.as_deref())?,
@@ -725,7 +754,7 @@ mod tests {
             // Placeholders stand for ids.
             let e = e.replace("<finding id>", "f1").replace("<run a>", "r1").replace("<run b>", "r2").replace("<run>", "r1").replace("<n>", "3");
             let e = e.replace("<first different call>", "3").replace("<host fn>", "x").replace("<key>", "k").replace("<hinted value>", "v");
-            let words = guide::words(e.trim_end_matches(" > plan.json"));
+            let words = remote::rewrite_args(guide::words(e.trim_end_matches(" > plan.json")));
             let m = command().try_get_matches_from(&words).unwrap_or_else(|err| panic!("example `{e}` does not parse: {err}"));
             Cli::from_arg_matches(&m).unwrap();
         }

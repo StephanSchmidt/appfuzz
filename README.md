@@ -99,6 +99,21 @@ platform = "fastly"
 An Extism plugin needs a platform file that types its JSON; see
 [Extism plugins](#extism-plugins).
 
+A Wasm file on a web server can be reviewed by its URL:
+
+```sh
+appfuzz https://appfuzz.dev/demo/chatty.wasm
+```
+
+appfuzz downloads it, and its manifest from the same URL ending in `.toml`
+instead of `.wasm` if there is one, and reviews it. Only `https://` URLs
+are downloaded (`--allow-http` for plain http), at most 50 MB, and the file
+must be WebAssembly. A downloaded manifest can't point at local files: its
+`wasm` is always the download, and it can only name a bundled platform.
+Downloads and their runs are kept in `~/.cache/appfuzz` (macOS:
+`~/Library/Caches/appfuzz`, or `$APPFUZZ_CACHE`), not in the current
+folder. `--wasm <url>` works with every command.
+
 `appfuzz` without arguments tells you what to run next.
 `appfuzz <command> --help` shows examples.
 

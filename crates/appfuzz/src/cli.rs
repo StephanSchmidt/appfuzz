@@ -7,12 +7,20 @@ pub(crate) struct Cli {
     #[arg(short, long, global = true)]
     pub(crate) manifest: Option<PathBuf>,
     /// A component to use without a manifest (or instead of its [app] wasm).
+    /// An https:// URL is downloaded, with the manifest at the same URL
+    /// ending in .toml instead of .wasm; `appfuzz <url>` reviews it.
     #[arg(long, global = true)]
     pub(crate) wasm: Option<PathBuf>,
     /// The component of a Spin app (`spin.toml`) to review, when it has
     /// more than one HTTP component.
     #[arg(long, global = true)]
     pub(crate) component: Option<String>,
+    /// Also download plain http:// URLs.
+    #[arg(long, global = true)]
+    pub(crate) allow_http: bool,
+    /// `--wasm` was a URL: use only its downloaded manifest, never ./appfuzz.toml.
+    #[arg(skip)]
+    pub(crate) remote: bool,
     /// Where runs are kept.
     #[arg(long, global = true, default_value = ".appfuzz")]
     pub(crate) state: PathBuf,

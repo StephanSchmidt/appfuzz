@@ -42,7 +42,12 @@ pub const DOCS: &[Doc] = &[
     },
     Doc {
         path: "review",
-        examples: &["appfuzz review", "appfuzz review --plan plan.json --time 5m --min info", "appfuzz review --fresh -j 1 --runs 2000 --search-seed 7"],
+        examples: &[
+            "appfuzz review",
+            "appfuzz https://appfuzz.dev/demo/chatty.wasm",
+            "appfuzz review --plan plan.json --time 5m --min info",
+            "appfuzz review --fresh -j 1 --runs 2000 --search-seed 7",
+        ],
         output: "session, completion status, verdict (pass/warn/fail/incomplete) and exit code, counts, findings with case files, coverage, domains, the steps run",
         next: "`explain <run>` of a finding; `check` what you suspect; `unexplored` if call sites were not reached",
     },
