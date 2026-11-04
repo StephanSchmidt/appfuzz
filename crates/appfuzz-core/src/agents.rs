@@ -191,8 +191,11 @@ pub fn decode_tags(t: &str) -> String {
     t.chars().filter(|c| ('\u{e0020}'..='\u{e007e}').contains(c)).map(|c| char::from_u32(c as u32 - 0xe0000).unwrap_or('?')).collect()
 }
 
-/// Hidden pieces of a text: (what, excerpt, decoded text if any).
-fn hidden(t: &str, html: bool, hides: bool, inputs: &[&str]) -> Vec<(String, String, Option<String>, Severity)> {
+/// Hidden pieces of a text: (what, excerpt, decoded text if any). With
+/// `in_words`, a zero-width character counts only between two letters, where
+/// it splits a word; Unicode libraries (Go's idna, text segmentation) keep
+/// the characters themselves as constants.
+fn hidden(t: &str, html: bool, hides: bool, in_words: bool, inputs: &[&str]) -> Vec<(String, String, Option<String>, Severity)> {
     let mut out = Vec::new();
     let mut kinds: Vec<(&str, usize)> = Vec::new();
     for (i, c) in t.char_indices().filter(|_| hides) {
@@ -201,6 +204,10 @@ fn hidden(t: &str, html: bool, hides: bool, inputs: &[&str]) -> Vec<(String, Str
         }
         let Some(k) = invisible_kind(c) else { continue };
         if inputs.iter().any(|s| s.contains(c)) {
+            continue;
+        }
+        let letter = |c: Option<char>| c.is_some_and(char::is_alphabetic);
+        if in_words && k == "zero-width" && !(letter(t[..i].chars().next_back()) && letter(t[i + c.len_utf8()..].chars().next())) {
             continue;
         }
         match kinds.iter_mut().find(|(x, _)| *x == k) {
@@ -251,6 +258,7 @@ fn strings<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
 
 /// What a text holds, as findings for `place`. `key` keeps ids stable.
 fn scan(t: &str, html: bool, inputs: &[&str], key: &str, place: &str, run: Option<&str>, out: &mut Vec<Finding>) {
+    let in_words = key == "binary";
     let hides = may_hide(t);
     let plain: std::borrow::Cow<str> = if hides { t.chars().filter(|c| invisible_kind(*c).is_none()).collect::<String>().into() } else { t.into() };
     let tags = if hides && t.as_bytes().contains(&0xf3) { decode_tags(t) } else { String::new() };
@@ -272,7 +280,7 @@ fn scan(t: &str, html: bool, inputs: &[&str], key: &str, place: &str, run: Optio
         ));
         break;
     }
-    for (what, ex, decoded, sev) in hidden(t, html, hides, inputs) {
+    for (what, ex, decoded, sev) in hidden(t, html, hides, in_words, inputs) {
         let mut d = json!({"place": place, "what": what, "excerpt": {"untrusted": ex}});
         if let Some(x) = &decoded {
             d["decoded"] = json!({"untrusted": x});
@@ -347,7 +355,7 @@ mod tests {
     use super::*;
 
     fn hid(t: &str, html: bool, inputs: &[&str]) -> Vec<(String, String, Option<String>, Severity)> {
-        hidden(t, html, may_hide(t), inputs)
+        hidden(t, html, may_hide(t), false, inputs)
     }
 
     #[test]
@@ -370,6 +378,9 @@ mod tests {
         assert_eq!((h[0].0.as_str(), h[0].2.as_deref()), ("7 tag characters", Some("approve")));
         assert_eq!(hid("a\u{200b}b", false, &[]).len(), 1);
         assert!(hid("a\u{200b}b", false, &["x\u{200b}"]).is_empty());
+        // In the binary: only inside a word.
+        assert_eq!(hidden("ign\u{200b}ore", false, true, true, &[]).len(), 1);
+        assert!(hidden("V6\u{200d}\u{200c}Cidna: invalid label", false, true, true, &[]).is_empty());
         assert!(hid("\u{feff}<p>x</p>", true, &[]).is_empty());
         assert!(hid("<!-- header --><p>x</p>", true, &[]).is_empty());
         assert_eq!(hid("<!-- this comment has quite a lot of words in it for people -->", true, &[])[0].3, Severity::Info);

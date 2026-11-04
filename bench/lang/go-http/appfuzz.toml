@@ -1,0 +1,22 @@
+# appfuzz language test: a wasi:http handler in Go (TinyGo + wasi-http-go)
+# that searches one fixed API and escapes what it shows.
+[app]
+wasm = "app.wasm"
+name = "go-http"
+
+[entry]
+export = "wasi:http/incoming-handler#handle"
+request = { method = "GET", uri = "https://app.example/?q=shoes", headers = [], body = "" }
+now = "2026-11-02T10:00:00"
+
+[grants]
+hosts = ["api.example"]
+# As Spin and wasmtime serve: the TinyGo runtime imports wasi:filesystem,
+# which these hosts provide (no files).
+wasi = ["wasi:cli", "wasi:clocks", "wasi:io", "wasi:random", "wasi:http", "wasi:filesystem"]
+
+[limits]
+fuel = 200_000_000
+memory = "64MiB"
+cost_per_request = 100
+max_latency_ms = 200

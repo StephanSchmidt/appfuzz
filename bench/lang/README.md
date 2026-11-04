@@ -87,6 +87,7 @@ platform file. The Rust ones are in the bench (`../apps/http-*`).
 | `../apps/http-no-response` | Rust | raw `wasi:http` bindings | no response on `/admin` |
 | `js-http` | JavaScript | jco + componentize-js (fetch event, `fetch()`) | none |
 | `py-http` | Python | componentize-py 0.25 (asyncio poll loop) | reflection |
+| `go-http` | Go | TinyGo 0.44 + wasi-http-go (`net/http`, `http.Get`) | none |
 
 Build:
 
@@ -94,11 +95,13 @@ Build:
 cd js-http && ../ts-chatty/node_modules/.bin/jco componentize app.js \
     --wit wit --world-name app -o app.wasm   # wit pinned to wasi:http 0.2.10, as StarlingMonkey
 cd py-http && uvx componentize-py -d ../../wit/http -w app componentize app -o app.wasm
+go-http/build.sh   # tinygo and go on PATH
 ```
 
-Both manifests grant `wasi:filesystem` and `wasi:sockets`, as Spin and
-`wasmtime serve` do: the JavaScript and Python runtimes import them even
-though the apps never use them. Without that grant, review fails with one
-`ungranted_import` per package, which is right for a strict
-`wasi:http/proxy` host. Both apps show `error_ignored` as info: the page is
+The JavaScript and Python manifests grant `wasi:filesystem` and
+`wasi:sockets`, the Go one `wasi:filesystem`, as Spin and `wasmtime serve`
+do: the runtimes import them even though the apps never use them. Without
+that grant, review fails with one `ungranted_import` per package, which is
+right for a strict `wasi:http/proxy` host. The JavaScript and Python apps
+show `error_ignored` as info: the page is
 the same whether the upstream answers with an error status or fails outright.
