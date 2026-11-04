@@ -567,7 +567,7 @@ fn flow(r: &RunRecord, m: &Manifest, resp: &Response, body: &str) -> Vec<Finding
                 "reflection",
                 &format!("{ex}\0{}", strip_index(path)),
                 Severity::Fail,
-                format!("{ex} puts the request field {} into its HTML output unescaped", strip_index(path)),
+                format!("{ex} puts {} into its HTML output unescaped", request_place(m, &r.spec.args, path, c.as_str())),
                 json!({"field": strip_index(path), "canary": c.as_str()}),
                 run,
             ));
@@ -596,7 +596,7 @@ fn flow(r: &RunRecord, m: &Manifest, resp: &Response, body: &str) -> Vec<Finding
                         "input_passthrough",
                         &format!("{ex}\0{}\0{}", strip_index(path), e.func),
                         Severity::Info,
-                        format!("the request field {} goes unchanged into {}", strip_index(path), e.func),
+                        format!("{} goes unchanged into {}", request_place(m, &r.spec.args, path, c.as_str()), e.func),
                         json!({"field": strip_index(path), "func": e.func, "n": e.n, "canary": c.as_str(), "exact": t.starts_with(c.as_str())}),
                         run,
                     ));
@@ -610,6 +610,65 @@ fn flow(r: &RunRecord, m: &Manifest, resp: &Response, body: &str) -> Vec<Finding
 /// `@0.query.q` → `query.q` (the first argument is the request).
 pub(crate) fn strip_index(p: &str) -> String {
     p.strip_prefix("@0.").map(str::to_string).unwrap_or_else(|| p.to_string())
+}
+
+/// Where in the request a canary at `path` is, as a developer names it:
+/// "the query parameter `url`", not "the request field uri".
+pub(crate) fn request_place(m: &Manifest, args: &[Value], path: &str, canary: &str) -> String {
+    let p = strip_index(path);
+    // Request fields with an HTTP role, or named like one.
+    if let Some(req) = args.first() {
+        let none = std::collections::BTreeMap::new();
+        let roles = m.entry.as_ref().map_or(&none, |e| &e.fields);
+        for (role, say) in [("query", "the query parameter"), ("form", "the form field")] {
+            if let Some(k) = crate::fuzz::role_path(roles, req, role).and_then(|f| p.strip_prefix(&format!("{f}.")).map(str::to_string)) {
+                return format!("{say} `{k}`");
+            }
+        }
+        if crate::fuzz::role_path(roles, req, "path").is_some_and(|f| f == p) {
+            return "the URL path".into();
+        }
+    }
+    if let Some(h) = p.strip_prefix("headers.") {
+        return format!("the request header `{h}`");
+    }
+    if p == "body" {
+        return "the request body".into();
+    }
+    if p == "uri"
+        && let Some(uri) = args.first().and_then(|a| a["uri"].as_str())
+        && let Some(at) = uri.find(canary)
+    {
+        return uri_place(uri, at);
+    }
+    format!("the request field {p}")
+}
+
+/// The part of a request URI at byte `at`.
+fn uri_place(uri: &str, at: usize) -> String {
+    let fragment = uri.find('#').unwrap_or(uri.len());
+    let query = uri[..fragment].find('?').unwrap_or(fragment);
+    if at > fragment {
+        return "the URL fragment".into();
+    }
+    if at > query {
+        let mut start = query + 1;
+        for part in uri[start..fragment].split('&') {
+            if at < start + part.len() {
+                let name = part.split('=').next().unwrap_or(part);
+                return if at < start + name.len() { "a query parameter name".into() } else { format!("the query parameter `{name}`") };
+            }
+            start += part.len() + 1;
+        }
+    }
+    let authority = uri.find("://").map(|i| {
+        let from = i + 3;
+        (from, uri[from..].find(['/', '?', '#']).map_or(uri.len(), |e| from + e))
+    });
+    match authority {
+        Some((from, to)) if (from..to).contains(&at) => "the host the request names".into(),
+        _ => "the URL path".into(),
+    }
 }
 
 pub(crate) fn canary_paths(v: &Value, path: String, out: &mut BTreeSet<(String, String)>) {
@@ -674,6 +733,28 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn request_places_are_named_as_developers_do() {
+        let c = "cnry1a2b7";
+        let m: Manifest = toml::from_str("[app]\nwasm = \"x.wasm\"\n").unwrap();
+        let place = |uri: &str| super::request_place(&m, &[json!({"uri": uri})], "@0.uri", c);
+        assert_eq!(place("https://app.example/?name=cnry1a2b7<i>&x=1"), "the query parameter `name`");
+        assert_eq!(place("https://app.example/?x=1&url=https://cnry1a2b7.example/"), "the query parameter `url`");
+        assert_eq!(place("https://app.example/?cnry1a2b7=1"), "a query parameter name");
+        assert_eq!(place("https://app.example/items/cnry1a2b7?x=1"), "the URL path");
+        assert_eq!(place("https://cnry1a2b7.example/?x=1"), "the host the request names");
+        assert_eq!(place("/?q=1#cnry1a2b7"), "the URL fragment");
+        assert_eq!(place("/a?q=cnry1a2b7"), "the query parameter `q`");
+        let args = [json!({"headers": [["x-user", "cnry1a2b7"]], "body": "cnry1a2b7"})];
+        assert_eq!(super::request_place(&m, &args, "@0.headers.x-user", c), "the request header `x-user`");
+        assert_eq!(super::request_place(&m, &args, "@0.body", c), "the request body");
+        let req = [json!({"path": c, "query": [["days", c]], "form": [["note", c]], "user": c})];
+        assert_eq!(super::request_place(&m, &req, "@0.query.days", c), "the query parameter `days`");
+        assert_eq!(super::request_place(&m, &req, "@0.form.note", c), "the form field `note`");
+        assert_eq!(super::request_place(&m, &req, "@0.path", c), "the URL path");
+        assert_eq!(super::request_place(&m, &req, "@0.user", c), "the request field user");
+    }
 
     /// The scanner finds what the regex finds, on random markup.
     #[test]

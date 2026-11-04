@@ -21,7 +21,7 @@ use wasmtime::component::Type;
 
 use crate::detect::{Finding, Severity};
 use crate::manifest::Manifest;
-use crate::output::{CANARY, canary_paths, strings, strip_index};
+use crate::output::{CANARY, canary_paths, strings};
 use crate::record::RunRecord;
 use crate::wit::Interface;
 
@@ -389,15 +389,17 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     out
 }
 
-/// Where a canary came from.
-fn sources(r: &RunRecord) -> BTreeMap<String, String> {
+/// Where a canary came from: as the title says it, and as the finding's
+/// key has it (by field, so one finding per field and sink).
+fn sources(r: &RunRecord, m: &Manifest) -> BTreeMap<String, (String, String)> {
     let mut out = BTreeMap::new();
     let mut req = BTreeSet::new();
     for (i, a) in r.spec.args.iter().enumerate() {
         canary_paths(a, format!("@{i}"), &mut req);
     }
     for (c, p) in req {
-        out.insert(c, format!("the request field {}", strip_index(&p)));
+        let place = crate::output::request_place(m, &r.spec.args, &p, &c);
+        out.insert(c, (place, format!("the request field {}", crate::output::strip_index(&p))));
     }
     for e in &r.events {
         if let Some(v) = &e.result {
@@ -405,7 +407,10 @@ fn sources(r: &RunRecord) -> BTreeMap<String, String> {
             strings(v, &mut s);
             for t in s {
                 for c in CANARY.find_iter(&t) {
-                    out.entry(c.as_str().to_string()).or_insert_with(|| format!("a string {} returned", e.func));
+                    out.entry(c.as_str().to_string()).or_insert_with(|| {
+                        let from = format!("a string {} returned", e.func);
+                        (from.clone(), from)
+                    });
                 }
             }
         }
@@ -469,7 +474,7 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut out = Vec::new();
     let ex = &r.spec.export;
     let run = Some(r.id.as_str());
-    let src = sources(r);
+    let src = sources(r, m);
     if src.is_empty() {
         return out;
     }
@@ -481,7 +486,7 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             strings(v, &mut texts);
             for s in texts {
                 for c in CANARY.find_iter(&s) {
-                    let Some(from) = src.get(c.as_str()) else { continue };
+                    let Some((from, from_key)) = src.get(c.as_str()) else { continue };
                     if label == Label::Html && trusted.contains(c.as_str()) {
                         continue;
                     }
@@ -523,7 +528,7 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                     };
                     out.push(Finding::new(
                         kind,
-                        &format!("{ex}\0{}\0{p}\0{from}", e.func),
+                        &format!("{ex}\0{}\0{p}\0{from_key}", e.func),
                         sev,
                         title,
                         json!({"func": e.func, "param": p, "label": label.name(), "source": from, "n": e.n, "canary": c.as_str(), "arg": s, "refused": denied}),

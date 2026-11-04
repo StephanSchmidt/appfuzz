@@ -78,6 +78,9 @@
   found. Shrinking also drops test strings and parts of long text the
   finding doesn't need, and text it doesn't need changed stays as the
   example request has it.
+- Findings name where in the request a value came from: "the query
+  parameter `url`", a form field, a header, the URL path or host, instead
+  of "the request field uri".
 
 ## 0.5.0
 
