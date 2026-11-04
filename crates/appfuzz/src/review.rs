@@ -40,11 +40,28 @@ pub struct Session {
     pub runs: Vec<String>,
 }
 
+/// The CLI for one step of a review: the caller's options, the review's
+/// state folder, all findings.
+fn step_cli(cli: &Cli, state: &std::path::Path, cmd: Cmd) -> Cli {
+    Cli {
+        manifest: cli.manifest.clone(),
+        wasm: cli.wasm.clone(),
+        component: cli.component.clone(),
+        state: state.to_path_buf(),
+        full: true,
+        jobs: cli.jobs,
+        fast: cli.fast,
+        allow_http: cli.allow_http,
+        remote: cli.remote,
+        json: cli.json,
+        human: cli.human,
+        cmd: Some(cmd),
+    }
+}
+
 pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
     let app = App::load(load_manifest(cli)?)?;
-    if crate::human::wanted(cli.human) {
-        crate::human::starting(&o.time);
-    }
+    crate::human::starting(cli.human, &o.time);
     let id = format!("review-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos());
     let state = cli.state.join("review-runs").join(&id);
     let store = RunStore::new(&state);
@@ -58,20 +75,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
     let mut errors = Vec::new();
     let mut step = |name: &str, cmd: Cmd| -> Option<Value> {
         let started = Instant::now();
-        let c = Cli {
-            manifest: cli.manifest.clone(),
-            wasm: cli.wasm.clone(),
-            component: cli.component.clone(),
-            state: state.clone(),
-            full: true,
-            jobs: cli.jobs,
-            fast: cli.fast,
-            allow_http: cli.allow_http,
-            remote: cli.remote,
-            json: cli.json,
-            human: cli.human,
-            cmd: Some(cmd),
-        };
+        let c = step_cli(cli, &state, cmd);
         let result = crate::run_with_app(c, Some(&app));
         let mut row = json!({"step": name, "ms": started.elapsed().as_millis()});
         let output = match result {
@@ -275,20 +279,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
     todo.sort_by_key(|f| std::cmp::Reverse(f.severity));
     for f in todo.iter().filter(|f| f.severity > Severity::Info && f.run.is_some()).take(o.confirm) {
         let started = Instant::now();
-        let c = Cli {
-            manifest: cli.manifest.clone(),
-            wasm: cli.wasm.clone(),
-            component: cli.component.clone(),
-            state: state.clone(),
-            full: true,
-            jobs: cli.jobs,
-            fast: cli.fast,
-            allow_http: cli.allow_http,
-            remote: cli.remote,
-            human: cli.human,
-            json: cli.json,
-            cmd: Some(Cmd::Confirm { target: f.id.clone(), finding: None, times: 3, max_runs: 500 }),
-        };
+        let c = step_cli(cli, &state, Cmd::Confirm { target: f.id.clone(), finding: None, times: 3, max_runs: 500 });
         match crate::run_with_app(c, Some(&app)) {
             Ok(v) => {
                 let mut row = json!({"step": format!("confirm {}", f.id), "ms": started.elapsed().as_millis()});

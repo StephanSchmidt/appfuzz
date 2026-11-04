@@ -23,7 +23,10 @@ fn stderr_style() -> Style {
 }
 
 /// Printed on stderr before a review starts, so a person knows it's working.
-pub(crate) fn starting(time: &str) {
+pub(crate) fn starting(human_flag: bool, time: &str) {
+    if !wanted(human_flag) {
+        return;
+    }
     eprintln!("{}", stderr_style().dim(&format!("Reviewing: probes, scaling, then {time} of fuzzing…\n")));
 }
 
