@@ -14,6 +14,7 @@ It tests what you deploy, not your source:
 
 - **WebAssembly components**, in any language that builds one. Tested with
   Rust, Zig, TypeScript, JavaScript, Go (TinyGo), C# and Python.
+- **HTTP handlers on `wasi:http`**: Spin, wasmCloud, `wasmtime serve`.
 - **Fastly Compute apps** (wasm32-wasip1 modules).
 - **[Extism](https://extism.org/) plugins**, from any PDK.
 
@@ -368,6 +369,7 @@ too. Details: [REFERENCE.md](REFERENCE.md#request-sequences).
 | Your app | Where the types come from | What you write |
 |----------|---------------------------|----------------|
 | **Component** (wasm32-wasip2, jco, componentize-*) | the WIT inside it | nothing |
+| **HTTP handler** on `wasi:http` (Spin, wasmCloud, `wasmtime serve`) | built in | nothing |
 | **Fastly Compute app** (wasm32-wasip1) | Fastly's witx, bundled | `platform = "fastly"` |
 | **Module on another witx platform** | your platform's witx | a `platform.toml` |
 | **Extism plugin** (any PDK) | a WIT file you supply | a `platform.toml` with `abi = "extism"` |
@@ -376,6 +378,33 @@ A plain module only names the host functions it calls, not what they take
 and return, so appfuzz needs its platform. `appfuzz platform docs` prints
 that platform's host API, with signatures and descriptions, as a reference
 for whoever writes apps for it.
+
+### HTTP handlers (`wasi:http`)
+
+A component that exports `wasi:http/incoming-handler` is tested like a web
+app: a run is one request, and the result is the response your handler
+sends. `appfuzz --wasm app.wasm review` works without a manifest. To choose
+the request yourself:
+
+```toml
+[entry]
+export = "wasi:http/incoming-handler#handle"
+request = { method = "GET", uri = "https://app.example/?q=shoes", headers = [], body = "" }
+```
+
+The fuzzer varies the method, URL, query, headers and body.
+
+Outgoing requests don't leave the sandbox. Each one is a call to
+`wasi:http/outgoing-handler#handle` with `method`, `url`, `headers` and
+`body`. Script the answer in a plan, or make it fail:
+
+```sh
+appfuzz run --plan '{"wasi:http/outgoing-handler#handle": {"return": {"ok": {"status": 503, "headers": [], "body": ""}}}}'
+appfuzz run --plan '{"wasi:http/outgoing-handler#handle": {"return": {"err": "connection-timeout"}}}'
+```
+
+If text from the incoming request decides where an outgoing request goes,
+the review reports SSRF.
 
 ### Fastly Compute
 
@@ -454,9 +483,10 @@ adds a feature, and the review refuses it.
   ([LABELS.md](LABELS.md)).
 - Requests run one at a time. Sequences share backend state between them,
   but concurrent requests and live services are out of reach.
-- Not yet supported: HTTP handlers on `wasi:http` (Spin, wasmCloud,
-  `wasmtime serve`), outbound HTTP from Extism plugins, Proxy-Wasm filters
-  and browser Wasm. `wasi:http` comes next.
+- Not yet supported: WASI 0.3 HTTP handlers (`wasi:http/handler`, Spin 4),
+  outbound HTTP from Extism plugins, Proxy-Wasm filters and browser Wasm.
+- Outgoing requests run one after another: if your handler sends several
+  at once, appfuzz counts the sum of their latencies, not the slowest.
 - Detecting hostile apps (hidden text, notes to the reviewer, data in
   disguise, time bombs) and runtime envelopes are **experimental**. A pass
   doesn't prove an app is benign.

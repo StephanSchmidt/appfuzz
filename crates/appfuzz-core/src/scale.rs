@@ -199,9 +199,46 @@ pub fn steady(plan: &Plan) -> Plan {
     p
 }
 
+/// The value of query parameter `key` in a URL.
+fn query_value(uri: &str, key: &str) -> Option<String> {
+    let q = uri.split_once('?')?.1;
+    let q = q.split_once('#').map_or(q, |(q, _)| q);
+    q.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+        (k == key).then(|| v.to_string())
+    })
+}
+
+/// A URL with query parameter `key` set to `value` (added if missing).
+/// The value stays readable; only what would split it is encoded.
+pub(crate) fn with_query(uri: &str, key: &str, value: &str) -> String {
+    let (uri, fragment) = uri.split_once('#').map_or((uri, None), |(u, f)| (u, Some(f)));
+    let (head, q) = uri.split_once('?').unwrap_or((uri, ""));
+    let value = value.replace('%', "%25").replace('&', "%26").replace('#', "%23");
+    let mut parts: Vec<String> = q.split('&').filter(|kv| !kv.is_empty() && kv.split('=').next() != Some(key)).map(str::to_string).collect();
+    parts.push(format!("{key}={value}"));
+    let mut out = format!("{head}?{}", parts.join("&"));
+    if let Some(f) = fragment {
+        out.push('#');
+        out.push_str(f);
+    }
+    out
+}
+
 /// Sets `path` in a request to `n` (or a string of n characters). A path
-/// into a list of `[key, value]` pairs adds the pair if missing.
+/// into a list of `[key, value]` pairs adds the pair if missing; `uri?key`
+/// sets a query parameter of the URL in field `uri`.
 pub fn set_field(req: &mut Value, path: &str, n: u64, as_len: bool) -> Result<()> {
+    if let Some((field, key)) = path.split_once('?') {
+        let slot = crate::harness::field_mut(req, field).filter(|v| v.is_string()).ok_or_else(|| anyhow!("no URL field {field}"))?;
+        let uri = slot.as_str().unwrap_or_default().to_string();
+        let v = match resized(query_value(&uri, key).map(Value::String).as_ref(), n, as_len) {
+            Value::String(t) => t,
+            other => other.to_string(),
+        };
+        *slot = Value::String(with_query(&uri, key, &v));
+        return Ok(());
+    }
     let (parent, last) = match path.rsplit_once('.') {
         Some((a, b)) => (crate::harness::field_mut(req, a).ok_or_else(|| anyhow!("no field {a}"))?, b),
         None => (req, path),
@@ -229,6 +266,11 @@ pub fn set_field(req: &mut Value, path: &str, n: u64, as_len: bool) -> Result<()
 
 /// Sets `path` to a text value (adding a `[key, value]` pair if needed).
 pub fn set_text(req: &mut Value, path: &str, text: &str) -> Result<()> {
+    if let Some((field, key)) = path.split_once('?') {
+        let slot = crate::harness::field_mut(req, field).filter(|v| v.is_string()).ok_or_else(|| anyhow!("no URL field {field}"))?;
+        *slot = Value::String(with_query(slot.as_str().unwrap_or_default(), key, text));
+        return Ok(());
+    }
     set_field(req, path, 0, false)?;
     let slot = crate::harness::field_mut(req, path).ok_or_else(|| anyhow!("no field {path}"))?;
     *slot = Value::String(text.to_string());
@@ -757,11 +799,11 @@ const MAX_CONTEXTS: usize = 24;
 /// Keys of a `[key, value]` list the app reads, from dictionary words:
 /// by a change in behaviour, or by fuel (byte-wise compares, solved byte by
 /// byte). Returns (key, behaviour with value "1").
-fn discover_keys(base: &RunSpec, list: &str, words: &[String], run: Runner) -> Vec<(String, String)> {
+fn discover_keys(base: &RunSpec, prefix: &str, words: &[String], run: Runner) -> Vec<(String, String)> {
     let with = |pairs: &[(&str, &str)]| -> RunSpec {
         let mut spec = base.clone();
         for (k, v) in pairs {
-            let full = format!("{list}.{k}");
+            let full = format!("{prefix}{k}");
             let (i, path) = split_arg(&full);
             if let Some(a) = spec.args.get_mut(i) {
                 let _ = set_text(a, path, v);
@@ -945,12 +987,20 @@ pub fn discover(app: &App, base: &RunSpec, dict_limit: usize, run: Runner) -> Re
     // strings: try common ones too.
     let mut key_words = words.clone();
     key_words.extend(COMMON_KEYS.iter().map(|k| k.to_string()).filter(|k| !words.contains(k)));
+    // A whole URL (Fastly, wasi:http): the keys of its query, as `uri?key`.
+    let mut prefixes: Vec<String> = pair_lists.iter().map(|l| format!("{l}.")).collect();
+    if let Some(req) = base.args.first() {
+        let fields = app.manifest.entry.as_ref().map(|e| e.fields.clone()).unwrap_or_default();
+        if let Some(p) = crate::fuzz::role_path(&fields, req, "uri").filter(|p| crate::harness::field(req, p).is_some_and(Value::is_string)) {
+            prefixes.push(format!("{p}?"));
+        }
+    }
     for c in 0..=field_ctxs {
         let spec = if c == 0 { base.clone() } else { ctxs[c - 1].spec.clone() };
         let ref_b = behaviour(&run(&spec));
-        for list in &pair_lists {
-            for (k, b1) in discover_keys(&spec, list, &key_words, run) {
-                let path = format!("{list}.{k}");
+        for prefix in &prefixes {
+            for (k, b1) in discover_keys(&spec, prefix, &key_words, run) {
+                let path = format!("{prefix}{k}");
                 let label = if c == 0 { path.clone() } else { format!("{path} (with {})", ctxs[c - 1].label) };
                 if !discovered.contains(&label) {
                     discovered.push(label);
@@ -1031,7 +1081,7 @@ pub fn discover(app: &App, base: &RunSpec, dict_limit: usize, run: Runner) -> Re
     let mut keys: Vec<String> = Vec::new();
     for k in knobs.iter().chain(ctxs.iter().flat_map(|c| c.knobs.iter())) {
         if let Knob::Field(p) = k
-            && pair_lists.iter().any(|l| p.starts_with(&format!("{l}.")))
+            && prefixes.iter().any(|l| p.starts_with(l.as_str()))
             && !keys.contains(p)
         {
             keys.push(p.clone());

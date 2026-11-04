@@ -443,7 +443,7 @@ pub fn static_findings(m: &Manifest, imports: &[Interface], st: &Statics) -> Vec
     let mut out = Vec::new();
     for i in imports.iter().filter(|i| !i.funcs.is_empty()) {
         let granted = match i.kind {
-            ImportKind::Platform => i.name.is_empty() || m.grants_import(&i.name),
+            ImportKind::Platform => i.name.is_empty() || m.grants_interface(&i.name),
             ImportKind::Wasi => m.grants_wasi(&i.name),
         };
         if !granted {

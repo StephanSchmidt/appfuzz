@@ -1191,10 +1191,13 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
     if let Some(a) = req.args.first_mut() {
         let mut ptrs = Vec::new();
         nodes(a, String::new(), &mut ptrs);
+        let fields = entry.map(|e| e.fields.clone()).unwrap_or_default();
+        let uri = role_path(&fields, a, "uri").filter(|p| crate::harness::field(a, p).is_some_and(Value::is_string));
         let skip = |p: &str| {
             let dotted = p.trim_start_matches('/').replace('/', ".");
             fixed.iter().any(|f| dotted == **f || dotted.starts_with(&format!("{f}.")))
                 || ["path", "method"].contains(&dotted.as_str())
+                || uri.as_deref() == Some(dotted.as_str())
         };
         for p in ptrs {
             if skip(&p) {
@@ -1210,12 +1213,26 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
         if let Some(q) = role_path(&entry.map(|e| e.fields.clone()).unwrap_or_default(), a, "query")
             && let Some(Value::Array(pairs)) = crate::harness::field_mut(a, &q)
         {
-            for k in keys {
+            for k in keys.iter().filter_map(|k| k.strip_prefix(&format!("{q}."))) {
                 if !pairs.iter().any(|p| p[0].as_str() == Some(k)) {
                     n += 1;
                     pairs.push(json!([k, crate::output::canary_for(&app.manifest, n)]));
                 }
             }
+        }
+        // A whole URL (Fastly, wasi:http): a canary as the path and as each
+        // query parameter the app reads, on the same origin.
+        if let Some(p) = uri
+            && let Some(slot) = crate::harness::field_mut(a, &p)
+        {
+            let origin = origin_of(slot.as_str().unwrap_or_default());
+            n += 1;
+            let mut u = format!("{origin}/{}", crate::output::canary_for(&app.manifest, n));
+            for k in keys.iter().filter_map(|k| k.strip_prefix(&format!("{p}?"))) {
+                n += 1;
+                u = scale::with_query(&u, k, &crate::output::canary_for(&app.manifest, n));
+            }
+            *slot = json!(u);
         }
     }
     if n > 0 {
@@ -1246,11 +1263,32 @@ pub(crate) fn has_string(t: &Type) -> bool {
     }
 }
 
+/// `scheme://host[:port]` of a URL, or the default app origin.
+fn origin_of(uri: &str) -> String {
+    match url::Url::parse(uri) {
+        Ok(u) if u.has_host() => u.origin().ascii_serialization(),
+        _ => "https://app.example".into(),
+    }
+}
+
 /// Points the request at a URL the app linked to (and fills its form).
 pub(crate) fn crawl_into(req: &mut Value, fields: &BTreeMap<String, String>, url: &str, method: &str, inputs: &[String], values: &[String]) -> bool {
     let full = if url.starts_with('/') { format!("http://app.invalid{url}") } else { url.to_string() };
     let Ok(u) = url::Url::parse(&full) else { return false };
     let mut changed = false;
+    // A whole URL: same origin, the link's path and query.
+    if let Some(p) = role_path(fields, req, "uri")
+        && let Some(slot) = crate::harness::field_mut(req, &p)
+        && slot.is_string()
+    {
+        let mut next = format!("{}{}", origin_of(slot.as_str().unwrap_or_default()), u.path());
+        if let Some(q) = u.query() {
+            next.push('?');
+            next.push_str(q);
+        }
+        *slot = json!(next);
+        changed = true;
+    }
     if let Some(p) = role_path(fields, req, "path")
         && let Some(slot) = crate::harness::field_mut(req, &p)
         && slot.is_string()

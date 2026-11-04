@@ -1,0 +1,15 @@
+{
+  "app": "http-ssrf",
+  "bug": "a wasi:http handler that fetches the URL in its query string and shows the answer unescaped",
+  "expect": [
+    {
+      "kind": "ssrf",
+      "min": "fail"
+    },
+    {
+      "kind": "stored_reflection",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

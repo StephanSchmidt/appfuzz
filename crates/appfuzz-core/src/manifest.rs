@@ -516,6 +516,12 @@ impl Manifest {
         }
     }
 
+    /// Whether an imported interface is granted: WASI by prefix, others
+    /// by name.
+    pub fn grants_interface(&self, interface: &str) -> bool {
+        if crate::wit::is_wasi(interface) { self.grants_wasi(interface) } else { self.grants_import(interface) }
+    }
+
     /// Whether a WASI interface is granted by prefix (`wasi:clocks` grants
     /// `wasi:clocks/monotonic-clock@0.2.12`).
     pub fn grants_wasi(&self, interface: &str) -> bool {

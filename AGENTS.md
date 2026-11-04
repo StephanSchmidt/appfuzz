@@ -54,6 +54,11 @@ cost = 1
 Without a manifest, `appfuzz --wasm app.wasm inspect` still works. The
 request is then generated from the WIT types.
 
+A `wasi:http` handler needs no platform: its request is
+`{method, uri, headers, body}`, and each outgoing request is the host function
+`wasi:http/outgoing-handler#handle` (url labelled for SSRF). See
+[REFERENCE](REFERENCE.md#wasihttp-handlers).
+
 A plain module (not a component) needs `[app] platform`, which is a bundled
 name (`fastly`) or a `platform.toml` path. For an Extism plugin, the platform
 has `abi = "extism"` and a WIT file that types the JSON. `[app] world` picks

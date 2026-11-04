@@ -1,0 +1,19 @@
+# appfuzz bench app: http-ssrf (a wasi:http handler that fetches the URL in its query string and shows the answer unescaped).
+[app]
+wasm = "../../target/wasm32-wasip2/release/http_ssrf.wasm"
+name = "http-ssrf"
+
+[entry]
+export = "wasi:http/incoming-handler#handle"
+request = { method = "GET", uri = "https://app.example/?url=https://api.example/status", headers = [], body = "" }
+output = { status = "status", body = "body", headers = "headers", body_format = "html" }
+now = "2026-11-02T10:00:00"
+
+[grants]
+hosts = ["api.example"]
+
+[limits]
+fuel = 200_000_000
+memory = "64MiB"
+cost_per_request = 100
+max_latency_ms = 200

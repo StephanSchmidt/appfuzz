@@ -627,6 +627,46 @@ a path). `appfuzz platform docs` prints the host API reference;
 `appfuzz platform check` checks a `platform.toml` against its WIT or witx and
 lists functions without a description.
 
+### wasi:http handlers
+
+A component that exports `wasi:http/incoming-handler` (0.2.x) needs no
+platform file. appfuzz shows the handler as one function:
+
+```wit
+handle: func(request: record { method: string, uri: string,
+  headers: list<tuple<string, string>>, body: string })
+  -> record { status: u16, headers: list<tuple<string, string>>, body: string };
+```
+
+- Without `[entry]`, the request is `GET https://app.example/` and the output
+  is `status`, `body` and `headers`. `method = "format:token"` and
+  `uri = "format:url"` hold unless the manifest says otherwise. Query keys in
+  the URI are request fields named `uri?key` (`sweep -f 'uri?days'`).
+- The URI is delivered as a client would send it: relative URIs resolve
+  against `https://app.example/`, unsafe characters are percent-encoded, and
+  a `Host` header is added when missing. Header names or values the HTTP
+  types reject are dropped.
+- A handler that returns without `response-outparam.set` is a crash. A
+  response set to an error code is status 500. An aborted response body is a
+  crash. Bodies are capped at 64 MiB.
+
+Outbound requests are the host function
+`wasi:http/outgoing-handler#handle(method: string, url: string, headers,
+body: string) -> result<response, string>`, where `response` is
+`{status, headers, body}`. The call happens when the guest first waits for
+the response, so a body written after `handle` is part of `body`. Requests
+nobody waited for are sent after the handler returns. Calls are serial:
+their latencies add up.
+
+Its defaults are `params = { url = "url" }` (SSRF sink) and
+`values = { status = "range:100..599" }`; a `[functions."wasi:http/outgoing-handler#handle"]`
+section replaces them. An `err` text that is a wasi:http error code
+(`dns-timeout`, `destination-not-found`, `connection-refused`,
+`connection-timeout`, `tls-certificate-error`, `http-request-denied`, …)
+arrives as that code; any other
+text arrives as `internal-error` with the text. A method or scheme the
+types reject, or an empty authority, fails before any host call.
+
 ### witx platforms
 
 `witx = ["path/to/abi.witx", …]` (or `builtin:fastly`) gives the types: pointers

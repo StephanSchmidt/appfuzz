@@ -34,6 +34,7 @@ pub mod urls;
 pub mod store;
 pub mod value;
 pub mod wasi;
+pub mod wasi_http;
 pub mod wit;
 pub mod witx_abi;
 

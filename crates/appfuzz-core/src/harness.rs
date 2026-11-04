@@ -35,6 +35,8 @@ mod core;
 use core::CoreApp;
 #[path = "harness_extism.rs"]
 mod extism;
+#[path = "harness_http.rs"]
+mod http;
 use extism::ExtismApp;
 
 const EPOCH_TICK: Duration = Duration::from_millis(10);
@@ -136,6 +138,8 @@ struct Host {
     read_limit: Option<usize>,
     /// Extism plugins: the kernel's byte store.
     kernel: Option<crate::extism::Kernel>,
+    /// wasi:http resources and requests in flight.
+    http: http::Http,
 }
 
 impl WasiView for Host {
@@ -267,8 +271,10 @@ impl App {
             (None, Some(core), imports, exports)
         } else {
             let component = Component::new(&engine, &bytes).map_err(anyhow::Error::from).context("not a WebAssembly component or module")?;
-            let imports = wit::imports(&engine, &component);
-            let exports = wit::exports(&engine, &component);
+            let mut imports = wit::imports(&engine, &component);
+            let mut exports = wit::exports(&engine, &component);
+            crate::wasi_http::adapt(&engine, &mut imports, &mut exports)?;
+            crate::wasi_http::default_manifest(&mut manifest, &imports, &exports)?;
             (Some(component), None, imports, exports)
         };
 
@@ -307,7 +313,7 @@ impl App {
         }
         for iface in imports.iter().filter(|i| i.kind == ImportKind::Platform) {
             for f in &iface.funcs {
-                platform.granted.insert(f.key.clone(), iface.name.is_empty() || manifest.grants_import(&iface.name));
+                platform.granted.insert(f.key.clone(), iface.name.is_empty() || manifest.grants_interface(&iface.name));
                 platform.cost.insert(f.key.clone(), manifest.cost_of(&f.key));
                 platform.latency_ms.insert(f.key.clone(), manifest.latency_ms_of(&f.key));
                 platform.funcs.insert(f.key.clone(), f.clone());
@@ -391,7 +397,7 @@ impl App {
         let pre = match (component, core, plugin) {
             (_, _, Some(p)) => Pre::Extism { pre: p.link(&engine)?, abi: p.abi.clone(), names: p.names.clone() },
             (_, Some(core), _) => Pre::Core { pre: core.link(&engine)?, start: core.start },
-            (Some(component), None, None) => Pre::Component(link_component(&engine, &component, &imports)?),
+            (Some(component), None, None) => Pre::Component(link_component(&engine, &component, &imports, crate::wasi_http::uses_http(&imports, &exports))?),
             (None, None, None) => unreachable!("one of them"),
         };
 
@@ -581,6 +587,7 @@ impl App {
             request: matches!(self.pre, Pre::Core { .. }).then(|| spec.args.first().cloned()).flatten(),
             read_limit: None,
             kernel,
+            http: Default::default(),
         };
         let mut store = Store::new(&self.engine, host);
         store.limiter(|h| &mut h.limiter);
@@ -597,10 +604,21 @@ impl App {
                 let fuel_start = store.get_fuel()?;
                 store.data_mut().fuel_start = fuel_start;
                 let func = lookup_export(&inst, &mut store, &export)?;
-                let mut results = vec![Val::Bool(false); export.ty.results().len()];
-                let call = func.call(&mut store, &args, &mut results);
+                let call = if crate::wasi_http::is_handler(&export) {
+                    // The request record becomes an incoming request; the
+                    // response set on the outparam becomes the result.
+                    let request = spec.args.first().cloned().unwrap_or(Value::Null);
+                    let ty = export.ty.results().next().context("handler result type")?;
+                    match http::call_handler(&mut store, func, &request)? {
+                        Ok(response) => Ok(vec![json_to_val(&response, &ty).context("handler response")?]),
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    let mut results = vec![Val::Bool(false); export.ty.results().len()];
+                    func.call(&mut store, &args, &mut results).and_then(|()| http::flush(&mut store)).map(|()| results)
+                };
                 instance = Some(inst);
-                call.map(|()| results)
+                call
             }
             Pre::Core { pre, start } => {
                 let inst = pre.instantiate(&mut store).map_err(anyhow::Error::from).context("instantiating the module")?;
@@ -693,10 +711,13 @@ impl App {
 
 /// Links a component: wasmtime-wasi made deterministic, and every
 /// platform import routed to the interceptor.
-fn link_component(engine: &Engine, component: &Component, imports: &[Interface]) -> Result<InstancePre<Host>> {
+fn link_component(engine: &Engine, component: &Component, imports: &[Interface], uses_http: bool) -> Result<InstancePre<Host>> {
     let mut linker: Linker<Host> = Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     linker.allow_shadowing(true);
+    if uses_http {
+        http::link(&mut linker)?;
+    }
     // Sleeps return at once and advance virtual time. Defined under the
     // version wasmtime-wasi provides, so semver matching routes older
     // 0.2.x imports (componentize-py uses 0.2.9) here too; a definition
@@ -720,7 +741,8 @@ fn link_component(engine: &Engine, component: &Component, imports: &[Interface])
             Ok((ready(&mut store)?,))
         })?;
     }
-    for iface in imports.iter().filter(|i| i.kind == ImportKind::Platform) {
+    // The outgoing handler is linked by `http::link`.
+    for iface in imports.iter().filter(|i| i.kind == ImportKind::Platform && !crate::wasi_http::is_client(&i.name)) {
         if iface.name.is_empty() {
             for f in &iface.funcs {
                 let key = f.key.clone();
