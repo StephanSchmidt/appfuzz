@@ -119,7 +119,7 @@ fn main() {
                 json!({"error": text.join(" ").trim_start_matches("error: ").to_string(), "usage": usage, "examples": examples})
             };
             out["help"] = json!(help);
-            emit(human::wanted(args.iter().any(|a| a == "--json")), &path, &out);
+            emit(human::wanted(args.iter().any(|a| a == "--human")), &path, &out);
             std::process::exit(3);
         }
     };
@@ -140,6 +140,9 @@ fn main() {
     if cli.allow_http {
         prefix += " --allow-http";
     }
+    if human::wanted(cli.human) {
+        prefix += " --human";
+    }
     if cli.state != Path::new(".appfuzz") {
         prefix += &format!(" --state {}", quote(&cli.state.to_string_lossy()));
     }
@@ -157,12 +160,12 @@ fn main() {
             }
             Err(e) => {
                 let o = json!({"error": format!("{e:#}"), "exit_code": 3});
-                emit(human::wanted(cli.json), &path, &o);
+                emit(human::wanted(cli.human), &path, &o);
                 std::process::exit(3);
             }
         }
     }
-    let human = human::wanted(cli.json);
+    let human = human::wanted(cli.human);
     if let Some(n) = cli.jobs {
         let _ = rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global();
     }
@@ -205,11 +208,10 @@ fn main() {
     std::process::exit(code);
 }
 
-/// Prints `out`: a summary for a person at a terminal when the command has
-/// one, JSON otherwise.
+/// Prints `out`: for a person with `--human`, JSON otherwise.
 fn emit(human: bool, path: &str, out: &Value) {
-    if human && let Some(text) = human::summary(path, out) {
-        print!("{text}");
+    if human {
+        print!("{}", human::summary(path, out));
     } else {
         println!("{}", serde_json::to_string_pretty(out).expect("json"));
     }

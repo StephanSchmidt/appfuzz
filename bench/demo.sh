@@ -20,7 +20,7 @@ done
 if [ "${CHECK:-0}" = 1 ]; then
     bin=${APPFUZZ:-appfuzz}
     for a in $apps; do
-        kinds=$("$bin" -j 1 -m "$out/$a.toml" --state "$out/.appfuzz" review --time 2s --json |
+        kinds=$("$bin" -j 1 -m "$out/$a.toml" --state "$out/.appfuzz" review --time 2s |
             python3 -c 'import json,sys; print(" ".join(sorted({f["kind"] for f in json.load(sys.stdin)["findings"] if f["severity"] != "info"})))')
         echo "$a: ${kinds:-pass}"
     done

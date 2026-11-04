@@ -24,7 +24,7 @@ Website: https://appfuzz.dev
 
 ```sh
 curl -fsSL https://appfuzz.dev/install.sh | sh     # or: brew install stephanschmidt/appfuzz/appfuzz
-appfuzz https://appfuzz.dev/demo/chatty.wasm
+appfuzz --human https://appfuzz.dev/demo/chatty.wasm
 ```
 
 That downloads a small demo app with a bug and reviews it. Four more are on
@@ -58,22 +58,23 @@ With a dozen rows in development this is fine. appfuzz grows the list the
 simulated backend returns and counts the calls:
 
 ```
-$ appfuzz review --time 10s
-appfuzz review FAIL  2 fail, 4 warn, 1 info  · 96,676 runs in 10.6s
+$ appfuzz --human review --time 10s
+ FAIL  chatty.wasm  appfuzz review
+       2 fail · 4 warn · 1 info · 96,676 runs in 10.6s
 
-  fail  n_plus_1               calls to bench:web/items#get grow as 1·n with n = length of the list bench:web/items#all returns; cost breaks its limit at n = 100
-  fail  over_budget            bench:web/handler#handle uses 129 cost, the limit is 100
-  warn  chatty                 bench:web/items#get is called for each element bench:web/items#all returned (2 calls for 2 elements)
-  warn  redundant_calls        bench:web/items#get: 2 of 4 calls repeat earlier calls with the same arguments
-  warn  serial_chain           bench:web/handler#handle waits 129 ms for 129 host calls in a row (128 × bench:web/items#get: 128 ms), the latency limit is 200 ms
-  warn  slow_host_sensitivity  bench:web/handler#handle takes 321.04 ms (limit 200) when bench:web/items#get answers in 20 ms; it calls it 16 times
+  ✗ fail  n_plus_1               calls to bench:web/items#get grow as 1·n with n = length of the list bench:web/items#all returns; cost breaks its limit at n = 100
+  ✗ fail  over_budget            bench:web/handler#handle uses 129 cost, the limit is 100
+  ▲ warn  chatty                 bench:web/items#get is called for each element bench:web/items#all returned (2 calls for 2 elements)
+  ▲ warn  redundant_calls        bench:web/items#get: 2 of 4 calls repeat earlier calls with the same arguments
+  ▲ warn  serial_chain           bench:web/handler#handle waits 129 ms for 129 host calls in a row (128 × bench:web/items#get: 128 ms), the latency limit is 200 ms
+  ▲ warn  slow_host_sensitivity  bench:web/handler#handle takes 321.04 ms (limit 200) when bench:web/items#get answers in 20 ms; it calls it 16 times
 
-Next:
-  appfuzz show r9e5a645b84 --view explanation
-  appfuzz findings --min info
+Next
+  › appfuzz --human show r9e5a645b84 --view explanation
+  › appfuzz --human findings --min info
 ```
 
-The exit code is 2 (fail), so CI stops. Piped or with `--json`, the same
+The exit code is 2 (fail), so CI stops. Without `--human`, the same
 command prints the full report as JSON. The same loop written in Zig,
 TypeScript, JavaScript, Go, C# and Python gets the same findings
 (`bench/lang`).
@@ -124,7 +125,7 @@ An Extism plugin needs a platform file that types its JSON; see
 A Wasm file on a web server can be reviewed by its URL:
 
 ```sh
-appfuzz https://appfuzz.dev/demo/chatty.wasm
+appfuzz --human https://appfuzz.dev/demo/chatty.wasm
 ```
 
 appfuzz downloads it, and its manifest from the same URL ending in `.toml`
@@ -136,10 +137,10 @@ Downloads and their runs are kept in `~/.cache/appfuzz` (macOS:
 `~/Library/Caches/appfuzz`, or `$APPFUZZ_CACHE`), not in the current
 folder. `--wasm <url>` works with every command.
 
-At a terminal, `review`, `run`, `inspect` and `findings` print a short
-summary: the verdict, one line per finding, and what to run next. Piped
-output, as in CI or for an agent, is one JSON document; `--json` gives JSON
-at a terminal too.
+Every command prints one JSON document, for CI and agents. With `--human`
+(or `APPFUZZ_HUMAN=1`) it prints for a person instead, in color: the
+verdict, one line per finding, and what to run next. Colors are off when
+the output is not a terminal or `NO_COLOR` is set.
 
 `appfuzz` without arguments tells you what to run next.
 `appfuzz <command> --help` shows examples.

@@ -13,12 +13,12 @@
 - Five demo apps at [appfuzz.dev/demo](https://appfuzz.dev/demo/): an n+1,
   an XSS, two crashes and one that passes. `bench/demo.sh` builds them.
 
-**Readable at a terminal**
+**Readable for people**
 
-- At a terminal, `review`, `run`, `inspect` and `findings` print a short
-  summary: the verdict, one line per finding, what to run next. Piped, or
-  with `--json` or `APPFUZZ_JSON`, they print the same JSON as before.
-  Colors follow `NO_COLOR`.
+- `--human` (or `APPFUZZ_HUMAN=1`) prints every command for a person
+  instead of JSON, in color: the verdict, one line per finding, what to run
+  next. Without it, output is the same JSON as before. Colors are off when
+  the output is not a terminal or `NO_COLOR` is set.
 
 **More kinds of apps**
 

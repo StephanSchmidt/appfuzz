@@ -62,7 +62,7 @@
         <p class="card-sub">Lists all items, then loads each one again</p>
       </div></div>
       <div class="install">
-        <code id="cmd-chatty"><span class="p">$</span> appfuzz https://appfuzz.dev/demo/chatty.wasm</code>
+        <code id="cmd-chatty"><span class="p">$</span> appfuzz --human https://appfuzz.dev/demo/chatty.wasm</code>
         <button type="button" class="copy" data-copy="cmd-chatty" aria-label="Copy command">Copy</button>
       </div>
 <pre class="code"><code>for it in items::all() {
@@ -81,7 +81,7 @@
         <p class="card-sub">The query goes straight into the page</p>
       </div></div>
       <div class="install">
-        <code id="cmd-reflect"><span class="p">$</span> appfuzz https://appfuzz.dev/demo/reflect-query.wasm</code>
+        <code id="cmd-reflect"><span class="p">$</span> appfuzz --human https://appfuzz.dev/demo/reflect-query.wasm</code>
         <button type="button" class="copy" data-copy="cmd-reflect" aria-label="Copy command">Copy</button>
       </div>
 <pre class="code"><code>let q = param(&amp;req.query, "q").unwrap_or("");
@@ -97,7 +97,7 @@ html(format!("&lt;p&gt;Results for {q}&lt;/p&gt;"))</code></pre>
         <p class="card-sub">Works on the demo data, crashes on an empty list</p>
       </div></div>
       <div class="install">
-        <code id="cmd-empty"><span class="p">$</span> appfuzz https://appfuzz.dev/demo/empty-panic.wasm</code>
+        <code id="cmd-empty"><span class="p">$</span> appfuzz --human https://appfuzz.dev/demo/empty-panic.wasm</code>
         <button type="button" class="copy" data-copy="cmd-empty" aria-label="Copy command">Copy</button>
       </div>
 <pre class="code"><code>let all = items::all();
@@ -114,7 +114,7 @@ html(format!("&lt;p&gt;First: {}&lt;/p&gt;", esc(&amp;first.name)))</code></pre>
         <p class="card-sub">Cuts names at 8 bytes, which breaks inside a character</p>
       </div></div>
       <div class="install">
-        <code id="cmd-utf8"><span class="p">$</span> appfuzz https://appfuzz.dev/demo/utf8-slice.wasm</code>
+        <code id="cmd-utf8"><span class="p">$</span> appfuzz --human https://appfuzz.dev/demo/utf8-slice.wasm</code>
         <button type="button" class="copy" data-copy="cmd-utf8" aria-label="Copy command">Copy</button>
       </div>
 <pre class="code"><code>for it in items::all() {
@@ -132,7 +132,7 @@ html(format!("&lt;p&gt;First: {}&lt;/p&gt;", esc(&amp;first.name)))</code></pre>
         <p class="card-sub">One read, sorted, escaped, at most 20 rows</p>
       </div></div>
       <div class="install">
-        <code id="cmd-clean"><span class="p">$</span> appfuzz https://appfuzz.dev/demo/clean.wasm</code>
+        <code id="cmd-clean"><span class="p">$</span> appfuzz --human https://appfuzz.dev/demo/clean.wasm</code>
         <button type="button" class="copy" data-copy="cmd-clean" aria-label="Copy command">Copy</button>
       </div>
 <pre class="code"><code>let mut all = items::all();

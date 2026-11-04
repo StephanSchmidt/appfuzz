@@ -15,8 +15,11 @@ pub(crate) struct Cli {
     /// more than one HTTP component.
     #[arg(long, global = true)]
     pub(crate) component: Option<String>,
-    /// Print JSON at a terminal too (piped output is always JSON).
+    /// Print for a person, with colors, instead of JSON (also APPFUZZ_HUMAN=1).
     #[arg(long, global = true)]
+    pub(crate) human: bool,
+    /// Compatibility option: output is JSON unless --human.
+    #[arg(long, global = true, hide = true)]
     pub(crate) json: bool,
     /// Also download plain http:// URLs.
     #[arg(long, global = true)]

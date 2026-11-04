@@ -44,7 +44,7 @@ pub const DOCS: &[Doc] = &[
         path: "review",
         examples: &[
             "appfuzz review",
-            "appfuzz https://appfuzz.dev/demo/chatty.wasm",
+            "appfuzz --human https://appfuzz.dev/demo/chatty.wasm",
             "appfuzz review --plan plan.json --time 5m --min info",
             "appfuzz review --fresh -j 1 --runs 2000 --search-seed 7",
         ],
@@ -433,7 +433,7 @@ pub fn next(path: &str, out: &Value) -> Vec<String> {
         "plan template" => n.push("appfuzz run --plan plan.json".into()),
         "run" | "call" | "show" | "explain" => {
             if let Some(r) = run {
-                if path != "explain" {
+                if path != "explain" && out.get("vs_stored_runs").is_none() {
                     n.push(format!("appfuzz show {r} --view explanation"));
                 }
                 n.push(format!("appfuzz show {r} --view timeline"));

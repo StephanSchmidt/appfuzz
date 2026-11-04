@@ -66,6 +66,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
             allow_http: cli.allow_http,
             remote: cli.remote,
             json: cli.json,
+            human: cli.human,
             cmd: Some(cmd),
         };
         let result = crate::run_with_app(c, Some(&app));
@@ -281,6 +282,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
             fast: cli.fast,
             allow_http: cli.allow_http,
             remote: cli.remote,
+            human: cli.human,
             json: cli.json,
             cmd: Some(Cmd::Confirm { target: f.id.clone(), finding: None, times: 3, max_runs: 500 }),
         };
