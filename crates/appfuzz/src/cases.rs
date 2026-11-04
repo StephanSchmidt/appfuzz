@@ -17,7 +17,9 @@ pub(super) fn matches(f: &Finding, r: &RunRecord, app: &App) -> bool {
 
 pub(super) fn replay(app: &App, store: &RunStore, path: &str, current: bool) -> Result<Value> {
     let case: Value = serde_json::from_slice(&std::fs::read(path)?)?;
-    if case["kind"] == "acceptance" { return crate::acceptance::replay(app,store,path,current); }
+    if case["kind"] == "acceptance" {
+        return crate::acceptance::replay(app, store, path, current);
+    }
     let mut spec: RunSpec = serde_json::from_value(case["spec"].clone()).context("case file has no spec")?;
     let finding: Finding = serde_json::from_value(case["finding"].clone()).context("case file has no finding")?;
     if current {

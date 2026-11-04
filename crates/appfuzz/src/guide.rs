@@ -16,10 +16,30 @@ pub struct Doc {
 }
 
 pub const DOCS: &[Doc] = &[
-    Doc { path: "acceptance run", examples: &["appfuzz acceptance run", "appfuzz acceptance run availability --runs 100"], output: "suite version, named check statuses, origin, matches, run ids, cases, findings and verdict", next: "`replay <case>` for a counterexample; `review` runs the suite too" },
-    Doc { path: "sequence run", examples: &["appfuzz sequence run scenario.json"], output: "records, persistent states, findings, case, verdict, exit_code", next: "`sequence fuzz scenario.json` to try repetitions and orderings" },
-    Doc { path: "sequence fuzz", examples: &["appfuzz sequence fuzz scenario.json --runs 100 --search-seed 7"], output: "evaluations, shrink_evaluations, minimized case, records, states, findings, verdict", next: "`sequence replay <case>` to reproduce the complete failure" },
-    Doc { path: "sequence replay", examples: &["appfuzz sequence replay case.json", "appfuzz sequence replay case.json --against-current"], output: "reproduced, records, states, findings, verdict, exit_code", next: "fix the app and use --against-current" },
+    Doc {
+        path: "acceptance run",
+        examples: &["appfuzz acceptance run", "appfuzz acceptance run availability --runs 100"],
+        output: "suite version, named check statuses, origin, matches, run ids, cases, findings and verdict",
+        next: "`replay <case>` for a counterexample; `review` runs the suite too",
+    },
+    Doc {
+        path: "sequence run",
+        examples: &["appfuzz sequence run scenario.json"],
+        output: "records, persistent states, findings, case, verdict, exit_code",
+        next: "`sequence fuzz scenario.json` to try repetitions and orderings",
+    },
+    Doc {
+        path: "sequence fuzz",
+        examples: &["appfuzz sequence fuzz scenario.json --runs 100 --search-seed 7"],
+        output: "evaluations, shrink_evaluations, minimized case, records, states, findings, verdict",
+        next: "`sequence replay <case>` to reproduce the complete failure",
+    },
+    Doc {
+        path: "sequence replay",
+        examples: &["appfuzz sequence replay case.json", "appfuzz sequence replay case.json --against-current"],
+        output: "reproduced, records, states, findings, verdict, exit_code",
+        next: "fix the app and use --against-current",
+    },
     Doc {
         path: "review",
         examples: &["appfuzz review", "appfuzz review --plan plan.json --time 5m --min info", "appfuzz review --fresh -j 1 --runs 2000 --search-seed 7"],
@@ -34,7 +54,11 @@ pub const DOCS: &[Doc] = &[
     },
     Doc {
         path: "platform docs",
-        examples: &["appfuzz platform docs --platform fastly --fn send_v2", "appfuzz platform docs --capability bookings-write", "appfuzz platform docs --markdown HOST-API.md"],
+        examples: &[
+            "appfuzz platform docs --platform fastly --fn send_v2",
+            "appfuzz platform docs --capability bookings-write",
+            "appfuzz platform docs --markdown HOST-API.md",
+        ],
         output: "every host function: signature, description, parameters, errors, SDK call, effect, cost, value domains, labels and rules",
         next: "write the app against it; declare the app's own semantics in appfuzz.toml (the platform's can only be tightened)",
     },
@@ -69,7 +93,12 @@ pub const DOCS: &[Doc] = &[
     },
     Doc {
         path: "show",
-        examples: &["appfuzz show last", "appfuzz show last --view explanation", "appfuzz show last --view provenance --call 3", "appfuzz show last --field outcome"],
+        examples: &[
+            "appfuzz show last",
+            "appfuzz show last --view explanation",
+            "appfuzz show last --view provenance --call 3",
+            "appfuzz show last --field outcome",
+        ],
         output: "the stored run record (spec, outcome, result, totals, events, stdout, stderr), or one field",
         next: "`timeline`, `calls`, `explain`",
     },
@@ -106,11 +135,7 @@ pub const DOCS: &[Doc] = &[
     Doc { path: "runs", examples: &["appfuzz runs"], output: "stored runs: id, export, outcome, host calls, fuel", next: "`explain <run>`" },
     Doc {
         path: "scale",
-        examples: &[
-            "appfuzz scale fn:bench:web/items#all",
-            "appfuzz scale field:query.days --sizes 1,7,30,365",
-            "appfuzz scale len:query.q",
-        ],
+        examples: &["appfuzz scale fn:bench:web/items#all", "appfuzz scale field:query.days --sizes 1,7,30,365", "appfuzz scale len:query.q"],
         output: "per size: calls, cost, time, fuel; growth laws with where limits break; findings",
         next: "`confirm <finding>`; `explain <run>` of the biggest point",
     },
@@ -200,7 +225,10 @@ pub const DOCS: &[Doc] = &[
     },
     Doc {
         path: "eval",
-        examples: &["appfuzz eval last 'size(rows)' --let rows='select .row'", "appfuzz eval last 'total == sum(prices)' --let total=out.json.total --let prices=host.items#all.result"],
+        examples: &[
+            "appfuzz eval last 'size(rows)' --let rows='select .row'",
+            "appfuzz eval last 'total == sum(prices)' --let total=out.json.total --let prices=host.items#all.result",
+        ],
         output: "each binding's value (or why it is undefined), the expression's value, and the verdict a saved assert would give on this run",
         next: "save it as an `[acceptance.checks.NAME]` with `let` and `assert`; `fuzz` and `review` then judge it on every run",
     },
@@ -234,28 +262,48 @@ pub const DOCS: &[Doc] = &[
         output: "host call instructions no stored run reached, with texts and numbers of the function and its callers; `dormant_code` findings where nearby code compares with odd large constants, hash constants or times",
         next: "`run --set` or `sweep --values` with the hinted values; `fuzz` again",
     },
-    Doc { path: "wasi", examples: &["appfuzz wasi"], output: "WASI imports with grants; clock, random, sleep and output use in stored runs", next: "`inspect` for platform imports" },
+    Doc {
+        path: "wasi",
+        examples: &["appfuzz wasi"],
+        output: "WASI imports with grants; clock, random, sleep and output use in stored runs",
+        next: "`inspect` for platform imports",
+    },
     Doc {
         path: "findings",
         examples: &["appfuzz findings", "appfuzz findings --min warn"],
         output: "all findings for this component: id, severity, kind, title, run, case file if confirmed",
         next: "`confirm <id>`; `explain <run>`",
     },
-    Doc { path: "wasm info", examples: &["appfuzz wasm info"], output: "core modules: role, size, functions, host imports, exports", next: "`wasm funcs --host`" },
+    Doc {
+        path: "wasm info",
+        examples: &["appfuzz wasm info"],
+        output: "core modules: role, size, functions, host imports, exports",
+        next: "`wasm funcs --host`",
+    },
     Doc {
         path: "wasm funcs",
         examples: &["appfuzz wasm funcs --host", "appfuzz wasm funcs --grep render"],
         output: "functions: size, calls, loops, host functions reached",
         next: "`wasm callgraph <func>`",
     },
-    Doc { path: "wasm callgraph", examples: &["appfuzz wasm callgraph 26 --depth 3"], output: "what a function calls, as a tree", next: "`wasm disasm <func>`" },
+    Doc {
+        path: "wasm callgraph",
+        examples: &["appfuzz wasm callgraph 26 --depth 3"],
+        output: "what a function calls, as a tree",
+        next: "`wasm disasm <func>`",
+    },
     Doc {
         path: "wasm xrefs",
         examples: &["appfuzz wasm xrefs bench:web/items#get"],
         output: "who calls a function or host function, as a tree",
         next: "`wasm loops` for calls inside loops",
     },
-    Doc { path: "wasm loops", examples: &["appfuzz wasm loops"], output: "loops that reach host functions (static n+1 candidates)", next: "`amplify` to measure them" },
+    Doc {
+        path: "wasm loops",
+        examples: &["appfuzz wasm loops"],
+        output: "loops that reach host functions (static n+1 candidates)",
+        next: "`amplify` to measure them",
+    },
     Doc {
         path: "wasm strings",
         examples: &["appfuzz wasm strings --grep http", "appfuzz wasm strings --min 8"],
@@ -263,15 +311,32 @@ pub const DOCS: &[Doc] = &[
         next: "`sweep --values` with interesting ones",
     },
     Doc { path: "wasm disasm", examples: &["appfuzz wasm disasm 26"], output: "a function's instructions", next: "`wasm callgraph`" },
-    Doc { path: "wasm sites", examples: &["appfuzz wasm sites"], output: "static call sites per host function, and the app functions that called it in stored runs", next: "`unexplored`" },
+    Doc {
+        path: "wasm sites",
+        examples: &["appfuzz wasm sites"],
+        output: "static call sites per host function, and the app functions that called it in stored runs",
+        next: "`unexplored`",
+    },
 ];
 
 pub const WORKFLOWS: &[(&str, &[&str])] = &[
     ("review in one go (CI)", &["appfuzz review --time 2m", "appfuzz show <run> --view explanation"]),
     ("start", &["appfuzz inspect", "appfuzz run", "appfuzz fuzz --time 2m", "appfuzz findings --min warn", "appfuzz confirm <finding id>"]),
-    ("understand a finding", &["appfuzz show <run> --view explanation", "appfuzz show <run> --view timeline", "appfuzz show <run> --view stack --call <n>", "appfuzz show <run> --view provenance --call <n>", "appfuzz show <run> --view fuel"]),
+    (
+        "understand a finding",
+        &[
+            "appfuzz show <run> --view explanation",
+            "appfuzz show <run> --view timeline",
+            "appfuzz show <run> --view stack --call <n>",
+            "appfuzz show <run> --view provenance --call <n>",
+            "appfuzz show <run> --view fuel",
+        ],
+    ),
     ("why do two runs differ", &["appfuzz diff <run a> <run b>", "appfuzz show <run b> --view provenance --call <first different call>"]),
-    ("test a suspicion", &["appfuzz check value_range .total 0 100", "appfuzz sweep -f query.days", "appfuzz scale field:query.days", "appfuzz probe pairs <run>"]),
+    (
+        "test a suspicion",
+        &["appfuzz check value_range .total 0 100", "appfuzz sweep -f query.days", "appfuzz scale field:query.days", "appfuzz probe pairs <run>"],
+    ),
     ("cost and fan-out", &["appfuzz amplify", "appfuzz scale fn:<host fn>", "appfuzz wasm loops"]),
     ("reach more code", &["appfuzz unexplored", "appfuzz run --set '{\"query\": [[\"<key>\", \"<hinted value>\"]]}'", "appfuzz fuzz"]),
     ("after a fix", &["appfuzz replay .appfuzz/cases/<finding id>.json --against-current", "appfuzz review"]),
@@ -407,7 +472,8 @@ pub fn next(path: &str, out: &Value) -> Vec<String> {
             // Two runs from different behaviour groups.
             let rows = out["table"].as_array().cloned().unwrap_or_default();
             let groups = out["behaviours"].as_array().cloned().unwrap_or_default();
-            let first_of = |g: &Value| g["values"][0].as_str().and_then(|v| rows.iter().find(|r| r["value"] == v)).and_then(|r| r["run"].as_str()).map(str::to_string);
+            let first_of =
+                |g: &Value| g["values"][0].as_str().and_then(|v| rows.iter().find(|r| r["value"] == v)).and_then(|r| r["run"].as_str()).map(str::to_string);
             if let (Some(a), Some(b)) = (groups.first().and_then(first_of), groups.get(1).and_then(first_of)) {
                 n.push(format!("appfuzz diff {a} {b}"));
             }

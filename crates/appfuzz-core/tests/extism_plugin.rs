@@ -140,9 +140,6 @@ fn kernel_calls_are_no_host_calls_in_static_analysis() {
     let hosts: Vec<String> = appfuzz_core::dormant::sites(&st).into_iter().map(|s| s.host).collect();
     assert!(hosts.iter().all(|h| !h.starts_with("extism:host/env")), "{hosts:?}");
     let app = app();
-    let loops: Vec<_> = appfuzz_core::detect::static_findings(&app.manifest, &app.imports, &st)
-        .into_iter()
-        .filter(|f| f.kind == "host_call_in_loop")
-        .collect();
+    let loops: Vec<_> = appfuzz_core::detect::static_findings(&app.manifest, &app.imports, &st).into_iter().filter(|f| f.kind == "host_call_in_loop").collect();
     assert!(loops.is_empty(), "{loops:?}");
 }

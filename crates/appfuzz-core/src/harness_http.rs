@@ -248,18 +248,18 @@ pub(super) fn link(linker: &mut Linker<Host>) -> Result<()> {
     })?;
 
     let mut out = linker.instance(&format!("wasi:http/outgoing-handler@{VERSION}"))?;
-    out.func_wrap(
-        "handle",
-        |mut store: StoreContextMut<'_, Host>, (req, _options): (Resource<HostOutgoingRequest>, Option<Resource<RequestOptions>>)| {
-            Ok((send(&mut store, req)?,))
-        },
-    )?;
+    out.func_wrap("handle", |mut store: StoreContextMut<'_, Host>, (req, _options): (Resource<HostOutgoingRequest>, Option<Resource<RequestOptions>>)| {
+        Ok((send(&mut store, req)?,))
+    })?;
     Ok(())
 }
 
 /// `outgoing-handler.handle`: checks the request like the real host and
 /// keeps it until the guest asks for the response.
-fn send(store: &mut StoreContextMut<'_, Host>, id: Resource<HostOutgoingRequest>) -> wasmtime::Result<Result<Resource<HostFutureIncomingResponse>, wt::ErrorCode>> {
+fn send(
+    store: &mut StoreContextMut<'_, Host>,
+    id: Resource<HostOutgoingRequest>,
+) -> wasmtime::Result<Result<Resource<HostFutureIncomingResponse>, wt::ErrorCode>> {
     let rep = id.rep();
     let host = store.data_mut();
     let req = host.table.delete(id)?;
@@ -287,18 +287,11 @@ fn send(store: &mut StoreContextMut<'_, Host>, id: Resource<HostOutgoingRequest>
         return Ok(Err(wt::ErrorCode::HttpRequestUriInvalid));
     }
     let path = req.path_with_query.clone().unwrap_or_else(|| "/".into());
-    let headers = http::HeaderMap::from(req.headers)
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
-        .collect();
+    let headers =
+        http::HeaderMap::from(req.headers).iter().map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())).collect();
     host.http.sent += 1;
-    let pending = Pending {
-        seq: host.http.sent,
-        method,
-        url: format!("{scheme}://{authority}{path}"),
-        headers,
-        body: req.body.map(|b| (b, buffer.unwrap_or_default())),
-    };
+    let pending =
+        Pending { seq: host.http.sent, method, url: format!("{scheme}://{authority}{path}"), headers, body: req.body.map(|b| (b, buffer.unwrap_or_default())) };
     let placeholder = Err(wasmtime_wasi_http::Error::InternalError(Some("not answered yet".into())));
     let future = host.table.push(HostFutureIncomingResponse::Ready(placeholder))?;
     // A reused slot: the guest dropped that earlier future without asking.
@@ -343,12 +336,7 @@ fn resolve(store: &mut StoreContextMut<'_, Host>, future: Option<u32>, p: Pendin
         let ty = store.data().platform.funcs.get(CLIENT_KEY).map(|f| f.ty.clone()).ok_or_else(|| wasmtime::format_err!("{CLIENT_KEY} is not linked"))?;
         let headers: Vec<Value> = p.headers.iter().map(|(k, v)| json!([k, v])).collect();
         let args = [json!(p.method), json!(p.url), Value::Array(headers), json!(String::from_utf8_lossy(&body))];
-        let params = ty
-            .params()
-            .zip(args.iter())
-            .map(|((_, t), v)| json_to_val(v, &t))
-            .collect::<Result<Vec<_>>>()
-            .map_err(wasmtime::Error::from_anyhow)?;
+        let params = ty.params().zip(args.iter()).map(|((_, t), v)| json_to_val(v, &t)).collect::<Result<Vec<_>>>().map_err(wasmtime::Error::from_anyhow)?;
         let mut results = vec![Val::Bool(false)];
         intercept(store.as_context_mut(), CLIENT_KEY, &params, &mut results).map_err(wasmtime::Error::from_anyhow)?;
         match incoming(&val_to_json(&results[0])) {
@@ -393,11 +381,7 @@ fn incoming(v: &Value) -> Result<SendResult> {
 
 fn pairs(v: Option<&Value>) -> Vec<(String, String)> {
     v.and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|p| Some((p.get(0)?.as_str()?.to_string(), p.get(1)?.as_str()?.to_string())))
-                .collect()
-        })
+        .map(|a| a.iter().filter_map(|p| Some((p.get(0)?.as_str()?.to_string(), p.get(1)?.as_str()?.to_string()))).collect())
         .unwrap_or_default()
 }
 
@@ -422,6 +406,55 @@ fn error_of(text: &str) -> wasmtime_wasi_http::Error {
     }
 }
 
+/// The request target as the platform's HTTP stack would hand it over.
+/// An attacker sends raw bytes, not what a browser would encode: `'`, `(`,
+/// `../` and the like arrive as they are. Only bytes the server's parser
+/// rejects (spaces, controls, `"`, `<`, `>`, …) are percent-encoded, as a
+/// client must to be heard at all. Text without `http(s)://` is a path on
+/// the app's host.
+fn deliver_uri(text: &str) -> Option<http::Uri> {
+    use std::sync::LazyLock;
+    // Which ASCII bytes the `http` crate accepts in a path and in a query.
+    static OK: LazyLock<[[bool; 128]; 2]> = LazyLock::new(|| {
+        let mut ok = [[false; 128]; 2];
+        for b in 0u8..128 {
+            let c = b as char;
+            ok[0][b as usize] = matches!(c, '?' | '#') || http::uri::PathAndQuery::try_from(format!("/{c}")).is_ok();
+            ok[1][b as usize] = c == '#' || http::uri::PathAndQuery::try_from(format!("/?{c}")).is_ok();
+        }
+        ok
+    });
+    let (origin, rest) = match text.find("://") {
+        Some(i) if matches!(&text[..i], "http" | "https") => {
+            let after = &text[i + 3..];
+            let end = after.find(['/', '?', '#']).unwrap_or(after.len());
+            (&text[..i + 3 + end], &text[i + 3 + end..])
+        }
+        _ => ("", text),
+    };
+    let mut target = String::with_capacity(rest.len() + 1);
+    if !rest.starts_with('/') {
+        target.push('/');
+    }
+    let mut query = false;
+    for c in rest.chars() {
+        let keep = (c as u32) >= 128 || OK[query as usize][c as usize];
+        if keep {
+            target.push(c);
+        } else {
+            for b in c.to_string().bytes() {
+                target.push_str(&format!("%{b:02X}"));
+            }
+        }
+        query |= c == '?';
+    }
+    let uri: Option<http::Uri> = format!("{origin}{target}").parse().ok();
+    uri.or_else(|| {
+        // An authority the parser rejects: deliver the target on the app's host.
+        target.parse().ok()
+    })
+}
+
 /// Calls `wasi:http/incoming-handler#handle` with the request record and
 /// returns the response record. The outer error is appfuzz's (a request
 /// the platform would not deliver), the inner one the guest's.
@@ -429,20 +462,8 @@ pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value)
     let text = |k: &str| request.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
     let method = text("method");
     let method = http::Method::from_bytes(method.as_bytes()).map_err(|_| anyhow!("the platform does not deliver method {method:?}"))?;
-    // Clients percent-encode what a URL cannot hold (`<`, quotes, spaces),
-    // so the app sees what a real client would send. A path alone is
-    // relative to the app's host.
-    // Control characters are encoded too: the URL parser would drop tabs
-    // and newlines, and the app would see text the request never had.
     let uri_text = text("uri");
-    let encoded: String = uri_text.chars().map(|c| if c.is_ascii_control() { format!("%{:02X}", c as u32) } else { c.to_string() }).collect();
-    let base = url::Url::parse("https://app.example/").expect("valid base");
-    let uri: http::Uri = url::Url::options()
-        .base_url(Some(&base))
-        .parse(&encoded)
-        .ok()
-        .and_then(|u| u.as_str().parse().ok())
-        .ok_or_else(|| anyhow!("the platform does not deliver uri {uri_text:?}"))?;
+    let uri = deliver_uri(&uri_text).ok_or_else(|| anyhow!("the platform does not deliver uri {uri_text:?}"))?;
     let scheme = match uri.scheme_str() {
         Some("https") => wt::Scheme::Https,
         Some("http") | None => wt::Scheme::Http,
@@ -466,9 +487,7 @@ pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value)
     let (req, out) = {
         let mut view = store.data_mut().http();
         let req = view.new_incoming_request(scheme, req).map_err(anyhow::Error::from)?;
-        let out = view
-            .new_response_outparam_from_callback(move |r| *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(r))
-            .map_err(anyhow::Error::from)?;
+        let out = view.new_response_outparam_from_callback(move |r| *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(r)).map_err(anyhow::Error::from)?;
         (req, out)
     };
     let typed = func.typed::<(Resource<HostIncomingRequest>, Resource<HostResponseOutparam>), ()>(&*store).map_err(anyhow::Error::from)?;
@@ -494,4 +513,20 @@ pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value)
     let bytes = store.data().http.response_body.as_ref().map(contents).unwrap_or_default();
     let headers: Vec<Value> = parts.headers.iter().map(|(k, v)| json!([k.as_str(), String::from_utf8_lossy(v.as_bytes())])).collect();
     Ok(Ok(json!({ "status": parts.status.as_u16(), "headers": headers, "body": String::from_utf8_lossy(&bytes) })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deliver_uri;
+
+    #[test]
+    fn uris_arrive_as_an_attacker_sends_them() {
+        let d = |s: &str| deliver_uri(s).map(|u| u.to_string());
+        assert_eq!(d("/?sku=a'b").as_deref(), Some("/?sku=a'b"));
+        assert_eq!(d("https://app.example/x?q=../(1)").as_deref(), Some("https://app.example/x?q=../(1)"));
+        assert_eq!(d("adminone").as_deref(), Some("/adminone"));
+        assert_eq!(d("/a b<c>\"d").as_deref(), Some("/a%20b%3Cc%3E\"d"));
+        assert_eq!(d("/?x=a\r\nb").as_deref(), Some("/?x=a%0D%0Ab"));
+        assert_eq!(d("/ü").as_deref(), Some("/ü"));
+    }
 }

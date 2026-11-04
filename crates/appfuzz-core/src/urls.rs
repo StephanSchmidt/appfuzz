@@ -43,9 +43,8 @@ pub struct UrlRef {
 }
 
 pub(crate) static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<([a-zA-Z][a-zA-Z0-9-]*)\b((?:[^>\x22']|\x22[^\x22]*\x22|'[^']*')*)>").unwrap());
-pub(crate) static ATTR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"([a-zA-Z_:@(\[#*][-a-zA-Z0-9_:.@()\[\]#*]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"#).unwrap()
-});
+pub(crate) static ATTR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"([a-zA-Z_:@(\[#*][-a-zA-Z0-9_:.@()\[\]#*]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"#).unwrap());
 static TEXT_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\b(?:https?|ftp|wss?)://[^\s"'<>\\]+"#).unwrap());
 static SCHEME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([a-zA-Z][a-zA-Z0-9+.-]*):").unwrap());
 static DIGITS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[0-9]+").unwrap());
@@ -66,17 +65,84 @@ static HOSTISH: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Attributes that never hold a URL a browser or a framework fetches.
 const PASSIVE: &[&str] = &[
-    "class", "id", "title", "alt", "name", "type", "value", "placeholder", "role", "lang", "dir", "for", "width", "height", "rel", "target", "method",
-    "formmethod", "charset", "content", "http-equiv", "loading", "decoding", "crossorigin", "referrerpolicy", "integrity", "tabindex", "hidden", "disabled",
-    "checked", "selected", "readonly", "required", "autocomplete", "min", "max", "step", "size", "rows", "cols", "maxlength", "colspan", "rowspan", "label",
-    "cite", "longdesc", "datetime", "accept", "media", "sizes", "nonce", "translate", "spellcheck", "draggable", "contenteditable", "style",
+    "class",
+    "id",
+    "title",
+    "alt",
+    "name",
+    "type",
+    "value",
+    "placeholder",
+    "role",
+    "lang",
+    "dir",
+    "for",
+    "width",
+    "height",
+    "rel",
+    "target",
+    "method",
+    "formmethod",
+    "charset",
+    "content",
+    "http-equiv",
+    "loading",
+    "decoding",
+    "crossorigin",
+    "referrerpolicy",
+    "integrity",
+    "tabindex",
+    "hidden",
+    "disabled",
+    "checked",
+    "selected",
+    "readonly",
+    "required",
+    "autocomplete",
+    "min",
+    "max",
+    "step",
+    "size",
+    "rows",
+    "cols",
+    "maxlength",
+    "colspan",
+    "rowspan",
+    "label",
+    "cite",
+    "longdesc",
+    "datetime",
+    "accept",
+    "media",
+    "sizes",
+    "nonce",
+    "translate",
+    "spellcheck",
+    "draggable",
+    "contenteditable",
+    "style",
 ];
 /// Words that say a request goes out without the user doing anything.
 pub(crate) const SELF_WORDS: &[&str] = &["load", "revealed", "intersect", "every", "init", "visible", "poll", "interval", "mount", "mounted"];
 /// Response headers that never hold a URL to follow.
 const PASSIVE_HEADERS: &[&str] = &[
-    "content-type", "content-length", "cache-control", "etag", "date", "expires", "last-modified", "vary", "set-cookie", "server", "age", "pragma",
-    "content-encoding", "content-language", "x-content-type-options", "strict-transport-security", "content-security-policy",
+    "content-type",
+    "content-length",
+    "cache-control",
+    "etag",
+    "date",
+    "expires",
+    "last-modified",
+    "vary",
+    "set-cookie",
+    "server",
+    "age",
+    "pragma",
+    "content-encoding",
+    "content-language",
+    "x-content-type-options",
+    "strict-transport-security",
+    "content-security-policy",
 ];
 
 /// One element as the browser sees it: attributes in order, entities

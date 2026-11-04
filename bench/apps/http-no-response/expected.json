@@ -1,0 +1,11 @@
+{
+  "app": "http-no-response",
+  "bug": "a wasi:http handler that returns without a response on /admin",
+  "expect": [
+    {
+      "kind": "crash",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

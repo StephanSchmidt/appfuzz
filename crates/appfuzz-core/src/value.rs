@@ -55,13 +55,9 @@ pub fn val_to_json_with(v: &Val, text: &impl Fn(&str) -> Value) -> Value {
         Val::Float64(f) => float_json(*f),
         Val::Char(c) => json!(c.to_string()),
         Val::String(s) => text(s),
-        Val::List(items) | Val::Tuple(items) | Val::FixedLengthList(items) => {
-            Value::Array(items.iter().map(conv).collect())
-        }
+        Val::List(items) | Val::Tuple(items) | Val::FixedLengthList(items) => Value::Array(items.iter().map(conv).collect()),
         Val::Map(pairs) => Value::Array(pairs.iter().map(|(k, v)| json!([conv(k), conv(v)])).collect()),
-        Val::Record(fields) => {
-            Value::Object(fields.iter().map(|(k, v)| (k.clone(), conv(v))).collect::<Map<_, _>>())
-        }
+        Val::Record(fields) => Value::Object(fields.iter().map(|(k, v)| (k.clone(), conv(v))).collect::<Map<_, _>>()),
         Val::Variant(case, None) => json!(case),
         Val::Variant(case, Some(p)) => json!({ case: conv(p) }),
         Val::Enum(case) => json!(case),
@@ -106,13 +102,7 @@ pub fn json_to_val(v: &Value, ty: &Type) -> Result<Val> {
         Type::List(l) => {
             let inner = l.ty();
             let items = v.as_array().ok_or_else(|| expected("array", v))?;
-            Val::List(
-                items
-                    .iter()
-                    .enumerate()
-                    .map(|(i, x)| json_to_val(x, &inner).with_context(|| format!("[{i}]")))
-                    .collect::<Result<_>>()?,
-            )
+            Val::List(items.iter().enumerate().map(|(i, x)| json_to_val(x, &inner).with_context(|| format!("[{i}]"))).collect::<Result<_>>()?)
         }
         Type::FixedLengthList(l) => {
             let inner = l.ty();
@@ -125,10 +115,7 @@ pub fn json_to_val(v: &Value, ty: &Type) -> Result<Val> {
         Type::Map(m) => {
             let (kt, vt) = (m.key(), m.value());
             let pairs = match v {
-                Value::Object(o) => o
-                    .iter()
-                    .map(|(k, x)| Ok((json_to_val(&json!(k), &kt)?, json_to_val(x, &vt)?)))
-                    .collect::<Result<_>>()?,
+                Value::Object(o) => o.iter().map(|(k, x)| Ok((json_to_val(&json!(k), &kt)?, json_to_val(x, &vt)?))).collect::<Result<_>>()?,
                 Value::Array(a) => a
                     .iter()
                     .map(|p| {
@@ -144,10 +131,7 @@ pub fn json_to_val(v: &Value, ty: &Type) -> Result<Val> {
             let obj = v.as_object().ok_or_else(|| expected("object (record)", v))?;
             let mut fields = Vec::new();
             for f in r.fields() {
-                let value = obj
-                    .get(f.name)
-                    .or_else(|| obj.get(&f.name.replace('-', "_")))
-                    .ok_or_else(|| anyhow!("missing field {:?}", f.name))?;
+                let value = obj.get(f.name).or_else(|| obj.get(&f.name.replace('-', "_"))).ok_or_else(|| anyhow!("missing field {:?}", f.name))?;
                 fields.push((f.name.to_string(), json_to_val(value, &f.ty).with_context(|| format!(".{}", f.name))?));
             }
             Val::Record(fields)
@@ -178,9 +162,7 @@ pub fn json_to_val(v: &Value, ty: &Type) -> Result<Val> {
         }
         Type::Option(o) => match v {
             Value::Null => Val::Option(None),
-            Value::Object(m) if m.len() == 1 && m.contains_key("some") => {
-                Val::Option(Some(Box::new(json_to_val(&m["some"], &o.ty())?)))
-            }
+            Value::Object(m) if m.len() == 1 && m.contains_key("some") => Val::Option(Some(Box::new(json_to_val(&m["some"], &o.ty())?))),
             other => Val::Option(Some(Box::new(json_to_val(other, &o.ty())?))),
         },
         Type::Result(r) => {
@@ -211,7 +193,9 @@ pub fn json_to_val(v: &Value, ty: &Type) -> Result<Val> {
             }
             Val::Flags(out)
         }
-        Type::Own(_) | Type::Borrow(_) | Type::Future(_) | Type::Stream(_) | Type::ErrorContext => {
+        // A placeholder: the harness gives the guest a fresh handle here.
+        Type::Own(_) => Val::Bool(false),
+        Type::Borrow(_) | Type::Future(_) | Type::Stream(_) | Type::ErrorContext => {
             bail!("appfuzz can't simulate resources, futures or streams yet ({})", crate::wit::type_str(ty))
         }
     })
@@ -275,8 +259,8 @@ pub struct GenOpts {
 }
 
 const WORDS: &[&str] = &[
-    "alpha", "birch", "cedar", "delta", "ember", "fjord", "grove", "harbor", "iris", "juniper", "kestrel", "linden",
-    "maple", "north", "orchid", "pine", "quartz", "river", "sage", "tundra",
+    "alpha", "birch", "cedar", "delta", "ember", "fjord", "grove", "harbor", "iris", "juniper", "kestrel", "linden", "maple", "north", "orchid", "pine",
+    "quartz", "river", "sage", "tundra",
 ];
 const UNICODE: &[&str] = &["Zoë", "東京", "مرحبا", "e\u{301}", "👩‍💻", "\u{200b}", "Ω≈ç√", "\u{feff}x"];
 const HTML: &[&str] = &["<b>bold</b>", "<script>x</script>", "\"quoted\"", "a & b", "<img src=x>", "'single'"];
@@ -370,11 +354,7 @@ impl Generator {
                     Some("mixed") => self.rng.random_bool(0.5),
                     _ => true,
                 };
-                if ok {
-                    Val::Result(Ok(r.ok().map(|t| Box::new(self.gen_val(&t)))))
-                } else {
-                    Val::Result(Err(r.err().map(|t| Box::new(self.gen_val(&t)))))
-                }
+                if ok { Val::Result(Ok(r.ok().map(|t| Box::new(self.gen_val(&t))))) } else { Val::Result(Err(r.err().map(|t| Box::new(self.gen_val(&t))))) }
             }
             Type::Flags(f) => Val::Flags(f.names().filter(|_| self.rng.random_bool(0.3)).map(str::to_string).collect()),
             // Not fakeable; callers check types before generating.
@@ -388,11 +368,7 @@ impl Generator {
 
     fn gen_string(&mut self) -> String {
         let mode = self.opts.strings.clone().unwrap_or_else(|| "words".into());
-        let mode = if mode == "edge" {
-            self.pick(&["words", "empty", "long", "unicode", "html"]).to_string()
-        } else {
-            mode
-        };
+        let mode = if mode == "edge" { self.pick(&["words", "empty", "long", "unicode", "html"]).to_string() } else { mode };
         if let Some(fixed) = mode.strip_prefix('=') {
             return fixed.to_string();
         }

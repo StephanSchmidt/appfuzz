@@ -70,8 +70,30 @@ pub fn response(r: &RunRecord, m: &Manifest) -> Response {
         }
     }
     let format = o.and_then(|o| o.body_format.as_deref());
-    out.html = format == Some("html") || (format.is_none() && out.body.as_deref().is_some_and(|b| TAG.is_match(b)));
+    let content_type = out.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-type")).map(|(_, v)| v.to_ascii_lowercase());
+    out.html = match (&content_type, format) {
+        // The response says what it is; a browser believes it.
+        (Some(ct), _) => ct.contains("html"),
+        (None, Some(f)) => f == "html",
+        // No type in a response that has headers: the browser sniffs, and
+        // only a body that starts like HTML renders as HTML.
+        (None, None) if o.is_some_and(|o| o.headers.is_some()) => out.body.as_deref().is_some_and(sniffs_html),
+        (None, None) => out.body.as_deref().is_some_and(|b| TAG.is_match(b)),
+    };
     out
+}
+
+/// The WHATWG MIME sniffing rule for HTML: after whitespace, one of these
+/// tags followed by a space or `>`, or a comment.
+fn sniffs_html(body: &str) -> bool {
+    const TAGS: &[&str] =
+        &["<!doctype html", "<html", "<head", "<script", "<iframe", "<h1", "<div", "<font", "<table", "<a", "<style", "<title", "<b", "<body", "<br", "<p"];
+    let b = body.trim_start_matches([' ', '\t', '\n', '\r', '\x0c']);
+    if b.starts_with("<!--") {
+        return true;
+    }
+    let head: String = b.chars().take(16).collect::<String>().to_ascii_lowercase();
+    TAGS.iter().any(|t| head.starts_with(t) && matches!(head[t.len()..].chars().next(), Some(' ' | '>')))
 }
 
 static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*?(/?)>").unwrap());
@@ -230,7 +252,14 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             None
         };
         if let Some(why) = bad {
-            out.push(Finding::new("invalid_response", &format!("{ex}\0header\0{n}"), Severity::Fail, format!("{ex}: {why}"), json!({"header": n, "value": v}), run));
+            out.push(Finding::new(
+                "invalid_response",
+                &format!("{ex}\0header\0{n}"),
+                Severity::Fail,
+                format!("{ex}: {why}"),
+                json!({"header": n, "value": v}),
+                run,
+            ));
             break;
         }
     }
@@ -276,8 +305,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     // (generated from a string in the binary) is in `<progress>` too.
     // Most runs have no error texts: skip the scan of the whole body.
     let text = if errs.is_empty() { String::new() } else { error_view(&resp, body) };
-    let shown: Vec<&(String, String)> =
-        errs.iter().filter(|(_, t)| text.contains(t.as_str()) && !other.iter().any(|o| o.contains(t.as_str()))).collect();
+    let shown: Vec<&(String, String)> = errs.iter().filter(|(_, t)| text.contains(t.as_str()) && !other.iter().any(|o| o.contains(t.as_str()))).collect();
     if let Some((f, t)) = shown.first() {
         leaks.push(format!("the error text {f} returned ({:?})", t.chars().take(60).collect::<String>()));
     }
@@ -588,6 +616,16 @@ pub fn word_bag(body: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sniffing_like_a_browser() {
+        assert!(super::sniffs_html("  <h1>Hi</h1>"));
+        assert!(super::sniffs_html("<!DOCTYPE html><html>"));
+        assert!(super::sniffs_html("<!-- x -->"));
+        assert!(!super::sniffs_html("Error::Other(\"<b>x\")"));
+        assert!(!super::sniffs_html("<bogus>"));
+        assert!(!super::sniffs_html("<blink>"));
+    }
+
     use super::*;
 
     /// The scanner finds what the regex finds, on random markup.

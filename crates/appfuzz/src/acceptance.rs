@@ -240,10 +240,15 @@ fn check_one(app: &App, state: &Path, name: &str, check: &Check, base: &RunSpec,
     }
     let mut health = Vec::new();
     if tally.rejected > 0 && tally.rejected * 10 > (tally.rejected + matches as u64) * 9 {
-        health.push(format!("assume rejected {} of {} evaluated runs; widen the request or plan so more runs qualify", tally.rejected, tally.rejected + matches as u64));
+        health.push(format!(
+            "assume rejected {} of {} evaluated runs; widen the request or plan so more runs qualify",
+            tally.rejected,
+            tally.rejected + matches as u64
+        ));
     }
     if witness.status == "not_exercised" && tally.vacuous > 0 {
-        witness.detail = json!({"reason": "vacuous: it only held on runs where every list it reads was empty; give the host lists items (plan, generate.list_len)"});
+        witness.detail =
+            json!({"reason": "vacuous: it only held on runs where every list it reads was empty; give the host lists items (plan, generate.list_len)"});
     }
     save(&store, &witness)?;
     FindingStore::new(state, &app.state_key).add(&findings)?;
@@ -330,8 +335,10 @@ pub(super) fn replay(app: &App, store: &RunStore, path: &str, current: bool) -> 
     let complete = matches!(e.status.as_str(), "holds" | "broken") || e.detail["vacuous"] == true;
     let reproduced = e.status == "broken";
     let findings = if reproduced { vec![finding(&case.name, &case.check, &e, Path::new(path))] } else { vec![] };
-    Ok(json!({"case":path,"name":case.name,"origin":case.check.origin,"mode":if current{"regression"}else{"exact"},"reproduced":reproduced,"superseded":superseded,
+    Ok(
+        json!({"case":path,"name":case.name,"origin":case.check.origin,"mode":if current{"regression"}else{"exact"},"reproduced":reproduced,"superseded":superseded,
         "status":if complete{"complete"}else{"incomplete"},"check_status":e.status,"matches":e.matches,"evidence":e.detail,"findings":findings,
         "runs":e.records.iter().map(|r|&r.id).collect::<Vec<_>>(),
-        "exit_code":if !complete{3}else if current{if reproduced{2}else{0}}else if reproduced{0}else{2}}))
+        "exit_code":if !complete{3}else if current{if reproduced{2}else{0}}else if reproduced{0}else{2}}),
+    )
 }

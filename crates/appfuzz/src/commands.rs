@@ -38,9 +38,9 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
         }
         Cmd::Sequence { cmd } => crate::sequences::command(load()?, &cli.state, cmd),
         Cmd::Acceptance { cmd: AcceptanceCmd::Run { name, runs, search_seed, shrink_runs, export, spec } } => {
-            let app=load()?;
-            let base=build_spec(app,export.as_deref(),spec)?;
-            crate::acceptance::run(app,&cli.state,&base,name.as_deref(),*runs,*search_seed,*shrink_runs)
+            let app = load()?;
+            let base = build_spec(app, export.as_deref(), spec)?;
+            crate::acceptance::run(app, &cli.state, &base, name.as_deref(), *runs, *search_seed, *shrink_runs)
         }
         Cmd::Inspect { wit } => {
             let app = load()?;
@@ -215,7 +215,8 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let attempted = probes.len();
             let injected = probes.iter().filter(|p| p.injected).count();
             let applicable = attempted > 0;
-            let errors = probes.iter().filter(|p| matches!(p.outcome, appfuzz_core::record::OutcomeKind::Error | appfuzz_core::record::OutcomeKind::PlanError)).count();
+            let errors =
+                probes.iter().filter(|p| matches!(p.outcome, appfuzz_core::record::OutcomeKind::Error | appfuzz_core::record::OutcomeKind::PlanError)).count();
             let complete = exhausted && applicable && errors == 0;
             Ok(json!({"run":base.id,"status":if complete {"complete"}else{"incomplete"},
                 "complete":complete,"attempted":attempted,"injected":injected,"blocked":attempted-injected,
@@ -313,7 +314,9 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let env: appfuzz_core::envelope::Envelope =
                 serde_json::from_str(&std::fs::read_to_string(envelope).with_context(|| format!("reading {}", envelope.display()))?)
                     .with_context(|| format!("parsing {}", envelope.display()))?;
-            if env.version != appfuzz_core::envelope::VERSION || env.review.is_empty() || env.contract != m.fingerprint()
+            if env.version != appfuzz_core::envelope::VERSION
+                || env.review.is_empty()
+                || env.contract != m.fingerprint()
                 || env.requirements != m.requirements_fingerprint()
             {
                 bail!("envelope is not bound to an accepted review of this platform contract");
@@ -383,8 +386,23 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 "plateau" => fuzz::Until::Plateau,
                 u => bail!("--until must be budget, new-finding or plateau, not {u:?}"),
             };
-            let asserts = app.manifest.acceptance.as_ref().filter(|_| !cli.fast).map(|s| s.shared_asserts(&base.export, app.manifest.entry.as_ref().map(|e| e.export.as_str()))).unwrap_or_default();
-            let opts = fuzz::FuzzOpts { runs: *runs, time: Some(parse_duration(time)?), until, seed: *rng, plateau: *plateau, internal_feedback:*internal_feedback, asserts, ..Default::default() };
+            let asserts = app
+                .manifest
+                .acceptance
+                .as_ref()
+                .filter(|_| !cli.fast)
+                .map(|s| s.shared_asserts(&base.export, app.manifest.entry.as_ref().map(|e| e.export.as_str())))
+                .unwrap_or_default();
+            let opts = fuzz::FuzzOpts {
+                runs: *runs,
+                time: Some(parse_duration(time)?),
+                until,
+                seed: *rng,
+                plateau: *plateau,
+                internal_feedback: *internal_feedback,
+                asserts,
+                ..Default::default()
+            };
             let prior = if *fresh { vec![] } else { fuzz::Corpus::load(&cli.state, &app.state_key)?.entries };
             let findings = FindingStore::new(&cli.state, &app.state_key);
             let known = findings.all()?.into_iter().map(|f| f.id).collect();

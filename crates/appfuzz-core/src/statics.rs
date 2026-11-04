@@ -9,9 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
-use wasmparser::{
-    ExternalKind, FunctionBody, KnownCustom, Name, Operator, Parser, Payload, TypeRef,
-};
+use wasmparser::{ExternalKind, FunctionBody, KnownCustom, Name, Operator, Parser, Payload, TypeRef};
 
 use crate::manifest::fn_key;
 use crate::record::{Frame, module_id};
@@ -172,10 +170,7 @@ impl Statics {
                         && let Some(mut m) = cur.take()
                     {
                         m.end = offset;
-                        m.id = module_id(
-                            m.imports.iter().map(|i| (i.module.as_str(), i.name.as_str())),
-                            m.exports.iter().map(|e| e.0.as_str()),
-                        );
+                        m.id = module_id(m.imports.iter().map(|i| (i.module.as_str(), i.name.as_str())), m.exports.iter().map(|e| e.0.as_str()));
                         modules.push(m);
                         cur_depth = usize::MAX;
                     }
@@ -197,15 +192,8 @@ impl Statics {
                             TypeRef::Global(_) => ("global", None),
                             TypeRef::Tag(_) => ("tag", None),
                         };
-                        let host = (func.is_some() && is_platform_module(imp.module) && !imp.name.starts_with('['))
-                            .then(|| fn_key(imp.module, imp.name));
-                        m.imports.push(ImportInfo {
-                            module: imp.module.to_string(),
-                            name: imp.name.to_string(),
-                            kind: kind.to_string(),
-                            func,
-                            host,
-                        });
+                        let host = (func.is_some() && is_platform_module(imp.module) && !imp.name.starts_with('[')).then(|| fn_key(imp.module, imp.name));
+                        m.imports.push(ImportInfo { module: imp.module.to_string(), name: imp.name.to_string(), kind: kind.to_string(), func, host });
                     }
                 }
                 Payload::FunctionSection(r) if cur.is_some() => {
@@ -293,9 +281,7 @@ impl Statics {
         if let Some(n) = &f.name {
             return demangle(n);
         }
-        self.module(&f.module)
-            .and_then(|m| m.func_name(f.func))
-            .unwrap_or_else(|| format!("{}:{}", f.module, f.func))
+        self.module(&f.module).and_then(|m| m.func_name(f.func)).unwrap_or_else(|| format!("{}:{}", f.module, f.func))
     }
 }
 
@@ -459,8 +445,26 @@ fn is_compare(op: &Operator<'_>) -> bool {
     use Operator::*;
     matches!(
         op,
-        I32Eq | I32Ne | I32LtS | I32LtU | I32GtS | I32GtU | I32LeS | I32LeU | I32GeS | I32GeU
-            | I64Eq | I64Ne | I64LtS | I64LtU | I64GtS | I64GtU | I64LeS | I64LeU | I64GeS | I64GeU
+        I32Eq
+            | I32Ne
+            | I32LtS
+            | I32LtU
+            | I32GtS
+            | I32GtU
+            | I32LeS
+            | I32LeU
+            | I32GeS
+            | I32GeU
+            | I64Eq
+            | I64Ne
+            | I64LtS
+            | I64LtU
+            | I64GtS
+            | I64GtU
+            | I64LeS
+            | I64LeU
+            | I64GeS
+            | I64GeU
     )
 }
 

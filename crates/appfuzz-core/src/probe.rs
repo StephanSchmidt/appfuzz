@@ -58,9 +58,7 @@ fn shape(t: &Type, s: &mut Shape) {
         Type::Tuple(t) => t.types().for_each(|t| shape(&t, s)),
         Type::Variant(v) => v.cases().filter_map(|c| c.ty).for_each(|t| shape(&t, s)),
         Type::String | Type::Char => s.string = true,
-        Type::S8 | Type::U8 | Type::S16 | Type::U16 | Type::S32 | Type::U32 | Type::S64 | Type::U64 | Type::Float32 | Type::Float64 => {
-            s.number = true
-        }
+        Type::S8 | Type::U8 | Type::S16 | Type::U16 | Type::S32 | Type::U32 | Type::S64 | Type::U64 | Type::Float32 | Type::Float64 => s.number = true,
         _ => {}
     }
 }
@@ -104,16 +102,16 @@ pub fn variants(t: &Type) -> Vec<(&'static str, GenOpts)> {
 
 /// Runs every value class of every host function (or those matching
 /// `only`). Returns the probes and the findings they produced.
-pub fn values(
-    app: &App,
-    base: &RunSpec,
-    only: Option<&str>,
-    run: Runner,
-) -> (Vec<ValueProbe>, Vec<Finding>) {
+pub fn values(app: &App, base: &RunSpec, only: Option<&str>, run: Runner) -> (Vec<ValueProbe>, Vec<Finding>) {
     let base = RunSpec { plan: steady(&base.plan), ..base.clone() };
     let mut probes = Vec::new();
     let mut findings = Vec::new();
-    let funcs = app.imports.iter().filter(|i| i.kind == ImportKind::Platform).flat_map(|i| i.funcs.iter()).filter(|f| app.manifest.function(&f.key).and_then(|s| s.fails) != Some(false));
+    let funcs = app
+        .imports
+        .iter()
+        .filter(|i| i.kind == ImportKind::Platform)
+        .flat_map(|i| i.funcs.iter())
+        .filter(|f| app.manifest.function(&f.key).and_then(|s| s.fails) != Some(false));
     let mut tries = Vec::new();
     for f in funcs.filter(|f| only.is_none_or(|o| f.key.contains(o))) {
         let Some(t) = f.ty.results().next() else { continue };
@@ -125,7 +123,9 @@ pub fn values(
                     tries.push((f, variant, spec));
                     continue;
                 }
-                if !matches!(variant, "err" | "none") { continue; }
+                if !matches!(variant, "err" | "none") {
+                    continue;
+                }
             }
             let fp = spec.plan.0.entry(f.key.clone()).or_default();
             *fp = FnPlan {

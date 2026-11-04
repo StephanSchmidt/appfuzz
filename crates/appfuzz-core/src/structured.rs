@@ -113,12 +113,17 @@ fn scalar(value: &Value, rng: &mut StdRng, words: &[String], numbers: &[i64]) ->
         Value::Bool(b) => json!(!b),
         Value::Number(_) => {
             let edges = [0, 1, -1, 2, 16, 127, 255, 256, 65535, i32::MAX as i64, i32::MIN as i64];
-            let n = if !numbers.is_empty() && rng.random_bool(0.3) { numbers[rng.random_range(0..numbers.len())] } else { edges[rng.random_range(0..edges.len())] };
+            let n =
+                if !numbers.is_empty() && rng.random_bool(0.3) { numbers[rng.random_range(0..numbers.len())] } else { edges[rng.random_range(0..edges.len())] };
             json!(n)
         }
         Value::String(_) => {
             let edges = ["", "0", "-1", "é🦀", "\"quoted\",cell\nnext", "null"];
-            if !words.is_empty() && rng.random_bool(0.3) { json!(words[rng.random_range(0..words.len())]) } else { json!(edges[rng.random_range(0..edges.len())]) }
+            if !words.is_empty() && rng.random_bool(0.3) {
+                json!(words[rng.random_range(0..words.len())])
+            } else {
+                json!(edges[rng.random_range(0..edges.len())])
+            }
         }
         Value::Null => json!(""),
         _ => value.clone(),

@@ -36,27 +36,17 @@ impl Decimal {
             None => (text, 0),
         };
         let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-        if whole.is_empty()
-            || !whole.bytes().all(|b| b.is_ascii_digit())
-            || !fraction.bytes().all(|b| b.is_ascii_digit())
-        {
+        if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) || !fraction.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        let mut digits = format!("{whole}{fraction}")
-            .trim_start_matches('0')
-            .to_string();
+        let mut digits = format!("{whole}{fraction}").trim_start_matches('0').to_string();
         let mut exponent = exponent.checked_sub(fraction.len() as i64)?;
         while digits.ends_with('0') {
             digits.pop();
             exponent = exponent.checked_add(1)?;
         }
         if digits.is_empty() {
-            return Some(Self {
-                negative: false,
-                digits: "0".into(),
-                exponent: 0,
-                integer: Some(0),
-            });
+            return Some(Self { negative: false, digits: "0".into(), exponent: 0, integer: Some(0) });
         }
         exponent.checked_add(digits.len() as i64)?;
         let integer = u32::try_from(exponent)
@@ -64,12 +54,7 @@ impl Decimal {
             .and_then(|e| 10i128.checked_pow(e))
             .and_then(|scale| digits.parse::<i128>().ok()?.checked_mul(scale))
             .and_then(|n| if negative { n.checked_neg() } else { Some(n) });
-        Some(Self {
-            negative,
-            digits,
-            exponent,
-            integer,
-        })
+        Some(Self { negative, digits, exponent, integer })
     }
     fn cmp(&self, other: &Self) -> Ordering {
         let zero = self.digits == "0";
@@ -83,22 +68,12 @@ impl Decimal {
         let order = match (zero, other_zero) {
             (true, false) => Ordering::Less,
             (false, true) => Ordering::Greater,
-            _ => (self.exponent + self.digits.len() as i64)
-                .cmp(&(other.exponent + other.digits.len() as i64))
-                .then_with(|| {
-                    let n = self.digits.len().max(other.digits.len());
-                    self.digits
-                        .bytes()
-                        .chain(std::iter::repeat(b'0'))
-                        .take(n)
-                        .cmp(other.digits.bytes().chain(std::iter::repeat(b'0')).take(n))
-                }),
+            _ => (self.exponent + self.digits.len() as i64).cmp(&(other.exponent + other.digits.len() as i64)).then_with(|| {
+                let n = self.digits.len().max(other.digits.len());
+                self.digits.bytes().chain(std::iter::repeat(b'0')).take(n).cmp(other.digits.bytes().chain(std::iter::repeat(b'0')).take(n))
+            }),
         };
-        if self.negative {
-            order.reverse()
-        } else {
-            order
-        }
+        if self.negative { order.reverse() } else { order }
     }
 }
 
@@ -126,11 +101,7 @@ impl<'de> Deserialize<'de> for Domain {
 }
 impl Serialize for Domain {
     fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        if self.text.len() == 1 {
-            self.text[0].serialize(s)
-        } else {
-            self.text.serialize(s)
-        }
+        if self.text.len() == 1 { self.text[0].serialize(s) } else { self.text.serialize(s) }
     }
 }
 impl Domain {
@@ -143,13 +114,7 @@ impl Domain {
                 return Ok(ty.clone());
             }
             match ty {
-                Type::Record(r) => resolve(
-                    &r.fields()
-                        .find(|f| f.name == path[0])
-                        .context("unknown input field")?
-                        .ty,
-                    &path[1..],
-                ),
+                Type::Record(r) => resolve(&r.fields().find(|f| f.name == path[0]).context("unknown input field")?.ty, &path[1..]),
                 Type::Option(o) => resolve(&o.ty(), path),
                 Type::List(l) => {
                     if let Type::Tuple(t) = l.ty() {
@@ -165,11 +130,7 @@ impl Domain {
                 _ => bail!("input path does not exist in WIT"),
             }
         }
-        let segs: Vec<_> = if path.is_empty() {
-            vec![]
-        } else {
-            path.split('.').collect()
-        };
+        let segs: Vec<_> = if path.is_empty() { vec![] } else { path.split('.').collect() };
         if segs.iter().any(|p| p.is_empty()) {
             bail!("empty input path segment");
         }
@@ -192,31 +153,19 @@ impl Domain {
         for t in &text {
             let bounds = |s: &str| -> Result<(Option<String>, Option<String>)> {
                 let (a, b) = s.split_once("..").context("write bounds as a..b")?;
-                Ok((
-                    (!a.is_empty()).then(|| a.to_string()),
-                    (!b.is_empty()).then(|| b.to_string()),
-                ))
+                Ok(((!a.is_empty()).then(|| a.to_string()), (!b.is_empty()).then(|| b.to_string())))
             };
             let rule = if let Some(s) = t.strip_prefix("range:") {
                 let (a, b) = bounds(s)?;
-                let parse = |s: String| {
-                    Decimal::parse(&s)
-                        .with_context(|| format!("invalid finite numeric bound {s:?}"))
-                };
+                let parse = |s: String| Decimal::parse(&s).with_context(|| format!("invalid finite numeric bound {s:?}"));
                 let (a, b) = (a.map(parse).transpose()?, b.map(parse).transpose()?);
-                if a.as_ref()
-                    .zip(b.as_ref())
-                    .is_some_and(|(a, b)| a.cmp(b).is_gt())
-                {
+                if a.as_ref().zip(b.as_ref()).is_some_and(|(a, b)| a.cmp(b).is_gt()) {
                     bail!("lower bound exceeds upper bound");
                 }
                 Rule::Range(a, b)
             } else if let Some(s) = t.strip_prefix("bytes:") {
                 let (a, b) = bounds(s)?;
-                let (a, b) = (
-                    a.map(|s| s.parse::<usize>()).transpose()?,
-                    b.map(|s| s.parse::<usize>()).transpose()?,
-                );
+                let (a, b) = (a.map(|s| s.parse::<usize>()).transpose()?, b.map(|s| s.parse::<usize>()).transpose()?);
                 if a.zip(b).is_some_and(|(a, b)| a > b) {
                     bail!("lower length exceeds upper length");
                 }
@@ -234,26 +183,16 @@ impl Domain {
             };
             rules.push(rule);
         }
-        let domain = Self {
-            text,
-            rules,
-            input_option_depth: 0,
-        };
+        let domain = Self { text, rules, input_option_depth: 0 };
         domain.check_consistency()?;
         Ok(domain)
     }
     fn check_consistency(&self) -> Result<()> {
-        let formats: Vec<_> = self
-            .text
-            .iter()
-            .filter(|s| s.starts_with("format:"))
-            .collect();
+        let formats: Vec<_> = self.text.iter().filter(|s| s.starts_with("format:")).collect();
         if formats.windows(2).any(|p| p[0] != p[1]) {
             bail!("a field cannot have conflicting formats");
         }
-        if self.rules.iter().any(|r| matches!(r, Rule::Range(..)))
-            && formats.iter().any(|s| s.as_str() != "format:int")
-        {
+        if self.rules.iter().any(|r| matches!(r, Rule::Range(..))) && formats.iter().any(|s| s.as_str() != "format:int") {
             bail!("numeric bounds conflict with a nonnumeric format");
         }
         let mut low: Option<&Decimal> = None;
@@ -321,45 +260,21 @@ impl Domain {
         };
         match rule {
             Rule::Range(a, b) => {
-                if a.as_ref().is_none_or(|a| a.integer.is_some())
-                    && b.as_ref().is_none_or(|b| b.integer.is_some())
-                {
-                    let n = v
-                        .as_i64()
-                        .map(i128::from)
-                        .or_else(|| v.as_u64().map(i128::from))
-                        .or_else(|| v.as_str()?.trim().parse::<i128>().ok());
+                if a.as_ref().is_none_or(|a| a.integer.is_some()) && b.as_ref().is_none_or(|b| b.integer.is_some()) {
+                    let n = v.as_i64().map(i128::from).or_else(|| v.as_u64().map(i128::from)).or_else(|| v.as_str()?.trim().parse::<i128>().ok());
                     if let Some(n) = n {
-                        return a.as_ref().is_none_or(|a| n >= a.integer.unwrap())
-                            && b.as_ref().is_none_or(|b| n <= b.integer.unwrap());
+                        return a.as_ref().is_none_or(|a| n >= a.integer.unwrap()) && b.as_ref().is_none_or(|b| n <= b.integer.unwrap());
                     }
                 }
-                let text = v
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| v.to_string());
-                Decimal::parse(&text).is_some_and(|n| {
-                    a.as_ref().is_none_or(|a| n.cmp(a).is_ge())
-                        && b.as_ref().is_none_or(|b| n.cmp(b).is_le())
-                })
+                let text = v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+                Decimal::parse(&text).is_some_and(|n| a.as_ref().is_none_or(|a| n.cmp(a).is_ge()) && b.as_ref().is_none_or(|b| n.cmp(b).is_le()))
             }
-            Rule::Bytes(a, b) => v
-                .as_str()
-                .is_some_and(|s| a.is_none_or(|a| s.len() >= a) && b.is_none_or(|b| s.len() <= b)),
+            Rule::Bytes(a, b) => v.as_str().is_some_and(|s| a.is_none_or(|a| s.len() >= a) && b.is_none_or(|b| s.len() <= b)),
             Rule::Uuid => v.as_str().is_some_and(crate::constraints::uuid_ok),
-            Rule::Existing(Constraint::Format(crate::constraints::Format::Date)) => {
-                v.as_str().is_some_and(date_ok)
-            }
-            Rule::Existing(Constraint::Format(crate::constraints::Format::Time)) => {
-                v.as_str().is_some_and(time_ok)
-            }
+            Rule::Existing(Constraint::Format(crate::constraints::Format::Date)) => v.as_str().is_some_and(date_ok),
+            Rule::Existing(Constraint::Format(crate::constraints::Format::Time)) => v.as_str().is_some_and(time_ok),
             Rule::Existing(Constraint::Format(crate::constraints::Format::DateTime)) => {
-                v.as_str().is_some_and(|s| {
-                    (s.len() == 16 || s.len() == 19)
-                        && s.as_bytes()[10] == b'T'
-                        && date_ok(&s[..10])
-                        && time_ok(&s[11..])
-                })
+                v.as_str().is_some_and(|s| (s.len() == 16 || s.len() == 19) && s.as_bytes()[10] == b'T' && date_ok(&s[..10]) && time_ok(&s[11..]))
             }
             Rule::Existing(c) => c.holds(v),
             Rule::Required => unreachable!(),
@@ -368,12 +283,7 @@ impl Domain {
     fn input_leaf<'a>(&self, value: Option<&'a Value>) -> Option<&'a Value> {
         let mut value = value;
         for _ in 0..self.input_option_depth {
-            value = value.map(|v| {
-                v.as_object()
-                    .filter(|o| o.len() == 1)
-                    .and_then(|o| o.get("some"))
-                    .unwrap_or(v)
-            });
+            value = value.map(|v| v.as_object().filter(|o| o.len() == 1).and_then(|o| o.get("some")).unwrap_or(v));
         }
         value
     }
@@ -388,13 +298,7 @@ impl Domain {
         match rule {
             Rule::Required => "missing",
             Rule::Range(low, _) => {
-                let text = value
-                    .map(|v| {
-                        v.as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| v.to_string())
-                    })
-                    .unwrap_or_default();
+                let text = value.map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())).unwrap_or_default();
                 match Decimal::parse(&text) {
                     None => "not_numeric",
                     Some(n) if low.as_ref().is_some_and(|lo| n.cmp(lo).is_lt()) => "below_minimum",
@@ -402,26 +306,15 @@ impl Domain {
                 }
             }
             Rule::Bytes(low, _) => {
-                if value
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| low.is_some_and(|lo| s.len() < lo))
-                {
+                if value.and_then(Value::as_str).is_some_and(|s| low.is_some_and(|lo| s.len() < lo)) {
                     "below_minimum"
                 } else {
                     "above_maximum"
                 }
             }
             Rule::Existing(Constraint::Len(low, _)) => {
-                let n = value.and_then(|v| {
-                    v.as_str()
-                        .map(|s| s.chars().count())
-                        .or_else(|| v.as_array().map(Vec::len))
-                });
-                if n.is_some_and(|n| low.is_some_and(|lo| n < lo)) {
-                    "below_minimum"
-                } else {
-                    "above_maximum"
-                }
+                let n = value.and_then(|v| v.as_str().map(|s| s.chars().count()).or_else(|| v.as_array().map(Vec::len)));
+                if n.is_some_and(|n| low.is_some_and(|lo| n < lo)) { "below_minimum" } else { "above_maximum" }
             }
             Rule::Existing(Constraint::Enum(_)) => "outside_enum",
             _ => "invalid_format",
@@ -432,17 +325,7 @@ impl Domain {
             Rule::Required => true,
             Rule::Range(..) | Rule::Existing(Constraint::Enum(_)) => matches!(
                 ty,
-                Type::String
-                    | Type::U8
-                    | Type::U16
-                    | Type::U32
-                    | Type::U64
-                    | Type::S8
-                    | Type::S16
-                    | Type::S32
-                    | Type::S64
-                    | Type::Float32
-                    | Type::Float64
+                Type::String | Type::U8 | Type::U16 | Type::U32 | Type::U64 | Type::S8 | Type::S16 | Type::S32 | Type::S64 | Type::Float32 | Type::Float64
             ),
             Rule::Existing(Constraint::Len(..)) => {
                 matches!(ty, Type::String | Type::List(_) | Type::FixedLengthList(_))
@@ -454,18 +337,10 @@ impl Domain {
 
 fn date_ok(s: &str) -> bool {
     let b = s.as_bytes();
-    if b.len() != 10
-        || b[4] != b'-'
-        || b[7] != b'-'
-        || b.iter()
-            .enumerate()
-            .any(|(i, c)| i != 4 && i != 7 && !c.is_ascii_digit())
-    {
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' || b.iter().enumerate().any(|(i, c)| i != 4 && i != 7 && !c.is_ascii_digit()) {
         return false;
     }
-    let y = b[..4]
-        .iter()
-        .fold(0u32, |n, c| n * 10 + u32::from(c - b'0'));
+    let y = b[..4].iter().fold(0u32, |n, c| n * 10 + u32::from(c - b'0'));
     let m = (b[5] - b'0') * 10 + b[6] - b'0';
     let d = (b[8] - b'0') * 10 + b[9] - b'0';
     let days = match m {
@@ -487,9 +362,7 @@ fn time_ok(s: &str) -> bool {
     (b.len() == 5 || b.len() == 8)
         && b[2] == b':'
         && (b.len() == 5 || b[5] == b':')
-        && b.iter()
-            .enumerate()
-            .all(|(i, c)| i == 2 || i == 5 || c.is_ascii_digit())
+        && b.iter().enumerate().all(|(i, c)| i == 2 || i == 5 || c.is_ascii_digit())
         && (b[0] - b'0') * 10 + b[1] - b'0' < 24
         && (b[3] - b'0') * 10 + b[4] - b'0' < 60
         && (b.len() == 5 || (b[6] - b'0') * 10 + b[7] - b'0' < 60)
@@ -507,57 +380,30 @@ enum Node {
 impl Node {
     fn compile(ty: &Type, path: &[&str], domain: &Domain) -> Result<Self> {
         if let Type::Option(o) = ty {
-            return Ok(Self::Option(
-                Box::new(Self::compile(&o.ty(), path, domain)?),
-                path.is_empty() && domain.text.iter().any(|s| s == "required"),
-            ));
+            return Ok(Self::Option(Box::new(Self::compile(&o.ty(), path, domain)?), path.is_empty() && domain.text.iter().any(|s| s == "required")));
         }
         if let Type::Result(r) = ty {
-            return Ok(Self::Ok(Box::new(Self::compile(
-                &r.ok().context("result has no ok value")?,
-                path,
-                domain,
-            )?)));
+            return Ok(Self::Ok(Box::new(Self::compile(&r.ok().context("result has no ok value")?, path, domain)?)));
         }
         if path.is_empty() && domain.accepts_type(ty) {
             return Ok(Self::Leaf(domain.clone()));
         }
         match ty {
             Type::List(l) => Ok(Self::Each(Box::new(Self::compile(&l.ty(), path, domain)?))),
-            Type::FixedLengthList(l) => {
-                Ok(Self::Each(Box::new(Self::compile(&l.ty(), path, domain)?)))
-            }
+            Type::FixedLengthList(l) => Ok(Self::Each(Box::new(Self::compile(&l.ty(), path, domain)?))),
             Type::Record(r) if !path.is_empty() => {
-                let f = r
-                    .fields()
-                    .find(|f| f.name == path[0])
-                    .context("unknown record field")?;
-                Ok(Self::Field(
-                    f.name.to_string(),
-                    Box::new(Self::compile(&f.ty, &path[1..], domain)?),
-                ))
+                let f = r.fields().find(|f| f.name == path[0]).context("unknown record field")?;
+                Ok(Self::Field(f.name.to_string(), Box::new(Self::compile(&f.ty, &path[1..], domain)?)))
             }
             Type::Tuple(t) if !path.is_empty() => {
                 let i = path[0].parse::<usize>()?;
                 let ty = t.types().nth(i).context("tuple index out of range")?;
-                Ok(Self::Index(
-                    i,
-                    Box::new(Self::compile(&ty, &path[1..], domain)?),
-                ))
+                Ok(Self::Index(i, Box::new(Self::compile(&ty, &path[1..], domain)?)))
             }
-            _ => bail!(
-                "unknown path or constraints incompatible with {}",
-                crate::wit::type_str(ty)
-            ),
+            _ => bail!("unknown path or constraints incompatible with {}", crate::wit::type_str(ty)),
         }
     }
-    fn check(
-        &self,
-        value: Option<&Value>,
-        path: &mut Vec<String>,
-        declared: &str,
-        out: &mut Evidence,
-    ) {
+    fn check(&self, value: Option<&Value>, path: &mut Vec<String>, declared: &str, out: &mut Evidence) {
         if out.violations.len() >= 16 {
             out.truncated = true;
             return;
@@ -606,12 +452,7 @@ impl Node {
             }
             Self::Option(next, required) => {
                 if value.is_some_and(|v| !v.is_null()) {
-                    let inner = value.map(|v| {
-                        v.as_object()
-                            .filter(|o| o.len() == 1)
-                            .and_then(|o| o.get("some"))
-                            .unwrap_or(v)
-                    });
+                    let inner = value.map(|v| v.as_object().filter(|o| o.len() == 1).and_then(|o| o.get("some")).unwrap_or(v));
                     next.check(inner, path, declared, out);
                 } else if *required {
                     out.checked += 1;
@@ -655,17 +496,9 @@ impl HostChecks {
             if parts.iter().any(|p| p.is_empty()) {
                 bail!("empty value path segment");
             }
-            let (index, (_, ty)) = params
-                .iter()
-                .enumerate()
-                .find(|(_, (name, _))| name == parts[0])
-                .with_context(|| format!("unknown parameter in {path:?}"))?;
-            checks.push((
-                index,
-                path.clone(),
-                Node::compile(ty, &parts[1..], domain)
-                    .with_context(|| format!("parameter {path}"))?,
-            ));
+            let (index, (_, ty)) =
+                params.iter().enumerate().find(|(_, (name, _))| name == parts[0]).with_context(|| format!("unknown parameter in {path:?}"))?;
+            checks.push((index, path.clone(), Node::compile(ty, &parts[1..], domain).with_context(|| format!("parameter {path}"))?));
         }
         Ok(Self { checks })
     }
@@ -705,21 +538,13 @@ pub struct Violation {
 pub fn coverage(app: &crate::harness::App, runs: &[crate::record::RunRecord]) -> Value {
     let mut functions = Vec::new();
     for f in app.imports.iter().flat_map(|i| &i.funcs) {
-        let Some(spec) = app
-            .manifest
-            .function(&f.key)
-            .filter(|s| !s.param_values.is_empty())
-        else {
+        let Some(spec) = app.manifest.function(&f.key).filter(|s| !s.param_values.is_empty()) else {
             continue;
         };
         let mut calls = 0u64;
         let mut checked = 0u64;
         let mut violations = 0u64;
-        for e in runs
-            .iter()
-            .flat_map(|r| &r.events)
-            .filter(|e| e.func == f.key)
-        {
+        for e in runs.iter().flat_map(|r| &r.events).filter(|e| e.func == f.key) {
             if let Some(c) = &e.value_checks {
                 calls += 1;
                 checked += c.checked;
@@ -728,11 +553,7 @@ pub fn coverage(app: &crate::harness::App, runs: &[crate::record::RunRecord]) ->
         }
         functions.push(json!({"func":f.key,"declared_paths":spec.param_values.keys().collect::<Vec<_>>(),"calls_with_evidence":calls,"checked_rules":checked,"violations":violations}));
     }
-    let unreached: Vec<_> = functions
-        .iter()
-        .filter(|f| f["checked_rules"] == 0)
-        .map(|f| &f["func"])
-        .collect();
+    let unreached: Vec<_> = functions.iter().filter(|f| f["checked_rules"] == 0).map(|f| &f["func"]).collect();
     json!({"scope":"recorded runs, function-level checks","declared_functions":functions.len(),"unexercised_functions":unreached,"functions":functions})
 }
 
@@ -751,19 +572,8 @@ mod tests {
         let d = domain(&["range:-9223372036854775808..-9223372036854775807"]);
         assert!(d.holds(Some(&json!(i64::MIN))));
         assert!(!d.holds(Some(&json!(i64::MIN + 2))));
-        for (s, valid) in [
-            ("0.10", true),
-            ("1e-1", true),
-            ("0.0999", false),
-            ("0.10001", false),
-            ("NaN", false),
-            ("Infinity", false),
-        ] {
-            assert_eq!(
-                domain(&["range:0.1..0.1"]).holds(Some(&json!(s))),
-                valid,
-                "{s}"
-            );
+        for (s, valid) in [("0.10", true), ("1e-1", true), ("0.0999", false), ("0.10001", false), ("NaN", false), ("Infinity", false)] {
+            assert_eq!(domain(&["range:0.1..0.1"]).holds(Some(&json!(s))), valid, "{s}");
         }
         assert!(domain(&["range:-1..0"]).holds(Some(&json!(-0.1))));
         for rules in [
@@ -775,29 +585,17 @@ mod tests {
             vec!["enum:a,b", "format:int"],
             vec!["format:date", "format:uuid"],
         ] {
-            assert!(
-                Domain::parse(rules.iter().map(|s| s.to_string()).collect()).is_err(),
-                "{rules:?}"
-            );
+            assert!(Domain::parse(rules.iter().map(|s| s.to_string()).collect()).is_err(), "{rules:?}");
         }
     }
     #[test]
     fn explicit_formats_lengths_presence_and_sets() {
-        for s in [
-            "0.0.0000",
-            "0000-00-00",
-            "2027-02-29",
-            "2026-04-31",
-            "2026-2-01",
-            "0000-01-01",
-        ] {
+        for s in ["0.0.0000", "0000-00-00", "2027-02-29", "2026-04-31", "2026-2-01", "0000-01-01"] {
             assert!(!domain(&["format:date"]).holds(Some(&json!(s))), "{s}");
         }
         assert!(domain(&["format:date"]).holds(Some(&json!("2028-02-29"))));
         assert!(!domain(&["format:uuid"]).holds(Some(&json!("0000-0000-0000-0000"))));
-        assert!(
-            domain(&["format:uuid"]).holds(Some(&json!("00000000-0000-0000-0000-000000000000")))
-        );
+        assert!(domain(&["format:uuid"]).holds(Some(&json!("00000000-0000-0000-0000-000000000000"))));
         assert!(domain(&["len:1..1"]).holds(Some(&json!("é"))));
         assert!(!domain(&["bytes:..1"]).holds(Some(&json!("é"))));
         assert!(domain(&["format:date"]).holds(None));

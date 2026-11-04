@@ -1,0 +1,15 @@
+{
+  "app": "spin-sql",
+  "bug": "a Spin component that pastes ?sku= into its SQL, and counts views with a key-value write on GET",
+  "expect": [
+    {
+      "kind": "sql_injection",
+      "min": "fail"
+    },
+    {
+      "kind": "write_on_safe_method",
+      "min": "fail"
+    }
+  ],
+  "allow": ["leaky_error"]
+}

@@ -11,16 +11,16 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::{Map, Value, json};
 
+use appfuzz_core::detect::{self, Finding, FindingStore, Severity};
 use appfuzz_core::fuzz;
 use appfuzz_core::harness::App;
 use appfuzz_core::manifest::Manifest;
 use appfuzz_core::plan::Plan;
-use appfuzz_core::detect::{self, Finding, FindingStore, Severity};
 use appfuzz_core::record::{RunRecord, RunSpec};
 use appfuzz_core::scale::{self, Knob};
+use appfuzz_core::statics::Statics;
 use appfuzz_core::store::RunStore;
 use appfuzz_core::value::Generator;
-use appfuzz_core::statics::Statics;
 use appfuzz_core::wit::{self, ImportKind};
 
 mod dig;
@@ -35,10 +35,10 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod commands;
 use commands::{run, run_with_app};
-mod cases;
 mod acceptance;
-mod sequences;
+mod cases;
 mod cli;
+mod sequences;
 use cli::*;
 
 /// The CLI with each command's examples, output and next steps (from
@@ -126,21 +126,22 @@ fn main() {
         Ok(c) => c,
         Err(e) => e.exit(),
     };
-    let raw_output = matches!(&cli.cmd, Some(Cmd::Plan { .. }))
-        || matches!(&cli.cmd, Some(Cmd::Show { view, .. }) if view == "record");
+    let raw_output = matches!(&cli.cmd, Some(Cmd::Plan { .. })) || matches!(&cli.cmd, Some(Cmd::Show { view, .. }) if view == "record");
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
     let mut prefix = String::from("appfuzz");
-    if let Some(m) = &cli.manifest { prefix += &format!(" --manifest {}", quote(&m.to_string_lossy())); }
-    if let Some(w) = &cli.wasm { prefix += &format!(" --wasm {}", quote(&w.to_string_lossy())); }
-    if cli.state != Path::new(".appfuzz") { prefix += &format!(" --state {}", quote(&cli.state.to_string_lossy())); }
+    if let Some(m) = &cli.manifest {
+        prefix += &format!(" --manifest {}", quote(&m.to_string_lossy()));
+    }
+    if let Some(w) = &cli.wasm {
+        prefix += &format!(" --wasm {}", quote(&w.to_string_lossy()));
+    }
+    if cli.state != Path::new(".appfuzz") {
+        prefix += &format!(" --state {}", quote(&cli.state.to_string_lossy()));
+    }
     if let Some(n) = cli.jobs {
         let _ = rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global();
     }
-    let out = if cli.cmd.is_none() {
-        Ok(guide::overview(state(&cli), commands(&command, "")))
-    } else {
-        run(cli)
-    };
+    let out = if cli.cmd.is_none() { Ok(guide::overview(state(&cli), commands(&command, ""))) } else { run(cli) };
     let mut out = match out {
         Ok(v) => v,
         Err(e) => {
@@ -161,12 +162,16 @@ fn main() {
         && !raw_output
         && !o.contains_key("next")
     {
-        let n: Vec<String> = guide::next(&path, &Value::Object(o.clone())).into_iter()
-            .map(|s| s.strip_prefix("appfuzz").map_or_else(|| s.clone(), |tail| format!("{prefix}{tail}"))).collect();
+        let n: Vec<String> = guide::next(&path, &Value::Object(o.clone()))
+            .into_iter()
+            .map(|s| s.strip_prefix("appfuzz").map_or_else(|| s.clone(), |tail| format!("{prefix}{tail}")))
+            .collect();
         o.insert("next".into(), json!(n));
     }
     let code = match path.as_str() {
-        "review" | "envelope check" | "check" | "replay" | "sequence run" | "sequence fuzz" | "sequence replay" | "acceptance run" | "probe faults" => out["exit_code"].as_i64().unwrap_or(3) as i32,
+        "review" | "envelope check" | "check" | "replay" | "sequence run" | "sequence fuzz" | "sequence replay" | "acceptance run" | "probe faults" => {
+            out["exit_code"].as_i64().unwrap_or(3) as i32
+        }
         "run" | "call" if matches!(out["outcome"]["kind"].as_str(), Some("error" | "plan_error")) => 3,
         "run" if out["asserts"].as_object().is_some_and(|a| a.values().any(|v| v["status"] == "broken")) => 2,
         _ => 0,
@@ -209,12 +214,21 @@ fn state(cli: &Cli) -> Value {
         st["error"] = json!(format!("cannot read {}", m.wasm_path().display()));
         return st;
     };
-    let runs: Vec<RunRecord> = RunStore::new(&cli.state).all().unwrap_or_default().into_iter().filter(|r| r.spec.component == hash && r.spec.contract == m.fingerprint()).collect();
+    let runs: Vec<RunRecord> =
+        RunStore::new(&cli.state).all().unwrap_or_default().into_iter().filter(|r| r.spec.component == hash && r.spec.contract == m.fingerprint()).collect();
     let findings = match FindingStore::new(&cli.state, &m.state_key(&hash)).all() {
-        Ok(f) => f, Err(e) => { st["error"] = json!(e.to_string()); return st; }
+        Ok(f) => f,
+        Err(e) => {
+            st["error"] = json!(e.to_string());
+            return st;
+        }
     };
     let corpus = match fuzz::Corpus::load(&cli.state, &m.state_key(&hash)) {
-        Ok(c) => c.entries.len(), Err(e) => { st["error"] = json!(e.to_string()); return st; }
+        Ok(c) => c.entries.len(),
+        Err(e) => {
+            st["error"] = json!(e.to_string());
+            return st;
+        }
     };
     let count = |s: Severity| findings.iter().filter(|f| f.severity == s).count();
     st["component"] = json!(m.wasm_path().display().to_string());
@@ -536,9 +550,9 @@ fn inspect(app: &App, with_wit: bool) -> Result<Value> {
                         if let Some(l) = labels_json(m, &f.key) {
                             o["labels"] = l;
                         }
-                        if let Some(s)=m.function(&f.key).filter(|s|!s.param_values.is_empty()) {
-                            o["param_values"]=json!(s.param_values);
-                            o["value_source"]=json!(s.value_source);
+                        if let Some(s) = m.function(&f.key).filter(|s| !s.param_values.is_empty()) {
+                            o["param_values"] = json!(s.param_values);
+                            o["value_source"] = json!(s.value_source);
                         }
                     }
                     o
@@ -547,15 +561,9 @@ fn inspect(app: &App, with_wit: bool) -> Result<Value> {
             json!({"interface": i.name, "kind": i.kind, "granted": granted, "funcs": funcs})
         })
         .collect();
-    let imported: Vec<String> =
-        app.imports.iter().map(|i| appfuzz_core::manifest::strip_version(&i.name).to_string()).collect();
-    let unused_grants: Vec<&String> = m
-        .grants
-        .imports
-        .iter()
-        .flatten()
-        .filter(|g| !imported.iter().any(|i| i == appfuzz_core::manifest::strip_version(g)))
-        .collect();
+    let imported: Vec<String> = app.imports.iter().map(|i| appfuzz_core::manifest::strip_version(&i.name).to_string()).collect();
+    let unused_grants: Vec<&String> =
+        m.grants.imports.iter().flatten().filter(|g| !imported.iter().any(|i| i == appfuzz_core::manifest::strip_version(g))).collect();
     let ungranted: Vec<&str> = app
         .imports
         .iter()
@@ -575,10 +583,8 @@ fn inspect(app: &App, with_wit: bool) -> Result<Value> {
         "entry": m.entry.as_ref().map(|e| &e.export),
         "limits": m.limits,
     });
-    let guess: appfuzz_core::labels::Suggestions = appfuzz_core::labels::suggest(&app.imports)
-        .into_iter()
-        .filter_map(|(k, s)| s.without(m.function(&k)).map(|s| (k, s)))
-        .collect();
+    let guess: appfuzz_core::labels::Suggestions =
+        appfuzz_core::labels::suggest(&app.imports).into_iter().filter_map(|(k, s)| s.without(m.function(&k)).map(|s| (k, s))).collect();
     if !guess.is_empty() {
         out["label_suggestions"] = json!({
             "note": "a guess from WIT names, not checked: keep what is true, then add it to appfuzz.toml",
@@ -630,8 +636,12 @@ fn plan_template(app: &App) -> Result<Value> {
                 many => Value::Array(many.iter().map(|t| g.gen_json(t)).collect()),
             };
             let mut o = json!({"_sig": f.signature(), "_example": example});
-            if let Some(q) = app.manifest.function(&f.key).and_then(|s| s.query.as_ref()) { o["_query"] = serde_json::to_value(q)?; }
-            if let Some(m) = app.manifest.function(&f.key).and_then(|s| s.mutation.as_ref()) { o["_mutation"] = serde_json::to_value(m)?; }
+            if let Some(q) = app.manifest.function(&f.key).and_then(|s| s.query.as_ref()) {
+                o["_query"] = serde_json::to_value(q)?;
+            }
+            if let Some(m) = app.manifest.function(&f.key).and_then(|s| s.mutation.as_ref()) {
+                o["_mutation"] = serde_json::to_value(m)?;
+            }
             if let Some(l) = labels_json(&app.manifest, &f.key) {
                 o["_labels"] = l;
             }
@@ -681,7 +691,9 @@ fn parse_duration(s: &str) -> Result<std::time::Duration> {
         "h" => n * 3600.0,
         u => bail!("bad duration unit {u:?} (ms, s, m, h)"),
     };
-    if !secs.is_finite() || secs <= 0.0 { bail!("duration must be positive and finite"); }
+    if !secs.is_finite() || secs <= 0.0 {
+        bail!("duration must be positive and finite");
+    }
     std::time::Duration::try_from_secs_f64(secs).context("duration is too large")
 }
 

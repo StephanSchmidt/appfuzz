@@ -13,10 +13,7 @@ use fastly::{mime, Error, Request, Response};
 #[fastly::main]
 fn main(req: Request) -> Result<Response, Error> {
     // Log service version
-    println!(
-        "FASTLY_SERVICE_VERSION: {}",
-        std::env::var("FASTLY_SERVICE_VERSION").unwrap_or_else(|_| String::new())
-    );
+    println!("FASTLY_SERVICE_VERSION: {}", std::env::var("FASTLY_SERVICE_VERSION").unwrap_or_else(|_| String::new()));
 
     // Filter request methods...
     match req.get_method() {
@@ -61,13 +58,10 @@ fn main(req: Request) -> Result<Response, Error> {
             // writeln!(endpoint, "Hello from the edge!").unwrap();
 
             // Send a default synthetic response.
-            Ok(Response::from_status(StatusCode::OK)
-                .with_content_type(mime::TEXT_HTML_UTF_8)
-                .with_body(include_str!("welcome-to-compute.html")))
+            Ok(Response::from_status(StatusCode::OK).with_content_type(mime::TEXT_HTML_UTF_8).with_body(include_str!("welcome-to-compute.html")))
         }
 
         // Catch all other requests and return a 404.
-        _ => Ok(Response::from_status(StatusCode::NOT_FOUND)
-            .with_body_text_plain("The page you requested could not be found\n")),
+        _ => Ok(Response::from_status(StatusCode::NOT_FOUND).with_body_text_plain("The page you requested could not be found\n")),
     }
 }

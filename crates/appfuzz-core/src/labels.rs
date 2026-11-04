@@ -251,9 +251,7 @@ fn walk_mut(v: &mut Value, segs: &[&str], f: &mut dyn FnMut(&mut String)) {
 pub fn walk_leaves_mut(v: &mut Value, segs: &[&str], f: &mut dyn FnMut(&mut Value)) {
     match v {
         Value::Array(a) => a.iter_mut().for_each(|x| walk_leaves_mut(x, segs, f)),
-        Value::Object(o) if o.len() == 1 && o.contains_key("ok") && segs.first() != Some(&"ok") => {
-            walk_leaves_mut(o.get_mut("ok").expect("checked"), segs, f)
-        }
+        Value::Object(o) if o.len() == 1 && o.contains_key("ok") && segs.first() != Some(&"ok") => walk_leaves_mut(o.get_mut("ok").expect("checked"), segs, f),
         Value::Object(o) if o.len() == 1 && o.contains_key("err") && segs.first() != Some(&"err") => {}
         Value::Object(o) if segs.is_empty() => o.values_mut().for_each(|x| walk_leaves_mut(x, segs, f)),
         Value::Object(o) => {
@@ -468,8 +466,7 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     out
 }
 
-static URL_ATTR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?i)\b(?:href|src|action|formaction)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*))"#).unwrap());
+static URL_ATTR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\b(?:href|src|action|formaction)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*))"#).unwrap());
 
 fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut traced: Vec<Traced> = Vec::new();
@@ -544,11 +541,8 @@ fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     let body_hits = find.hits(body);
     if !body_hits.is_empty() {
-        let in_urls: BTreeSet<usize> = URL_ATTR
-            .captures_iter(body)
-            .filter_map(|c| c.get(1).or(c.get(2)).or(c.get(3)).map(|x| x.as_str()))
-            .flat_map(|u| find.hits(u))
-            .collect();
+        let in_urls: BTreeSet<usize> =
+            URL_ATTR.captures_iter(body).filter_map(|c| c.get(1).or(c.get(2)).or(c.get(3)).map(|x| x.as_str())).flat_map(|u| find.hits(u)).collect();
         for i in body_hits {
             if traced[i].label == Label::Secret {
                 add(i, "the response body".into(), Severity::Fail, json!({}));
@@ -1024,7 +1018,12 @@ mod tests {
 
     #[test]
     fn echoed_request_values_are_not_leaks() {
-        let r = pii_run(json!({"query": [["email", "p1@mail.example"]]}), &["p1@mail.example"], json!({"status": 200, "body": "p1@mail.example"}), "p1@mail.example");
+        let r = pii_run(
+            json!({"query": [["email", "p1@mail.example"]]}),
+            &["p1@mail.example"],
+            json!({"status": 200, "body": "p1@mail.example"}),
+            "p1@mail.example",
+        );
         assert!(leaks(&r, &pii_manifest(true, true)).is_empty());
     }
 

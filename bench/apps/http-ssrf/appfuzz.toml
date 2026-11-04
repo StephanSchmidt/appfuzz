@@ -6,7 +6,7 @@ name = "http-ssrf"
 [entry]
 export = "wasi:http/incoming-handler#handle"
 request = { method = "GET", uri = "https://app.example/?url=https://api.example/status", headers = [], body = "" }
-output = { status = "status", body = "body", headers = "headers", body_format = "html" }
+output = { status = "status", body = "body", headers = "headers" }
 now = "2026-11-02T10:00:00"
 
 [grants]

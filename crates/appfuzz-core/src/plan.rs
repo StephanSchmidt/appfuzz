@@ -18,8 +18,8 @@
 //! generated from the WIT type. Keys starting with `_` inside a function
 //! entry (`_sig`, `_example`) are notes and ignored.
 
-use std::collections::BTreeMap;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -118,14 +118,18 @@ impl Plan {
 
     pub fn validate(&self) -> Result<()> {
         for (key, f) in &self.0 {
-            if (!f.dataset_rows.is_empty() || f.dataset_seed.is_some()) && key != "_defaults" { bail!("dataset_rows belongs under _defaults"); }
+            if (!f.dataset_rows.is_empty() || f.dataset_seed.is_some()) && key != "_defaults" {
+                bail!("dataset_rows belongs under _defaults");
+            }
             for k in f.notes.keys() {
                 if !k.starts_with('_') {
                     bail!("{key}: unknown plan field {k:?} (notes must start with _)");
                 }
             }
             for n in f.on_call.keys() {
-                if call_start(n).is_none() { bail!("{key}: on_call key {n:?} must be a positive call number or N+"); }
+                if call_start(n).is_none() {
+                    bail!("{key}: on_call key {n:?} must be a positive call number or N+");
+                }
             }
             for (i, r) in f.rules.iter().enumerate() {
                 for m in r.when.values() {
@@ -167,12 +171,7 @@ impl Plan {
             } else {
                 return None;
             };
-            Some(Resolved {
-                decision,
-                latency_ms: r.latency_ms.or(fn_latency).or(defaults.and_then(|d| d.response.latency_ms)),
-                cost,
-                source,
-            })
+            Some(Resolved { decision, latency_ms: r.latency_ms.or(fn_latency).or(defaults.and_then(|d| d.response.latency_ms)), cost, source })
         };
         if let Some(f) = fp {
             if let Some(r) = f.on_call.get(&call.to_string())
@@ -181,12 +180,19 @@ impl Plan {
                 return res;
             }
             // Exact positions win; otherwise the latest starting range wins.
-            let range = f.on_call.iter().filter_map(|(key, response)| {
-                let (start, tail) = call_start(key)?;
-                (tail && start <= call).then_some((start, response))
-            }).max_by_key(|(start, _)| *start);
+            let range = f
+                .on_call
+                .iter()
+                .filter_map(|(key, response)| {
+                    let (start, tail) = call_start(key)?;
+                    (tail && start <= call).then_some((start, response))
+                })
+                .max_by_key(|(start, _)| *start);
             if let Some((start, response)) = range
-                && let Some(res) = finish(response, format!("on_call {start}+")) { return res; }
+                && let Some(res) = finish(response, format!("on_call {start}+"))
+            {
+                return res;
+            }
             for (i, rule) in f.rules.iter().enumerate() {
                 if rule.when.iter().all(|(param, m)| arg(args, param).is_some_and(|a| matches(m, a)))
                     && let Some(res) = finish(&rule.response, format!("rule {i}"))
@@ -258,47 +264,57 @@ enum CompiledMatcher {
     Any,
     Regex(Option<Regex>),
     Contains(Option<String>),
-    Range(Option<(f64,f64)>),
+    Range(Option<(f64, f64)>),
     Not(Box<CompiledMatcher>),
     Equal(Value),
 }
 impl CompiledMatcher {
-    fn new(value:&Value)->Self {
-        if let Value::Object(o)=value && o.len()==1 {
-            let (key,v)=o.iter().next().unwrap();
+    fn new(value: &Value) -> Self {
+        if let Value::Object(o) = value
+            && o.len() == 1
+        {
+            let (key, v) = o.iter().next().unwrap();
             match key.as_str() {
-                "any"=>return Self::Any,
-                "regex"=>return Self::Regex(v.as_str().and_then(|s|Regex::new(s).ok())),
-                "contains"=>return Self::Contains(v.as_str().map(str::to_owned)),
-                "range"=>return Self::Range(v.as_array().and_then(|r|Some((r.first()?.as_f64()?,r.get(1)?.as_f64()?)))),
-                "not"=>return Self::Not(Box::new(Self::new(v))),
-                _=>{}
+                "any" => return Self::Any,
+                "regex" => return Self::Regex(v.as_str().and_then(|s| Regex::new(s).ok())),
+                "contains" => return Self::Contains(v.as_str().map(str::to_owned)),
+                "range" => return Self::Range(v.as_array().and_then(|r| Some((r.first()?.as_f64()?, r.get(1)?.as_f64()?)))),
+                "not" => return Self::Not(Box::new(Self::new(v))),
+                _ => {}
             }
         }
         Self::Equal(value.clone())
     }
-    fn matches(&self,value:&Value)->bool {
+    fn matches(&self, value: &Value) -> bool {
         match self {
-            Self::Any=>true,
-            Self::Regex(re)=>re.as_ref().is_some_and(|re|re.is_match(&text(value))),
-            Self::Contains(s)=>s.as_ref().is_some_and(|s|text(value).contains(s)),
-            Self::Range(bounds)=>bounds.is_some_and(|(lo,hi)|value.as_f64().is_some_and(|n|n>=lo && n<=hi)),
-            Self::Not(m)=>!m.matches(value),
-            Self::Equal(v)=>matches(v,value),
+            Self::Any => true,
+            Self::Regex(re) => re.as_ref().is_some_and(|re| re.is_match(&text(value))),
+            Self::Contains(s) => s.as_ref().is_some_and(|s| text(value).contains(s)),
+            Self::Range(bounds) => bounds.is_some_and(|(lo, hi)| value.as_f64().is_some_and(|n| n >= lo && n <= hi)),
+            Self::Not(m) => !m.matches(value),
+            Self::Equal(v) => matches(v, value),
         }
     }
 }
-pub(crate) fn compile_rules(rules:&[Rule])->Vec<CompiledRule> {
-    rules.iter().map(|r|CompiledRule {when:r.when.iter().map(|(p,m)|(p.clone(),CompiledMatcher::new(m))).collect(),response:r.response.clone()}).collect()
+pub(crate) fn compile_rules(rules: &[Rule]) -> Vec<CompiledRule> {
+    rules
+        .iter()
+        .map(|r| CompiledRule { when: r.when.iter().map(|(p, m)| (p.clone(), CompiledMatcher::new(m))).collect(), response: r.response.clone() })
+        .collect()
 }
-pub(crate) fn resolve_compiled_rules(rules:&[CompiledRule],args:&[(String,Value)],fn_latency:Option<f64>)->Option<Resolved> {
-    let (i,rule)=rules.iter().enumerate().find(|(_,r)|r.when.iter().all(|(p,m)|arg(args,p).is_some_and(|v|m.matches(v))))?;
-    let r=&rule.response;
-    let decision=if let Some(msg)=&r.commit_then_trap {Decision::CommitThenTrap(msg.clone())}
-        else if let Some(msg)=&r.trap {Decision::Trap(msg.clone())}
-        else if let Some(v)=&r.ret {Decision::Return(v.clone())}
-        else {Decision::Generate(r.generate.clone()?)};
-    Some(Resolved{decision,latency_ms:r.latency_ms.or(fn_latency),cost:None,source:format!("manifest rule {i}")})
+pub(crate) fn resolve_compiled_rules(rules: &[CompiledRule], args: &[(String, Value)], fn_latency: Option<f64>) -> Option<Resolved> {
+    let (i, rule) = rules.iter().enumerate().find(|(_, r)| r.when.iter().all(|(p, m)| arg(args, p).is_some_and(|v| m.matches(v))))?;
+    let r = &rule.response;
+    let decision = if let Some(msg) = &r.commit_then_trap {
+        Decision::CommitThenTrap(msg.clone())
+    } else if let Some(msg) = &r.trap {
+        Decision::Trap(msg.clone())
+    } else if let Some(v) = &r.ret {
+        Decision::Return(v.clone())
+    } else {
+        Decision::Generate(r.generate.clone()?)
+    };
+    Some(Resolved { decision, latency_ms: r.latency_ms.or(fn_latency), cost: None, source: format!("manifest rule {i}") })
 }
 
 fn arg<'a>(args: &'a [(String, Value)], param: &str) -> Option<&'a Value> {
@@ -354,7 +370,7 @@ pub fn matches(m: &Value, v: &Value) -> bool {
     false
 }
 
-fn text(v: &Value) -> Cow<'_,str> {
+fn text(v: &Value) -> Cow<'_, str> {
     match v {
         Value::String(s) => Cow::Borrowed(s),
         other => Cow::Owned(other.to_string()),
@@ -368,31 +384,49 @@ mod tests {
 
     #[test]
     fn compiled_platform_matchers_preserve_literal_recursive_and_regex_semantics() {
-        let patterns=[json!("x"),json!({"some":"x"}),json!({"regex":"^x+$"}),json!({"not":{"regex":"^x+$"}}),json!({"regex":"["}),json!({"any":false}),json!({"range":[1,6]}),json!({"contains":"x"}),json!({"other":"x"})];
-        let values=[Value::Null,json!("x"),json!("xx"),json!("z"),json!("é"),json!({"some":"x"}),json!(0),json!(6),json!(7)];
+        let patterns = [
+            json!("x"),
+            json!({"some":"x"}),
+            json!({"regex":"^x+$"}),
+            json!({"not":{"regex":"^x+$"}}),
+            json!({"regex":"["}),
+            json!({"any":false}),
+            json!({"range":[1,6]}),
+            json!({"contains":"x"}),
+            json!({"other":"x"}),
+        ];
+        let values = [Value::Null, json!("x"), json!("xx"), json!("z"), json!("é"), json!({"some":"x"}), json!(0), json!(6), json!(7)];
         for pattern in &patterns {
-            let compiled=CompiledMatcher::new(pattern);
-            for value in &values {assert_eq!(compiled.matches(value),matches(pattern,value),"{pattern} {value}");}
+            let compiled = CompiledMatcher::new(pattern);
+            for value in &values {
+                assert_eq!(compiled.matches(value), matches(pattern, value), "{pattern} {value}");
+            }
         }
-        let rules=vec![Rule{when:BTreeMap::from([("date".into(),json!({"not":{"regex":"^2026-"}}))]),response:Response{ret:Some(json!({"err":"date"})),latency_ms:Some(2.0),..Default::default()}}];
-        let compiled=compile_rules(&rules);
-        for value in ["2026-11-02","bad"] {
-            let args=vec![("date".into(),json!(value))];
-            let old=resolve_rules(&rules,&args,Some(1.0));let new=resolve_compiled_rules(&compiled,&args,Some(1.0));
-            assert_eq!(old.as_ref().map(|r|&r.decision),new.as_ref().map(|r|&r.decision));
-            assert_eq!(old.as_ref().map(|r|r.latency_ms),new.as_ref().map(|r|r.latency_ms));
-            assert_eq!(old.as_ref().map(|r|&r.source),new.as_ref().map(|r|&r.source));
+        let rules = vec![Rule {
+            when: BTreeMap::from([("date".into(), json!({"not":{"regex":"^2026-"}}))]),
+            response: Response { ret: Some(json!({"err":"date"})), latency_ms: Some(2.0), ..Default::default() },
+        }];
+        let compiled = compile_rules(&rules);
+        for value in ["2026-11-02", "bad"] {
+            let args = vec![("date".into(), json!(value))];
+            let old = resolve_rules(&rules, &args, Some(1.0));
+            let new = resolve_compiled_rules(&compiled, &args, Some(1.0));
+            assert_eq!(old.as_ref().map(|r| &r.decision), new.as_ref().map(|r| &r.decision));
+            assert_eq!(old.as_ref().map(|r| r.latency_ms), new.as_ref().map(|r| r.latency_ms));
+            assert_eq!(old.as_ref().map(|r| &r.source), new.as_ref().map(|r| &r.source));
         }
     }
 
     #[test]
     fn outage_ranges_are_numeric_and_exact_positions_override_them() {
-        let p=Plan::parse(r#"{"x:y/a#get":{"return":0,"on_call":{"2+":{"return":2},"10+":{"return":10},"12":{"return":12}}}}"#).unwrap();
-        for (n,expected) in [(1,0),(2,2),(9,2),(10,10),(11,10),(12,12),(13,10)] {
-            let Decision::Return(value)=p.resolve("x:y/a#get",n,&[]).decision else {panic!("literal");};
-            assert_eq!(value,json!(expected));
+        let p = Plan::parse(r#"{"x:y/a#get":{"return":0,"on_call":{"2+":{"return":2},"10+":{"return":10},"12":{"return":12}}}}"#).unwrap();
+        for (n, expected) in [(1, 0), (2, 2), (9, 2), (10, 10), (11, 10), (12, 12), (13, 10)] {
+            let Decision::Return(value) = p.resolve("x:y/a#get", n, &[]).decision else {
+                panic!("literal");
+            };
+            assert_eq!(value, json!(expected));
         }
-        for key in ["0","0+","-1+","1++","4294967296+","01+"] {
+        for key in ["0", "0+", "-1+", "1++", "4294967296+", "01+"] {
             assert!(Plan::parse(&json!({"x:y/a#get":{"on_call":{key:{"return":1}}}}).to_string()).is_err());
         }
     }

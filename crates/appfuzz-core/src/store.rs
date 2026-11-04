@@ -33,11 +33,7 @@ impl RunStore {
 
     /// A run by id, unique id prefix, or `last`.
     pub fn load(&self, id: &str) -> Result<RunRecord> {
-        let id = if id == "last" {
-            std::fs::read_to_string(self.dir.join("last")).context("no runs yet")?.trim().to_string()
-        } else {
-            id.to_string()
-        };
+        let id = if id == "last" { std::fs::read_to_string(self.dir.join("last")).context("no runs yet")?.trim().to_string() } else { id.to_string() };
         if let Some(r) = self.get(&id)? {
             return Ok(r);
         }

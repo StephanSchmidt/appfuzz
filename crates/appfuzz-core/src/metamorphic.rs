@@ -103,7 +103,13 @@ pub fn variants(app: &App, r: &RunRecord) -> Vec<Variant> {
     }
     // Not for lists the host promises are unique.
     let unique = |f: &str| app.manifest.function(f).is_some_and(|s| s.values.values().any(|c| matches!(c, crate::constraints::Constraint::Unique(_))));
-    for e in r.events.iter().filter(|e| !app.manifest.function(&e.func).is_some_and(|s| s.query.is_some()) && !unique(&e.func)).filter(|e| e.result.as_ref().and_then(list_in).is_some_and(|a| !a.is_empty())).take(PER_KIND) {
+    for e in r
+        .events
+        .iter()
+        .filter(|e| !app.manifest.function(&e.func).is_some_and(|s| s.query.is_some()) && !unique(&e.func))
+        .filter(|e| e.result.as_ref().and_then(list_in).is_some_and(|a| !a.is_empty()))
+        .take(PER_KIND)
+    {
         let mut v = e.result.clone().unwrap_or_default();
         if let Some(a) = list_mut(&mut v) {
             let x = a[0].clone();
@@ -129,7 +135,9 @@ pub fn variants(app: &App, r: &RunRecord) -> Vec<Variant> {
         out.push(Variant { change: Change::Clock, func: None, call: None, spec: RunSpec { now: format!("{d}T{hms}"), ..base.clone() } });
     }
     // One recoverable success, with an error matching its actual WIT type.
-    if let Some(variant) = crate::faults::first_variant(app, r) { out.push(variant); }
+    if let Some(variant) = crate::faults::first_variant(app, r) {
+        out.push(variant);
+    }
     let mut funcs: Vec<&str> = Vec::new();
     for e in &r.events {
         if !funcs.contains(&e.func.as_str()) && funcs.len() < SLOW_FUNCS {
@@ -219,10 +227,14 @@ pub fn compare(app: &App, base: &RunRecord, v: &Variant, vr: &RunRecord) -> Vec<
             ));
         }
         Change::Fault => {
-            let Some(call) = v.call else { return out; };
+            let Some(call) = v.call else {
+                return out;
+            };
             let outage = vr.events.iter().any(|e| e.func == func && e.call == call && e.source == format!("on_call {call}+"));
             let recipe = crate::faults::Recipe { func: func.clone(), call, mode: if outage { crate::faults::Mode::Outage } else { crate::faults::Mode::Once } };
-            if !crate::faults::injected(base, &recipe, vr) { return out; }
+            if !crate::faults::injected(base, &recipe, vr) {
+                return out;
+            }
             let retried = vr.events.iter().filter(|e| e.func == func).count() > base.events.iter().filter(|e| e.func == func).count();
             if same && !retried {
                 out.push(Finding::new(

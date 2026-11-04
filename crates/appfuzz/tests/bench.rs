@@ -62,7 +62,8 @@ fn check(manifest: &Path, expected: &Value, state: &Path) -> (Vec<String>, Value
             problems.push(format!("missed {kind} (≥ {}){}", e["min"], if seen.is_empty() { String::new() } else { format!(", only: {seen:?}") }));
         }
     }
-    let allowed: Vec<&str> = expect.iter().filter_map(|e| e["kind"].as_str()).chain(expected["allow"].as_array().into_iter().flatten().filter_map(Value::as_str)).collect();
+    let allowed: Vec<&str> =
+        expect.iter().filter_map(|e| e["kind"].as_str()).chain(expected["allow"].as_array().into_iter().flatten().filter_map(Value::as_str)).collect();
     for f in &findings {
         let k = f["kind"].as_str().unwrap_or_default();
         if rank(f["severity"].as_str().unwrap_or_default()) >= 1 && !allowed.contains(&k) {

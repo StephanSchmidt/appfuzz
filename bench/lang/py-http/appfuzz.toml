@@ -1,0 +1,21 @@
+# appfuzz language test: a wasi:http handler in Python (componentize-py
+# poll loop) that greets the visitor by name, unescaped.
+[app]
+wasm = "app.wasm"
+name = "py-http"
+
+[entry]
+export = "wasi:http/incoming-handler#handle"
+request = { method = "GET", uri = "https://app.example/?name=Ada", headers = [], body = "" }
+output = { status = "status", body = "body", headers = "headers" }
+now = "2026-11-02T10:00:00"
+
+[grants]
+hosts = ["api.example"]
+wasi = ["wasi:cli", "wasi:clocks", "wasi:io", "wasi:random", "wasi:http"]
+
+[limits]
+fuel = 200_000_000
+memory = "64MiB"
+cost_per_request = 100
+max_latency_ms = 200

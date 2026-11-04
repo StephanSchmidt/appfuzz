@@ -83,17 +83,15 @@ fn carrier(engine: &Engine) -> Result<(FuncInfo, FuncInfo)> {
     let bytes = wit_component::ComponentEncoder::default().module(&module)?.validate(true).encode()?;
     let component = Component::new(engine, &bytes).map_err(anyhow::Error::from).context("wasi:http carrier component")?;
     let entry = crate::wit::exports(engine, &component).into_iter().find(|f| f.name == "handle").context("carrier entry")?;
-    let client = crate::wit::imports(engine, &component)
-        .into_iter()
-        .flat_map(|i| i.funcs)
-        .find(|f| f.name == "handle")
-        .context("carrier client")?;
+    let client = crate::wit::imports(engine, &component).into_iter().flat_map(|i| i.funcs).find(|f| f.name == "handle").context("carrier client")?;
     Ok((entry, client))
 }
 
 /// What the platform promises for an HTTP handler, unless the manifest
 /// says otherwise: the entry is the handler, the request is a parsed HTTP
-/// request, outbound URLs are SSRF sinks and statuses are real.
+/// request, outbound URLs are SSRF sinks, outbound headers may carry
+/// secrets (an `Authorization` token to the app's API is normal; sending it
+/// elsewhere is SSRF or an ungranted host) and statuses are real.
 pub fn default_manifest(manifest: &mut Manifest, imports: &[Interface], exports: &[FuncInfo]) -> Result<()> {
     if let Some(handler) = exports.iter().find(|f| is_handler(f)) {
         let entry = manifest.entry.get_or_insert_with(|| Entry {
@@ -119,11 +117,12 @@ pub fn default_manifest(manifest: &mut Manifest, imports: &[Interface], exports:
                 o.body = Some("body".into());
                 o.headers = Some("headers".into());
             }
-            // The platform parses the client's HTTP before the app runs.
-            for (path, c) in [("method", "format:token"), ("uri", "format:url")] {
-                if !entry.values.contains_key(path) {
-                    entry.values.insert(path.into(), serde_json::from_value(json!(c)).with_context(|| format!("constraint {c}"))?);
-                }
+            // The platform parses the client's HTTP before the app runs. No
+            // constraint on `uri`: any text is delivered as a valid URI
+            // (resolved against https://app.example/, unsafe bytes
+            // percent-encoded), so no request is impossible.
+            if !entry.values.contains_key("method") {
+                entry.values.insert("method".into(), serde_json::from_value(json!("format:token")).context("constraint format:token")?);
             }
         }
     }
@@ -131,7 +130,7 @@ pub fn default_manifest(manifest: &mut Manifest, imports: &[Interface], exports:
         let spec: FunctionSpec = toml::from_str(
             r#"
 description = "Sends an HTTP request and waits for the response."
-params = { url = "url" }
+params = { url = "url", headers = "secret" }
 values = { status = "range:100..599" }
 "#,
         )

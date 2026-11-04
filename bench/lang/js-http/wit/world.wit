@@ -1,0 +1,8 @@
+// A wasi:http 0.2 handler that may send requests: the world of
+// `wasmtime serve`, Spin and wasmCloud HTTP components.
+package bench:http;
+
+world app {
+  import wasi:http/outgoing-handler@0.2.10;
+  export wasi:http/incoming-handler@0.2.10;
+}

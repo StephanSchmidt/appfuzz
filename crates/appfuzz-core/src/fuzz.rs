@@ -26,10 +26,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use wasmtime::component::Type;
 
-use crate::detect::{Finding, panic_text};
-use crate::harness::{App, field, fn_key_eq, set_clock_fields};
 use crate::assertion::{Assertion, Margin, Verdict};
 use crate::check::Property;
+use crate::detect::{Finding, panic_text};
+use crate::harness::{App, field, fn_key_eq, set_clock_fields};
 use crate::metamorphic;
 use crate::par;
 use crate::plan::{Plan, Response};
@@ -75,8 +75,19 @@ pub enum Stage {
 /// Longest list the permute stage hands back.
 const MAX_PERMUTED: usize = 64;
 
-const STAGES: [Stage; 11] =
-    [Stage::Crawl, Stage::Request, Stage::Compare, Stage::Structured, Stage::HostValues, Stage::GrowList, Stage::GrowInput, Stage::Fault, Stage::Permute, Stage::Env, Stage::Splice];
+const STAGES: [Stage; 11] = [
+    Stage::Crawl,
+    Stage::Request,
+    Stage::Compare,
+    Stage::Structured,
+    Stage::HostValues,
+    Stage::GrowList,
+    Stage::GrowInput,
+    Stage::Fault,
+    Stage::Permute,
+    Stage::Env,
+    Stage::Splice,
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -86,7 +97,7 @@ pub struct Entry {
     /// Why it was kept: `features 4` or `max calls …`.
     pub reasons: Vec<String>,
     #[serde(default)]
-    pub feedback:crate::feedback::Feedback,
+    pub feedback: crate::feedback::Feedback,
     #[serde(skip)]
     record: Option<Arc<RunRecord>>,
     /// Same-host links and form inputs of the record, for crawling;
@@ -146,7 +157,7 @@ pub struct FuzzOpts {
     pub dict_limit: usize,
     /// Seed with the request keys and modes `amplify` would find.
     pub discover: bool,
-    pub internal_feedback:bool,
+    pub internal_feedback: bool,
     /// Checked on every run like a detector (`check_failed`).
     pub property: Option<Property>,
     /// Stop at the first new finding of this kind.
@@ -158,7 +169,20 @@ pub struct FuzzOpts {
 
 impl Default for FuzzOpts {
     fn default() -> Self {
-        FuzzOpts { runs: None, time: Some(Duration::from_secs(60)), until: Until::Budget, seed: 1, plateau: 2000, max_corpus: 300, dict_limit: 200, discover: true, internal_feedback:false, property: None, stop_on: None, asserts: Vec::new() }
+        FuzzOpts {
+            runs: None,
+            time: Some(Duration::from_secs(60)),
+            until: Until::Budget,
+            seed: 1,
+            plateau: 2000,
+            max_corpus: 300,
+            dict_limit: 200,
+            discover: true,
+            internal_feedback: false,
+            property: None,
+            stop_on: None,
+            asserts: Vec::new(),
+        }
     }
 }
 
@@ -198,7 +222,7 @@ pub struct FuzzReport {
     pub findings: Vec<Finding>,
     pub last_new_at_run: u64,
     pub jobs: usize,
-    pub feedback:crate::feedback::Status,
+    pub feedback: crate::feedback::Status,
     pub faults: crate::faults::Coverage,
     /// What every saved assert saw in this campaign.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -413,7 +437,7 @@ struct State {
     known: BTreeSet<String>,
     new_findings: Vec<Finding>,
     observed: BTreeMap<String, Finding>,
-    comparison_progress:BTreeMap<String,(u64,String)>,
+    comparison_progress: BTreeMap<String, (u64, String)>,
     asserts: Vec<AssertStat>,
     faults: crate::faults::Search,
     /// Runs admitted, and runs handed to a worker.
@@ -429,7 +453,7 @@ struct State {
 
 /// A run and what the worker derived from it.
 struct Executed {
-    feedback:crate::feedback::Feedback,
+    feedback: crate::feedback::Feedback,
     /// None: no asserts, or skipped by sampling.
     asserts: Option<Vec<AssertObs>>,
     r: Arc<RunRecord>,
@@ -439,15 +463,15 @@ struct Executed {
 }
 
 /// The unlocked half of an evaluation: run, detectors, features.
-fn execute(app: &App, st: &Statics, spec: &RunSpec, prop: Option<&Property>, probe:&crate::feedback::Probe, judge: &Judge) -> Executed {
+fn execute(app: &App, st: &Statics, spec: &RunSpec, prop: Option<&Property>, probe: &crate::feedback::Probe, judge: &Judge) -> Executed {
     let r = Arc::new(app.run(spec));
     if matches!(r.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) {
-        return Executed { feedback:Default::default(), asserts: None, r, findings: vec![], features: BTreeSet::new(), metrics: vec![] };
+        return Executed { feedback: Default::default(), asserts: None, r, findings: vec![], features: BTreeSet::new(), metrics: vec![] };
     }
     let asserts = (!judge.list.is_empty() && r.outcome.kind == OutcomeKind::Ok && judge.sample()).then(|| judge.judge(&r, &app.manifest));
     let mut findings = crate::detect::per_run_checked(app, &r);
     findings.extend(prop.and_then(|p| p.finding(&r, &app.manifest)));
-    let feedback=if r.outcome.kind==OutcomeKind::Ok {probe.collect(spec)}else{Default::default()};
+    let feedback = if r.outcome.kind == OutcomeKind::Ok { probe.collect(spec) } else { Default::default() };
     let mut features = features(&r, st, app);
     features.extend(feedback.features());
     let metrics = if r.outcome.kind == OutcomeKind::Ok { metrics(&r) } else { vec![] };
@@ -496,10 +520,12 @@ impl State {
             reasons.push(format!("findings {}", found.len()));
         }
         reasons.extend(assert_reasons);
-        if stage!=Stage::Check && let Some((group,distance))=feedback.progress()
-            && (self.comparison_progress.contains_key(&group) || self.comparison_progress.len()<self.max_corpus.max(2)/2)
-            && self.comparison_progress.get(&group).is_none_or(|(old,_)|distance<*old) {
-            self.comparison_progress.insert(group,(distance,r.id.clone()));
+        if stage != Stage::Check
+            && let Some((group, distance)) = feedback.progress()
+            && (self.comparison_progress.contains_key(&group) || self.comparison_progress.len() < self.max_corpus.max(2) / 2)
+            && self.comparison_progress.get(&group).is_none_or(|(old, _)| distance < *old)
+        {
+            self.comparison_progress.insert(group, (distance, r.id.clone()));
             reasons.push(format!("comparison distance {distance}"));
         }
         let fresh = feats.iter().filter(|f| !self.features.contains(*f)).count();
@@ -723,8 +749,7 @@ impl Mutator<'_> {
     }
 
     fn number(&mut self, old: Option<i64>) -> i64 {
-        const EDGES: [i64; 22] =
-            [0, 1, 2, 3, 7, 10, 31, 32, 63, 64, 100, 127, 128, 255, 256, 1000, 1024, 4096, 65535, 65536, 2_147_483_647, 4_294_967_295];
+        const EDGES: [i64; 22] = [0, 1, 2, 3, 7, 10, 31, 32, 63, 64, 100, 127, 128, 255, 256, 1000, 1024, 4096, 65535, 65536, 2_147_483_647, 4_294_967_295];
         let c = self.consts;
         match (self.rng.random_range(0..4u8), old) {
             (0, Some(n)) => *self.pick(&[n + 1, n - 1, n * 2, n * 10, n / 2]).expect("non-empty"),
@@ -753,8 +778,14 @@ impl Mutator<'_> {
                 self.pick(&ATTACKS).expect("non-empty").to_string()
             }
             _ if self.app.manifest.has_output_labels() && self.rng.random_bool(0.4) => {
-                const ATTACKS: [&str; 6] =
-                    ["//evil.example/", "https://evil.example/", "/\\evil.example", "javascript:alert(1)", "<img src=x onerror=alert(1)>", "\" onmouseover=\"alert(1)"];
+                const ATTACKS: [&str; 6] = [
+                    "//evil.example/",
+                    "https://evil.example/",
+                    "/\\evil.example",
+                    "javascript:alert(1)",
+                    "<img src=x onerror=alert(1)>",
+                    "\" onmouseover=\"alert(1)",
+                ];
                 self.pick(&ATTACKS).expect("non-empty").to_string()
             }
             _ => self.pick(&ODD).expect("non-empty").to_string(),
@@ -948,23 +979,30 @@ impl Mutator<'_> {
                 any.then_some(())?;
             }
             Stage::Compare => {
-                let candidates=crate::feedback::substitutions(&spec.args,&parent.feedback.comparisons);
-                let changed=self.pick(&candidates).is_some_and(|patch|patch.apply(&mut spec.args));
-                if !changed && !self.mutate_request(&mut spec.args){return None;}
-                crate::constraints::conform_request(&mut spec.args,&self.app.manifest,self.rng.random());
+                let candidates = crate::feedback::substitutions(&spec.args, &parent.feedback.comparisons);
+                let changed = self.pick(&candidates).is_some_and(|patch| patch.apply(&mut spec.args));
+                if !changed && !self.mutate_request(&mut spec.args) {
+                    return None;
+                }
+                crate::constraints::conform_request(&mut spec.args, &self.app.manifest, self.rng.random());
             }
             Stage::Structured => {
                 // Request strings and observed host-result strings use the same
                 // parser. Model-backed successes remain owned by their datasets.
                 let mut root = Value::Array(spec.args.clone());
                 let request_paths = crate::structured::locations(&root);
-                let host_values: Vec<_> = rec.as_ref().into_iter().flat_map(|r| r.events.iter()).take(256)
+                let host_values: Vec<_> = rec
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|r| r.events.iter())
+                    .take(256)
                     .filter(|e| !self.app.manifest.function(&e.func).is_some_and(|f| f.query.is_some() || f.mutation.is_some()))
                     .filter_map(|e| {
                         let value = e.result.as_ref()?;
                         let paths = crate::structured::locations(value);
                         (!paths.is_empty()).then_some((e, paths))
-                    }).collect();
+                    })
+                    .collect();
                 if !request_paths.is_empty() && (host_values.is_empty() || self.rng.random_bool(0.5)) {
                     let path = self.pick(&request_paths)?;
                     let slot = root.pointer_mut(path)?;
@@ -977,7 +1015,12 @@ impl Mutator<'_> {
                     let mut value = event.result.clone()?;
                     let slot = value.pointer_mut(path)?;
                     *slot = json!(crate::structured::mutate(slot.as_str()?, &mut self.rng, self.words, self.consts)?);
-                    spec.plan.0.entry(event.func.clone()).or_default().on_call.insert(event.call.to_string(), Response { ret: Some(value), ..Default::default() });
+                    spec.plan
+                        .0
+                        .entry(event.func.clone())
+                        .or_default()
+                        .on_call
+                        .insert(event.call.to_string(), Response { ret: Some(value), ..Default::default() });
                 }
             }
             Stage::HostValues => {
@@ -1011,9 +1054,12 @@ impl Mutator<'_> {
             }
             Stage::Permute => {
                 let r = rec?;
-                let with_list: Vec<_> = r.events.iter().filter(|e| e.result.as_ref().is_some_and(|v| first_list(v).is_some_and(|a| !a.is_empty()))).cloned().collect();
+                let with_list: Vec<_> =
+                    r.events.iter().filter(|e| e.result.as_ref().is_some_and(|v| first_list(v).is_some_and(|a| !a.is_empty()))).cloned().collect();
                 let e = self.pick(&with_list)?.clone();
-                if self.app.manifest.function(&e.func).is_some_and(|f| f.query.is_some()) { return None; }
+                if self.app.manifest.function(&e.func).is_some_and(|f| f.query.is_some()) {
+                    return None;
+                }
                 let mut v = e.result.clone()?;
                 let a = first_list_mut(&mut v)?;
                 match self.rng.random_range(0..4u8) {
@@ -1070,7 +1116,8 @@ impl Mutator<'_> {
                     (refs, r.result.as_ref().map(form_inputs).unwrap_or_default())
                 });
                 let u = self.pick(refs)?.clone();
-                let words: Vec<String> = (0..inputs.len()).map(|_| if self.rng.random_bool(0.5) { self.number(None).to_string() } else { self.word() }).collect();
+                let words: Vec<String> =
+                    (0..inputs.len()).map(|_| if self.rng.random_bool(0.5) { self.number(None).to_string() } else { self.word() }).collect();
                 let req = spec.args.first_mut()?;
                 if !crawl_into(req, &self.app.manifest.entry.as_ref()?.fields, &u.url, &u.method, inputs, &words) {
                     return None;
@@ -1159,11 +1206,7 @@ pub(crate) fn form_inputs(v: &Value) -> Vec<String> {
 /// Request fields by role: `http.path`, `http.query`, `http.method`,
 /// `http.form`; without roles, fields named `path`, `query`, `method`, `form`.
 pub(crate) fn role_path(fields: &BTreeMap<String, String>, req: &Value, role: &str) -> Option<String> {
-    fields
-        .iter()
-        .find(|(_, r)| r.as_str() == format!("http.{role}"))
-        .map(|(p, _)| p.clone())
-        .or_else(|| field(req, role).is_some().then(|| role.to_string()))
+    fields.iter().find(|(_, r)| r.as_str() == format!("http.{role}")).map(|(p, _)| p.clone()).or_else(|| field(req, role).is_some().then(|| role.to_string()))
 }
 
 /// The functions a run calls, in order, repeats collapsed.
@@ -1244,7 +1287,11 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
         let mut s = base.clone();
         for k in strings {
             let o = Mutator::current_opts(&s.plan, k);
-            Mutator::set_generate(&mut s.plan, k, GenOpts { strings: Some(canary.into()), results: Some("ok".into()), options: Some("some".into()), list_len: Some(2), ..o });
+            Mutator::set_generate(
+                &mut s.plan,
+                k,
+                GenOpts { strings: Some(canary.into()), results: Some("ok".into()), options: Some("some".into()), list_len: Some(2), ..o },
+            );
         }
         out.push(s);
     }
@@ -1334,9 +1381,11 @@ pub fn fuzz(
     opts: &FuzzOpts,
     on_run: OnRun,
 ) -> anyhow::Result<(FuzzReport, Corpus)> {
-    if opts.runs == Some(0) { anyhow::bail!("run budget must be positive"); }
+    if opts.runs == Some(0) {
+        anyhow::bail!("run budget must be positive");
+    }
     let started = Instant::now();
-    let probe=crate::feedback::Probe::new(app,opts.internal_feedback);
+    let probe = crate::feedback::Probe::new(app, opts.internal_feedback);
     let st = Statics::parse(&app.bytes)?;
     let words = dictionary(&st, opts.dict_limit);
     let routes = routes(&st, 32);
@@ -1364,7 +1413,7 @@ pub fn fuzz(
         known: known_findings,
         new_findings: Vec::new(),
         observed: BTreeMap::new(),
-        comparison_progress:BTreeMap::new(),
+        comparison_progress: BTreeMap::new(),
         asserts: opts.asserts.iter().map(|(n, a)| AssertStat { name: n.clone(), property: a.expr.text.clone(), ..Default::default() }).collect(),
         faults: crate::faults::Search::new(),
         runs: 0,
@@ -1408,7 +1457,9 @@ pub fn fuzz(
     for s in &mut seeds {
         s.fuel = s.fuel.min(fuel);
     }
-    if let Some(n) = opts.runs { seeds.truncate(n.min(usize::MAX as u64) as usize); }
+    if let Some(n) = opts.runs {
+        seeds.truncate(n.min(usize::MAX as u64) as usize);
+    }
     lock(&state).started += seeds.len() as u64;
     // Pair checks of a kept run, once per call shape.
     let check = |r: &RunRecord| {
@@ -1418,7 +1469,8 @@ pub fn fuzz(
         let vs = metamorphic::variants(app, r);
         // Longer lists show more (a hash map's order, a duplicate).
         let longest = r.events.iter().filter_map(|e| e.result.as_ref().and_then(crate::detect::list_in)).map(Vec::len).max().unwrap_or(0);
-        let key = format!("{}\0{:?}\0{}", call_shape(r), vs.iter().map(|v| (v.change, &v.func)).collect::<Vec<_>>(), usize::BITS - longest.min(8).leading_zeros());
+        let key =
+            format!("{}\0{:?}\0{}", call_shape(r), vs.iter().map(|v| (v.change, &v.func)).collect::<Vec<_>>(), usize::BITS - longest.min(8).leading_zeros());
         if !lock(&state).checked.insert(key) {
             return;
         }
@@ -1450,7 +1502,15 @@ pub fn fuzz(
         anyhow::bail!("the seed request does not run; check it with `appfuzz run`");
     }
     let worker = |i: usize| {
-        let mut m = Mutator { app, words: &words, consts: &consts, keys: &keys, funcs: &funcs, routes: &routes, rng: StdRng::seed_from_u64(opts.seed.wrapping_add((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))) };
+        let mut m = Mutator {
+            app,
+            words: &words,
+            consts: &consts,
+            keys: &keys,
+            funcs: &funcs,
+            routes: &routes,
+            rng: StdRng::seed_from_u64(opts.seed.wrapping_add((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))),
+        };
         loop {
             let (stage, parent, other, fault) = {
                 let mut s = lock(&state);
@@ -1484,7 +1544,8 @@ pub fn fuzz(
             let sampled_out = ex.asserts.is_none() && !judge.list.is_empty() && ex.r.outcome.kind == OutcomeKind::Ok;
             if let Some((base, recipe)) = &fault {
                 lock(&state).faults.observe(crate::faults::injected(base, recipe, &ex.r));
-                let variant = metamorphic::Variant { change: metamorphic::Change::Fault, func: Some(recipe.func.clone()), call: Some(recipe.call), spec: spec.clone() };
+                let variant =
+                    metamorphic::Variant { change: metamorphic::Change::Fault, func: Some(recipe.func.clone()), call: Some(recipe.call), spec: spec.clone() };
                 ex.findings.extend(crate::faults::compare(app, base, recipe, &variant, &ex.r));
             }
             let (r, keep, found) = lock(&state).admit(spec, stage, ex);
@@ -1495,7 +1556,9 @@ pub fn fuzz(
                 s.asserts.iter_mut().for_each(|a| a.sampled_out -= 1);
                 s.observe(&r, obs, stage);
             }
-            if keep && stage != Stage::Fault { lock(&state).faults.enqueue(app, r.clone()); }
+            if keep && stage != Stage::Fault {
+                lock(&state).faults.enqueue(app, r.clone());
+            }
             on_run(&r, keep, &found);
             if keep {
                 check(&r);
@@ -1526,7 +1589,7 @@ pub fn fuzz(
         findings: fz.observed.into_values().collect(),
         last_new_at_run: fz.last_new,
         jobs,
-        feedback:probe.finish(),
+        feedback: probe.finish(),
         faults: fz.faults.coverage(),
         asserts: fz.asserts,
         assert_cost_pct: (!opts.asserts.is_empty()).then(|| {

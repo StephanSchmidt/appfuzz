@@ -58,9 +58,7 @@ pub fn imports(engine: &Engine, component: &Component) -> Vec<Interface> {
                 let funcs = inst
                     .exports(engine)
                     .filter_map(|(f, item)| match item.ty {
-                        ComponentItem::ComponentFunc(ty) => {
-                            Some(FuncInfo { interface: name.to_string(), name: f.to_string(), key: fn_key(name, f), ty })
-                        }
+                        ComponentItem::ComponentFunc(ty) => Some(FuncInfo { interface: name.to_string(), name: f.to_string(), key: fn_key(name, f), ty }),
                         _ => None,
                     })
                     .collect();

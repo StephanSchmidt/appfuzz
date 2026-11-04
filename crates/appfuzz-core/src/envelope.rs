@@ -355,12 +355,21 @@ impl Envelope {
     /// Every check on one trace, as `outside_envelope` findings.
     pub fn check(&self, r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         let mut v = Vec::new();
-        if self.version != VERSION || self.component.is_empty() || r.spec.component != self.component || r.spec.contract != self.contract || self.contract != m.fingerprint()
+        if self.version != VERSION
+            || self.component.is_empty()
+            || r.spec.component != self.component
+            || r.spec.contract != self.contract
+            || self.contract != m.fingerprint()
             || self.requirements != m.requirements_fingerprint()
         {
-            return vec![Finding::new("outside_envelope", "identity", Severity::Fail,
+            return vec![Finding::new(
+                "outside_envelope",
+                "identity",
+                Severity::Fail,
                 "trace, envelope and platform contract must identify the same build and configuration".into(),
-                json!({"what": "identity"}), Some(&r.id))];
+                json!({"what": "identity"}),
+                Some(&r.id),
+            )];
         }
         for i in 0..r.events.len() {
             v.extend(self.check_call(r, i, m));

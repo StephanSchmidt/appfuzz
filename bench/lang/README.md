@@ -73,3 +73,30 @@ Coverage guidance sees the interpreter's branches, not the script's, and
 static findings (`host_call_in_loop`, `wasm disasm`, `profile`) point at
 interpreter functions. Each run boots the engine, so there are fewer runs per
 second than for Rust.
+
+## HTTP handlers (`wasi:http`)
+
+Handlers built with each language's usual HTTP tooling, reviewed without a
+platform file. The Rust ones are in the bench (`../apps/http-*`).
+
+| App | Language | Toolchain | Bug |
+|-----|----------|-----------|-----|
+| `../apps/http-wstd` | Rust | `wstd` 0.6 (`#[wstd::http_server]`, `Client`) | none |
+| `../apps/http-spin` | Rust | Spin SDK 5.2 (`#[http_component]`, `http::send`, variables) | none |
+| `../apps/http-ssrf` | Rust | raw `wasi:http` bindings | SSRF, stored reflection |
+| `../apps/http-no-response` | Rust | raw `wasi:http` bindings | no response on `/admin` |
+| `js-http` | JavaScript | jco + componentize-js (fetch event, `fetch()`) | none |
+| `py-http` | Python | componentize-py 0.25 (asyncio poll loop) | reflection |
+
+Build:
+
+```sh
+cd js-http && ../ts-chatty/node_modules/.bin/jco componentize app.js \
+    --wit wit --world-name app -o app.wasm   # wit pinned to wasi:http 0.2.10, as StarlingMonkey
+cd py-http && uvx componentize-py -d ../../wit/http -w app componentize app -o app.wasm
+```
+
+What review finds besides the bug: `js-http` fails `ungranted_import` twice
+(`wasi:filesystem`, from the runtime), `py-http` eight times (`wasi:filesystem`
+and `wasi:sockets`). All of them show `error_ignored` as info: the page is the
+same whether the upstream answers with an error status or fails outright.

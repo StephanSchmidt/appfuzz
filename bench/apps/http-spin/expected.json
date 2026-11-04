@@ -1,0 +1,6 @@
+{
+  "app": "http-spin",
+  "bug": "none: a Spin HTTP component that sends its API token only to its API and escapes what it shows",
+  "expect": [],
+  "allow": []
+}

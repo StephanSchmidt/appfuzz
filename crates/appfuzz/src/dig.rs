@@ -87,12 +87,17 @@ pub fn bindings(app: &App, run: Option<RunRecord>) -> Result<Value> {
             paths.push(format!("host.{k}.result"));
         }
         paths.extend(f.ty.params().map(|(p, _)| format!("host.{k}.args.{p}")));
-        host.push(json!({"func": f.key, "signature": f.signature(), "paths": paths.iter().map(|p| json!({"path": p, "example": example(p)})).collect::<Vec<_>>()}));
+        host.push(
+            json!({"func": f.key, "signature": f.signature(), "paths": paths.iter().map(|p| json!({"path": p, "example": example(p)})).collect::<Vec<_>>()}),
+        );
     }
     let mut request = Vec::new();
-    if let Some(req) = run.as_ref().and_then(|r| r.spec.args.first()).cloned().or_else(|| {
-        app.default_export().ok().and_then(|e| app.default_args(e, &app.manifest.start_time()).ok()).and_then(|a| a.into_iter().next())
-    }) {
+    if let Some(req) = run
+        .as_ref()
+        .and_then(|r| r.spec.args.first())
+        .cloned()
+        .or_else(|| app.default_export().ok().and_then(|e| app.default_args(e, &app.manifest.start_time()).ok()).and_then(|a| a.into_iter().next()))
+    {
         fn walk(v: &Value, prefix: &str, out: &mut Vec<String>, depth: usize) {
             match v {
                 Value::Object(o) if depth < 3 => o.iter().for_each(|(k, x)| walk(x, &format!("{prefix}.{k}"), out, depth + 1)),
@@ -111,7 +116,8 @@ pub fn bindings(app: &App, run: Option<RunRecord>) -> Result<Value> {
         walk(&req, "request", &mut paths, 0);
         request = paths.iter().map(|p| json!({"path": p, "example": if p.contains('<') { Value::Null } else { example(p) }})).collect();
     }
-    let output: Vec<Value> = ["out.status", "out.body", "out.headers", "out.result", "out.json"].iter().map(|p| json!({"path": p, "example": example(p)})).collect();
+    let output: Vec<Value> =
+        ["out.status", "out.body", "out.headers", "out.result", "out.json"].iter().map(|p| json!({"path": p, "example": example(p)})).collect();
     let run_wide: Vec<Value> =
         ["calls", "totals", "clock.now", "clock.today", "clock.time", "logs", "outcome"].iter().map(|p| json!({"path": p, "example": example(p)})).collect();
     Ok(json!({
@@ -186,12 +192,39 @@ pub fn check(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, prop: Prope
 }
 
 const SWEEP_NUMBERS: &[&str] = &[
-    "-2147483648", "-1", "0", "1", "2", "7", "10", "99", "100", "101", "255", "256", "1000", "65535", "65536", "2147483647", "2147483648",
+    "-2147483648",
+    "-1",
+    "0",
+    "1",
+    "2",
+    "7",
+    "10",
+    "99",
+    "100",
+    "101",
+    "255",
+    "256",
+    "1000",
+    "65535",
+    "65536",
+    "2147483647",
+    "2147483648",
     "9007199254740993",
 ];
 const SWEEP_DATES: &[&str] = &[
-    "2026-02-28", "2026-02-29", "2028-02-29", "2026-12-31", "2027-01-01", "1970-01-01", "2038-01-19", "9999-12-31", "2026-13-01", "2026-00-10",
-    "2026-1-1", "26-01-01", "",
+    "2026-02-28",
+    "2026-02-29",
+    "2028-02-29",
+    "2026-12-31",
+    "2027-01-01",
+    "1970-01-01",
+    "2038-01-19",
+    "9999-12-31",
+    "2026-13-01",
+    "2026-00-10",
+    "2026-1-1",
+    "26-01-01",
+    "",
 ];
 const SWEEP_TIMES: &[&str] = &["00:00", "00:01", "11:59", "12:00", "23:59", "24:00", "12:60", "-1:00", "9:5", "02:30", ""];
 const SWEEP_STRINGS: &[&str] =
@@ -214,9 +247,7 @@ pub fn sweep_values(kind: &str, st: &Statics) -> Result<Vec<String>> {
 fn set_value(req: &mut Value, path: &str, v: &str) -> Result<()> {
     let was_number = field(req, path).is_some_and(Value::is_number);
     appfuzz_core::scale::set_text(req, path, v)?;
-    if was_number
-        && let (Some(slot), Ok(n)) = (field_mut(req, path), v.parse::<serde_json::Number>())
-    {
+    if was_number && let (Some(slot), Ok(n)) = (field_mut(req, path), v.parse::<serde_json::Number>()) {
         *slot = Value::Number(n);
     }
     Ok(())
@@ -240,7 +271,15 @@ pub fn sweep(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, path: &str,
         let text = resp.body.as_deref().map(visible_text).unwrap_or_default();
         let shown: String = text.chars().take(100).collect();
         let fs = detect::per_run(r, &app.manifest);
-        groups.entry(format!("{} {} {}", detect::kind_name(r.outcome.kind), resp.status.map_or("-".into(), |s| s.to_string()), r.call_counts().iter().map(|(f, n)| format!("{f}={n}")).collect::<Vec<_>>().join(","))).or_default().push(short(v));
+        groups
+            .entry(format!(
+                "{} {} {}",
+                detect::kind_name(r.outcome.kind),
+                resp.status.map_or("-".into(), |s| s.to_string()),
+                r.call_counts().iter().map(|(f, n)| format!("{f}={n}")).collect::<Vec<_>>().join(",")
+            ))
+            .or_default()
+            .push(short(v));
         rows.push(json!({
             "value": short(v), "outcome": r.outcome.kind, "status": resp.status, "host_calls": r.totals.host_calls,
             "virtual_ms": ms(r.totals.virtual_ns), "fuel": r.totals.fuel, "text": shown, "findings": fs.iter().map(|f| &f.kind).collect::<Vec<_>>(), "run": r.id,
@@ -388,7 +427,11 @@ pub fn provenance(app: &App, r: &RunRecord, n: u32) -> Result<Value> {
             (x.n, x.func.as_str(), l)
         })
         .collect();
-    let consts: BTreeSet<&str> = st.modules.iter().flat_map(|m| m.strings.iter().map(|(_, s)| s.as_str()).chain(m.funcs.iter().flat_map(|f| f.text_consts.iter().map(|(_, s)| s.as_str())))).collect();
+    let consts: BTreeSet<&str> = st
+        .modules
+        .iter()
+        .flat_map(|m| m.strings.iter().map(|(_, s)| s.as_str()).chain(m.funcs.iter().flat_map(|f| f.text_consts.iter().map(|(_, s)| s.as_str()))))
+        .collect();
     let numbers: BTreeSet<i64> = st.modules.iter().flat_map(|m| m.funcs.iter().flat_map(|f| f.cmp_consts.iter().copied())).collect();
     let mut args = Vec::new();
     let mut mine = Vec::new();
@@ -463,7 +506,13 @@ type Metric<'a> = &'a dyn Fn(&RunRecord) -> f64;
 
 /// A run in plain terms, next to the typical run of the same export.
 pub fn explain(app: &App, store: &RunStore, r: &RunRecord) -> Result<Value> {
-    let others: Vec<RunRecord> = store.all()?.into_iter().filter(|x| x.spec.component == r.spec.component && x.spec.contract == r.spec.contract && x.spec.export == r.spec.export && x.outcome.kind == OutcomeKind::Ok).collect();
+    let others: Vec<RunRecord> = store
+        .all()?
+        .into_iter()
+        .filter(|x| {
+            x.spec.component == r.spec.component && x.spec.contract == r.spec.contract && x.spec.export == r.spec.export && x.outcome.kind == OutcomeKind::Ok
+        })
+        .collect();
     let median = |f: &dyn Fn(&RunRecord) -> f64| {
         let mut v: Vec<f64> = others.iter().map(f).collect();
         v.sort_by(|a, b| a.total_cmp(b));
@@ -494,7 +543,12 @@ pub fn explain(app: &App, store: &RunStore, r: &RunRecord) -> Result<Value> {
     let resp = response(r, &app.manifest);
     let mut plan: Vec<String> = r.spec.plan.0.keys().cloned().collect();
     plan.retain(|k| !k.starts_with('_'));
-    let failed: Vec<Value> = r.events.iter().filter(|e| e.trap.is_some() || e.result.as_ref().is_some_and(|v| v.get("err").is_some())).map(|e| json!({"n": e.n, "func": e.func})).collect();
+    let failed: Vec<Value> = r
+        .events
+        .iter()
+        .filter(|e| e.trap.is_some() || e.result.as_ref().is_some_and(|v| v.get("err").is_some()))
+        .map(|e| json!({"n": e.n, "func": e.func}))
+        .collect();
     Ok(json!({
         "run": r.id, "export": r.spec.export, "outcome": r.outcome.kind, "message": r.outcome.message.as_deref().map(|m| m.lines().next().unwrap_or("")),
         "status": resp.status, "text": resp.body.as_deref().map(|b| visible_text(b).chars().take(200).collect::<String>()),
@@ -559,10 +613,13 @@ pub fn unexplored(app: &App, store: &RunStore) -> Result<(Value, Vec<Finding>)> 
         sites.push(o);
     }
     let found = dormant::find(&st, &runs);
-    Ok((json!({
-        "runs_used": runs.len(), "static_sites": all.len(), "unreached": sites.len(), "sites": sites,
-        "note": "a site is a call instruction; it counts as reached when it is on the stack of a host call in a stored run. Small wrappers around one host function are looked through (via)",
-    }), found))
+    Ok((
+        json!({
+            "runs_used": runs.len(), "static_sites": all.len(), "unreached": sites.len(), "sites": sites,
+            "note": "a site is a call instruction; it counts as reached when it is on the stack of a host call in a stored run. Small wrappers around one host function are looked through (via)",
+        }),
+        found,
+    ))
 }
 
 /// WASI the component imports, what the manifest grants, and what the

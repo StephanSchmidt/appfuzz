@@ -221,7 +221,11 @@ impl State {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Operation { Create, Update, Delete }
+pub enum Operation {
+    Create,
+    Update,
+    Delete,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mutation {
@@ -236,7 +240,9 @@ pub struct Mutation {
     #[serde(default = "rejected")]
     pub reject: Value,
 }
-fn rejected() -> Value { json!({"err":"dataset constraint violation"}) }
+fn rejected() -> Value {
+    json!({"err":"dataset constraint violation"})
+}
 fn parameter<'a>(args: &'a [(String, Value)], path: &str) -> Result<&'a Value> {
     let (root, rest) = path.split_once('.').unwrap_or((path, ""));
     let value = args.iter().find(|(k, _)| k == root).map(|(_, v)| v).context("unknown mutation parameter")?;
@@ -260,13 +266,15 @@ impl Mutation {
     pub fn prepare(&self, defs: &BTreeMap<String, Dataset>, state: &State, args: &[(String, Value)]) -> Result<(State, Value)> {
         let mut next = state.clone();
         let d = &defs[&self.dataset];
-        let fields: Map<String, Value> = self.fields.iter().map(|(k,p)| Ok((k.clone(), parameter(args,p)?.clone()))).collect::<Result<_>>()?;
-        let filters: Map<String, Value> = self.filter.iter().map(|(k,p)| Ok((k.clone(), parameter(args,p)?.clone()))).collect::<Result<_>>()?;
+        let fields: Map<String, Value> = self.fields.iter().map(|(k, p)| Ok((k.clone(), parameter(args, p)?.clone()))).collect::<Result<_>>()?;
+        let filters: Map<String, Value> = self.filter.iter().map(|(k, p)| Ok((k.clone(), parameter(args, p)?.clone()))).collect::<Result<_>>()?;
         let rows = next.tables.get_mut(&self.dataset).context("missing mutation dataset")?;
-        let matches = |r: &Value| filters.iter().all(|(k,v)| r.get(k) == Some(v));
+        let matches = |r: &Value| filters.iter().all(|(k, v)| r.get(k) == Some(v));
         match self.operation {
             Operation::Create => {
-                if rows.len() >= MAX_ROWS { return Ok((state.clone(), self.reject.clone())); }
+                if rows.len() >= MAX_ROWS {
+                    return Ok((state.clone(), self.reject.clone()));
+                }
                 let n = next.next.get_mut(&self.dataset).context("missing dataset counter")?;
                 let mut row = d.template.clone();
                 row.extend(fields);
@@ -274,7 +282,11 @@ impl Mutation {
                 *n = n.checked_add(1).context("dataset key overflow")?;
                 rows.push(Value::Object(row));
             }
-            Operation::Update => { for row in rows.iter_mut().filter(|r| matches(r)) { row.as_object_mut().context("dataset row must be a record")?.extend(fields.clone()); } }
+            Operation::Update => {
+                for row in rows.iter_mut().filter(|r| matches(r)) {
+                    row.as_object_mut().context("dataset row must be a record")?.extend(fields.clone());
+                }
+            }
             Operation::Delete => rows.retain(|r| !matches(r)),
         }
         // Deleting a referenced parent is restricted; writes cannot create dangling references.
@@ -294,28 +306,32 @@ mod mutation_tests {
     use super::*;
     #[test]
     fn mutations_are_atomic_keep_references_and_never_reuse_deleted_keys() {
-        let defs: BTreeMap<String,Dataset> = serde_json::from_value(json!({
+        let defs: BTreeMap<String, Dataset> = serde_json::from_value(json!({
             "users":{"rows":1,"key":"id","template":{"id":1,"name":"Alice"}},
             "orders":{"rows":0,"key":"id","template":{"id":1,"owner":1},"references":{"owner":"users"}}
-        })).unwrap();
-        let mut state = State::new(build(&defs,&BTreeMap::new(),1).unwrap());
-        let create: Mutation = serde_json::from_value(json!({"dataset":"orders","operation":"create","fields":{"owner":"who"},"response":{"ok":true}})).unwrap();
+        }))
+        .unwrap();
+        let mut state = State::new(build(&defs, &BTreeMap::new(), 1).unwrap());
+        let create: Mutation =
+            serde_json::from_value(json!({"dataset":"orders","operation":"create","fields":{"owner":"who"},"response":{"ok":true}})).unwrap();
         create.validate(&defs).unwrap();
-        let (rejected, response) = create.prepare(&defs,&state,&[("who".into(),json!(999))]).unwrap();
-        assert_eq!(state,rejected);
+        let (rejected, response) = create.prepare(&defs, &state, &[("who".into(), json!(999))]).unwrap();
+        assert_eq!(state, rejected);
         assert!(response.get("err").is_some());
-        state = create.prepare(&defs,&state,&[("who".into(),json!(1))]).unwrap().0;
+        state = create.prepare(&defs, &state, &[("who".into(), json!(1))]).unwrap().0;
         let delete: Mutation = serde_json::from_value(json!({"dataset":"users","operation":"delete","filter":{"id":"who"},"response":{"ok":true}})).unwrap();
-        let (rejected, response) = delete.prepare(&defs,&state,&[("who".into(),json!(1))]).unwrap();
-        assert_eq!(state,rejected);
+        let (rejected, response) = delete.prepare(&defs, &state, &[("who".into(), json!(1))]).unwrap();
+        assert_eq!(state, rejected);
         assert!(response.get("err").is_some());
         let mut delete = delete;
         delete.dataset = "orders".into();
-        state = delete.prepare(&defs,&state,&[("who".into(),json!(1))]).unwrap().0;
-        state = create.prepare(&defs,&state,&[("who".into(),json!(1))]).unwrap().0;
-        assert_eq!(state.tables["orders"][0]["id"],2);
-        let update: Mutation = serde_json::from_value(json!({"dataset":"orders","operation":"update","filter":{"id":"id"},"fields":{"owner":"who"},"response":{"ok":true}})).unwrap();
-        let (rejected, _) = update.prepare(&defs,&state,&[("id".into(),json!(2)),("who".into(),json!(999))]).unwrap();
-        assert_eq!(state,rejected);
+        state = delete.prepare(&defs, &state, &[("who".into(), json!(1))]).unwrap().0;
+        state = create.prepare(&defs, &state, &[("who".into(), json!(1))]).unwrap().0;
+        assert_eq!(state.tables["orders"][0]["id"], 2);
+        let update: Mutation =
+            serde_json::from_value(json!({"dataset":"orders","operation":"update","filter":{"id":"id"},"fields":{"owner":"who"},"response":{"ok":true}}))
+                .unwrap();
+        let (rejected, _) = update.prepare(&defs, &state, &[("id".into(), json!(2)), ("who".into(), json!(999))]).unwrap();
+        assert_eq!(state, rejected);
     }
 }

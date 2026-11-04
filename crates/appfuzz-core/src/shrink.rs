@@ -157,8 +157,12 @@ impl Across {
         Ok(match self {
             Across::Fault { fault } => {
                 let base = run(spec);
-                if base.outcome.kind != OutcomeKind::Ok { return Ok(None); }
-                let Some(variant) = fault.variant(app, &base) else { return Ok(None); };
+                if base.outcome.kind != OutcomeKind::Ok {
+                    return Ok(None);
+                }
+                let Some(variant) = fault.variant(app, &base) else {
+                    return Ok(None);
+                };
                 let actual = run(&variant.spec);
                 crate::faults::compare(app, &base, fault, &variant, &actual).into_iter().find(|f| f.id == id)
             }
@@ -263,9 +267,13 @@ fn candidates(app: &App, s: &RunSpec, base: &[Value], lows: &Lows) -> Vec<Cand> 
                 let key = format!("{k}\0call:{n}");
                 for m in down(start as u64, 1, &key, lows) {
                     let next = format!("{m}{}", if tail { "+" } else { "" });
-                    if fp.on_call.contains_key(&next) { continue; }
+                    if fp.on_call.contains_key(&next) {
+                        continue;
+                    }
                     let mut candidate = with(&|p| {
-                        if let Some(response) = p.on_call.remove(n) { p.on_call.insert(next.clone(), response); }
+                        if let Some(response) = p.on_call.remove(n) {
+                            p.on_call.insert(next.clone(), response);
+                        }
                     });
                     candidate.step = Some((key.clone(), m));
                     tiers[1].push(candidate);
@@ -344,13 +352,20 @@ fn response_edits(r: &Response, at: &str, lows: &Lows) -> Vec<Step> {
         let mut structured_edits = 0;
         'structured: for path in crate::structured::locations(v) {
             for text in crate::structured::shrink(v.pointer(&path).and_then(Value::as_str).expect("string")) {
-                if structured_edits == 32 || text.len() > structured_bytes { break 'structured; }
+                if structured_edits == 32 || text.len() > structured_bytes {
+                    break 'structured;
+                }
                 structured_edits += 1;
                 structured_bytes -= text.len();
                 let path = path.clone();
-                out.push((2, Box::new(move |r| {
-                    if let Some(slot) = r.ret.as_mut().and_then(|v| v.pointer_mut(&path)) { *slot = json!(text); }
-                })));
+                out.push((
+                    2,
+                    Box::new(move |r| {
+                        if let Some(slot) = r.ret.as_mut().and_then(|v| v.pointer_mut(&path)) {
+                            *slot = json!(text);
+                        }
+                    }),
+                ));
             }
         }
         // A literal list whose content does not matter: generated
@@ -532,23 +547,25 @@ fn request_edits(app: &App, s: &RunSpec, base: &[Value], lows: &Lows, out: &mut 
                 let mut inner = Vec::new();
                 if structured_edits < 32 && structured_bytes > 0 {
                     for text in crate::structured::shrink(t) {
-                        if structured_edits == 32 || text.len() > structured_bytes { break; }
+                        if structured_edits == 32 || text.len() > structured_bytes {
+                            break;
+                        }
                         structured_edits += 1;
                         structured_bytes -= text.len();
                         inner.push((json!(text), None));
                     }
                 }
                 inner.extend(match t.parse::<u64>() {
-                Ok(n) => num(n, true),
-                // Only long text is cut, to no less than 16 characters:
-                // short text is a word that matters.
-                Err(_) => down(t.chars().count() as u64, 16, &len_key, lows)
-                    .into_iter()
-                    .map(|n| (json!(t.chars().take(n as usize).collect::<String>()), Some((len_key.clone(), n))))
-                    .collect(),
+                    Ok(n) => num(n, true),
+                    // Only long text is cut, to no less than 16 characters:
+                    // short text is a word that matters.
+                    Err(_) => down(t.chars().count() as u64, 16, &len_key, lows)
+                        .into_iter()
+                        .map(|n| (json!(t.chars().take(n as usize).collect::<String>()), Some((len_key.clone(), n))))
+                        .collect(),
                 });
                 inner
-            },
+            }
             Value::Number(n) => n.as_u64().map(|n| num(n, false)).unwrap_or_default(),
             _ => vec![],
         });

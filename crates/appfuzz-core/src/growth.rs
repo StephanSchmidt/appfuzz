@@ -47,8 +47,7 @@ impl Class {
     }
 }
 
-const ORDER: [Class; 7] =
-    [Class::Constant, Class::Log, Class::Linear, Class::NLogN, Class::Quadratic, Class::Cubic, Class::Exponential];
+const ORDER: [Class; 7] = [Class::Constant, Class::Log, Class::Linear, Class::NLogN, Class::Quadratic, Class::Cubic, Class::Exponential];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Law {
@@ -119,13 +118,7 @@ pub fn fit(points: &[(f64, f64)]) -> Option<Law> {
         let plateau = points.iter().position(|p| p.1 == last).unwrap_or(n - 1);
         let before = &points[..plateau];
         let inner = if before.len() >= 3 { fit(before).map(|l| format!("{} up to n = {}, then ", l.text, before[plateau - 1].0)) } else { None };
-        return Some(Law {
-            class: Class::Capped,
-            a: last,
-            b: 1.0,
-            text: format!("{}capped at {}", inner.unwrap_or_default(), round(last)),
-            fit: 1.0,
-        });
+        return Some(Law { class: Class::Capped, a: last, b: 1.0, text: format!("{}capped at {}", inner.unwrap_or_default(), round(last)), fit: 1.0 });
     }
     // Growing faster than linear needs growth at most steps: a single jump
     // (memory pages, a buffer doubling) fits 2^n perfectly but is a step.

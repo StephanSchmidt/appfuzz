@@ -110,11 +110,13 @@ pub fn run(cmd: &WasmCmd, bytes: &[u8], runs: &[RunRecord]) -> Result<Value> {
                 .iter()
                 .filter(|f| !host || reach.contains_key(&f.index))
                 .filter(|f| re.as_ref().is_none_or(|re| re.is_match(&m.label(f.index))))
-                .map(|f| json!({
-                    "func": f.index, "name": m.label(f.index), "bytes": f.end - f.start,
-                    "calls": f.calls.len(), "call_indirect": f.call_indirect, "loops": f.loops.len(),
-                    "reaches_host": reach.get(&f.index).map(|s| s.iter().collect::<Vec<_>>()).unwrap_or_default(),
-                }))
+                .map(|f| {
+                    json!({
+                        "func": f.index, "name": m.label(f.index), "bytes": f.end - f.start,
+                        "calls": f.calls.len(), "call_indirect": f.call_indirect, "loops": f.loops.len(),
+                        "reaches_host": reach.get(&f.index).map(|s| s.iter().collect::<Vec<_>>()).unwrap_or_default(),
+                    })
+                })
                 .collect();
             json!({"module": m.id, "count": funcs.len(), "funcs": funcs})
         }
@@ -144,7 +146,14 @@ pub fn run(cmd: &WasmCmd, bytes: &[u8], runs: &[RunRecord]) -> Result<Value> {
                     if hosts.is_empty() {
                         continue;
                     }
-                    let callees: Vec<String> = l.calls.iter().filter(|(c, _)| reach.contains_key(c)).map(|(c, _)| m.label(*c)).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+                    let callees: Vec<String> = l
+                        .calls
+                        .iter()
+                        .filter(|(c, _)| reach.contains_key(c))
+                        .map(|(c, _)| m.label(*c))
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
                     out.push(json!({
                         "func": f.index, "name": m.label(f.index), "loop_at": format!("{:x}", l.start), "nesting": l.depth,
                         "hosts": hosts, "via": callees, "indirect_calls_in_loop": l.call_indirect,

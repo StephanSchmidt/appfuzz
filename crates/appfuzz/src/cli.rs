@@ -207,7 +207,7 @@ pub(crate) enum Cmd {
         /// are not constants in the binary. Each successful run also executes
         /// an instrumented copy, so the search runs about 2.5 times fewer inputs.
         #[arg(long)]
-        internal_feedback:bool,
+        internal_feedback: bool,
         /// Stop after this many runs.
         #[arg(long)]
         runs: Option<u64>,

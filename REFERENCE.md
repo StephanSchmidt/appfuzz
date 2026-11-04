@@ -639,10 +639,10 @@ handle: func(request: record { method: string, uri: string,
 ```
 
 - Without `[entry]`, the request is `GET https://app.example/` and the output
-  is `status`, `body` and `headers`. `method = "format:token"` and
-  `uri = "format:url"` hold unless the manifest says otherwise. Query keys in
+  is `status`, `body` and `headers`. `method = "format:token"` holds unless
+  the manifest says otherwise. Query keys in
   the URI are request fields named `uri?key` (`sweep -f 'uri?days'`).
-- The URI is delivered as a client would send it: relative URIs resolve
+- Any `uri` text is delivered as a valid URI, as a client would send it: relative URIs resolve
   against `https://app.example/`, unsafe characters are percent-encoded, and
   a `Host` header is added when missing. Header names or values the HTTP
   types reject are dropped.
@@ -658,7 +658,8 @@ the response, so a body written after `handle` is part of `body`. Requests
 nobody waited for are sent after the handler returns. Calls are serial:
 their latencies add up.
 
-Its defaults are `params = { url = "url" }` (SSRF sink) and
+Its defaults are `params = { url = "url", headers = "secret" }` (the URL is
+an SSRF sink; headers may carry an API token) and
 `values = { status = "range:100..599" }`; a `[functions."wasi:http/outgoing-handler#handle"]`
 section replaces them. An `err` text that is a wasi:http error code
 (`dns-timeout`, `destination-not-found`, `connection-refused`,

@@ -448,10 +448,13 @@ impl Manifest {
     pub fn function(&self, key: &str) -> Option<&FunctionSpec> {
         self.functions.get(key).or_else(|| {
             // Also accept keys written with a version.
-            self.functions.iter().find(|(k, _)| {
-                let (i, f) = k.split_once('#').unwrap_or(("", k));
-                fn_key(i, f) == key
-            }).map(|(_, v)| v)
+            self.functions
+                .iter()
+                .find(|(k, _)| {
+                    let (i, f) = k.split_once('#').unwrap_or(("", k));
+                    fn_key(i, f) == key
+                })
+                .map(|(_, v)| v)
         })
     }
 

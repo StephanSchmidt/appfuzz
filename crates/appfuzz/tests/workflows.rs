@@ -85,100 +85,132 @@ impl Fixture {
 
 #[test]
 fn semantic_host_argument_violations_confirm_replay_and_regress() {
-    let f=Fixture::new(false);
-    f.edit("\nrequest = 1\n","\nrequest = 7\n");
-    let mut text=std::fs::read_to_string(&f.manifest).unwrap();
+    let f = Fixture::new(false);
+    f.edit("\nrequest = 1\n", "\nrequest = 7\n");
+    let mut text = std::fs::read_to_string(&f.manifest).unwrap();
     text.push_str("\n[functions.\"test:workflow/db#get\"]\nparam_values={id='range:1..6'}\nvalue_source='test platform specification'\n");
-    std::fs::write(&f.manifest,text).unwrap();
-    let (_,r)=f.cli(&["run"]);
-    let bad=r["findings"].as_array().unwrap().iter().find(|v|v["kind"]=="invalid_host_argument").unwrap();
-    assert_eq!(bad["evidence"],"policy_violation");
-    let (_,confirmed)=f.cli(&["confirm",bad["id"].as_str().unwrap(),"--max-runs","30"]);
-    assert_eq!(confirmed["confirmed"],true,"{confirmed}");
-    assert_eq!(confirmed["spec"]["args"][0],7,"shrinking must keep an upper-bound violation above six");
-    let case=confirmed["case"].as_str().unwrap();assert_eq!(f.cli(&["replay",case]).0,0);
-    let bytes=component("package test:workflow; interface db { get:func(id:u32)->u32; } world app {import db;export run:func(n:u32)->u32;}",
-        r#"(module (import "test:workflow/db" "get" (func $get (param i32) (result i32))) (func (export "run") (param i32) (result i32) (call $get (i32.const 1))))"#);
-    std::fs::write(f.dir.join("app.wasm"),bytes).unwrap();
-    let (code,replayed)=f.cli(&["replay",case,"--against-current"]);assert_eq!(code,0,"{replayed}");assert_eq!(replayed["reproduced"],false);
+    std::fs::write(&f.manifest, text).unwrap();
+    let (_, r) = f.cli(&["run"]);
+    let bad = r["findings"].as_array().unwrap().iter().find(|v| v["kind"] == "invalid_host_argument").unwrap();
+    assert_eq!(bad["evidence"], "policy_violation");
+    let (_, confirmed) = f.cli(&["confirm", bad["id"].as_str().unwrap(), "--max-runs", "30"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    assert_eq!(confirmed["spec"]["args"][0], 7, "shrinking must keep an upper-bound violation above six");
+    let case = confirmed["case"].as_str().unwrap();
+    assert_eq!(f.cli(&["replay", case]).0, 0);
+    let bytes = component(
+        "package test:workflow; interface db { get:func(id:u32)->u32; } world app {import db;export run:func(n:u32)->u32;}",
+        r#"(module (import "test:workflow/db" "get" (func $get (param i32) (result i32))) (func (export "run") (param i32) (result i32) (call $get (i32.const 1))))"#,
+    );
+    std::fs::write(f.dir.join("app.wasm"), bytes).unwrap();
+    let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], false);
 }
 
 #[test]
 fn guest_input_domains_do_not_filter_out_invalid_requests() {
-    let f=Fixture::new(true);
-    f.edit("request = \"safe\"","request = \"0.0.0000\"\ninput_values={''=['required','format:date']}");
-    let mut text=std::fs::read_to_string(&f.manifest).unwrap();
+    let f = Fixture::new(true);
+    f.edit("request = \"safe\"", "request = \"0.0.0000\"\ninput_values={''=['required','format:date']}");
+    let mut text = std::fs::read_to_string(&f.manifest).unwrap();
     text.push_str("\n[acceptance]\nversion=1\n[acceptance.checks.reject]\norigin='marketing'\nsearch=false\ninput_class='invalid'\nexpect={selector='$',equals='rejected'}\n");
-    std::fs::write(&f.manifest,text).unwrap();
-    let (code,r)=f.cli(&["acceptance","run"]);assert_eq!(code,2,"{r}");assert_eq!(r["checks"][0]["status"],"broken");
-    let case=r["checks"][0]["case"].as_str().unwrap();assert_eq!(f.cli(&["replay",case]).0,0);
-    f.edit("input_class='invalid'","input_class='valid'");
-    let (code,r)=f.cli(&["acceptance","run"]);assert_eq!(code,3,"{r}");assert_eq!(r["checks"][0]["matches"],0);
-    f.edit("input_class='valid'","input_class='invalid'");
+    std::fs::write(&f.manifest, text).unwrap();
+    let (code, r) = f.cli(&["acceptance", "run"]);
+    assert_eq!(code, 2, "{r}");
+    assert_eq!(r["checks"][0]["status"], "broken");
+    let case = r["checks"][0]["case"].as_str().unwrap();
+    assert_eq!(f.cli(&["replay", case]).0, 0);
+    f.edit("input_class='invalid'", "input_class='valid'");
+    let (code, r) = f.cli(&["acceptance", "run"]);
+    assert_eq!(code, 3, "{r}");
+    assert_eq!(r["checks"][0]["matches"], 0);
+    f.edit("input_class='valid'", "input_class='invalid'");
     f.edit("input_values=", "values={''='format:date'}\ninput_values=");
-    let (code,r)=f.cli(&["acceptance","run"]);assert_eq!(code,3,"{r}");assert_eq!(r["checks"][0]["status"],"not_exercised");
+    let (code, r) = f.cli(&["acceptance", "run"]);
+    assert_eq!(code, 3, "{r}");
+    assert_eq!(r["checks"][0]["status"], "not_exercised");
 }
 
 #[test]
 fn rejected_input_must_obey_declared_effect_restrictions() {
-    let f=Fixture::new(false);f.edit("\nrequest = 1\n","\nrequest = 7\ninput_values={''='range:1..6'}\n");
-    let mut text=std::fs::read_to_string(&f.manifest).unwrap();
+    let f = Fixture::new(false);
+    f.edit("\nrequest = 1\n", "\nrequest = 7\ninput_values={''='range:1..6'}\n");
+    let mut text = std::fs::read_to_string(&f.manifest).unwrap();
     text.push_str("\n[functions.\"test:workflow/db#get\"]\neffect='write'\n[acceptance]\nversion=1\n[acceptance.checks.reject]\norigin='marketing'\nsearch=false\ninput_class='invalid'\nproperty=['no_crash']\nforbid_effects=['write','delete','external']\n");
-    std::fs::write(&f.manifest,text).unwrap();
-    let (code,r)=f.cli(&["acceptance","run"]);assert_eq!(code,2,"{r}");assert!(r["checks"][0]["evidence"]["why"].as_str().unwrap().contains("forbidden effect"));
-    let case=r["checks"][0]["case"].as_str().unwrap();
-    f.edit("effect='write'\n","");
-    let (code,unknown)=f.cli(&["acceptance","run"]);assert_eq!(code,3,"{unknown}");
-    f.edit("[functions.\"test:workflow/db#get\"]\n","[functions.\"test:workflow/db#get\"]\neffect='write'\n");
-    let bytes=component("package test:workflow; world app {export run:func(n:u32)->u32;}",r#"(module (func (export "run") (param i32) (result i32) (i32.const 7)))"#);
-    std::fs::write(f.dir.join("app.wasm"),bytes).unwrap();
-    let (code,r)=f.cli(&["replay",case,"--against-current"]);assert_eq!(code,0,"{r}");assert_eq!(r["reproduced"],false);
+    std::fs::write(&f.manifest, text).unwrap();
+    let (code, r) = f.cli(&["acceptance", "run"]);
+    assert_eq!(code, 2, "{r}");
+    assert!(r["checks"][0]["evidence"]["why"].as_str().unwrap().contains("forbidden effect"));
+    let case = r["checks"][0]["case"].as_str().unwrap();
+    f.edit("effect='write'\n", "");
+    let (code, unknown) = f.cli(&["acceptance", "run"]);
+    assert_eq!(code, 3, "{unknown}");
+    f.edit("[functions.\"test:workflow/db#get\"]\n", "[functions.\"test:workflow/db#get\"]\neffect='write'\n");
+    let bytes = component(
+        "package test:workflow; world app {export run:func(n:u32)->u32;}",
+        r#"(module (func (export "run") (param i32) (result i32) (i32.const 7)))"#,
+    );
+    std::fs::write(f.dir.join("app.wasm"), bytes).unwrap();
+    let (code, r) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!(code, 0, "{r}");
+    assert_eq!(r["reproduced"], false);
 }
 
 fn fault_fixture(crash: bool) -> Fixture {
-    let f=Fixture::new(false);
-    let wit="package test:workflow; interface db { save:func(id:u32) -> result<u32,u32>; } world app { import db; export run:func(n:u32) -> u32; }";
-    let guard=if crash {"(if (i32.and (i32.load (i32.const 0)) (i32.eq (local.get $i) (i32.const 7))) (then unreachable))"}else{""};
-    let wat=format!(r#"(module (import "test:workflow/db" "save" (func $save (param i32 i32)))
+    let f = Fixture::new(false);
+    let wit = "package test:workflow; interface db { save:func(id:u32) -> result<u32,u32>; } world app { import db; export run:func(n:u32) -> u32; }";
+    let guard = if crash { "(if (i32.and (i32.load (i32.const 0)) (i32.eq (local.get $i) (i32.const 7))) (then unreachable))" } else { "" };
+    let wat = format!(
+        r#"(module (import "test:workflow/db" "save" (func $save (param i32 i32)))
       (memory (export "memory") 1)
       (func (export "run") (param i32) (result i32) (local $i i32)
         (local.set $i (i32.const 1)) (loop $next
           (call $save (local.get $i) (i32.const 0)) {guard}
           (local.set $i (i32.add (local.get $i) (i32.const 1)))
           (br_if $next (i32.le_u (local.get $i) (i32.const 7))))
-        (i32.const 42)))"#);
-    std::fs::write(f.dir.join("app.wasm"),component(wit,&wat)).unwrap();
+        (i32.const 42)))"#
+    );
+    std::fs::write(f.dir.join("app.wasm"), component(wit, &wat)).unwrap();
     f
 }
 
 #[test]
 fn fault_probe_budgets_filter_and_replay_late_crashes_and_ignored_errors() {
-    let plan=r#"{"test:workflow/db#save":{"return":{"ok":1}}}"#;
-    let f=fault_fixture(true);
-    let (code,p)=f.cli(&["probe","faults","--plan",plan,"--runs","3"]);
-    assert_eq!(code,3,"{p}"); assert_eq!(p["attempted"],3); assert_eq!(p["complete"],false);
-    let (code,p)=f.cli(&["probe","faults","--plan",plan,"--fn","missing"]);
-    assert_eq!(code,3,"{p}"); assert_eq!(p["attempted"],0);
-    let (code,p)=f.cli(&["probe","faults","--plan",plan,"--runs","14"]);
-    assert_eq!(code,0,"{p}"); assert_eq!(p["complete"],true); assert_eq!(p["injected"],14);
-    let crash=p["findings"].as_array().unwrap().iter().find(|f|f["kind"]=="crash").unwrap();
-    let (_,confirmed)=f.cli(&["confirm",crash["id"].as_str().unwrap()]);
-    assert_eq!(confirmed["confirmed"],true,"{confirmed}");
-    let case=confirmed["case"].as_str().unwrap();
-    let (code,replay)=f.cli(&["replay",case]); assert_eq!(code,0,"{replay}"); assert_eq!(replay["reproduced"],true);
+    let plan = r#"{"test:workflow/db#save":{"return":{"ok":1}}}"#;
+    let f = fault_fixture(true);
+    let (code, p) = f.cli(&["probe", "faults", "--plan", plan, "--runs", "3"]);
+    assert_eq!(code, 3, "{p}");
+    assert_eq!(p["attempted"], 3);
+    assert_eq!(p["complete"], false);
+    let (code, p) = f.cli(&["probe", "faults", "--plan", plan, "--fn", "missing"]);
+    assert_eq!(code, 3, "{p}");
+    assert_eq!(p["attempted"], 0);
+    let (code, p) = f.cli(&["probe", "faults", "--plan", plan, "--runs", "14"]);
+    assert_eq!(code, 0, "{p}");
+    assert_eq!(p["complete"], true);
+    assert_eq!(p["injected"], 14);
+    let crash = p["findings"].as_array().unwrap().iter().find(|f| f["kind"] == "crash").unwrap();
+    let (_, confirmed) = f.cli(&["confirm", crash["id"].as_str().unwrap()]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let (code, replay) = f.cli(&["replay", case]);
+    assert_eq!(code, 0, "{replay}");
+    assert_eq!(replay["reproduced"], true);
 
-    let f=fault_fixture(false);
-    let (_,p)=f.cli(&["probe","faults","--plan",plan,"--runs","14"]);
-    let ignored=p["findings"].as_array().unwrap().iter().find(|f|f["kind"]=="error_ignored").unwrap();
-    let (_,confirmed)=f.cli(&["confirm",ignored["id"].as_str().unwrap()]);
-    assert_eq!(confirmed["confirmed"],true,"{confirmed}");
-    let case=confirmed["case"].as_str().unwrap();
-    let saved:Value=serde_json::from_slice(&std::fs::read(case).unwrap()).unwrap();
-    assert!(!saved["recipe"]["fault"]["fault"].is_null(),"{saved}");
-    let (code,replay)=f.cli(&["replay",case]); assert_eq!(code,0,"{replay}"); assert_eq!(replay["reproduced"],true);
-    let (_,r)=f.cli(&["fuzz","--plan",plan,"--fresh","--runs","160"]);
-    assert!(r["faults"]["attempted"].as_u64().unwrap()>0,"{r}");
-    assert!(r["runs"].as_u64().unwrap()<=160);
+    let f = fault_fixture(false);
+    let (_, p) = f.cli(&["probe", "faults", "--plan", plan, "--runs", "14"]);
+    let ignored = p["findings"].as_array().unwrap().iter().find(|f| f["kind"] == "error_ignored").unwrap();
+    let (_, confirmed) = f.cli(&["confirm", ignored["id"].as_str().unwrap()]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let saved: Value = serde_json::from_slice(&std::fs::read(case).unwrap()).unwrap();
+    assert!(!saved["recipe"]["fault"]["fault"].is_null(), "{saved}");
+    let (code, replay) = f.cli(&["replay", case]);
+    assert_eq!(code, 0, "{replay}");
+    assert_eq!(replay["reproduced"], true);
+    let (_, r) = f.cli(&["fuzz", "--plan", plan, "--fresh", "--runs", "160"]);
+    assert!(r["faults"]["attempted"].as_u64().unwrap() > 0, "{r}");
+    assert!(r["runs"].as_u64().unwrap() <= 160);
 }
 
 #[test]

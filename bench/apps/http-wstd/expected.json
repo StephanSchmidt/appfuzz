@@ -1,0 +1,6 @@
+{
+  "app": "http-wstd",
+  "bug": "none: a wasi:http handler built with wstd that fetches from one host and escapes what it shows",
+  "expect": [],
+  "allow": []
+}

@@ -64,6 +64,10 @@ pub struct Point {
     pub fuel: u64,
     pub peak_memory: u64,
     pub virtual_ms: f64,
+    /// Unrounded, for fitting: `virtual_ms` keeps two decimals, and on a
+    /// fast handler the rounding alone can look like superlinear growth.
+    #[serde(skip)]
+    pub virtual_ns: u64,
     pub cost: u64,
     pub output_bytes: u64,
     pub host_arg_bytes: u64,
@@ -84,6 +88,7 @@ impl Point {
             fuel: r.totals.fuel,
             peak_memory: r.totals.peak_memory,
             virtual_ms: ms(r.totals.virtual_ns),
+            virtual_ns: r.totals.virtual_ns,
             cost: r.totals.cost,
             output_bytes: r.result.as_ref().map(|v| v.to_string().len() as u64).unwrap_or(0),
             host_arg_bytes: r.events.iter().map(|e| Value::Object(e.args.clone()).to_string().len() as u64).sum(),
@@ -104,7 +109,9 @@ pub fn apply(app: &App, base: &RunSpec, knob: &Knob, n: u64) -> Result<RunSpec> 
                 .find(|x| x.key == *f || x.key.ends_with(&format!("/{f}")) || x.key.ends_with(&format!("#{f}")))
                 .ok_or_else(|| anyhow!("no platform import {f}"))?;
             if let Some(q) = app.manifest.function(&info.key).and_then(|s| s.query.as_ref()) {
-                if n > crate::dataset::MAX_ROWS as u64 { bail!("dataset scale exceeds {}", crate::dataset::MAX_ROWS); }
+                if n > crate::dataset::MAX_ROWS as u64 {
+                    bail!("dataset scale exceeds {}", crate::dataset::MAX_ROWS);
+                }
                 spec.plan.0.entry("_defaults".into()).or_default().dataset_rows.insert(q.dataset.clone(), n as usize);
                 return Ok(spec);
             }
@@ -420,7 +427,12 @@ pub fn analyze(app: &App, knob: Knob, points: Vec<Point>) -> ScaleReport {
         }
         let breaks_at = limit.and_then(|lim| {
             // A measured break wins over the extrapolated one.
-            points.iter().find(|p| f(p) > lim).map(|p| p.n).filter(|&n| law.breaking_point(lim, MAX_BREAK_N).is_none_or(|b| b > n)).or(law.breaking_point(lim, MAX_BREAK_N))
+            points
+                .iter()
+                .find(|p| f(p) > lim)
+                .map(|p| p.n)
+                .filter(|&n| law.breaking_point(lim, MAX_BREAK_N).is_none_or(|b| b > n))
+                .or(law.breaking_point(lim, MAX_BREAK_N))
         });
         growth.push(Growth { metric, law, breaks_at, limit });
     };
@@ -430,7 +442,7 @@ pub fn analyze(app: &App, knob: Knob, points: Vec<Point>) -> ScaleReport {
         add(format!("calls {f}"), &move |p: &Point| *p.calls.get(&key).unwrap_or(&0) as f64, None);
     }
     add("cost".into(), &|p| p.cost as f64, l.cost_per_request.map(|c| c as f64));
-    add("virtual_ms".into(), &|p| p.virtual_ms, l.max_latency_ms);
+    add("virtual_ms".into(), &|p| p.virtual_ns as f64 / 1e6, l.max_latency_ms);
     add("fuel".into(), &|p| p.fuel as f64, Some(l.fuel as f64));
     add("peak_memory".into(), &|p| p.peak_memory as f64, Some(l.memory as f64));
     add("output_bytes".into(), &|p| p.output_bytes as f64, None);
@@ -762,7 +774,14 @@ fn nested(app: &App, base: &RunSpec, reports: &[ScaleReport], only: Option<&str>
         if d < NESTED_MIN {
             continue;
         }
-        let n = Nested { func: f.to_string(), outer: (*a).clone(), inner: (*b).clone(), calls: [c[0], c[1], c[2], c[3]], interaction: (d * 100.0).round() / 100.0, run: rs[3].id.clone() };
+        let n = Nested {
+            func: f.to_string(),
+            outer: (*a).clone(),
+            inner: (*b).clone(),
+            calls: [c[0], c[1], c[2], c[3]],
+            interaction: (d * 100.0).round() / 100.0,
+            run: rs[3].id.clone(),
+        };
         findings.push(Finding::new(
             "nested_fan_out",
             &format!("{}\0{f}\0{a:?}\0{b:?}", base.export),
@@ -1092,13 +1111,7 @@ pub fn discover(app: &App, base: &RunSpec, dict_limit: usize, run: Runner) -> Re
 
 /// Finds the knobs and turns each of them, in the base request and in
 /// every mode (context) the app has.
-pub fn amplify(
-    app: &App,
-    base: &RunSpec,
-    only: Option<&str>,
-    dict_limit: usize,
-    run: Runner,
-) -> Result<AmplifyReport> {
+pub fn amplify(app: &App, base: &RunSpec, only: Option<&str>, dict_limit: usize, run: Runner) -> Result<AmplifyReport> {
     let mut base = RunSpec { plan: steady(&base.plan), ..base.clone() };
     // Enough fuel to see a production overrun; hangs end sooner.
     base.fuel = base.fuel.min(app.manifest.limits.fuel.saturating_mul(2));
@@ -1158,7 +1171,15 @@ pub fn amplify(
                 if better {
                     table.insert(
                         f.clone(),
-                        FanOut { func: f.clone(), base_calls: *base_calls.get(f).unwrap_or(&0), max_calls: c, knob: r.knob.clone(), n: p.n, law, run: p.run.clone() },
+                        FanOut {
+                            func: f.clone(),
+                            base_calls: *base_calls.get(f).unwrap_or(&0),
+                            max_calls: c,
+                            knob: r.knob.clone(),
+                            n: p.n,
+                            law,
+                            run: p.run.clone(),
+                        },
                     );
                 }
             }
@@ -1179,8 +1200,8 @@ const MAX_CRAWL: usize = 16;
 
 /// Request keys common on the web, tried besides the binary's words.
 const COMMON_KEYS: &[&str] = &[
-    "q", "s", "id", "p", "n", "page", "limit", "offset", "count", "size", "sort", "order", "search", "query", "filter", "from", "to", "date",
-    "day", "days", "start", "end", "view", "mode", "type", "lang", "next", "url", "redirect", "return", "name", "user", "debug",
+    "q", "s", "id", "p", "n", "page", "limit", "offset", "count", "size", "sort", "order", "search", "query", "filter", "from", "to", "date", "day", "days",
+    "start", "end", "view", "mode", "type", "lang", "next", "url", "redirect", "return", "name", "user", "debug",
 ];
 
 /// Host lists longer than this are unusual: superlinear growth that only

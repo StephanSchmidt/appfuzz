@@ -191,15 +191,18 @@ pub(crate) fn format_ok(f: Format, s: &str) -> bool {
         Format::Time => time(s),
         Format::DateTime => s.split_once('T').is_some_and(|(d, t)| date(d) && time(t)),
         Format::Email => s.split_once('@').is_some_and(|(a, b)| !a.is_empty() && b.contains('.') && !s.contains(char::is_whitespace)),
-        Format::Int => { let digits=s.strip_prefix('-').unwrap_or(s); !digits.is_empty() && digits.bytes().all(|b|b.is_ascii_digit()) },
+        Format::Int => {
+            let digits = s.strip_prefix('-').unwrap_or(s);
+            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+        }
         Format::Uuid => uuid_ok(s),
         Format::Url => url::Url::parse(s).is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some()),
         Format::Token => !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)),
     }
 }
 
-pub(crate) fn uuid_ok(s:&str)->bool {
-    s.len()==36 && s.bytes().enumerate().all(|(i,b)|if [8,13,18,23].contains(&i){b==b'-'}else{b.is_ascii_hexdigit()})
+pub(crate) fn uuid_ok(s: &str) -> bool {
+    s.len() == 36 && s.bytes().enumerate().all(|(i, b)| if [8, 13, 18, 23].contains(&i) { b == b'-' } else { b.is_ascii_hexdigit() })
 }
 
 fn example(f: Format, seed: u64) -> String {
@@ -211,7 +214,7 @@ fn example(f: Format, seed: u64) -> String {
         Format::DateTime => format!("2026-{month:02}-{day:02}T{:02}:{:02}:00", seed % 24, (seed / 24) % 60),
         Format::Email => format!("user{}@mail.example", seed % 1000),
         Format::Int => (seed % 1000).to_string(),
-        Format::Uuid => format!("00000000-0000-4000-8000-{:012x}",seed & 0x0000_ffff_ffff_ffff),
+        Format::Uuid => format!("00000000-0000-4000-8000-{:012x}", seed & 0x0000_ffff_ffff_ffff),
         Format::Url => format!("https://app.example/p{}", seed % 100),
         Format::Token => ["GET", "HEAD", "POST", "PUT", "DELETE"][(seed % 5) as usize].to_string(),
     }

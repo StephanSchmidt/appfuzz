@@ -44,31 +44,51 @@ impl Finding {
     /// The nature of the evidence is independent of its policy severity.
     pub fn evidence(&self) -> &'static str {
         match self.kind.as_str() {
-            "crash" | "stack_overflow" | "hang" | "over_budget" | "check_failed" |
-            "crash_on_host_value" | "hang_on_host_value" | "crash_at_time" | "hang_at_time" |
-            "big_output" | "big_payload" | "redundant_calls" | "busy_wait" | "sleeps" => "measured",
-            "invalid_host_argument" | "acceptance_failed" | "sequence_check_failed" | "ungranted_import" | "ungranted_call" | "write_on_safe_method" |
-            "script_in_output" | "non_local_url" | "open_redirect" | "outside_envelope" => "policy_violation",
+            "crash"
+            | "stack_overflow"
+            | "hang"
+            | "over_budget"
+            | "check_failed"
+            | "crash_on_host_value"
+            | "hang_on_host_value"
+            | "crash_at_time"
+            | "hang_at_time"
+            | "big_output"
+            | "big_payload"
+            | "redundant_calls"
+            | "busy_wait"
+            | "sleeps" => "measured",
+            "invalid_host_argument"
+            | "acceptance_failed"
+            | "sequence_check_failed"
+            | "ungranted_import"
+            | "ungranted_call"
+            | "write_on_safe_method"
+            | "script_in_output"
+            | "non_local_url"
+            | "open_redirect"
+            | "outside_envelope" => "policy_violation",
             _ => "heuristic",
         }
     }
 
     pub fn experimental(&self) -> bool {
-        matches!(self.kind.as_str(), "agent_directed_text" | "hidden_text" | "encoded_flow" |
-            "constant_payload" | "unexpected_destination" | "probing" | "dormant_code" | "outside_envelope")
+        matches!(
+            self.kind.as_str(),
+            "agent_directed_text"
+                | "hidden_text"
+                | "encoded_flow"
+                | "constant_payload"
+                | "unexpected_destination"
+                | "probing"
+                | "dormant_code"
+                | "outside_envelope"
+        )
     }
 
     pub fn new(kind: &str, key: &str, severity: Severity, title: String, detail: Value, run: Option<&str>) -> Self {
         let h = blake3::hash(format!("{kind}\0{key}").as_bytes()).to_hex();
-        Finding {
-            id: format!("f{}", &h[..8]),
-            kind: kind.to_string(),
-            severity,
-            title,
-            detail,
-            run: run.map(str::to_string),
-            confirmed: None,
-        }
+        Finding { id: format!("f{}", &h[..8]), kind: kind.to_string(), severity, title, detail, run: run.map(str::to_string), confirmed: None }
     }
 }
 
@@ -175,7 +195,7 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let arg_text: Vec<String> = r.events.iter().map(|e| serde_json::to_string(&e.args).unwrap_or_default()).collect();
     let mut same: BTreeMap<(&str, &str), u32> = BTreeMap::new();
     for (e, a) in r.events.iter().zip(&arg_text) {
-        for v in e.value_checks.iter().flat_map(|c|&c.violations) {
+        for v in e.value_checks.iter().flat_map(|c| &c.violations) {
             out.push(Finding::new("invalid_host_argument", &format!("{}\0{}\0{}\0{}",e.func,v.declaration,v.constraint,v.reason), Severity::Fail,
                 format!("{} parameter {} violates {}",e.func,v.path,v.constraint),
                 json!({"func":e.func,"parameter":v.declaration,"path":v.path,"constraint":v.constraint,"reason":v.reason,"value":v.value,"bytes":v.bytes,"n":e.n,"call":e.call,"source":m.function(&e.func).and_then(|f|f.value_source.as_deref())}),run));
@@ -269,14 +289,7 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     let out_bytes = r.result.as_ref().map(crate::value::json_len).unwrap_or(0);
     if out_bytes > OUTPUT_MAX {
-        out.push(Finding::new(
-            "big_output",
-            ex,
-            Severity::Warn,
-            format!("{ex} returns {out_bytes} bytes"),
-            json!({"bytes": out_bytes}),
-            run,
-        ));
+        out.push(Finding::new("big_output", ex, Severity::Warn, format!("{ex} returns {out_bytes} bytes"), json!({"bytes": out_bytes}), run));
     }
     if t.clock_reads >= CLOCK_READS_MAX {
         out.push(Finding::new(
@@ -304,7 +317,13 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             "serial_chain",
             &format!("{ex}\0{f}"),
             Severity::Warn,
-            format!("{ex} waits {} ms for {} host calls in a row ({n} × {f}: {} ms), the latency limit is {} ms", fmt(ms(t.host_ns)), t.host_calls, fmt(ms(ns)), fmt(ml)),
+            format!(
+                "{ex} waits {} ms for {} host calls in a row ({n} × {f}: {} ms), the latency limit is {} ms",
+                fmt(ms(t.host_ns)),
+                t.host_calls,
+                fmt(ms(ns)),
+                fmt(ml)
+            ),
             json!({"host_ms": ms(t.host_ns), "host_calls": t.host_calls, "slowest_func": f, "slowest_calls": n, "slowest_ms": ms(ns), "limit_ms": ml}),
             run,
         ));
@@ -477,8 +496,7 @@ pub fn static_findings(m: &Manifest, imports: &[Interface], st: &Statics) -> Vec
         let mut seen = BTreeSet::new();
         for f in &m.funcs {
             for l in &f.loops {
-                let hosts: BTreeSet<&String> =
-                    l.calls.iter().filter_map(|(c, _)| reach.get(c)).flatten().collect();
+                let hosts: BTreeSet<&String> = l.calls.iter().filter_map(|(c, _)| reach.get(c)).flatten().collect();
                 for h in hosts {
                     if seen.insert((f.index, h.clone())) {
                         out.push(Finding::new(

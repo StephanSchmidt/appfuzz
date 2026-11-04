@@ -103,15 +103,11 @@ fn fuzz_finds_cost_above_every_individual_axis_and_shrinks_both() {
         let (report, corpus) = search(&app, base.clone(), Plan::default(), seed, 300);
         assert!(report.findings.iter().any(|f| f.kind == "over_budget" && f.detail["limit"] == "cost"));
         // Already-known failures need not be retained a second time by another stage.
-        let entry =
-            corpus.entries.iter().find(|e| appfuzz_core::constraints::broken_request(&e.spec.args, &app.manifest).is_empty() && app.run(&e.spec).totals.cost > 100).unwrap_or_else(
-                || {
-                    panic!(
-                        "joint input missing seed={seed} stages={:?}",
-                        report.stages
-                    )
-                },
-            );
+        let entry = corpus
+            .entries
+            .iter()
+            .find(|e| appfuzz_core::constraints::broken_request(&e.spec.args, &app.manifest).is_empty() && app.run(&e.spec).totals.cost > 100)
+            .unwrap_or_else(|| panic!("joint input missing seed={seed} stages={:?}", report.stages));
         let (small, _) = shrink::minimise(&app, &entry.spec, &base, &|r| r.totals.cost > 100 && r.outcome.kind == OutcomeKind::Ok, 300, &|s| app.run(s));
         assert!(app.run(&small).totals.cost > 100);
         for axis in ["x", "y"] {

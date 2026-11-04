@@ -69,9 +69,16 @@ struct Platform {
 enum Pre {
     Component(InstancePre<Host>),
     /// A plain module on a witx platform; a run calls `start`.
-    Core { pre: wasmtime::InstancePre<Host>, start: String },
+    Core {
+        pre: wasmtime::InstancePre<Host>,
+        start: String,
+    },
     /// An Extism plugin; a run calls the export's function of the module.
-    Extism { pre: wasmtime::InstancePre<Host>, abi: Arc<crate::extism::Abi>, names: Arc<BTreeMap<String, String>> },
+    Extism {
+        pre: wasmtime::InstancePre<Host>,
+        abi: Arc<crate::extism::Abi>,
+        names: Arc<BTreeMap<String, String>>,
+    },
 }
 
 impl Pre {
@@ -138,6 +145,8 @@ struct Host {
     read_limit: Option<usize>,
     /// Extism plugins: the kernel's byte store.
     kernel: Option<crate::extism::Kernel>,
+    /// The last handle given out for a platform resource (`connection.open`).
+    resource_rep: u32,
     /// wasi:http resources and requests in flight.
     http: http::Http,
 }
@@ -250,8 +259,8 @@ impl App {
     }
 
     pub(crate) fn from_feedback(manifest: Manifest, bytes: Vec<u8>, readers: Vec<String>) -> Result<Self> {
-        let mut app=Self::from_bytes_engine(manifest,bytes,engine()?)?;
-        app.feedback_readers=readers;
+        let mut app = Self::from_bytes_engine(manifest, bytes, engine()?)?;
+        app.feedback_readers = readers;
         Ok(app)
     }
 
@@ -275,6 +284,7 @@ impl App {
             let mut exports = wit::exports(&engine, &component);
             crate::wasi_http::adapt(&engine, &mut imports, &mut exports)?;
             crate::wasi_http::default_manifest(&mut manifest, &imports, &exports)?;
+            crate::known::defaults(&mut manifest, &imports)?;
             (Some(component), None, imports, exports)
         };
 
@@ -294,22 +304,37 @@ impl App {
             infallible: BTreeSet::new(),
         };
         crate::labels::check_wit(&manifest, &imports)?;
-        if let Some(entry)=&mut manifest.entry
-            && !entry.input_values.is_empty() {
-                let export=exports.iter().find(|e|fn_key_eq(&e.key,&entry.export)).context("input_values export not found")?;
-                let (_,ty)=export.ty.params().next().context("input_values needs a request argument")?;
-                for (path,domain) in &mut entry.input_values {domain.validate_input_type(&ty,path).with_context(||format!("input_values {path}"))?;}
+        if let Some(entry) = &mut manifest.entry
+            && !entry.input_values.is_empty()
+        {
+            let export = exports.iter().find(|e| fn_key_eq(&e.key, &entry.export)).context("input_values export not found")?;
+            let (_, ty) = export.ty.params().next().context("input_values needs a request argument")?;
+            for (path, domain) in &mut entry.input_values {
+                domain.validate_input_type(&ty, path).with_context(|| format!("input_values {path}"))?;
+            }
         }
         crate::dataset::validate(&manifest.datasets)?;
-        if let Some(suite)=&manifest.acceptance {suite.validate(&manifest)?;suite.validate_wit(&manifest,&imports,&exports)?;}
+        if let Some(suite) = &manifest.acceptance {
+            suite.validate(&manifest)?;
+            suite.validate_wit(&manifest, &imports, &exports)?;
+        }
         for spec in manifest.functions.values() {
-            if spec.query.is_some() && spec.mutation.is_some() { bail!("a host function cannot have both query and mutation bindings"); }
+            if spec.query.is_some() && spec.mutation.is_some() {
+                bail!("a host function cannot have both query and mutation bindings");
+            }
             if let Some(m) = &spec.mutation {
                 m.validate(&manifest.datasets)?;
-                let expected = match m.operation { crate::dataset::Operation::Delete => crate::manifest::Effect::Delete, _ => crate::manifest::Effect::Write };
-                if spec.effect != Some(expected) { bail!("mutation binding requires effect = {}", expected.name()); }
+                let expected = match m.operation {
+                    crate::dataset::Operation::Delete => crate::manifest::Effect::Delete,
+                    _ => crate::manifest::Effect::Write,
+                };
+                if spec.effect != Some(expected) {
+                    bail!("mutation binding requires effect = {}", expected.name());
+                }
             }
-            if let Some(q) = &spec.query { q.validate(&manifest.datasets)?; }
+            if let Some(q) = &spec.query {
+                q.validate(&manifest.datasets)?;
+            }
         }
         for iface in imports.iter().filter(|i| i.kind == ImportKind::Platform) {
             for f in &iface.funcs {
@@ -321,9 +346,9 @@ impl App {
                     platform.infallible.insert(f.key.clone());
                 }
                 if let Some(spec) = manifest.function(&f.key).filter(|s| !s.param_values.is_empty()) {
-                    let params = f.ty.params().map(|(n,t)|(n.to_string(),t)).collect::<Vec<_>>();
-                    let checks = crate::value_contract::HostChecks::compile(&params, &spec.param_values).with_context(||format!("{} param_values",f.key))?;
-                    platform.argument_checks.insert(f.key.clone(),checks);
+                    let params = f.ty.params().map(|(n, t)| (n.to_string(), t)).collect::<Vec<_>>();
+                    let checks = crate::value_contract::HostChecks::compile(&params, &spec.param_values).with_context(|| format!("{} param_values", f.key))?;
+                    platform.argument_checks.insert(f.key.clone(), checks);
                 }
                 if let Some(m) = manifest.function(&f.key).and_then(|s| s.mutation.as_ref()) {
                     let names = f.param_names();
@@ -331,16 +356,22 @@ impl App {
                         bail!("{}: mutation names an unknown parameter", f.key);
                     }
                     let results: Vec<_> = f.ty.results().collect();
-                    if results.len() != 1 { bail!("{}: mutation requires one WIT result", f.key); }
+                    if results.len() != 1 {
+                        bail!("{}: mutation requires one WIT result", f.key);
+                    }
                     json_to_val(&m.response, &results[0]).context("mutation success response does not match WIT")?;
                     json_to_val(&m.reject, &results[0]).context("mutation rejection response does not match WIT")?;
                     platform.mutations.insert(f.key.clone(), m.clone());
                 }
                 if let Some(q) = manifest.function(&f.key).and_then(|s| s.query.as_ref()) {
                     let names = f.param_names();
-                    if q.filter.values().any(|p| !names.contains(p)) { bail!("{}: dataset filter names an unknown parameter", f.key); }
+                    if q.filter.values().any(|p| !names.contains(p)) {
+                        bail!("{}: dataset filter names an unknown parameter", f.key);
+                    }
                     let types: Vec<_> = f.ty.results().collect();
-                    if types.len() != 1 { bail!("{}: dataset query requires one WIT result", f.key); }
+                    if types.len() != 1 {
+                        bail!("{}: dataset query requires one WIT result", f.key);
+                    }
                     let sizes = manifest.datasets.keys().map(|k| (k.clone(), 1)).collect();
                     let world = crate::dataset::build(&manifest.datasets, &sizes, 0)?;
                     let mut sample_query = q.clone();
@@ -415,7 +446,20 @@ impl App {
 
         let contract = manifest.fingerprint();
         let state_key = manifest.state_key(&hash);
-        Ok(App { contract, state_key, engine, bytes, hash, manifest, imports, exports, pre, platform: Arc::new(platform), ticker_stop, feedback_readers:vec![] })
+        Ok(App {
+            contract,
+            state_key,
+            engine,
+            bytes,
+            hash,
+            manifest,
+            imports,
+            exports,
+            pre,
+            platform: Arc::new(platform),
+            ticker_stop,
+            feedback_readers: vec![],
+        })
     }
 
     pub fn export(&self, name: &str) -> Result<&FuncInfo> {
@@ -481,11 +525,16 @@ impl App {
 
     pub fn initial_state(&self, plan: &Plan, seed: u64) -> Result<crate::dataset::State> {
         let defaults = plan.0.get("_defaults");
-        Ok(crate::dataset::State::new(crate::dataset::build(&self.manifest.datasets,
-            &defaults.map(|p| p.dataset_rows.clone()).unwrap_or_default(), defaults.and_then(|p| p.dataset_seed).unwrap_or(seed))?))
+        Ok(crate::dataset::State::new(crate::dataset::build(
+            &self.manifest.datasets,
+            &defaults.map(|p| p.dataset_rows.clone()).unwrap_or_default(),
+            defaults.and_then(|p| p.dataset_seed).unwrap_or(seed),
+        )?))
     }
 
-    pub fn run(&self, spec: &RunSpec) -> RunRecord { self.run_shared(spec, None) }
+    pub fn run(&self, spec: &RunSpec) -> RunRecord {
+        self.run_shared(spec, None)
+    }
 
     /// Sequence records include the starting state in their identity. They are
     /// replayed as a sequence, never through the stateless run cache.
@@ -493,21 +542,27 @@ impl App {
         self.run_shared(spec, Some(state))
     }
 
-    fn run_shared(&self, spec: &RunSpec, state: Option<Arc<Mutex<crate::dataset::State>>>) -> RunRecord { self.run_captured(spec,state).0 }
+    fn run_shared(&self, spec: &RunSpec, state: Option<Arc<Mutex<crate::dataset::State>>>) -> RunRecord {
+        self.run_captured(spec, state).0
+    }
 
-    pub(crate) fn feedback(&self,spec:&RunSpec)->Result<crate::feedback::Feedback> {
-        let (record,feedback)=self.run_captured(spec,None);
-        if matches!(record.outcome.kind,OutcomeKind::Error|OutcomeKind::PlanError) {bail!("{}",record.outcome.message.unwrap_or_else(||"feedback run could not execute".into()));}
+    pub(crate) fn feedback(&self, spec: &RunSpec) -> Result<crate::feedback::Feedback> {
+        let (record, feedback) = self.run_captured(spec, None);
+        if matches!(record.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) {
+            bail!("{}", record.outcome.message.unwrap_or_else(|| "feedback run could not execute".into()));
+        }
         Ok(feedback)
     }
 
-    fn run_captured(&self, spec: &RunSpec, state: Option<Arc<Mutex<crate::dataset::State>>>) -> (RunRecord,crate::feedback::Feedback) {
+    fn run_captured(&self, spec: &RunSpec, state: Option<Arc<Mutex<crate::dataset::State>>>) -> (RunRecord, crate::feedback::Feedback) {
         let started = Instant::now();
         let id = if let Some(s) = &state {
             let mut bytes = serde_json::to_vec(&*s.lock().unwrap_or_else(|e| e.into_inner())).expect("state serializes");
             bytes.extend_from_slice(spec.id().as_bytes());
             format!("s{}", &blake3::hash(&bytes).to_hex()[..16])
-        } else { spec.id() };
+        } else {
+            spec.id()
+        };
         let mut record = RunRecord {
             id,
             spec: spec.clone(),
@@ -518,15 +573,21 @@ impl App {
             stdout: String::new(),
             stderr: String::new(),
         };
-        let mut feedback=crate::feedback::Feedback::default();
+        let mut feedback = crate::feedback::Feedback::default();
         if let Err(e) = self.run_inner(spec, &mut record, state, &mut feedback) {
             record.outcome = Outcome { kind: OutcomeKind::Error, message: Some(format!("{e:#}")), stack: vec![] };
         }
         record.totals.wall_us = started.elapsed().as_micros() as u64;
-        (record,feedback)
+        (record, feedback)
     }
 
-    fn run_inner(&self, spec: &RunSpec, record: &mut RunRecord, state: Option<Arc<Mutex<crate::dataset::State>>>, feedback:&mut crate::feedback::Feedback) -> Result<()> {
+    fn run_inner(
+        &self,
+        spec: &RunSpec,
+        record: &mut RunRecord,
+        state: Option<Arc<Mutex<crate::dataset::State>>>,
+        feedback: &mut crate::feedback::Feedback,
+    ) -> Result<()> {
         if spec.component != self.hash {
             bail!("spec is for component {}, this is {}", spec.component, self.hash);
         }
@@ -538,11 +599,8 @@ impl App {
         if params.len() != spec.args.len() {
             bail!("{} takes {} arguments, got {}", export.key, params.len(), spec.args.len());
         }
-        let args = params
-            .iter()
-            .zip(&spec.args)
-            .map(|((name, ty), v)| json_to_val(v, ty).with_context(|| format!("argument {name}")))
-            .collect::<Result<Vec<_>>>()?;
+        let args =
+            params.iter().zip(&spec.args).map(|((name, ty), v)| json_to_val(v, ty).with_context(|| format!("argument {name}"))).collect::<Result<Vec<_>>>()?;
 
         let start = parse_datetime(&spec.now).ok_or_else(|| anyhow!("bad time {:?}", spec.now))?;
         let start_ns = (start.max(0) as u64).checked_mul(1_000_000_000).ok_or_else(|| anyhow!("time {:?} is past the year 2554", spec.now))?;
@@ -572,7 +630,10 @@ impl App {
             platform: self.platform.clone(),
             modules: Vec::new(),
             plan: Arc::new(spec.plan.clone()),
-            world: match state { Some(s) => s, None => Arc::new(Mutex::new(self.initial_state(&spec.plan, spec.seed)?)) },
+            world: match state {
+                Some(s) => s,
+                None => Arc::new(Mutex::new(self.initial_state(&spec.plan, spec.seed)?)),
+            },
             seed: spec.seed,
             identity: crate::identity::caller(spec, &self.manifest),
             clock: clock.clone(),
@@ -588,6 +649,7 @@ impl App {
             read_limit: None,
             kernel,
             http: Default::default(),
+            resource_rep: 0,
         };
         let mut store = Store::new(&self.engine, host);
         store.limiter(|h| &mut h.limiter);
@@ -692,10 +754,10 @@ impl App {
         if let Some(instance) = instance.filter(|_| !self.feedback_readers.is_empty()) {
             store.set_fuel(10_000_000)?;
             store.set_epoch_deadline(100);
-            for (module,name) in self.feedback_readers.iter().enumerate() {
-                let read=instance.get_typed_func::<(),(Vec<u8>,)>(&mut store,name)?;
-                let (bytes,)=read.call(&mut store,())?;
-                feedback.decode(&bytes,module as u32)?;
+            for (module, name) in self.feedback_readers.iter().enumerate() {
+                let read = instance.get_typed_func::<(), (Vec<u8>,)>(&mut store, name)?;
+                let (bytes,) = read.call(&mut store, ())?;
+                feedback.decode(&bytes, module as u32)?;
             }
         }
         drop(store);
@@ -741,19 +803,44 @@ fn link_component(engine: &Engine, component: &Component, imports: &[Interface],
             Ok((ready(&mut store)?,))
         })?;
     }
+    let resources: BTreeMap<String, Vec<String>> = component
+        .component_type()
+        .imports(engine)
+        .filter_map(|(name, item)| match item.ty {
+            wasmtime::component::types::ComponentItem::ComponentInstance(ci) => Some((
+                name.to_string(),
+                ci.exports(engine)
+                    .filter(|(_, e)| matches!(e.ty, wasmtime::component::types::ComponentItem::Resource(_)))
+                    .map(|(n, _)| n.to_string())
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let mut next_resource = 0u32;
     // The outgoing handler is linked by `http::link`.
     for iface in imports.iter().filter(|i| i.kind == ImportKind::Platform && !crate::wasi_http::is_client(&i.name)) {
         if iface.name.is_empty() {
             for f in &iface.funcs {
                 let key = f.key.clone();
-                linker.root().func_new(&f.name, move |store, _ty, params, results| intercept(store, &key, params, results).map_err(wasmtime::Error::from_anyhow))?;
+                linker.root().func_new(&f.name, move |store, ty, params, results| {
+                    intercept_component(store, &ty, &key, params, results).map_err(wasmtime::Error::from_anyhow)
+                })?;
             }
             continue;
         }
         let mut inst = linker.instance(&iface.name)?;
+        // Its resources (a database connection, a key-value store): the
+        // host hands out handles and gets them back in method calls.
+        for name in resources.get(iface.name.as_str()).into_iter().flatten() {
+            inst.resource(name, wasmtime::component::ResourceType::host_dynamic(RESOURCE_BASE + next_resource), |_, _| Ok(()))?;
+            next_resource += 1;
+        }
         for f in &iface.funcs {
             let key = f.key.clone();
-            inst.func_new(&f.name, move |store, _ty, params, results| intercept(store, &key, params, results).map_err(wasmtime::Error::from_anyhow))?;
+            inst.func_new(&f.name, move |store, ty, params, results| {
+                intercept_component(store, &ty, &key, params, results).map_err(wasmtime::Error::from_anyhow)
+            })?;
         }
     }
     // Link as is first. `define_unknown_imports_as_traps` matches names
@@ -779,17 +866,11 @@ pub fn fn_key_eq(a: &str, b: &str) -> bool {
     a == b || fn_key(i, f) == b
 }
 
-fn lookup_export(
-    instance: &wasmtime::component::Instance,
-    store: &mut Store<Host>,
-    export: &FuncInfo,
-) -> Result<wasmtime::component::Func> {
+fn lookup_export(instance: &wasmtime::component::Instance, store: &mut Store<Host>, export: &FuncInfo) -> Result<wasmtime::component::Func> {
     let idx = if export.interface.is_empty() {
         instance.get_export_index(&mut *store, None, &export.name)
     } else {
-        let iface = instance
-            .get_export_index(&mut *store, None, &export.interface)
-            .ok_or_else(|| anyhow!("no exported interface {}", export.interface))?;
+        let iface = instance.get_export_index(&mut *store, None, &export.interface).ok_or_else(|| anyhow!("no exported interface {}", export.interface))?;
         instance.get_export_index(&mut *store, Some(&iface), &export.name)
     }
     .ok_or_else(|| anyhow!("no export {}", export.key))?;
@@ -820,14 +901,17 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     };
     let names = info.param_names();
     let args: Vec<(String, Value)> = names.iter().cloned().zip(params.iter().map(val_to_json)).collect();
-    let value_checks = platform.argument_checks.get(key).map(|checks|checks.check(&args));
+    let value_checks = platform.argument_checks.get(key).map(|checks| checks.check(&args));
     // The platform's rules come first: the host keeps its promises, whatever
     // the plan or the fuzzer says.
     let mut resolved = match platform.rules.get(key) {
         Some(rules) => crate::plan::resolve_compiled_rules(rules, &args, None).unwrap_or_else(|| data.plan.resolve(key, call, &args)),
         None => data.plan.resolve(key, call, &args),
     };
-    let commit_trap = match &resolved.decision { Decision::CommitThenTrap(msg) => Some(msg.clone()), _ => None };
+    let commit_trap = match &resolved.decision {
+        Decision::CommitThenTrap(msg) => Some(msg.clone()),
+        _ => None,
+    };
     if commit_trap.is_some() && (!platform.mutations.contains_key(key) || resolved.source.starts_with("manifest rule")) {
         data.plan_error = Some("commit_then_trap requires a modeled mutation in a host plan".into());
         bail!("commit_then_trap requires a modeled mutation in a host plan");
@@ -853,14 +937,16 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
         Decision::Return(v) => v.get("err").is_some() || v.is_null(),
         Decision::Generate(o) => o.results.as_deref() == Some("err") || o.options.as_deref() == Some("none"),
     };
-    if !resolved.source.starts_with("manifest rule") && !failure
+    if !resolved.source.starts_with("manifest rule")
+        && !failure
         && let Some(query) = platform.queries.get(key)
     {
         resolved.decision = Decision::Return(query.resolve(&data.world.lock().unwrap_or_else(|e| e.into_inner()).tables, &args)?);
         resolved.source = format!("dataset {}", query.dataset);
     }
     let mut pending_state = None;
-    if !resolved.source.starts_with("manifest rule") && !failure
+    if !resolved.source.starts_with("manifest rule")
+        && !failure
         && let Some(mutation) = platform.mutations.get(key)
     {
         let current = data.world.lock().unwrap_or_else(|e| e.into_inner());
@@ -940,15 +1026,15 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
                         data.plan_error = Some(format!("dataset response for {key} contradicts value constraints"));
                         bail!("dataset response contradicts value constraints");
                     }
-                } else { crate::constraints::conform_at(&mut v, c, data.seed); }
+                } else {
+                    crate::constraints::conform_at(&mut v, c, data.seed);
+                }
             }
             let vals: Result<Vec<Val>> = match result_types.len() {
                 0 => Ok(vec![]),
                 1 => json_to_val(&v, &result_types[0]).map(|x| vec![x]),
                 n => match &v {
-                    Value::Array(a) if a.len() == n => {
-                        a.iter().zip(&result_types).map(|(v, t)| json_to_val(v, t)).collect()
-                    }
+                    Value::Array(a) if a.len() == n => a.iter().zip(&result_types).map(|(v, t)| json_to_val(v, t)).collect(),
                     _ => Err(anyhow!("expected an array of {n} results")),
                 },
             };
@@ -1023,6 +1109,130 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     }
     data.events.push(event);
     outcome
+}
+
+/// A component's platform import: as `intercept`, then owned resources in
+/// the answer become handles. Their types come from the linked function
+/// type, where imported resources are the host's.
+fn intercept_component(mut store: StoreContextMut<'_, Host>, ty: &ComponentFunc, key: &str, params: &[Val], results: &mut [Val]) -> Result<()> {
+    let answer = intercept(wasmtime::AsContextMut::as_context_mut(&mut store), key, params, results);
+    // Handles the guest passed in (a borrowed `self`) are released by the
+    // host, or the call fails with borrows outstanding.
+    let mut passed = Vec::new();
+    for p in params {
+        resources_in(p, &mut passed);
+    }
+    for r in passed {
+        r.resource_drop(&mut store)?;
+    }
+    answer?;
+    let types: Vec<_> = ty.results().collect();
+    if let ([t], Some(e)) = (types.as_slice(), store.data_mut().events.last_mut())
+        && let Some(r) = e.result.as_mut()
+    {
+        show_resources(r, t);
+    }
+    for (r, t) in results.iter_mut().zip(&types) {
+        give_resources(r, t, &mut store)?;
+    }
+    Ok(())
+}
+
+/// Recorded answers show a handle as `"<resource>"`.
+fn show_resources(v: &mut Value, ty: &wasmtime::component::Type) {
+    use wasmtime::component::Type as T;
+    match (ty, v) {
+        (T::Own(_), v) => *v = Value::String("<resource>".into()),
+        (T::List(l), Value::Array(xs)) => xs.iter_mut().for_each(|x| show_resources(x, &l.ty())),
+        (T::Record(r), Value::Object(m)) => {
+            for f in r.fields() {
+                if let Some(x) = m.get_mut(f.name) {
+                    show_resources(x, &f.ty);
+                }
+            }
+        }
+        (T::Tuple(t), Value::Array(xs)) => t.types().zip(xs.iter_mut()).for_each(|(t, x)| show_resources(x, &t)),
+        (T::Option(o), v) if !v.is_null() => match v.get_mut("some") {
+            Some(x) => show_resources(x, &o.ty()),
+            None => show_resources(v, &o.ty()),
+        },
+        (T::Result(r), Value::Object(m)) => {
+            if let (Some(x), Some(t)) = (m.get_mut("ok"), r.ok()) {
+                show_resources(x, &t);
+            }
+            if let (Some(x), Some(t)) = (m.get_mut("err"), r.err()) {
+                show_resources(x, &t);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resources_in(v: &Val, out: &mut Vec<wasmtime::component::ResourceAny>) {
+    match v {
+        Val::Resource(r) => out.push(*r),
+        Val::List(xs) | Val::Tuple(xs) | Val::FixedLengthList(xs) => xs.iter().for_each(|x| resources_in(x, out)),
+        Val::Record(fs) => fs.iter().for_each(|(_, x)| resources_in(x, out)),
+        Val::Option(Some(x)) | Val::Variant(_, Some(x)) | Val::Result(Ok(Some(x)) | Err(Some(x))) => resources_in(x, out),
+        _ => {}
+    }
+}
+
+/// Payloads of the host resource types appfuzz defines for platform imports.
+const RESOURCE_BASE: u32 = 0x4146_0000;
+const MAX_RESOURCES: u32 = 4096;
+
+/// Replaces the placeholders `json_to_val` and the generator leave for an
+/// owned resource with a fresh handle of the right type.
+fn give_resources(v: &mut Val, ty: &wasmtime::component::Type, store: &mut StoreContextMut<'_, Host>) -> Result<()> {
+    use wasmtime::component::Type as T;
+    match (ty, v) {
+        (T::Own(rt), v) => {
+            let payload = (RESOURCE_BASE..RESOURCE_BASE + MAX_RESOURCES)
+                .find(|&p| wasmtime::component::ResourceType::host_dynamic(p) == *rt)
+                .ok_or_else(|| anyhow!("appfuzz can't create this resource (it is not a resource of a platform import)"))?;
+            store.data_mut().resource_rep += 1;
+            let rep = store.data().resource_rep;
+            *v = Val::Resource(wasmtime::component::ResourceDynamic::new_own(rep, payload).try_into_resource_any(&mut *store)?);
+        }
+        (T::List(l), Val::List(items)) => {
+            let t = l.ty();
+            for x in items {
+                give_resources(x, &t, store)?;
+            }
+        }
+        (T::Record(r), Val::Record(fields)) => {
+            for (f, (_, x)) in r.fields().zip(fields.iter_mut()) {
+                give_resources(x, &f.ty, store)?;
+            }
+        }
+        (T::Tuple(t), Val::Tuple(items)) => {
+            for (t, x) in t.types().zip(items.iter_mut()) {
+                give_resources(x, &t, store)?;
+            }
+        }
+        (T::Option(o), Val::Option(Some(x))) => give_resources(x, &o.ty(), store)?,
+        (T::Result(r), Val::Result(res)) => match res {
+            Ok(Some(x)) => {
+                if let Some(t) = r.ok() {
+                    give_resources(x, &t, store)?;
+                }
+            }
+            Err(Some(x)) => {
+                if let Some(t) = r.err() {
+                    give_resources(x, &t, store)?;
+                }
+            }
+            _ => {}
+        },
+        (T::Variant(var), Val::Variant(case, Some(x))) => {
+            if let Some(t) = var.cases().find(|c| c.name == case.as_str()).and_then(|c| c.ty) {
+                give_resources(x, &t, store)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Strings longer than this are cut in recorded host calls.
@@ -1165,7 +1375,9 @@ pub fn set_clock_fields(request: &mut Value, fields: &BTreeMap<String, String>, 
 }
 
 pub fn field_mut<'a>(v: &'a mut Value, path: &str) -> Option<&'a mut Value> {
-    if path.is_empty() { return Some(v); }
+    if path.is_empty() {
+        return Some(v);
+    }
     let mut cur = v;
     for seg in path.split('.') {
         cur = match cur {
@@ -1181,16 +1393,14 @@ pub fn field_mut<'a>(v: &'a mut Value, path: &str) -> Option<&'a mut Value> {
 }
 
 pub fn field<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
-    if path.is_empty() { return Some(v); }
+    if path.is_empty() {
+        return Some(v);
+    }
     let mut cur = v;
     for seg in path.split('.') {
         cur = match cur {
             Value::Object(o) => o.get(seg)?,
-            Value::Array(a) => a
-                .iter()
-                .find(|p| p.as_array().and_then(|p| p.first()).and_then(Value::as_str) == Some(seg))?
-                .as_array()?
-                .get(1)?,
+            Value::Array(a) => a.iter().find(|p| p.as_array().and_then(|p| p.first()).and_then(Value::as_str) == Some(seg))?.as_array()?.get(1)?,
             _ => return None,
         };
     }

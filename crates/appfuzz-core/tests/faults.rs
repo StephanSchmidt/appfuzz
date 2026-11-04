@@ -91,7 +91,10 @@ fn sweeps_every_occurrence_including_late_calls_with_typed_errors() {
     assert!(complete);
     assert_eq!(probes.len(), 14);
     assert!(probes.iter().all(|p| p.injected && p.outcome != OutcomeKind::PlanError));
-    assert_eq!(probes.iter().map(|p| (p.fault.call, p.fault.mode)).collect::<Vec<_>>(), (1..=7).flat_map(|n| [(n, Mode::Once), (n, Mode::Outage)]).collect::<Vec<_>>());
+    assert_eq!(
+        probes.iter().map(|p| (p.fault.call, p.fault.mode)).collect::<Vec<_>>(),
+        (1..=7).flat_map(|n| [(n, Mode::Once), (n, Mode::Outage)]).collect::<Vec<_>>()
+    );
     assert!(found.iter().any(|f| f.kind == "crash"));
     assert!(probes.iter().filter(|p| p.fault.mode == Mode::Once && p.fault.call < 7).all(|p| p.outcome == OutcomeKind::Ok));
     let target = probes.iter().find(|p| p.fault.mode == Mode::Once && p.outcome == OutcomeKind::Unreachable).unwrap();
@@ -158,7 +161,14 @@ fn aliases_preserve_the_prefix_and_a_different_prefix_cannot_establish_causality
     let recipe = Recipe { func: "test:faults/store#save".into(), call: 7, mode: Mode::Once };
     let mut variant = recipe.variant(&app, &base).unwrap();
     assert!(faults::injected(&base, &recipe, &app.run(&variant.spec)));
-    variant.spec.plan.0.get_mut("test:faults/store#save").unwrap().on_call.insert("1".into(), appfuzz_core::plan::Response { ret: Some(json!({"ok":99})), ..Default::default() });
+    variant
+        .spec
+        .plan
+        .0
+        .get_mut("test:faults/store#save")
+        .unwrap()
+        .on_call
+        .insert("1".into(), appfuzz_core::plan::Response { ret: Some(json!({"ok":99})), ..Default::default() });
     let different = app.run(&variant.spec);
     assert!(!faults::injected(&base, &recipe, &different));
     assert!(faults::compare(&app, &base, &recipe, &variant, &different).is_empty());
