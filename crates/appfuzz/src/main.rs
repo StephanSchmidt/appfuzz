@@ -384,6 +384,7 @@ fn sorted(m: Mutex<Vec<((u32, u64), Finding)>>) -> Vec<Finding> {
 
 fn run_cached(app: &App, store: &RunStore, spec: &RunSpec) -> Result<RunRecord> {
     if let Some(r) = store.get(&spec.id())? {
+        store.set_last(&r.id)?;
         return Ok(r);
     }
     let r = app.run(spec);

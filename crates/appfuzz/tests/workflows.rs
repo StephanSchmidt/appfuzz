@@ -251,6 +251,19 @@ fn findings_are_listed_for_apps_with_built_in_labels() {
 }
 
 #[test]
+fn last_is_the_run_just_shown() {
+    // A run already in the store is not run again, but it is the latest.
+    let f = Fixture::new(false);
+    let (_, first) = f.cli(&["run"]);
+    let (_, other) = f.cli(&["run", "--args", "[2]"]);
+    assert_ne!(first["run"], other["run"]);
+    let (_, again) = f.cli(&["run"]);
+    assert_eq!(again["run"], first["run"]);
+    let (_, shown) = f.cli(&["explain", "last"]);
+    assert_eq!(shown["run"], first["run"], "{shown}");
+}
+
+#[test]
 fn nonexecuting_reviews_are_incomplete() {
     let f = Fixture::new(false);
     f.edit("export = \"run\"", "export = \"missing\"");

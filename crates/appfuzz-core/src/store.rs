@@ -19,8 +19,13 @@ impl RunStore {
     pub fn save(&self, r: &RunRecord) -> Result<()> {
         std::fs::create_dir_all(&self.dir).with_context(|| format!("creating {}", self.dir.display()))?;
         write_atomic(&self.dir.join(format!("{}.json", r.id)), &serde_json::to_vec(r)?)?;
-        write_atomic(&self.dir.join("last"), r.id.as_bytes())?;
-        Ok(())
+        self.set_last(&r.id)
+    }
+
+    /// Makes `id` the run `last` stands for: the one a command just ran,
+    /// or found already stored.
+    pub fn set_last(&self, id: &str) -> Result<()> {
+        write_atomic(&self.dir.join("last"), id.as_bytes())
     }
 
     pub fn get(&self, id: &str) -> Result<Option<RunRecord>> {
