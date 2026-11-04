@@ -446,21 +446,21 @@ fn response_edits(r: &Response, at: &str, lows: &Lows) -> Vec<Step> {
     edits.into_iter().map(|(t, e)| (t, e, None)).chain(steps).collect()
 }
 
-/// Long text without a chunk of it (halves, quarters, …), where what
-/// matters is not at its start: no shorter than 16 characters.
-fn text_chunks(t: &str) -> Vec<String> {
+/// Text with a run of one character (`aaaa…`, as the fuzzer makes long
+/// text) left out or halved, where what matters comes after it. Cutting
+/// anywhere else would only mangle the text (a URL's host, a word).
+fn run_cuts(t: &str) -> Vec<String> {
     let chars: Vec<char> = t.chars().collect();
-    let len = chars.len();
     let mut out = Vec::new();
-    let mut size = len / 2;
-    while size > 0 && len - size >= 16 && out.len() < CHUNKS {
-        let mut at = 0;
-        while at < len && out.len() < CHUNKS {
-            let to = (at + size).min(len);
-            out.push(chars[..at].iter().chain(&chars[to..]).collect());
-            at += size;
+    let mut at = 0;
+    while at < chars.len() && out.len() < CHUNKS {
+        let end = at + chars[at..].iter().take_while(|c| **c == chars[at]).count();
+        if end - at >= 8 {
+            for keep in [0, (end - at) / 2] {
+                out.push(chars[..at + keep].iter().chain(&chars[end..]).collect());
+            }
         }
-        size /= 2;
+        at = end;
     }
     out
 }
@@ -594,7 +594,7 @@ fn request_edits(app: &App, s: &RunSpec, base: &[Value], lows: &Lows, out: &mut 
                     Err(_) => down(t.chars().count() as u64, 16, &len_key, lows)
                         .into_iter()
                         .map(|n| (json!(t.chars().take(n as usize).collect::<String>()), Some((len_key.clone(), n))))
-                        .chain(text_chunks(t).into_iter().map(|t| (json!(t), None)))
+                        .chain(run_cuts(t).into_iter().map(|t| (json!(t), None)))
                         .collect(),
                 });
                 inner
@@ -643,13 +643,18 @@ mod tests {
     }
 
     #[test]
-    fn long_text_loses_chunks() {
-        let t = format!("{}{}", "a".repeat(32), "b".repeat(32));
-        let cuts = text_chunks(&t);
-        assert_eq!(cuts[0], "b".repeat(32));
-        assert_eq!(cuts[1], "a".repeat(32));
-        assert!(cuts.iter().all(|c| c.len() >= 16 && c.len() < 64));
-        assert!(text_chunks("short text, kept").is_empty());
+    fn runs_of_one_character_shrink() {
+        let t = format!("https://app.example/{}?url={}x", "a".repeat(32), "b".repeat(8));
+        assert_eq!(
+            run_cuts(&t),
+            [
+                "https://app.example/?url=bbbbbbbbx".to_string(),
+                format!("https://app.example/{}?url=bbbbbbbbx", "a".repeat(16)),
+                format!("https://app.example/{}?url=x", "a".repeat(32)),
+                format!("https://app.example/{}?url=bbbbx", "a".repeat(32)),
+            ]
+        );
+        assert!(run_cuts("https://app.example/?q=shoes").is_empty());
     }
 
     #[test]
