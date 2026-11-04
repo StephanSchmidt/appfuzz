@@ -457,14 +457,43 @@ fn is_err(v: Option<&Value>) -> bool {
     matches!(v, Some(Value::Object(o)) if o.len() == 1 && o.contains_key("err"))
 }
 
+/// The WASI packages of the `wasi:http/proxy` world, what every HTTP host
+/// provides.
+const PROXY_WORLD: [&str; 5] = ["wasi:http", "wasi:io", "wasi:clocks", "wasi:random", "wasi:cli"];
+
 /// Findings from the binary and the manifest alone.
 pub fn static_findings(m: &Manifest, imports: &[Interface], st: &Statics) -> Vec<Finding> {
     let mut out = Vec::new();
-    for i in imports.iter().filter(|i| !i.funcs.is_empty()) {
-        let granted = match i.kind {
-            ImportKind::Platform => i.name.is_empty() || m.grants_interface(&i.name),
-            ImportKind::Wasi => m.grants_wasi(&i.name),
+    // WASI is granted by package (`wasi:sockets`), so one finding per
+    // package: a language runtime imports a whole package at once.
+    let mut wasi: BTreeMap<&str, Vec<&Interface>> = BTreeMap::new();
+    for i in imports.iter().filter(|i| !i.funcs.is_empty() && i.kind == ImportKind::Wasi && !m.grants_wasi(&i.name)) {
+        wasi.entry(i.name.split('/').next().unwrap_or(&i.name)).or_default().push(i);
+    }
+    let http = imports.iter().any(|i| i.name.starts_with("wasi:http/"));
+    for (package, ifaces) in wasi {
+        let what = match ifaces.as_slice() {
+            [one] => strip_version(&one.name).to_string(),
+            many => format!("{package} ({} interfaces)", many.len()),
         };
+        let mut title = format!("imports {what} but the manifest does not grant it");
+        if http && !PROXY_WORLD.contains(&package) {
+            title.push_str(
+                ". Spin and wasmtime serve provide it, strict wasi:http/proxy hosts don't. \
+                 JavaScript, Python and Go runtimes import it without using it; if your platform provides it, grant it",
+            );
+        }
+        out.push(Finding::new(
+            "ungranted_import",
+            package,
+            Severity::Fail,
+            title,
+            json!({"package": package, "interfaces": ifaces.iter().map(|i| &i.name).collect::<Vec<_>>()}),
+            None,
+        ));
+    }
+    for i in imports.iter().filter(|i| !i.funcs.is_empty() && i.kind == ImportKind::Platform) {
+        let granted = i.name.is_empty() || m.grants_interface(&i.name);
         if !granted {
             out.push(Finding::new(
                 "ungranted_import",

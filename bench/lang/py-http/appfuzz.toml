@@ -12,7 +12,9 @@ now = "2026-11-02T10:00:00"
 
 [grants]
 hosts = ["api.example"]
-wasi = ["wasi:cli", "wasi:clocks", "wasi:io", "wasi:random", "wasi:http"]
+# As Spin and wasmtime serve: the runtime imports wasi:filesystem and
+# wasi:sockets, which these hosts provide (no files; sockets only to allowed hosts).
+wasi = ["wasi:cli", "wasi:clocks", "wasi:io", "wasi:random", "wasi:http", "wasi:filesystem", "wasi:sockets"]
 
 [limits]
 fuel = 200_000_000

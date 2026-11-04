@@ -96,7 +96,9 @@ cd js-http && ../ts-chatty/node_modules/.bin/jco componentize app.js \
 cd py-http && uvx componentize-py -d ../../wit/http -w app componentize app -o app.wasm
 ```
 
-What review finds besides the bug: `js-http` fails `ungranted_import` twice
-(`wasi:filesystem`, from the runtime), `py-http` eight times (`wasi:filesystem`
-and `wasi:sockets`). All of them show `error_ignored` as info: the page is the
-same whether the upstream answers with an error status or fails outright.
+Both manifests grant `wasi:filesystem` and `wasi:sockets`, as Spin and
+`wasmtime serve` do: the JavaScript and Python runtimes import them even
+though the apps never use them. Without that grant, review fails with one
+`ungranted_import` per package, which is right for a strict
+`wasi:http/proxy` host. Both apps show `error_ignored` as info: the page is
+the same whether the upstream answers with an error status or fails outright.
