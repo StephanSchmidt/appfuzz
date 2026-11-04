@@ -688,7 +688,27 @@ redirect), it sends it again with forged ones: a made-up bearer token,
 a JWT's claims without verifying it. A forged credential that went to a
 host call (a session lookup, a token service) is left out, since the
 simulated host decided. Besides the manifest's request, it tries up to
-eight paths of stored runs that were turned away.
+eight paths of stored runs that were turned away or issued a session token.
+
+Where the app read a secret (a result labelled `secret`, such as a Spin
+secret variable) while checking the made-up bearer token or API key, the
+probe sends the secret's prefixes instead: 0, 1, 2, … correct leading
+characters, the rest other characters of the same kind, always the full
+length. Fuel that never falls and rises at least twice, with an equal cost
+for two different wrong guesses, is `timing_unsafe_compare` (warn): the
+comparison stops at the first wrong character, so response times tell how
+much of a guess is right. A hash or a constant-time comparison costs the
+same for every guess.
+
+Session tokens are `Set-Cookie` values and JSON fields whose name looks like
+one (`session`, `sid`, `token`, `auth`, `csrf`, `reset`, `api_key`, …), 8
+characters or more. Not signed tokens with three dot-separated parts (JWTs),
+not text from the request or a host answer, and none in a run that read a
+secret (the token may be signed with it). Each response with one is sent
+again with host answers pinned, with two other random seeds and a second
+later. A token that stays the same under the other seeds is
+`predictable_token` (fail): made from the clock when it changes a second
+later, a constant otherwise. The run with the whole secret is checked too.
 
 Outbound requests are the host function
 `wasi:http/outgoing-handler#handle(method: string, url: string, headers,

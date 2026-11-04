@@ -1,0 +1,11 @@
+{
+  "app": "http-session-clock",
+  "bug": "a session cookie made from the time in milliseconds: anyone can compute another visitor's session",
+  "expect": [
+    {
+      "kind": "predictable_token",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

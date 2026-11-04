@@ -145,6 +145,148 @@ pub fn check(anon: &RunRecord, runs: &[(&Forged, &RunRecord)], m: &Manifest) -> 
     ))
 }
 
+/// Secrets a run read from host calls (results labelled `secret`).
+pub fn secrets(r: &RunRecord, m: &Manifest) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for e in &r.events {
+        let Some(v) = &e.result else { continue };
+        for (p, l) in m.call_result_labels(&e.func, &e.args) {
+            if l == crate::labels::Label::Secret {
+                for s in crate::labels::values_at(v, &p) {
+                    if s.chars().count() >= 8 && !out.contains(&s) {
+                        out.push(s);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The same character class, another character: a parser that stops at an
+/// unexpected character costs the same for every candidate.
+fn other(c: char, by: u8) -> char {
+    const HEX: &str = "0123456789abcdef";
+    let rot = |set: &str| set.find(c).map(|i| set.as_bytes()[(i + by as usize) % set.len()] as char);
+    rot(HEX).or_else(|| rot("0123456789ABCDEF")).or_else(|| rot("abcdefghijklmnopqrstuvwxyz")).or_else(|| rot("ABCDEFGHIJKLMNOPQRSTUVWXYZ")).unwrap_or(c)
+}
+
+/// The secret's first `k` characters, the rest replaced: as long as the
+/// secret, so a comparison gets past the length check.
+pub fn prefix_of(secret: &str, k: usize, by: u8) -> String {
+    secret.chars().enumerate().map(|(i, c)| if i < k { c } else { other(c, by) }).collect()
+}
+
+/// The prefix lengths to try: every one, or 12 spread over a long secret.
+pub fn prefix_lengths(secret: &str) -> Vec<usize> {
+    let n = secret.chars().count();
+    if n <= 24 { (0..n).collect() } else { (0..12).map(|i| i * (n - 1) / 11).collect() }
+}
+
+/// `timing_unsafe_compare` when the fuel of the candidates grows with the
+/// correct prefix. `fuel[i]` is the run with `lengths[i]` correct leading
+/// characters; `control` is the run with none, other characters.
+pub fn timing(ex: &str, what: &str, lengths: &[usize], runs: &[&RunRecord], control: &RunRecord) -> Option<Finding> {
+    if runs.iter().chain([&control]).any(|r| r.outcome.kind != OutcomeKind::Ok) || runs.len() < 4 {
+        return None;
+    }
+    let fuel: Vec<u64> = runs.iter().map(|r| r.totals.fuel).collect();
+    let rises = fuel.windows(2).filter(|w| w[1] > w[0]).count();
+    let steady = control.totals.fuel == fuel[0] && fuel.windows(2).all(|w| w[1] >= w[0]);
+    if !steady || rises < 2 {
+        return None;
+    }
+    let last = runs.len() - 1;
+    Some(Finding::new(
+        "timing_unsafe_compare",
+        &format!("{ex}\0timing"),
+        Severity::Warn,
+        format!(
+            "{ex} compares {what} with its secret one character at a time: each correct leading character costs more ({} instructions with none right, {} with {}), so the secret can be guessed character by character from response times; compare in constant time",
+            fuel[0], fuel[last], lengths[last]
+        ),
+        json!({"credential": what, "prefix_lengths": lengths, "fuel": fuel, "runs": runs.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), "control_run": control.id}),
+        Some(runs[last].id.as_str()),
+    ))
+}
+
+static TOKEN_NAME: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)sess|sid|token|auth|jwt|login|remember|csrf|xsrf|reset|api.?key|nonce|otp").unwrap());
+
+/// Session tokens in the response: session-like `Set-Cookie` values and
+/// token-like JSON fields, as (where, value). Not JWTs and other signed
+/// tokens (three dot-separated parts), not text the request or a host
+/// call brought.
+pub fn tokens(r: &RunRecord, m: &Manifest) -> Vec<(String, String)> {
+    if r.outcome.kind != OutcomeKind::Ok {
+        return Vec::new();
+    }
+    let resp = crate::output::response(r, m);
+    let mut out = Vec::new();
+    for (k, v) in &resp.headers {
+        if k.eq_ignore_ascii_case("set-cookie")
+            && let Some((name, value)) = v.split(';').next().unwrap_or_default().split_once('=')
+            && TOKEN_NAME.is_match(name)
+        {
+            out.push((format!("the cookie {}", name.trim()), value.trim().trim_matches('"').to_string()));
+        }
+    }
+    fn fields(v: &Value, out: &mut Vec<(String, String)>) {
+        match v {
+            Value::Object(o) => {
+                for (k, x) in o {
+                    match x {
+                        Value::String(s) if TOKEN_NAME.is_match(k) => out.push((format!("the field {k}"), s.clone())),
+                        _ => fields(x, out),
+                    }
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|x| fields(x, out)),
+            _ => {}
+        }
+    }
+    if let Some(body) = resp.body.as_deref()
+        && let Ok(v) = serde_json::from_str::<Value>(body)
+    {
+        fields(&v, &mut out);
+    }
+    let brought = |t: &str| r.spec.args.iter().any(|a| has_text(a, t)) || r.events.iter().any(|e| e.result.as_ref().is_some_and(|v| has_text(v, t)));
+    out.retain(|(_, v)| v.len() >= 8 && v.matches('.').count() != 2 && !brought(v));
+    out
+}
+
+/// `predictable_token` for tokens that stay the same under other random
+/// seeds. `seeds` are the run with other seeds, `clock` one second later.
+pub fn predictable(r: &RunRecord, seeds: &[&RunRecord], clock: Option<&RunRecord>, m: &Manifest) -> Vec<Finding> {
+    // A token made with a secret (signed) is not guessable without it.
+    if !secrets(r, m).is_empty() || seeds.is_empty() {
+        return Vec::new();
+    }
+    let ex = &r.spec.export;
+    let mut out = Vec::new();
+    for (place, value) in tokens(r, m) {
+        let same = |x: &RunRecord| tokens(x, m).into_iter().any(|(p, v)| p == place && v == value);
+        if !seeds.iter().all(|x| same(x)) {
+            continue;
+        }
+        let timed = clock.is_some_and(|c| c.outcome.kind == OutcomeKind::Ok && !same(c) && tokens(c, m).iter().any(|(p, _)| *p == place));
+        let how = if timed {
+            "it is made from the clock, not from random bytes: anyone who knows roughly when it was issued can compute it"
+        } else {
+            "it is the same every time: anyone can use it"
+        };
+        out.push(Finding::new(
+            "predictable_token",
+            &format!("{ex}\0token\0{place}"),
+            Severity::Fail,
+            format!("{place} ({}) is the same with other random seeds; {how}. Make it from 16 or more random bytes", value.chars().take(24).collect::<String>()),
+            json!({"place": place, "value": value, "clock_dependent": timed, "seed_runs": seeds.iter().map(|x| x.id.clone()).collect::<Vec<_>>(), "clock_run": clock.map(|c| c.id.clone())}),
+            Some(r.id.as_str()),
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +302,16 @@ mod tests {
         let f = forged(&anon);
         assert!(f.iter().all(|f| f.request["headers"].as_array().unwrap().len() == 2));
         assert!(anonymous(&json!({"path": "/"})).is_none());
+    }
+
+    #[test]
+    fn prefixes() {
+        let s = "sk_00ff9a";
+        assert_eq!(prefix_of(s, 0, 1), "tl_1100ab");
+        assert_eq!(prefix_of(s, 4, 1), "sk_0100ab");
+        assert_eq!(prefix_of(s, 9, 1), s);
+        assert_ne!(prefix_of(s, 0, 1), prefix_of(s, 0, 2));
+        assert_eq!(prefix_lengths(s).len(), 9);
+        assert_eq!(prefix_lengths(&"x".repeat(40)), vec![0, 3, 7, 10, 14, 17, 21, 24, 28, 31, 35, 39]);
     }
 }

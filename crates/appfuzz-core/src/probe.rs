@@ -4,7 +4,7 @@
 //! legally return (empty lists, `err`, `none`, edge numbers, odd strings)?
 
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use wasmtime::component::Type;
 
 use crate::detect::{Finding, Severity};
@@ -268,15 +268,19 @@ pub struct AuthProbe {
 }
 
 /// Each base request without credentials; where that is turned away, with
-/// forged ones (`auth::forged`). `auth_bypass` comes from comparing them.
-/// Bases with the same path are tried once.
+/// forged ones (`auth::forged`): `auth_bypass` comes from comparing them.
+/// Where the app reads a secret to check them, the secret's prefixes:
+/// `timing_unsafe_compare`. Session tokens in the responses, with other
+/// random seeds and a second later: `predictable_token`. Bases with the same
+/// method and path are tried once.
 pub fn auth(app: &App, bases: &[RunSpec], run: Runner) -> (Vec<AuthProbe>, Vec<Finding>) {
+    let m = &app.manifest;
     let mut seen = std::collections::BTreeSet::new();
     let anon: Vec<RunSpec> = bases
         .iter()
         .filter_map(|b| {
             let req = crate::auth::anonymous(b.args.first()?)?;
-            seen.insert(crate::auth::path(&req)).then(|| {
+            seen.insert(format!("{} {}", req["method"].as_str().unwrap_or_default(), crate::auth::path(&req))).then(|| {
                 let mut s = b.clone();
                 s.args[0] = req;
                 s
@@ -286,11 +290,13 @@ pub fn auth(app: &App, bases: &[RunSpec], run: Runner) -> (Vec<AuthProbe>, Vec<F
     let anon_runs = par::map(&anon, |s| run(s));
     let mut probes = Vec::new();
     let mut findings = Vec::new();
-    let mut found = false;
+    let (mut bypass, mut timing) = (false, false);
+    let mut issuing: Vec<RunRecord> = Vec::new();
     for (s, a) in anon.iter().zip(&anon_runs) {
         let p = crate::auth::path(&s.args[0]);
         probes.push(AuthProbe { path: p.clone(), what: "no credentials".into(), run: a.id.clone(), outcome: a.outcome.kind });
-        if found || crate::auth::rejected(a, &app.manifest).is_none() {
+        issuing.push(a.clone());
+        if crate::auth::rejected(a, m).is_none() {
             continue;
         }
         let forged = crate::auth::forged(&s.args[0]);
@@ -308,10 +314,95 @@ pub fn auth(app: &App, bases: &[RunSpec], run: Runner) -> (Vec<AuthProbe>, Vec<F
             findings.extend(crate::detect::per_run_checked(app, r));
         }
         let pairs: Vec<(&crate::auth::Forged, &RunRecord)> = forged.iter().zip(&runs).collect();
-        if let Some(f) = crate::auth::check(a, &pairs, &app.manifest) {
+        if !bypass && let Some(f) = crate::auth::check(a, &pairs, m) {
             findings.push(f);
-            found = true;
+            bypass = true;
+        }
+        if !timing {
+            for (f, r) in &pairs {
+                let Some((finding, with_secret)) = secret_prefixes(app, f, r, run, &mut probes) else { continue };
+                issuing.extend(with_secret);
+                if let Some(x) = finding {
+                    findings.push(x);
+                    timing = true;
+                    break;
+                }
+            }
         }
     }
+    findings.extend(predictable_tokens(app, &issuing, run, &mut probes));
     (probes, findings)
+}
+
+/// The forged credential replaced by prefixes of the secret the app read
+/// while checking it: the finding, and the run with the whole secret. Only
+/// for a credential the app compared (a bearer token or an API key).
+fn secret_prefixes(
+    app: &App,
+    f: &crate::auth::Forged,
+    r: &RunRecord,
+    run: Runner,
+    probes: &mut Vec<AuthProbe>,
+) -> Option<(Option<Finding>, Option<RunRecord>)> {
+    let (what, header, prefix) = match f.what {
+        "a made-up bearer token" => ("the bearer token", "authorization", "Bearer "),
+        "a made-up API key" => ("the API key", "x-api-key", ""),
+        _ => return None,
+    };
+    let secret = crate::auth::secrets(r, &app.manifest).into_iter().next()?;
+    let base = crate::metamorphic::pinned(r).unwrap_or_else(|| r.spec.clone());
+    let with = |text: String| {
+        let mut s = base.clone();
+        for h in s.args[0]["headers"].as_array_mut().into_iter().flatten() {
+            if h.get(0).and_then(Value::as_str).is_some_and(|k| k.eq_ignore_ascii_case(header)) {
+                h[1] = json!(format!("{prefix}{text}"));
+            }
+        }
+        s
+    };
+    let lengths = crate::auth::prefix_lengths(&secret);
+    let mut specs: Vec<RunSpec> = lengths.iter().map(|&k| with(crate::auth::prefix_of(&secret, k, 1))).collect();
+    specs.push(with(crate::auth::prefix_of(&secret, 0, 2)));
+    specs.push(with(secret.clone()));
+    let mut runs = par::map(&specs, |s| run(s));
+    let full = runs.pop();
+    let control = runs.pop()?;
+    let p = crate::auth::path(&base.args[0]);
+    for (k, x) in lengths.iter().zip(&runs) {
+        probes.push(AuthProbe { path: p.clone(), what: format!("{what}: {k} characters of the secret"), run: x.id.clone(), outcome: x.outcome.kind });
+    }
+    let refs: Vec<&RunRecord> = runs.iter().collect();
+    Some((crate::auth::timing(&r.spec.export, what, &lengths, &refs, &control), full))
+}
+
+/// Runs that issue session tokens, again with two other random seeds and a
+/// second later, host answers pinned.
+fn predictable_tokens(app: &App, issuing: &[RunRecord], run: Runner, probes: &mut Vec<AuthProbe>) -> Vec<Finding> {
+    let m = &app.manifest;
+    let mut findings = Vec::new();
+    for r in issuing.iter().filter(|r| !crate::auth::tokens(r, m).is_empty()).take(8) {
+        let Some(mut base) = crate::metamorphic::pinned(r) else { continue };
+        if !m.datasets.is_empty() {
+            let d = base.plan.0.entry("_defaults".into()).or_default();
+            d.dataset_seed = Some(d.dataset_seed.unwrap_or(r.spec.seed));
+        }
+        let mut specs: Vec<RunSpec> = (1..=2).map(|k| RunSpec { seed: base.seed.wrapping_add(k), ..base.clone() }).collect();
+        if let Some(t) = crate::wasi::parse_datetime(&base.now) {
+            let (d, _, hms) = crate::wasi::format_datetime(t + 1);
+            let mut later = RunSpec { now: format!("{d}T{hms}"), ..base.clone() };
+            if let Some(e) = m.entry.as_ref().filter(|e| crate::harness::fn_key_eq(&e.export, &base.export)) {
+                let now = later.now.clone();
+                crate::harness::set_clock_fields(&mut later.args[0], &e.fields, &now);
+            }
+            specs.push(later);
+        }
+        let runs = par::map(&specs, |s| run(s));
+        let p = crate::auth::path(&base.args[0]);
+        for (x, what) in runs.iter().zip(["another random seed", "a third random seed", "a second later"]) {
+            probes.push(AuthProbe { path: p.clone(), what: format!("the session token with {what}"), run: x.id.clone(), outcome: x.outcome.kind });
+        }
+        let seeds: Vec<&RunRecord> = runs.iter().take(2).collect();
+        findings.extend(crate::auth::predictable(r, &seeds, runs.get(2), m));
+    }
+    findings
 }

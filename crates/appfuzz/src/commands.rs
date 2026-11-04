@@ -280,13 +280,13 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
         Cmd::Probe { cmd: ProbeCmd::Auth { export, spec } } => {
             let app = load()?;
             let base = build_spec(app, export.as_deref(), spec)?;
-            // Paths the fuzzer found turned away, after the base request.
+            // Paths the fuzzer saw turned away or issuing a session token.
             let mut bases = vec![base.clone()];
             let mut stored: Vec<RunRecord> = store
                 .all()?
                 .into_iter()
                 .filter(|r| r.spec.component == app.hash && r.spec.contract == app.contract && r.spec.export == base.export)
-                .filter(|r| appfuzz_core::auth::rejected(r, &app.manifest).is_some())
+                .filter(|r| appfuzz_core::auth::rejected(r, &app.manifest).is_some() || !appfuzz_core::auth::tokens(r, &app.manifest).is_empty())
                 .collect();
             stored.sort_by(|a, b| a.id.cmp(&b.id));
             let mut paths = std::collections::BTreeSet::new();

@@ -1,0 +1,6 @@
+{
+  "app": "spin-admin-checked",
+  "bug": "none: the admin token is compared in constant time and the CSRF cookie is random",
+  "expect": [],
+  "allow": []
+}

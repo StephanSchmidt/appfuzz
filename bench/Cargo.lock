@@ -665,6 +665,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-session-clock"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
 name = "http-spin"
 version = "0.1.0"
 dependencies = [
@@ -1329,6 +1336,23 @@ dependencies = [
  "autocfg",
  "static_assertions",
  "version_check",
+]
+
+[[package]]
+name = "spin-admin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "spin-sdk",
+]
+
+[[package]]
+name = "spin-admin-checked"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "getrandom",
+ "spin-sdk",
 ]
 
 [[package]]

@@ -461,7 +461,9 @@ visitor's data, and naming another host, to catch password reset links
 and redirects built from the `Host` header. Where your handler turns away
 a request without credentials, the review tries forged ones: a made-up
 token, a JWT nobody signed, `admin:admin`, a made-up session cookie. If one
-gets in, the review fails.
+gets in, the review fails. It also catches a token compared with `==`
+against your secret (the time it takes gives the token away one character
+at a time) and session ids made from the clock instead of random bytes.
 
 ### Spin apps
 

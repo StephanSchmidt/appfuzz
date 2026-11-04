@@ -451,8 +451,11 @@ pub(crate) enum ProbeCmd {
     ///
     /// Where the request without credentials is turned away (401, 403, a
     /// redirect), sends a made-up token, an unsigned JWT, a JWT with a
-    /// wrong signature, Basic admin:admin and made-up session cookies. Also
-    /// tries paths of stored runs that were turned away.
+    /// wrong signature, Basic admin:admin and made-up session cookies, and
+    /// prefixes of the secret the app checks them against (a comparison
+    /// that leaks timing). Sends responses with a session token again with
+    /// other random seeds (a token that is not random). Also tries paths of
+    /// stored runs that were turned away or issued a token.
     Auth {
         #[arg(long)]
         export: Option<String>,

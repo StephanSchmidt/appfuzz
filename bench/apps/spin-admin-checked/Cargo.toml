@@ -1,0 +1,13 @@
+[package]
+name = "spin-admin-checked"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+spin-sdk = "5.2"
+anyhow = "1"
+getrandom = "0.4"

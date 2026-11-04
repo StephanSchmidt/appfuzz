@@ -9,6 +9,12 @@
   unsigned JWT, a JWT with a wrong signature, `Basic admin:admin`, a
   made-up API key and session cookies. One that gets a 2xx is
   `auth_bypass` (fail). Paths the fuzzer saw turned away are tried too.
+- Where the app checks the token against a secret, `probe auth` sends the
+  secret's prefixes. Cost that grows with the correct prefix is
+  `timing_unsafe_compare` (warn): the comparison stops at the first wrong
+  character.
+- Session cookies and token fields that stay the same with other random
+  seeds are `predictable_token` (fail), made from the clock or constant.
 
 **Spin**
 

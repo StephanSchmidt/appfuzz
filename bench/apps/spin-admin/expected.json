@@ -1,0 +1,11 @@
+{
+  "app": "spin-admin",
+  "bug": "an admin API that compares its bearer token with ==: the time a wrong token takes tells how much of it is right",
+  "expect": [
+    {
+      "kind": "timing_unsafe_compare",
+      "min": "warn"
+    }
+  ],
+  "allow": []
+}

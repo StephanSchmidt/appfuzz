@@ -171,8 +171,8 @@ pub const DOCS: &[Doc] = &[
     Doc {
         path: "probe auth",
         examples: &["appfuzz probe auth"],
-        output: "the request without credentials and, where it is turned away, with forged ones (made-up token, unsigned JWT, wrong signature, Basic admin:admin, session cookies); also paths of stored runs that were turned away: those that did not end ok, findings",
-        next: "`explain <run>` for an auth_bypass finding",
+        output: "the request without credentials and, where it is turned away, with forged ones (made-up token, unsigned JWT, wrong signature, Basic admin:admin, session cookies) and prefixes of the secret it checks them against; session tokens with other random seeds; also paths of stored runs that were turned away or issued a token: those that did not end ok, findings",
+        next: "`explain <run>` for an auth_bypass, timing_unsafe_compare or predictable_token finding",
     },
     Doc {
         path: "probe pairs",
