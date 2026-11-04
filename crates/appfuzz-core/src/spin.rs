@@ -188,9 +188,11 @@ fn from_str(text: &str, dir: &Path, component: Option<&str>) -> Result<Manifest>
         m.functions.insert(crate::wasi_http::CLIENT_KEY.into(), FunctionSpec { rules: vec![rule], ..Default::default() });
     }
 
-    m.grants.hosts = c.allowed_outbound_hosts.iter().filter_map(|h| host(h, &spin.variables, &c.variables)).collect();
-    m.grants.hosts.sort();
-    m.grants.hosts.dedup();
+    let mut hosts: Vec<String> = c.allowed_outbound_hosts.iter().filter_map(|h| host(h, &spin.variables, &c.variables)).collect();
+    hosts.sort();
+    hosts.dedup();
+    // Declared even when empty: Spin then refuses every request.
+    m.grants.hosts = Some(hosts);
     Ok(m)
 }
 
@@ -338,7 +340,7 @@ greeting = "{{ greeting }}, world"
         assert_eq!(m.wasm_path(), PathBuf::from("/app/target/wasm32-wasip2/release/web.wasm"));
         assert_eq!(m.app.name.as_deref(), Some("shop"));
         assert_eq!(m.app.base.as_deref(), Some("/shop"));
-        assert_eq!(m.grants.hosts, vec!["*.cdn.example", "api.example.com", "cache.internal"]);
+        assert_eq!(m.grants.hosts.unwrap(), vec!["*.cdn.example", "api.example.com", "cache.internal"]);
         let get = |name: &str| vec![("name".to_string(), json!(name))];
         let vars = &m.functions["fermyon:spin/variables#get"];
         assert_eq!(crate::plan::result_labels_for(None, &vars.rules, &get("token")), vec![(String::new(), Label::Secret)]);
@@ -385,7 +387,7 @@ greeting = "{{ greeting }}, world"
         let two = format!("{APP}\n[[trigger.http]]\nroute = \"/admin/...\"\ncomponent = \"admin\"\n[component.admin]\nsource = \"admin.wasm\"\n");
         assert!(from_str(&two, Path::new("."), None).unwrap_err().to_string().contains("--component"));
         let m = from_str(&two, Path::new("."), Some("admin")).unwrap();
-        assert!(m.grants.hosts.is_empty());
+        assert_eq!(m.grants.hosts, Some(vec![]));
         let out = &m.functions[crate::wasi_http::CLIENT_KEY];
         assert!(crate::plan::resolve_rules(&out.rules, &[("url".to_string(), json!("https://api.example.com/"))], None).is_some(), "no host granted");
         let open = &m.functions["fermyon:spin/sqlite#[static]connection.open"];

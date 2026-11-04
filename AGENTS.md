@@ -41,6 +41,7 @@ now = "2026-11-02T10:00:00"
 [grants]                     # what the platform would grant; omit to link everything
 imports = ["acme:web/items", "acme:web/store"]
 wasi = ["wasi:cli", "wasi:clocks", "wasi:io", "wasi:random"]
+hosts = ["api.acme.example"] # hosts the app may call; others are unexpected_destination
 
 [limits]                     # production limits; findings are measured against them
 fuel = 2_000_000_000

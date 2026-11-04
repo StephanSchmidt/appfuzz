@@ -82,7 +82,7 @@ pub fn destination(url: &str, m: &Manifest) -> Option<Dest> {
     match classify(&u).0.as_str() {
         "external" | "protocol_relative" | "backslash" | "ip" => {
             let d = absolute(&u)?;
-            (d.class == Class::Internal || !granted(&d.target, &m.grants.hosts)).then_some(d)
+            (d.class == Class::Internal || !granted(&d.target, m.grants.hosts.as_deref().unwrap_or_default())).then_some(d)
         }
         "same_host" => {
             let base = m.app.base.as_deref()?.trim_end_matches('/');
@@ -199,6 +199,14 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let run = Some(r.id.as_str());
     let mut out = Vec::new();
     let mut from_binary: BTreeSet<String> = BTreeSet::new();
+    // Without grants nothing says which hosts the app may call: one
+    // written into it is a hint, and only internal ones are probing.
+    let listed = m.grants.lists_hosts();
+    let mut own = |d: &Dest, o: &Origin| {
+        if *o == Origin::Binary && (listed || d.class != Class::OffHost) {
+            from_binary.insert(d.endpoint.clone());
+        }
+    };
     let mut seen = BTreeSet::new();
     let mut report = |out: &mut Vec<Finding>, d: &Dest, o: &Origin, place: &str, how: &str, strong: bool| {
         let sev = match (o, d.class) {
@@ -206,6 +214,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             (Origin::Host(_), Class::OffHost) => return,
             (Origin::Host(_), _) => Severity::Warn,
             (Origin::Binary, Class::Internal) => Severity::Fail,
+            (Origin::Binary, Class::OffHost) if !listed => Severity::Info,
             (Origin::Binary, _) if strong => Severity::Fail,
             (Origin::Binary, _) => Severity::Warn,
         };
@@ -217,11 +226,21 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             _ => ("the app's own code".to_string(), json!("binary")),
         };
         let short: String = d.url.chars().take(100).collect();
+        let title = if sev == Severity::Info {
+            format!(
+                "{ex} {how} aimed at {} ({short}), written into the app: add `[grants] hosts = [\"{}\"]` if the platform allows it, so that other hosts are reported",
+                d.target, d.target
+            )
+        } else if d.class == Class::OffHost {
+            format!("{ex} {how} aimed at another host ({short}), which `[grants] hosts` doesn't list; the target comes from {from}")
+        } else {
+            format!("{ex} {how} aimed at {} ({short}); the target comes from {from}", d.class.says())
+        };
         out.push(Finding::new(
             "unexpected_destination",
             &format!("{ex}\0{}\0{}\0{place}", d.class.name(), d.target),
             sev,
-            format!("{ex} {how} aimed at {} ({short}); the target comes from {from}", d.class.says()),
+            title,
             json!({"url": d.url, "class": d.class.name(), "target": d.target, "where": place, "how": how, "from": src}),
             run,
         ));
@@ -234,9 +253,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             }
             let Some(d) = destination(&u.url, m) else { continue };
             let o = origin(r, &d, None);
-            if o == Origin::Binary {
-                from_binary.insert(d.endpoint.clone());
-            }
+            own(&d, &o);
             let how = match u.trigger.as_str() {
                 "load" => "a load",
                 "form" => "a form",
@@ -261,9 +278,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                         continue;
                     }
                     let o = origin(r, &d, Some(e.n));
-                    if o == Origin::Binary {
-                        from_binary.insert(d.endpoint.clone());
-                    }
+                    own(&d, &o);
                     report(&mut out, &d, &o, &e.func, &format!("calls {} with {p}", e.func), labelled || fetch);
                 }
             }
@@ -320,6 +335,33 @@ mod tests {
         assert_eq!(destination("http://10.0.0.1:6379", &m).unwrap().endpoint, "10.0.0.1:6379");
         assert_eq!(destination("http://1024", &m).unwrap().written, "1024");
         assert_eq!(destination("//u:p@Evil.example:81/x", &m).unwrap().written, "evil.example");
+    }
+
+    #[test]
+    fn hosts_written_into_the_app() {
+        let found = |grants: &str, urls: &[&str]| {
+            let m = manifest(&format!("{grants}[functions.\"a/http#fetch\"]\nparams = {{ url = \"url\" }}\n"));
+            let events = urls
+                .iter()
+                .map(|u| crate::envelope::TraceCall { func: "a/http#fetch".into(), args: json!({"url": u}).as_object().unwrap().clone(), ..Default::default() })
+                .collect();
+            let t = crate::envelope::Trace { export: "x#handle".into(), events, ..Default::default() };
+            check(&t.to_record(), &m).into_iter().map(|f| (f.kind, f.severity)).collect::<Vec<_>>()
+        };
+        let api = ["https://api.example/quote"];
+        // No host list: a hint. A list without the host: a fail.
+        assert_eq!(found("", &api), [("unexpected_destination".to_string(), Severity::Info)]);
+        assert_eq!(found("[grants]\nhosts = [\"other.example\"]\n", &api), [("unexpected_destination".to_string(), Severity::Fail)]);
+        assert!(found("[grants]\nhosts = [\"api.example\"]\n", &api).is_empty());
+        assert_eq!(found("", &["http://169.254.169.254/"])[0].1, Severity::Fail);
+        // Four APIs are no probing without a host list; four internal hosts are.
+        let four = ["https://a.example/", "https://b.example/", "https://c.example/", "https://d.example/"];
+        assert!(!found("", &four).iter().any(|(k, _)| k == "probing"));
+        assert!(found("[grants]\nhosts = []\n", &four).iter().any(|(k, _)| k == "probing"));
+        // Other grants and no hosts: none granted.
+        assert_eq!(found("[grants]\nwasi = [\"wasi:io\"]\n", &api)[0].1, Severity::Fail);
+        let internal = ["http://10.0.0.1/", "http://10.0.0.2/", "http://10.0.0.3/", "http://10.0.0.4/"];
+        assert!(found("", &internal).iter().any(|(k, _)| k == "probing"));
     }
 
     #[test]

@@ -452,7 +452,7 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                     // within reach, and none when nothing is allowed.
                     let denied = kind == "ssrf" && e.result.as_ref().and_then(|v| v.get("err")).and_then(Value::as_str) == Some("http-request-denied");
                     if denied {
-                        if m.grants.hosts.is_empty() {
+                        if m.grants.hosts.as_ref().is_none_or(Vec::is_empty) {
                             continue;
                         }
                         sev = Severity::Warn;
@@ -475,7 +475,7 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                         format!(
                             "{from} decides the host of the URL of {} (parameter {p}); the platform refused this request, but the client can still send it to any allowed host ({}) with a path of its choice: build the URL from a fixed host",
                             e.func,
-                            m.grants.hosts.join(", ")
+                            m.grants.hosts.iter().flatten().cloned().collect::<Vec<_>>().join(", ")
                         )
                     } else if kind == "escaped_by_hand" {
                         format!("{from} goes into the {noun} of {} (parameter {p}) with {intact}; pass it as a parameter or use a library", e.func)

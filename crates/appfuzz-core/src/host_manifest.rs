@@ -396,12 +396,12 @@ pub fn merge(host: &HostManifest, mut app: Manifest, app_toml: &toml::Table) -> 
         (Some(hw), None) => app.grants.wasi = Some(hw.clone()),
         _ => {}
     }
-    if !host.grants.hosts.is_empty() {
-        if let Some(x) = app.grants.hosts.iter().find(|x| !host.grants.hosts.iter().any(|h| *x == h || x.ends_with(&format!(".{h}")))) {
-            return Err(weaker("grants.hosts".into(), format!("{x:?}"), format!("{:?}", host.grants.hosts)));
+    if let Some(hosts) = host.grants.hosts.as_ref().filter(|h| !h.is_empty()) {
+        if let Some(x) = app.grants.hosts.iter().flatten().find(|x| !hosts.iter().any(|h| *x == h || x.ends_with(&format!(".{h}")))) {
+            return Err(weaker("grants.hosts".into(), format!("{x:?}"), format!("{hosts:?}")));
         }
-        if app.grants.hosts.is_empty() {
-            app.grants.hosts = host.grants.hosts.clone();
+        if app.grants.hosts.as_ref().is_none_or(Vec::is_empty) {
+            app.grants.hosts = Some(hosts.clone());
         }
     }
 

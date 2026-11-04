@@ -34,6 +34,9 @@
   pages over 4 KB.
 - `findings` and `appfuzz` (the status) show what `review` found for HTTP
   handlers, Spin apps and `wasi:keyvalue` users; before, they showed none.
+- Without a manifest, an app that calls its own API (a host written into
+  it) passes: the call is an info finding naming the `[grants] hosts` line
+  to add. With grants, a host they don't list is still a fail.
 
 **Fewer false positives**
 

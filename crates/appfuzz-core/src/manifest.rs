@@ -183,13 +183,22 @@ pub struct Grants {
     #[serde(default)]
     pub wasi: Option<Vec<String>>,
     /// Hosts the app may name as destinations: `api.example.com`, or
-    /// `example.com` for it and its subdomains.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hosts: Vec<String>,
+    /// `example.com` for it and its subdomains (see `lists_hosts`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
     /// Capabilities of the platform the app asks for, by name; each grants
     /// the interfaces `platform.toml` lists for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
+}
+
+impl Grants {
+    /// Whether the platform says which hosts the app may call: in `hosts`,
+    /// or by listing other grants and no hosts (it grants none). Without
+    /// any grants a host written into the app is a hint.
+    pub fn lists_hosts(&self) -> bool {
+        self.hosts.is_some() || self.imports.is_some() || self.wasi.is_some() || self.capabilities.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

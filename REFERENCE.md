@@ -741,6 +741,12 @@ arrives as that code; any other
 text arrives as `internal-error` with the text. A method or scheme the
 types reject, or an empty authority, fails before any host call.
 
+A host written into the app (`https://api.example/quote`) that `[grants]
+hosts` doesn't list is `unexpected_destination`, a fail. Without any
+`[grants]` (no manifest, say) it is info, naming the line to add; a
+manifest that lists other grants and no hosts grants none. Addresses in
+the internal network are a fail either way.
+
 ### Spin apps (`spin.toml`)
 
 Without `appfuzz.toml`, appfuzz reads `spin.toml` from the current
