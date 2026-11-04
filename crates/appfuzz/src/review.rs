@@ -4,7 +4,7 @@
 use crate::{Cli, Cmd, ProbeCmd, RunArgs, SpecArgs, finding_json, load_manifest};
 use anyhow::Result;
 use appfuzz_core::{
-    detect::{FindingStore, Severity},
+    detect::{Finding, FindingStore, Severity},
     fuzz::Corpus,
     harness::App,
     record::OutcomeKind,
@@ -38,6 +38,124 @@ pub struct Session {
     pub complete: bool,
     pub verdict: String,
     pub runs: Vec<String>,
+    /// The app file reviewed: a later build of it checks these findings
+    /// again. Empty for sessions written before it was kept.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub wasm: String,
+}
+
+/// The app file a review is of, as the session keeps it.
+pub(crate) fn wasm_id(path: std::path::PathBuf) -> String {
+    std::fs::canonicalize(&path).unwrap_or(path).display().to_string()
+}
+
+/// Reviews of this app file, on any build, newest first.
+pub(crate) fn sessions(state: &std::path::Path, wasm: &str) -> Result<Vec<Session>> {
+    let dir = match std::fs::read_dir(state.join("reviews")) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = Vec::new();
+    for e in dir {
+        let e = e?;
+        if e.path().extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        let Ok(s) = serde_json::from_slice::<Session>(&std::fs::read(e.path())?) else { continue };
+        if s.wasm == wasm {
+            out.push((e.metadata()?.modified()?, s));
+        }
+    }
+    out.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+    Ok(out.into_iter().map(|(_, s)| s).collect())
+}
+
+/// Fail and warn findings of reviews on other builds or contracts, newest
+/// first and one per id, each with the build it was found on. Ids in
+/// `current` are this build's own.
+pub(crate) fn earlier_findings(
+    state: &std::path::Path,
+    sessions: &[Session],
+    component: &str,
+    contract: &str,
+    current: &[Finding],
+) -> Result<Vec<(Finding, String)>> {
+    let mut seen: std::collections::BTreeSet<String> = current.iter().map(|f| f.id.clone()).collect();
+    let mut out = Vec::new();
+    for s in sessions.iter().filter(|s| s.component != component || s.contract != contract) {
+        for f in FindingStore::new(state, &appfuzz_core::manifest::state_key(&s.component, &s.contract)).all()? {
+            let case = f.detail["sequence_case"] == true || f.detail["acceptance_case"] == true;
+            if f.severity > Severity::Info && f.run.is_some() && !case && seen.insert(f.id.clone()) {
+                out.push((f, s.component.clone()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Findings of earlier builds of this app: their inputs run on this one, so
+/// a fix shows as a finding not found again. One that shows is a finding of
+/// this review; an input this build can't take is skipped. Rows get their
+/// `status` once the review's findings are known (`found` says the rerun
+/// showed it).
+fn recheck_earlier(
+    cli: &Cli,
+    app: &App,
+    executable: bool,
+    (root, store): (&RunStore, &RunStore),
+    findings: &FindingStore,
+    current: &[Finding],
+) -> Result<Vec<Value>> {
+    if !executable {
+        return Ok(Vec::new());
+    }
+    let sessions = sessions(&cli.state, &wasm_id(app.manifest.wasm_path()))?;
+    let mut rows = Vec::new();
+    for (f, build) in earlier_findings(&cli.state, &sessions, &app.hash, &app.contract, current)? {
+        let mut row = json!({"id": f.id, "kind": f.kind, "severity": f.severity, "title": f.title, "build": build});
+        match crate::cases::recheck(app, root, store, &f) {
+            Ok(c) => {
+                findings.add(&c.findings)?;
+                row["found"] = json!(c.found);
+            }
+            Err(e) => {
+                row["status"] = json!("not_rerun");
+                row["reason"] = json!(format!("{e:#}"));
+            }
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+/// An earlier finding is found again when the rerun showed it or the review
+/// found it otherwise.
+fn settle(rows: &mut [Value], all: &[Finding]) {
+    for row in rows.iter_mut().filter(|r| r["status"].is_null()) {
+        let found = row.as_object_mut().and_then(|o| o.remove("found")) == Some(json!(true));
+        row["status"] = json!(if found || all.iter().any(|f| f.id == row["id"]) { "found_again" } else { "not_found" });
+    }
+}
+
+/// `findings` on a build that has no review yet: the last review was of
+/// another build, and `review` checks its fail and warn findings here.
+pub(crate) fn note_rebuild(state: &std::path::Path, m: &appfuzz_core::manifest::Manifest, hash: &str, current: &[Finding], out: &mut Value) -> Result<()> {
+    let contract = m.fingerprint();
+    let sessions = sessions(state, &wasm_id(m.wasm_path()))?;
+    if sessions.iter().any(|s| s.component == hash && s.contract == contract) {
+        return Ok(());
+    }
+    let earlier = earlier_findings(state, &sessions, hash, &contract, current)?;
+    if !earlier.is_empty() {
+        out["earlier_builds"] = json!(earlier.len());
+        out["note"] = json!(format!(
+            "the app changed since it was last reviewed; earlier reviews found {} fail or warn findings, and `appfuzz review` checks them on this build",
+            earlier.len()
+        ));
+        out["next"] = json!(["appfuzz review --time 2m"]);
+    }
+    Ok(())
 }
 
 /// The CLI for one step of a review: the caller's options, the review's
@@ -277,6 +395,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
             }
         }
     }
+    let mut earlier = recheck_earlier(cli, &app, executable, (&root_store, &store), &findings, &root_findings.all()?)?;
     let mut todo = findings.all()?;
     todo.sort_by_key(|f| std::cmp::Reverse(f.severity));
     for f in todo.iter().filter(|f| f.severity > Severity::Info && f.run.is_some()).take(o.confirm) {
@@ -298,6 +417,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
     }
     let mut all = findings.all()?;
     all.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.kind.cmp(&b.kind)));
+    settle(&mut earlier, &all);
     let count = |s| all.iter().filter(|f| f.severity == s).count();
     let (fail, warn) = (count(Severity::Fail), count(Severity::Warn));
     let complete = errors.is_empty() && executable && fuzz.is_some();
@@ -327,6 +447,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
         complete,
         verdict: verdict.into(),
         runs: runs.iter().map(|r| r.id.clone()).collect(),
+        wasm: wasm_id(app.manifest.wasm_path()),
     };
     let dir = cli.state.join("reviews");
     std::fs::create_dir_all(&dir)?;
@@ -338,6 +459,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
         "status": if complete { "complete" } else { "incomplete" }, "verdict": verdict, "exit_code": code,
         "counts": {"fail": fail, "warn": warn, "info": count(Severity::Info), "confirmed": confirmed},
         "findings": all.iter().filter(|f| f.severity >= o.min).map(finding_json).collect::<Vec<_>>(),
+        "earlier_builds": earlier,
         "coverage": {"kind": if fuzz.as_ref().is_some_and(|v|v["feedback"]["mode"]=="internal") {"internal_and_boundary_features"}else{"host_boundary_and_output_features"},
             "internal_feedback":fuzz.as_ref().map(|v| &v["feedback"]), "faults":fuzz.as_ref().map(|v| &v["faults"]), "fuzz_runs": fuzz.as_ref().map(|v| &v["runs"]),
             "host_value_contracts":appfuzz_core::value_contract::coverage(&app,&runs),

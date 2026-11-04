@@ -373,6 +373,11 @@ pub fn strip_version(name: &str) -> &str {
 
 /// The key appfuzz uses for a host function: `interface#function`, without
 /// the interface version.
+/// Where runs, corpora and findings of one build under one contract live.
+pub fn state_key(component: &str, contract: &str) -> String {
+    blake3::hash(format!("{component}:{contract}").as_bytes()).to_hex().to_string()
+}
+
 pub fn fn_key(interface: &str, func: &str) -> String {
     if interface.is_empty() { func.to_string() } else { format!("{}#{func}", strip_version(interface)) }
 }
@@ -408,7 +413,7 @@ impl Manifest {
     }
 
     pub fn state_key(&self, component: &str) -> String {
-        blake3::hash(format!("{component}:{}", self.fingerprint()).as_bytes()).to_hex().to_string()
+        state_key(component, &self.fingerprint())
     }
 
     pub fn load(path: &Path) -> Result<Self> {

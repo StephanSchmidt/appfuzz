@@ -157,7 +157,8 @@ pub(crate) enum Cmd {
     Replay {
         #[arg(default_value = "last")]
         run: String,
-        /// Regression check on the current build/contract (requires a case file).
+        /// Regression check on the current build/contract: a case file, or a
+        /// stored run whose findings are checked again.
         #[arg(long)]
         against_current: bool,
     },

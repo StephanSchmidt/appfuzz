@@ -635,6 +635,23 @@ impl FindingStore {
         FindingStore { path: state.join("findings").join(format!("{component}.json")) }
     }
 
+    /// The findings of every build and contract in a state folder.
+    pub fn everywhere(state: &std::path::Path) -> anyhow::Result<Vec<Finding>> {
+        let dir = match std::fs::read_dir(state.join("findings")) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for e in dir {
+            let path = e?.path();
+            if path.extension().is_some_and(|x| x == "json") {
+                out.extend(FindingStore { path }.all()?);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn all(&self) -> anyhow::Result<Vec<Finding>> {
         use anyhow::Context;
         let bytes = match std::fs::read(&self.path) {

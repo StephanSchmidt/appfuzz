@@ -125,10 +125,8 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             Ok(json!({"run": r.id, "stdout": r.stdout, "stderr": r.stderr}))
         }
         Cmd::Replay { run, against_current } if run.ends_with(".json") && Path::new(run).exists() => cases::replay(load()?, &store, run, *against_current),
-        Cmd::Replay { run, against_current } => {
-            if *against_current {
-                bail!("--against-current requires a confirmed case file");
-            }
+        Cmd::Replay { run, against_current: true } => cases::replay_run(&cli, load()?, &store, run),
+        Cmd::Replay { run, .. } => {
             let old = store.load(run)?;
             let app = load()?;
             let new = app.run(&old.spec);
@@ -571,7 +569,9 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let min = severity(min)?;
             let mut all: Vec<Finding> = FindingStore::new(&cli.state, &m.state_key(&hash)).all()?.into_iter().filter(|f| f.severity >= min).collect();
             all.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.kind.cmp(&b.kind)));
-            Ok(json!({"count": all.len(), "findings": all.iter().map(finding_json).collect::<Vec<_>>()}))
+            let mut out = json!({"count": all.len(), "findings": all.iter().map(finding_json).collect::<Vec<_>>()});
+            review::note_rebuild(&cli.state, &m, &hash, &all, &mut out)?;
+            Ok(out)
         }
         Cmd::Wasm { cmd } => {
             let m = load_manifest(&cli)?;

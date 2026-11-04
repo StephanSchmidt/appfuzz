@@ -133,7 +133,7 @@ pub const DOCS: &[Doc] = &[
     },
     Doc {
         path: "replay",
-        examples: &["appfuzz replay last", "appfuzz replay .appfuzz/cases/f8d860089.json"],
+        examples: &["appfuzz replay last", "appfuzz replay .appfuzz/cases/f8d860089.json", "appfuzz replay <run> --against-current"],
         output: "exact historical replay, or regression with --against-current; errors exit 3, never count as a fix",
         next: "`diff <old> <new>` when it changed",
     },
@@ -356,7 +356,7 @@ pub const WORKFLOWS: &[(&str, &[&str])] = &[
     ),
     ("cost and fan-out", &["appfuzz amplify", "appfuzz scale fn:<host fn>", "appfuzz wasm loops"]),
     ("reach more code", &["appfuzz unexplored", "appfuzz run --set '{\"query\": [[\"<key>\", \"<hinted value>\"]]}'", "appfuzz fuzz"]),
-    ("after a fix", &["appfuzz replay .appfuzz/cases/<finding id>.json --against-current", "appfuzz review"]),
+    ("after a fix", &["appfuzz review", "appfuzz replay .appfuzz/cases/<finding id>.json --against-current", "appfuzz replay <run> --against-current"]),
 ];
 
 pub const NOTES: &[&str] = &[

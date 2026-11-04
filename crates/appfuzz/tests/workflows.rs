@@ -1205,3 +1205,41 @@ fn platform_wasi_is_simulated() {
     let (_, i) = f.cli(&["inspect"]);
     assert!(i["imports"].as_array().unwrap().iter().all(|i| i["kind"] == "platform"), "{i}");
 }
+#[test]
+fn a_rebuild_is_checked_against_the_findings_of_the_last_one() {
+    let f = Fixture::new(false);
+    let wit = "package test:workflow; world app { export run: func(n: u32) -> u32; }";
+    let build = |pad: bool, crash: bool| {
+        let check = if crash { "(if (i32.gt_u (local.get 0) (i32.const 1000)) (then unreachable))" } else { "" };
+        let pad = if pad { "(func $pad (result i32) (i32.const 7)) (func (export \"other\") (result i32) (call $pad))" } else { "" };
+        let wat = format!(r#"(module (memory (export "memory") 1) {pad} (func (export "run") (param i32) (result i32) {check} (local.get 0)))"#);
+        let wit = if pad.is_empty() { wit.to_string() } else { wit.replace("export run", "export other: func() -> u32; export run") };
+        std::fs::write(f.dir.join("app.wasm"), component(&wit, &wat)).unwrap();
+    };
+    build(false, true);
+    let (code, r) = f.review();
+    assert_eq!(code, 2, "{r}");
+    let crash = r["findings"].as_array().unwrap().iter().find(|x| x["kind"] == "crash").unwrap_or_else(|| panic!("{r}")).clone();
+    let run = crash["run"].as_str().unwrap();
+    // The fix: findings say the last review was of another build.
+    build(false, false);
+    let (_, listed) = f.cli(&["findings"]);
+    assert!(listed["earlier_builds"].as_u64().unwrap() >= 1, "{listed}");
+    let (code, r) = f.cli(&["replay", run]);
+    assert_eq!(code, 3, "{r}");
+    assert!(r["error"].as_str().unwrap().contains("--against-current"), "{r}");
+    let (code, r) = f.cli(&["replay", run, "--against-current"]);
+    assert_eq!(code, 0, "{r}");
+    let row = |r: &Value, key: &str| r[key].as_array().unwrap().iter().find(|x| x["id"] == crash["id"]).unwrap_or_else(|| panic!("{r}")).clone();
+    assert_eq!(row(&r, "before")["found_again"], false, "{r}");
+    let (code, r) = f.review();
+    assert_eq!(code, 0, "{r}");
+    assert_eq!(row(&r, "earlier_builds")["status"], "not_found", "{r}");
+    // It breaks again elsewhere in the code: the crash has another site.
+    build(true, true);
+    let (code, r) = f.review();
+    assert_eq!(code, 2, "{r}");
+    assert_eq!(row(&r, "earlier_builds")["status"], "found_again", "{r}");
+    let (code, r) = f.cli(&["replay", run, "--against-current"]);
+    assert_eq!(code, 2, "{r}");
+}

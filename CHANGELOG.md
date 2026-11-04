@@ -42,6 +42,16 @@
   it) passes: the call is an info finding naming the `[grants] hosts` line
   to add. With grants, a host they don't list is still a fail.
 
+**Checking a fix**
+
+- After a rebuild, `review` runs the inputs of earlier reviews' fail and
+  warn findings again and lists each as found again or not. `findings` on
+  the new build says it has no review yet, and how many findings earlier
+  reviews had.
+- `replay <run> --against-current` runs a stored run on the current build
+  and says whether its findings show again (exit 2 if one does). Before,
+  only case files could, and the error for a run named a flag runs refused.
+
 **Fewer false positives**
 
 - `error_ignored` is not reported when the page was already an error page,

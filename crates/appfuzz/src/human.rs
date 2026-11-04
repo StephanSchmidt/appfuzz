@@ -112,6 +112,9 @@ fn render(st: &Style, path: &str, out: &Value) -> String {
         "findings" => {
             let n = out["count"].as_u64().unwrap_or(0);
             let _ = writeln!(s, "{} {}", st.badge("1;30;46", "FINDINGS"), st.bold(&format!("{n} finding{}", if n == 1 { "" } else { "s" })));
+            if let Some(note) = out["note"].as_str() {
+                let _ = writeln!(s, "  {}", wrap(note, 2, st.cols));
+            }
             findings(st, out, &mut s);
         }
         "explain" | "show" if out.get("vs_stored_runs").is_some() => explain(st, out, &mut s),
@@ -148,6 +151,18 @@ fn review(st: &Style, out: &Value, s: &mut String) {
     }
     let _ = writeln!(s, "       {}", counts.join(&st.dim(" · ")));
     findings(st, out, s);
+    let earlier: Vec<&Value> = out["earlier_builds"].as_array().into_iter().flatten().collect();
+    if !earlier.is_empty() {
+        let _ = writeln!(s, "\n{}", st.bold("Found on an earlier build"));
+    }
+    for f in earlier {
+        let (mark, says) = match f["status"].as_str() {
+            Some("not_found") => (st.paint("1;32", "✓"), "not found again".to_string()),
+            Some("found_again") => (st.paint("1;31", "✗"), "found again".to_string()),
+            _ => (st.dim("–"), format!("not rerun: {}", f["reason"].as_str().unwrap_or(""))),
+        };
+        let _ = writeln!(s, "  {mark} {} {}  {}", st.bold(f["kind"].as_str().unwrap_or("")), st.dim(f["id"].as_str().unwrap_or("")), says);
+    }
     for e in out["errors"].as_array().into_iter().flatten() {
         let _ = writeln!(s, "  {} {}", st.paint("1;35", "✗ error"), e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string()));
     }

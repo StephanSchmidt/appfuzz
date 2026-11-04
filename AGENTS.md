@@ -355,11 +355,15 @@ search; `--host-seed` (`--seed`) controls generated results and guest randomness
 `review` accepts request/host-plan options and `--runs`. `--time` covers its
 fuzz phase; probes, scaling, regression inputs and confirmations are additional.
 Use `-j 1 --fresh --runs N` for repeatable search choices. Previously found
-failure inputs are re-evaluated even with `--fresh`.
+failure inputs are re-evaluated even with `--fresh`. After a rebuild, `review`
+re-runs the inputs of earlier reviews' fail and warn findings and lists each
+under `earlier_builds` as `found_again` or `not_found`: that is how to check a
+fix.
 
 `check` exits 2 on a counterexample, 3 on an unexercised selector or error.
-An unexercised selector has `holds: null`, not true. `replay case.json` requires
-the original build and contract; use `--against-current` after changing either.
+An unexercised selector has `holds: null`, not true. `replay case.json` and
+`replay <run>` require the original build and contract; use `--against-current`
+after changing either.
 Regression replay exits 2 if the original finding persists, 0 if it is absent,
 and 3 if execution failed. Comparison cases execute their comparison recipe.
 

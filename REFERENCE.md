@@ -26,6 +26,18 @@ found failure inputs for the same build and contract; `--fresh` resets the
 search corpus, not those regression inputs. Incompatible old cache entries are
 ignored. A required analysis error produces `incomplete`, never `pass`.
 
+After a rebuild or a manifest change, review also re-runs the inputs of the
+fail and warn findings of earlier reviews of the same app file, and lists each
+under `earlier_builds`: `found_again` (it is among this review's findings),
+`not_found`, or `not_rerun` with the reason (an input the new build can't take).
+A crash on the same input counts as found again even when it moved in the code.
+`findings` on a build that has no review yet says how many fail and warn
+findings earlier reviews had.
+
+`replay <run> --against-current` runs a stored run's input on the current build
+and checks the fail and warn findings it showed: `before` lists each with
+`found_again`, and the exit code is that of case replay.
+
 | Exit | Review | Property check | Case replay |
 |---|---|---|---|
 | 0 | Complete, no warnings/failures | Exercised, no counterexample | Reproduced exactly; or absent in `--against-current` mode |

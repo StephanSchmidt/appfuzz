@@ -521,6 +521,16 @@ impl App {
         }
     }
 
+    /// Moves a spec saved for another build or contract onto this one, with
+    /// this manifest's limits: the same input, judged by the current app.
+    pub fn rebase(&self, spec: &mut RunSpec) {
+        spec.component.clone_from(&self.hash);
+        spec.contract.clone_from(&self.contract);
+        spec.fuel = self.manifest.limits.fuel.saturating_mul(5);
+        spec.memory = self.manifest.limits.memory.saturating_mul(4);
+        spec.ns_per_fuel = self.manifest.limits.ns_per_fuel;
+    }
+
     /// Arguments from the manifest's `[entry] request`, with clock fields
     /// set to `now`.
     pub fn default_args(&self, export: &FuncInfo, now: &str) -> Result<Vec<Value>> {
@@ -608,7 +618,11 @@ impl App {
         feedback: &mut crate::feedback::Feedback,
     ) -> Result<()> {
         if spec.component != self.hash {
-            bail!("spec is for component {}, this is {}", spec.component, self.hash);
+            bail!(
+                "spec is for component {}, this is {}: the app was rebuilt; `replay RUN --against-current` runs the input on this build",
+                spec.component,
+                self.hash
+            );
         }
         if spec.contract != self.contract {
             bail!("saved run uses a different platform contract or engine; use replay --against-current for a regression check");
