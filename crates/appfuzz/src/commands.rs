@@ -5,6 +5,7 @@ pub(super) fn run(cli: Cli) -> Result<Value> {
     run_with_app(cli, None)
 }
 
+#[allow(clippy::too_many_lines, reason = "one match arm per CLI command")]
 pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
     let owned = std::cell::OnceCell::new();
     let load = || -> Result<&App> {

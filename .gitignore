@@ -11,6 +11,10 @@
 !/Cargo.toml
 !/Cargo.lock
 !/rustfmt.toml
+!/clippy.toml
+!/deny.toml
+!/_typos.toml
+!/.gitleaks.toml
 !/crates/
 !/website/
 !/demos/

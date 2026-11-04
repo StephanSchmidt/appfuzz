@@ -1,0 +1,17 @@
+[files]
+extend-exclude = [
+    # Vendored upstream interface files: keep them byte-identical.
+    "crates/appfuzz-core/platforms/fastly/witx/",
+    "**/deps/*.wit",
+    # Slides use German class names (titel, foto, vollbild).
+    "website/appos/",
+]
+
+[default]
+# Base64 blobs in bench fixtures.
+extend-ignore-re = ['''[A-Za-z0-9+/]{40,}={0,2}''']
+
+[default.extend-words]
+retrun = "retrun" # test: a misspelled plan key must be rejected
+caf = "caf"       # test: "caf\u{e9}"
+wdth = "wdth"     # CSS font-variation axis

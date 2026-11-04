@@ -22,3 +22,26 @@ jobs:
           (cd demos/fastly-hello && cargo fmt --all --check)
       - run: cargo clippy --all-targets --release -- -D warnings
       - run: cargo test --release
+
+  # Supply chain, secrets, unused dependencies, spelling. Configs at the
+  # repo root: deny.toml, .gitleaks.toml, _typos.toml.
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks scans the whole history
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+      - name: gitleaks
+        run: |
+          set -euo pipefail
+          v=8.30.1
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v$v/gitleaks_${v}_linux_x64.tar.gz" | tar -xz gitleaks
+          ./gitleaks git --redact --no-banner .
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      - run: cargo machete crates
+      - uses: crate-ci/typos@v1.52.0

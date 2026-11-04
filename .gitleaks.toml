@@ -1,0 +1,9 @@
+# Default rules plus allowlisted test fixtures. appfuzz generates fake
+# secrets on purpose (secret markers, canaries); list each fixture exactly.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "fake keys in unit tests"
+regexTarget = "match"
+regexes = ['''sk_live_0123456789''']
