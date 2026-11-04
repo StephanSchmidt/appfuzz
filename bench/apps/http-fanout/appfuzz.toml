@@ -1,0 +1,21 @@
+# appfuzz bench app: http-fanout (four upstream requests at once).
+[app]
+wasm = "../../target/wasm32-wasip2/release/http_fanout.wasm"
+name = "http-fanout"
+
+[entry]
+export = "wasi:http/incoming-handler#handle"
+request = { method = "GET", uri = "https://app.example/", headers = [], body = "" }
+now = "2026-11-02T10:00:00"
+
+[grants]
+hosts = ["prices.example"]
+
+[limits]
+fuel = 200_000_000
+memory = "64MiB"
+cost_per_request = 100
+max_latency_ms = 200
+
+[functions."wasi:http/outgoing-handler#handle"]
+latency_ms = 60.0

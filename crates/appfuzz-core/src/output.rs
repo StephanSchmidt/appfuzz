@@ -21,6 +21,8 @@ pub struct Response {
     pub body: Option<String>,
     /// The body was a list of bytes that is not UTF-8.
     pub body_not_utf8: bool,
+    /// The body's length in bytes.
+    pub body_len: Option<usize>,
     pub headers: Vec<(String, String)>,
     /// The manifest says, or the body looks like, HTML.
     pub html: bool,
@@ -42,9 +44,13 @@ pub fn response(r: &RunRecord, m: &Manifest) -> Response {
         None => Some(result),
     };
     match body {
-        Some(Value::String(s)) => out.body = Some(s.clone()),
+        Some(Value::String(s)) => {
+            out.body = Some(s.clone());
+            out.body_len = Some(s.len());
+        }
         Some(Value::Array(a)) if !a.is_empty() && a.iter().all(|x| x.as_u64().is_some_and(|n| n < 256)) => {
             let bytes: Vec<u8> = a.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect();
+            out.body_len = Some(bytes.len());
             match String::from_utf8(bytes) {
                 Ok(s) => out.body = Some(s),
                 Err(e) => {
@@ -263,8 +269,33 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             break;
         }
     }
-    if resp.body_not_utf8 {
+    let header = |name: &str| resp.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.trim());
+    // Bytes are fine where the response says it sends bytes (an image, a
+    // download); as text a browser shows replacement characters.
+    let text_type = header("content-type").is_none_or(|ct| {
+        let ct = ct.to_ascii_lowercase();
+        ct.starts_with("text/") || ["json", "xml", "html", "javascript", "charset="].iter().any(|t| ct.contains(t))
+    });
+    if resp.body_not_utf8 && text_type {
         out.push(Finding::new("invalid_response", &format!("{ex}\0utf8"), Severity::Warn, format!("{ex} returns a body that is not UTF-8"), json!({}), run));
+    }
+    // A Content-Length that disagrees with the body: the platform cuts the
+    // response short or fails it, and a proxy may read the rest as the next
+    // response. HEAD, 1xx, 204 and 304 send no body.
+    let head = r.spec.args.first().and_then(|a| a.get("method")).and_then(Value::as_str).is_some_and(|m| m.eq_ignore_ascii_case("HEAD"));
+    let bodiless = head || resp.status.is_some_and(|s| (100..200).contains(&s) || s == 204 || s == 304);
+    if let (Some(cl), Some(len)) = (header("content-length"), resp.body_len)
+        && !bodiless
+        && cl.parse::<usize>().ok() != Some(len)
+    {
+        out.push(Finding::new(
+            "invalid_response",
+            &format!("{ex}\0content-length"),
+            Severity::Fail,
+            format!("{ex} sends Content-Length {cl} with a body of {len} bytes"),
+            json!({"content_length": cl, "body_bytes": len}),
+            run,
+        ));
     }
     let Some(body) = resp.body.as_deref() else { return out };
     let body = &body[..body.len().min(1 << 20)];

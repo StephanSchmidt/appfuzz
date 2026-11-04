@@ -137,6 +137,13 @@ struct Host {
     ns_per_fuel: f64,
     events: Vec<HostCall>,
     calls: BTreeMap<String, u32>,
+    /// When the next host call started, if before it was answered: an
+    /// outgoing HTTP request is in flight from `handle` until the guest
+    /// waits for it, alongside the guest's work and other requests.
+    call_started_ns: Option<u64>,
+    /// How long the next host call may take before it times out (an
+    /// outgoing request's `first-byte-timeout`).
+    call_deadline_ns: Option<u64>,
     plan_error: Option<String>,
     host_trap: Option<String>,
     limiter: Limiter,
@@ -648,6 +655,8 @@ impl App {
             ns_per_fuel: spec.ns_per_fuel,
             events: vec![],
             calls: BTreeMap::new(),
+            call_started_ns: None,
+            call_deadline_ns: None,
             plan_error: None,
             host_trap: None,
             limiter: Limiter { max: spec.memory, peak: 0, hit: false },
@@ -677,11 +686,12 @@ impl App {
                     // The request record becomes an incoming request; the
                     // response set on the outparam becomes the result.
                     let request = spec.args.first().cloned().unwrap_or(Value::Null);
-                    let ty = export.ty.results().next().context("handler result type")?;
-                    match http::call_handler(&mut store, func, &request)? {
-                        Ok(response) => Ok(vec![json_to_val(&response, &ty).context("handler response")?]),
-                        Err(e) => Err(e),
-                    }
+                    // The response JSON is the result as it is: the carrier
+                    // type has no place for binary bodies or trailers.
+                    http::call_handler(&mut store, func, &request)?.map(|response| {
+                        store.data_mut().http.result = Some(response);
+                        vec![]
+                    })
                 } else {
                     let mut results = vec![Val::Bool(false); export.ty.results().len()];
                     func.call(&mut store, &args, &mut results).and_then(|()| http::flush(&mut store)).map(|()| results)
@@ -720,6 +730,7 @@ impl App {
         match call {
             // A plain module's result is the response it sent, if any.
             Ok(_) if matches!(self.pre, Pre::Core { .. }) => record.result = store.data_mut().handles.response.take(),
+            Ok(_) if crate::wasi_http::is_handler(&export) => record.result = store.data_mut().http.result.take(),
             Ok(status) if let Pre::Extism { abi, .. } = &self.pre => {
                 let status = match status.first() {
                     Some(Val::S32(s)) => *s,
@@ -998,11 +1009,23 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     }
     let generated = matches!(resolved.decision, Decision::Generate(_));
     let latency_ms = resolved.latency_ms.unwrap_or_else(|| platform.latency_ms.get(key).copied().unwrap_or(1.0));
-    let latency_ns = (latency_ms * 1_000_000.0) as u64;
+    let mut latency_ns = (latency_ms * 1_000_000.0) as u64;
+    // A request the guest gave a timeout fails when the timeout runs out.
+    if let Some(d) = data.call_deadline_ns.take()
+        && latency_ns > d
+    {
+        latency_ns = d;
+        resolved.decision = Decision::Return(serde_json::json!({ "err": "connection-read-timeout" }));
+        resolved.source = "timeout".into();
+    }
     let cost = resolved.cost.unwrap_or_else(|| platform.cost.get(key).copied().unwrap_or(1));
+    // A call in flight since `started` is ready at `started + latency`; the
+    // guest waits only for what is left (requests sent together overlap).
+    let started = data.call_started_ns.take();
     let t_ns = data.clock.with(|c| {
-        let t = c.elapsed_ns();
-        c.host_ns += latency_ns;
+        let now = c.elapsed_ns();
+        let t = started.map_or(now, |s| s.min(now));
+        c.host_ns += (t + latency_ns).saturating_sub(now);
         t
     });
 

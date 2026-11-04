@@ -126,8 +126,8 @@ pub fn default_manifest(manifest: &mut Manifest, imports: &[Interface], exports:
             }
         }
     }
-    if imports.iter().any(|i| is_client(&i.name)) && manifest.function(CLIENT_KEY).is_none() {
-        let spec: FunctionSpec = toml::from_str(
+    if imports.iter().any(|i| is_client(&i.name)) {
+        let defaults: FunctionSpec = toml::from_str(
             r#"
 description = "Sends an HTTP request and waits for the response."
 params = { url = "url", headers = "secret" }
@@ -135,7 +135,27 @@ values = { status = "range:100..599" }
 "#,
         )
         .context("default outgoing-handler spec")?;
-        manifest.functions.insert(CLIENT_KEY.into(), spec);
+        // A manifest section keeps what it sets (a latency, its own labels);
+        // what it leaves out comes from the defaults.
+        let key = manifest
+            .functions
+            .keys()
+            .find(|k| {
+                let (i, f) = k.split_once('#').unwrap_or(("", k));
+                crate::manifest::fn_key(i, f) == CLIENT_KEY
+            })
+            .cloned()
+            .unwrap_or_else(|| CLIENT_KEY.into());
+        let spec = manifest.functions.entry(key).or_default();
+        if spec.description.is_none() {
+            spec.description = defaults.description;
+        }
+        if spec.params.is_empty() {
+            spec.params = defaults.params;
+        }
+        if spec.values.is_empty() {
+            spec.values = defaults.values;
+        }
     }
     Ok(())
 }

@@ -1,0 +1,6 @@
+{
+  "app": "http-fanout",
+  "bug": "none: four upstream requests sent together and awaited together take as long as the slowest, not the sum",
+  "expect": [],
+  "allow": []
+}

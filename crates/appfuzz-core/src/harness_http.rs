@@ -62,6 +62,9 @@ pub(super) struct Http {
     /// What the handler set as its response, and that response's body.
     response: Arc<Mutex<Option<Response>>>,
     response_body: Option<Buffer>,
+    /// The handler's response as the run's result: a string body for text,
+    /// a list of bytes otherwise, and trailers if any.
+    pub(super) result: Option<Value>,
 }
 
 impl Default for Http {
@@ -76,12 +79,17 @@ impl Default for Http {
             sent: 0,
             response: Arc::default(),
             response_body: None,
+            result: None,
         }
     }
 }
 
 struct Pending {
     seq: u64,
+    /// Virtual time when the guest sent it.
+    sent_ns: u64,
+    /// How long the guest lets it take: connect plus first-byte timeout.
+    deadline_ns: Option<u64>,
     method: String,
     url: String,
     headers: Vec<(String, String)>,
@@ -138,6 +146,8 @@ impl OutputStream for BufferStream {
 #[derive(PartialEq)]
 enum End {
     Finished,
+    /// Finished with trailers.
+    Trailers(http::HeaderMap),
     /// Still open: the guest holds the body.
     Open,
     Aborted,
@@ -153,7 +163,7 @@ fn end_of(body: &mut HyperOutgoingBody) -> End {
             Some(None) => return End::Finished,
             Some(Some(Err(_))) => return End::Aborted,
             // Trailers end the body; data frames cannot come (the stream was replaced).
-            Some(Some(Ok(f))) if f.is_trailers() => return End::Finished,
+            Some(Some(Ok(f))) if f.is_trailers() => return f.into_trailers().map_or(End::Finished, End::Trailers),
             Some(Some(Ok(_))) => {}
         }
     }
@@ -248,8 +258,17 @@ pub(super) fn link(linker: &mut Linker<Host>) -> Result<()> {
     })?;
 
     let mut out = linker.instance(&format!("wasi:http/outgoing-handler@{VERSION}"))?;
-    out.func_wrap("handle", |mut store: StoreContextMut<'_, Host>, (req, _options): (Resource<HostOutgoingRequest>, Option<Resource<RequestOptions>>)| {
-        Ok((send(&mut store, req)?,))
+    out.func_wrap("handle", |mut store: StoreContextMut<'_, Host>, (req, options): (Resource<HostOutgoingRequest>, Option<Resource<RequestOptions>>)| {
+        // The response must start within connect + first-byte timeout; a
+        // connect timeout alone says nothing about a whole response.
+        let deadline_ns = match options {
+            Some(o) => {
+                let o = store.data_mut().table.delete(o)?;
+                o.first_byte_timeout.map(|f| (f + o.connect_timeout.unwrap_or_default()).as_nanos() as u64)
+            }
+            None => None,
+        };
+        Ok((send(&mut store, req, deadline_ns)?,))
     })?;
     Ok(())
 }
@@ -259,8 +278,11 @@ pub(super) fn link(linker: &mut Linker<Host>) -> Result<()> {
 fn send(
     store: &mut StoreContextMut<'_, Host>,
     id: Resource<HostOutgoingRequest>,
+    deadline_ns: Option<u64>,
 ) -> wasmtime::Result<Result<Resource<HostFutureIncomingResponse>, wt::ErrorCode>> {
     let rep = id.rep();
+    Host::sync_guest_time(store);
+    let sent_ns = store.data().clock.with(|c| c.elapsed_ns());
     let host = store.data_mut();
     let req = host.table.delete(id)?;
     let buffer = host.http.requests.remove(&rep);
@@ -290,8 +312,15 @@ fn send(
     let headers =
         http::HeaderMap::from(req.headers).iter().map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())).collect();
     host.http.sent += 1;
-    let pending =
-        Pending { seq: host.http.sent, method, url: format!("{scheme}://{authority}{path}"), headers, body: req.body.map(|b| (b, buffer.unwrap_or_default())) };
+    let pending = Pending {
+        seq: host.http.sent,
+        sent_ns,
+        deadline_ns,
+        method,
+        url: format!("{scheme}://{authority}{path}"),
+        headers,
+        body: req.body.map(|b| (b, buffer.unwrap_or_default())),
+    };
     let placeholder = Err(wasmtime_wasi_http::Error::InternalError(Some("not answered yet".into())));
     let future = host.table.push(HostFutureIncomingResponse::Ready(placeholder))?;
     // A reused slot: the guest dropped that earlier future without asking.
@@ -338,6 +367,8 @@ fn resolve(store: &mut StoreContextMut<'_, Host>, future: Option<u32>, p: Pendin
         let args = [json!(p.method), json!(p.url), Value::Array(headers), json!(String::from_utf8_lossy(&body))];
         let params = ty.params().zip(args.iter()).map(|((_, t), v)| json_to_val(v, &t)).collect::<Result<Vec<_>>>().map_err(wasmtime::Error::from_anyhow)?;
         let mut results = vec![Val::Bool(false)];
+        store.data_mut().call_started_ns = Some(p.sent_ns);
+        store.data_mut().call_deadline_ns = p.deadline_ns;
         intercept(store.as_context_mut(), CLIENT_KEY, &params, &mut results).map_err(wasmtime::Error::from_anyhow)?;
         match incoming(&val_to_json(&results[0])) {
             Ok(r) => r,
@@ -507,12 +538,22 @@ pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value)
         Some(Ok(r)) => r,
     };
     let (parts, mut body) = response.into_parts();
-    if end_of(&mut body) == End::Aborted {
+    let end = end_of(&mut body);
+    if end == End::Aborted {
         return Ok(Err(wasmtime::format_err!("the handler aborted its response body")));
     }
     let bytes = store.data().http.response_body.as_ref().map(contents).unwrap_or_default();
-    let headers: Vec<Value> = parts.headers.iter().map(|(k, v)| json!([k.as_str(), String::from_utf8_lossy(v.as_bytes())])).collect();
-    Ok(Ok(json!({ "status": parts.status.as_u16(), "headers": headers, "body": String::from_utf8_lossy(&bytes) })))
+    let pairs = |h: &http::HeaderMap| -> Vec<Value> { h.iter().map(|(k, v)| json!([k.as_str(), String::from_utf8_lossy(v.as_bytes())])).collect() };
+    // Text as text; other bytes as a list of bytes, so the record stays lossless.
+    let body = match String::from_utf8(bytes) {
+        Ok(t) => json!(t),
+        Err(e) => json!(e.into_bytes()),
+    };
+    let mut out = json!({ "status": parts.status.as_u16(), "headers": pairs(&parts.headers), "body": body });
+    if let End::Trailers(t) = &end {
+        out["trailers"] = json!(pairs(t));
+    }
+    Ok(Ok(out))
 }
 
 #[cfg(test)]

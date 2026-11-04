@@ -649,19 +649,41 @@ handle: func(request: record { method: string, uri: string,
 - A handler that returns without `response-outparam.set` is a crash. A
   response set to an error code is status 500. An aborted response body is a
   crash. Bodies are capped at 64 MiB.
+- A response body that is not UTF-8 is recorded as a list of bytes (an
+  image, a download). It is `invalid_response` (warn) only when the
+  `content-type` is text or missing. Trailers appear as `trailers` in the
+  result.
+- A `content-length` header that differs from the body's size is
+  `invalid_response` (fail): the platform cuts the response short or fails
+  it, and a proxy may read the rest as the next response. HEAD requests and
+  1xx, 204 and 304 responses are exempt.
+- Request bodies, and bodies of outbound requests and their answers, are
+  text.
 
 Outbound requests are the host function
 `wasi:http/outgoing-handler#handle(method: string, url: string, headers,
 body: string) -> result<response, string>`, where `response` is
 `{status, headers, body}`. The call happens when the guest first waits for
 the response, so a body written after `handle` is part of `body`. Requests
-nobody waited for are sent after the handler returns. Calls are serial:
-their latencies add up.
+nobody waited for are sent after the handler returns.
+
+A request is in flight from `handle` on: it is ready at the virtual time
+it was sent plus its latency, and the guest waits only for what is left.
+Requests sent together overlap, so four 60 ms requests awaited together
+take 60 ms; awaited one by one, each after the previous answer, they take
+240. A `first-byte-timeout` in the request options (plus the
+`connect-timeout`, if set) is honoured: a request whose latency is longer
+fails at that time with `connection-read-timeout`. A `connect-timeout`
+alone does not limit a response.
+
+A `[functions."wasi:http/outgoing-handler#handle"]` section keeps what it
+sets (a latency, a cost, rules) and takes the defaults below for the
+labels and values it leaves out.
 
 Its defaults are `params = { url = "url", headers = "secret" }` (the URL is
 an SSRF sink; headers may carry an API token) and
-`values = { status = "range:100..599" }`; a `[functions."wasi:http/outgoing-handler#handle"]`
-section replaces them. An `err` text that is a wasi:http error code
+`values = { status = "range:100..599" }`; a manifest section's own
+`params` or `values` replace them. An `err` text that is a wasi:http error code
 (`dns-timeout`, `destination-not-found`, `connection-refused`,
 `connection-timeout`, `tls-certificate-error`, `http-request-denied`, …)
 arrives as that code; any other

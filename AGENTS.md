@@ -291,7 +291,7 @@ and `confirm <id>` makes it reproducible.
 | `big_output`, `big_payload`, `busy_wait`, `sleeps` | too much output or host data; spinning on the clock |
 | `slow_host_sensitivity` | one slow host function pushes the request over the latency limit |
 | `duplicate_sensitivity`, `order_dependence`, `nondeterminism`, `error_ignored`, `continues_after_error` | the answer changes when it should not, or stays the same when it should change |
-| `invalid_response`, `broken_markup`, `inconsistent_response`, `leaky_error` | bad output: impossible status or headers, unbalanced HTML, an error page with status 200, internal error text |
+| `invalid_response`, `broken_markup`, `inconsistent_response`, `leaky_error` | bad output: impossible status or headers, a wrong Content-Length, unbalanced HTML, an error page with status 200, internal error text |
 | `reflection`, `stored_reflection`, `input_passthrough` | request or host text reaches HTML unescaped, or reaches a host call unchanged |
 | `sql_injection`, `path_traversal`, `command_injection`, `ssrf`, `html_injection`, `regex_injection`, `escaped_by_hand` | request or host text reaches a labelled sink (§4) |
 | `pii_leak`, `secret_leak` | a labelled value reaches a place it must not (§4) |

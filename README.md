@@ -506,8 +506,6 @@ adds a feature, and the review refuses it.
   but concurrent requests and live services are out of reach.
 - Not yet supported: WASI 0.3 HTTP handlers (`wasi:http/handler`, Spin 4),
   outbound HTTP from Extism plugins, Proxy-Wasm filters and browser Wasm.
-- Outgoing requests run one after another: if your handler sends several
-  at once, appfuzz counts the sum of their latencies, not the slowest.
 - Detecting hostile apps (hidden text, notes to the reviewer, data in
   disguise, time bombs) and runtime envelopes are **experimental**. A pass
   doesn't prove an app is benign.

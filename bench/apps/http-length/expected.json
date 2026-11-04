@@ -1,0 +1,11 @@
+{
+  "app": "http-length",
+  "bug": "Content-Length counted before escaping: a name with < makes the body longer than announced",
+  "expect": [
+    {
+      "kind": "invalid_response",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}
