@@ -132,3 +132,17 @@ fn imports_the_wit_lacks_are_refused() {
     let err = App::from_bytes(m, wat::parse_str(&wat).unwrap()).err().expect("refused").to_string();
     assert!(err.contains("unknown_fn"), "{err}");
 }
+
+#[test]
+fn kernel_calls_are_no_host_calls_in_static_analysis() {
+    let st = appfuzz_core::statics::Statics::parse(&wat::parse_str(WAT).unwrap()).unwrap();
+    // `$copy` calls the kernel in a loop; that is memory traffic, not the platform.
+    let hosts: Vec<String> = appfuzz_core::dormant::sites(&st).into_iter().map(|s| s.host).collect();
+    assert!(hosts.iter().all(|h| !h.starts_with("extism:host/env")), "{hosts:?}");
+    let app = app();
+    let loops: Vec<_> = appfuzz_core::detect::static_findings(&app.manifest, &app.imports, &st)
+        .into_iter()
+        .filter(|f| f.kind == "host_call_in_loop")
+        .collect();
+    assert!(loops.is_empty(), "{loops:?}");
+}

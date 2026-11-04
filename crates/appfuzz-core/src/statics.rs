@@ -372,8 +372,11 @@ impl ModuleInfo {
     }
 }
 
+/// Whether calls into `module` are host calls. The Extism kernel
+/// (`extism:host/env`: memory, input, output) is the plugin's runtime, like
+/// WASI, so its calls are no host calls; `extism:host/user` is the platform.
 fn is_platform_module(module: &str) -> bool {
-    module.contains(':') && !is_wasi(module)
+    module.contains(':') && !is_wasi(module) && module != crate::extism::KERNEL_MODULE
 }
 
 fn scan_body(index: u32, body: &FunctionBody<'_>) -> Result<FuncInfo> {

@@ -590,10 +590,13 @@ impl Kernel {
     }
 }
 
+/// The kernel's import module: memory, input and output, not the platform.
+pub const KERNEL_MODULE: &str = "extism:host/env";
+
 /// Links `extism:host/env`, the kernel, to `kernel` in the store's data.
 pub fn link_kernel<T: 'static>(linker: &mut wasmtime::Linker<T>, kernel: fn(&mut T) -> &mut Kernel) -> Result<()> {
     use wasmtime::Caller;
-    const ENV: &str = "extism:host/env";
+    const ENV: &str = KERNEL_MODULE;
     let err = |e: anyhow::Error| wasmtime::Error::from_anyhow(e);
     linker.func_wrap(ENV, "alloc", move |mut c: Caller<'_, T>, n: i64| kernel(c.data_mut()).alloc(n as u64).map(|x| x as i64).map_err(err))?;
     linker.func_wrap(ENV, "free", move |mut c: Caller<'_, T>, at: i64| kernel(c.data_mut()).free(at as u64))?;

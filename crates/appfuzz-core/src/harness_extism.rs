@@ -22,7 +22,7 @@ use crate::value::{json_to_val, val_to_json};
 use crate::wit::{FuncInfo, ImportKind, Interface};
 
 const USER: &str = "extism:host/user";
-const ENV: &str = "extism:host/env";
+const ENV: &str = crate::extism::KERNEL_MODULE;
 const WASI_P1: &str = "wasi_snapshot_preview1";
 
 pub(super) struct ExtismApp {
