@@ -246,6 +246,23 @@ pub(super) fn link(linker: &mut Linker<Host>) -> Result<()> {
             Ok((set,))
         },
     )?;
+    // The same for a path: an attacker sends `../admin`, which the types
+    // accept; the canary's markup they would reject.
+    types.func_wrap(
+        "[method]outgoing-request.set-path-with-query",
+        |mut store: StoreContextMut<'_, Host>, (id, path): (Resource<HostOutgoingRequest>, Option<String>)| {
+            let rep = id.rep();
+            let mut view = store.data_mut().http();
+            let set = wt::HostOutgoingRequest::set_path_with_query(&mut view, id, path.clone())?;
+            if set.is_err()
+                && let Some(p) = path.filter(|p| crate::output::CANARY.is_match(p))
+            {
+                store.data_mut().table.get_mut(&Resource::<HostOutgoingRequest>::new_borrow(rep))?.path_with_query = Some(p);
+                return Ok((Ok(()),));
+            }
+            Ok((set,))
+        },
+    )?;
     types.func_wrap("[method]future-incoming-response.subscribe", |mut store: StoreContextMut<'_, Host>, (id,): (Resource<HostFutureIncomingResponse>,)| {
         answer(&mut store, id.rep())?;
         let mut view = store.data_mut().http();

@@ -227,3 +227,34 @@ pub fn times(app: &App, base: &RunSpec, run: Runner) -> (Vec<TimeProbe>, Vec<Fin
     }
     (probes, findings)
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WebProbe {
+    pub what: String,
+    pub run: String,
+    pub outcome: OutcomeKind,
+}
+
+/// The request from a foreign website and claiming a foreign host
+/// (`web::variants`); `permissive_cors` and `host_header_injection` come
+/// from these runs. Nothing for an entry without `uri` and `headers`.
+pub fn web(app: &App, base: &RunSpec, run: Runner) -> (Vec<WebProbe>, Vec<Finding>) {
+    let Some(req) = base.args.first() else { return (vec![], vec![]) };
+    let variants = crate::web::variants(req, &app.manifest);
+    let specs: Vec<RunSpec> = variants
+        .iter()
+        .map(|(_, v)| {
+            let mut s = base.clone();
+            s.args[0] = v.clone();
+            s
+        })
+        .collect();
+    let runs = par::map(&specs, |s| run(s));
+    let mut probes = Vec::new();
+    let mut findings = Vec::new();
+    for ((what, _), r) in variants.iter().zip(runs) {
+        probes.push(WebProbe { what: what.clone(), run: r.id.clone(), outcome: r.outcome.kind });
+        findings.extend(crate::detect::per_run_checked(app, &r));
+    }
+    (probes, findings)
+}

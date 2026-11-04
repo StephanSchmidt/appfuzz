@@ -265,6 +265,18 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 .collect();
             Ok(json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, app, found)?}))
         }
+        Cmd::Probe { cmd: ProbeCmd::Web { export, spec } } => {
+            let app = load()?;
+            let base = build_spec(app, export.as_deref(), spec)?;
+            let runner = |s: &RunSpec| run_cached(app, &store, s).unwrap_or_else(|_| app.run(s));
+            let (probes, found) = appfuzz_core::probe::web(app, &base, &runner);
+            let failed: Vec<Value> = probes
+                .iter()
+                .filter(|p| p.outcome != appfuzz_core::record::OutcomeKind::Ok)
+                .map(|p| json!({"what": p.what, "outcome": p.outcome, "run": p.run}))
+                .collect();
+            Ok(json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, app, found)?}))
+        }
         Cmd::Envelope { cmd: None, out, review, allow_warnings } => {
             let app = load()?;
             let review_id = if review == "last" {

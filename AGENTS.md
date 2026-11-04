@@ -168,7 +168,7 @@ Parameter labels:
 | `sql` | SQL text | a quote intact: `sql_injection`; quotes doubled or backslashed by hand: `escaped_by_hand` (warn) |
 | `path` | a file path | `../` intact: `path_traversal` |
 | `shell` | a shell command | `;` or `$(` intact: `command_injection`; `'\''` quoting: `escaped_by_hand` |
-| `url` | a URL to fetch | control of the scheme or host: `ssrf` |
+| `url` | a URL to fetch | control of the scheme or host: `ssrf`; `../` intact in the path: `url_path_injection` |
 | `html` | markup | `<i>` intact: `html_injection` |
 | `regex` | a regular expression | `(` intact: `regex_injection` (warn) |
 | `pii`, `secret` | may receive personal data or secrets | (no sink check) |
@@ -249,6 +249,7 @@ an error.
 | "this field changes behaviour" | `sweep -f query.days`, or `--values a,b,c`, or `--gen dates` |
 | "it breaks on some clock" | `probe times`, `sweep -f today --gen dates`, `run --now 2028-02-29T23:59:00` |
 | "it depends on order, duplicates, randomness" | `probe pairs <run>` |
+| "another site can read it", "it trusts the Host header" | `probe web` |
 | "it can't handle odd host values" | `probe values --fn X` |
 | "it breaks when a later host call fails, or retries forever" | `probe faults last --runs 256`, optionally `--fn X` |
 | "why do these two runs differ?" | `diff <a> <b>`, then `provenance <b> --call <n>` |
@@ -293,8 +294,9 @@ and `confirm <id>` makes it reproducible.
 | `duplicate_sensitivity`, `order_dependence`, `nondeterminism`, `error_ignored`, `continues_after_error` | the answer changes when it should not, or stays the same when it should change |
 | `invalid_response`, `broken_markup`, `inconsistent_response`, `leaky_error` | bad output: impossible status or headers, a wrong Content-Length, unbalanced HTML, an error page with status 200, internal error text |
 | `reflection`, `stored_reflection`, `input_passthrough` | request or host text reaches HTML unescaped, or reaches a host call unchanged |
-| `sql_injection`, `path_traversal`, `command_injection`, `ssrf`, `html_injection`, `regex_injection`, `escaped_by_hand` | request or host text reaches a labelled sink (§4) |
+| `sql_injection`, `path_traversal`, `command_injection`, `ssrf`, `url_path_injection`, `html_injection`, `regex_injection`, `escaped_by_hand` | request or host text reaches a labelled sink (§4) |
 | `pii_leak`, `secret_leak` | a labelled value reaches a place it must not (§4) |
+| `permissive_cors`, `host_header_injection` | HTTP handlers: another website may read the response with the visitor's cookies; a host the client names ends up in a link, redirect or outbound request (`probe web`) |
 | `script_in_output`, `unsafe_action`, `open_redirect`, `non_local_url` | the response breaks an output label: a script, a request the user didn't ask for, a URL off the app (§4 output labels) |
 | `foreign_user_access`, `missing_owner_check` | a user id that is not the caller's goes to a host call; another user's record shows in a page (§4 identity) |
 | `write_on_safe_method`, `repeated_write`, `partial_write` | a change on GET, the same change twice, a change that stays when a later one fails (§4 effects) |

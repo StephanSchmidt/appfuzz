@@ -1,0 +1,11 @@
+{
+  "app": "http-reset-link",
+  "bug": "the reset link is built from the Host header",
+  "expect": [
+    {
+      "kind": "host_header_injection",
+      "min": "warn"
+    }
+  ],
+  "allow": []
+}

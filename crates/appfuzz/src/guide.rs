@@ -158,6 +158,12 @@ pub const DOCS: &[Doc] = &[
         next: "`explain <run>`; `sweep -f today --gen dates`",
     },
     Doc {
+        path: "probe web",
+        examples: &["appfuzz probe web"],
+        output: "the request from another website (Origin, CORS preflight) and naming another host: those that did not end ok, findings",
+        next: "`explain <run>` for a permissive_cors or host_header_injection finding",
+    },
+    Doc {
         path: "probe pairs",
         examples: &["appfuzz probe pairs last", "appfuzz probe pairs --set '{\"query\": [[\"days\", \"7\"]]}'"],
         output: "the run with one change each (list reversed, duplicate, seed, clock, one failure, one slow function) and whether the answer changed; findings",
@@ -442,7 +448,7 @@ pub fn next(path: &str, out: &Value) -> Vec<String> {
                 n.push(format!("appfuzz show {r} --view explanation"));
             }
         }
-        "fuzz" | "amplify" | "scale" | "probe values" | "probe times" | "probe pairs" => {
+        "fuzz" | "amplify" | "scale" | "probe values" | "probe times" | "probe web" | "probe pairs" => {
             if path == "fuzz" {
                 if !findings.is_empty() {
                     n.push("appfuzz findings --min warn".into());

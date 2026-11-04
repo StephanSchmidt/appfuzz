@@ -1,0 +1,16 @@
+# appfuzz bench app: http-reset-link.
+[app]
+wasm = "../../target/wasm32-wasip2/release/http_reset_link.wasm"
+name = "http-reset-link"
+
+[entry]
+export = "wasi:http/incoming-handler#handle"
+request = { method = "GET", uri = "https://app.example/", headers = [], body = "" }
+output = { status = "status", body = "body", headers = "headers" }
+now = "2026-11-02T10:00:00"
+
+[limits]
+fuel = 200_000_000
+memory = "64MiB"
+cost_per_request = 100
+max_latency_ms = 200

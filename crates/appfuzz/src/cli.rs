@@ -422,6 +422,17 @@ pub(crate) enum ProbeCmd {
         #[command(flatten)]
         spec: SpecArgs,
     },
+    /// Requests from another website and naming another host (HTTP).
+    ///
+    /// Catches CORS headers that let any site read the response with the
+    /// visitor's cookies, and links, redirects or outbound requests built
+    /// from the Host header.
+    Web {
+        #[arg(long)]
+        export: Option<String>,
+        #[command(flatten)]
+        spec: SpecArgs,
+    },
     /// Every kind of value each host function may return.
     Values {
         /// Only host functions matching this.

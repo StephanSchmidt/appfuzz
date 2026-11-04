@@ -403,15 +403,24 @@ fn sink_problem(label: Label, s: &str, start: usize, end: usize) -> Option<(&'st
         Label::Html if t.starts_with("<i>") => Some(("html_injection", Severity::Fail, "markup")),
         Label::Regex if unescaped(t, "(") => Some(("regex_injection", Severity::Warn, "(")),
         Label::Url => {
+            let auth_end = match s.find("://") {
+                None => 0,
+                Some(i) => s[i + 3..].find(['/', '?', '#']).map(|j| i + 3 + j).unwrap_or(s.len()),
+            };
             let host = match s.find("://") {
                 None => start == 0,
-                Some(i) if start < i + 3 => true,
-                Some(i) => {
-                    let auth_end = s[i + 3..].find(['/', '?', '#']).map(|j| i + 3 + j).unwrap_or(s.len());
-                    start < auth_end
-                }
+                Some(i) => start < i + 3 || start < auth_end,
             };
-            host.then_some(("ssrf", Severity::Fail, "the scheme or host"))
+            // In the path, an intact `../` reaches other endpoints of the
+            // same API: `/items/../admin` is `/admin`.
+            let path_end = s[auth_end..].find(['?', '#']).map_or(s.len(), |j| auth_end + j);
+            if host {
+                Some(("ssrf", Severity::Fail, "the scheme or host"))
+            } else if start < path_end && t.contains("../") {
+                Some(("url_path_injection", Severity::Fail, "../"))
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -446,7 +455,13 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                         Label::Html => "HTML",
                         _ => "regular expression",
                     };
-                    let title = if kind == "escaped_by_hand" {
+                    let noun = if kind == "url_path_injection" { "URL path" } else { noun };
+                    let title = if kind == "url_path_injection" {
+                        format!(
+                            "{from} goes into the {noun} of {} (parameter {p}) with ../ intact: it reaches other endpoints of that API; percent-encode it",
+                            e.func
+                        )
+                    } else if kind == "escaped_by_hand" {
                         format!("{from} goes into the {noun} of {} (parameter {p}) with {intact}; pass it as a parameter or use a library", e.func)
                     } else {
                         format!("{from} goes into the {noun} of {} (parameter {p}) with {intact} intact", e.func)
@@ -916,6 +931,12 @@ mod tests {
         let url = format!("https://{c}<i>'\"../;$(x)/items");
         let s = url.find(c).unwrap();
         assert_eq!(sink_problem(Label::Url, &url, s, s + c.len()).unwrap().0, "ssrf");
+        let url = format!("https://api.example/items/{c}<i>'\"../;$(x)?full=1");
+        let s = url.find(c).unwrap();
+        assert_eq!(sink_problem(Label::Url, &url, s, s + c.len()).unwrap().0, "url_path_injection");
+        let url = format!("https://api.example/items/{c}%3Ci%3E'%22..%2F;$(x)");
+        let s = url.find(c).unwrap();
+        assert!(sink_problem(Label::Url, &url, s, s + c.len()).is_none());
         let sh = format!("grep '{c}<i>'\\''\"../;$(x)' f");
         let s = sh.find(c).unwrap();
         assert_eq!(sink_problem(Label::Shell, &sh, s, s + c.len()).unwrap().0, "escaped_by_hand");

@@ -405,7 +405,13 @@ appfuzz run --plan '{"wasi:http/outgoing-handler#handle": {"return": {"err": "co
 ```
 
 If text from the incoming request decides where an outgoing request goes,
-the review reports SSRF.
+the review reports SSRF. If it can add `../` to the path, it can reach
+other endpoints of that API, and the review reports that too.
+
+The review also sends your handler requests the way an attacker would:
+from another website, to catch CORS headers that let any site read a
+visitor's data, and naming another host, to catch password reset links
+and redirects built from the `Host` header.
 
 ### Spin apps
 

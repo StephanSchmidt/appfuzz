@@ -123,6 +123,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
         }
         step("probe values", Cmd::Probe { cmd: ProbeCmd::Values { func: None, export: o.export.clone(), spec: o.spec.clone() } });
         step("probe times", Cmd::Probe { cmd: ProbeCmd::Times { export: o.export.clone(), spec: o.spec.clone() } });
+        step("probe web", Cmd::Probe { cmd: ProbeCmd::Web { export: o.export.clone(), spec: o.spec.clone() } });
         step("amplify", Cmd::Amplify { func: None, dict: 200, export: o.export.clone(), spec: o.spec.clone() });
         fuzz = step(
             "fuzz",

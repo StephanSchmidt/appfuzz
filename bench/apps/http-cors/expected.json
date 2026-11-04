@@ -1,0 +1,11 @@
+{
+  "app": "http-cors",
+  "bug": "CORS repeats any Origin with credentials: any website can read the visitor's account",
+  "expect": [
+    {
+      "kind": "permissive_cors",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

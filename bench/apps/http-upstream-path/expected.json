@@ -1,0 +1,11 @@
+{
+  "app": "http-upstream-path",
+  "bug": "?id= goes into the path of the API request as it is: ../ reaches other endpoints",
+  "expect": [
+    {
+      "kind": "url_path_injection",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

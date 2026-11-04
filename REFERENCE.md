@@ -660,6 +660,23 @@ handle: func(request: record { method: string, uri: string,
 - Request bodies, and bodies of outbound requests and their answers, are
   text.
 
+`probe web` (part of `review`) sends the request as another website
+would and as a request naming another host would:
+
+- With `Origin: https://attacker.example`, `null`, a look-alike of the
+  app's host, and a CORS preflight for each. A response that repeats the
+  Origin in `Access-Control-Allow-Origin` with
+  `Access-Control-Allow-Credentials: true` is `permissive_cors` (fail): any
+  website the visitor opens can read it as the visitor. Repeating the
+  Origin without credentials is the same as `*` and no finding.
+- With the host `attacker.example`, and with `X-Forwarded-Host` and
+  `Forwarded: host=` naming it. That host in an outbound request's URL is
+  `host_header_injection` (fail); in a redirect or a link in the page it
+  is a warning: a password reset link built this way points to the
+  attacker. The app's own host is the one in the manifest's request.
+
+Both checks also judge every fuzz run.
+
 Outbound requests are the host function
 `wasi:http/outgoing-handler#handle(method: string, url: string, headers,
 body: string) -> result<response, string>`, where `response` is

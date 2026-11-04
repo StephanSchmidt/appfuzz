@@ -32,7 +32,7 @@ is an error.
 | `sql` | SQL text | a quote intact: `sql_injection` (fail); quotes doubled or backslashed: `escaped_by_hand` (warn) |
 | `path` | a file path | `../` intact: `path_traversal` (fail) |
 | `shell` | a shell command | `;` or `$(` intact: `command_injection` (fail); `'\''` quoting: `escaped_by_hand` (warn) |
-| `url` | a URL to fetch | control of the scheme or host: `ssrf` (fail) |
+| `url` | a URL to fetch | control of the scheme or host: `ssrf` (fail); `../` intact in the path, so other endpoints of the API are reachable: `url_path_injection` (fail) |
 | `html` | markup | `<i>` intact: `html_injection` (fail) |
 | `regex` | a regular expression | `(` intact: `regex_injection` (warn) |
 | `pii` | may receive personal data | no `pii_leak` for it |
