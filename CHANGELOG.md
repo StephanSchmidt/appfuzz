@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+**Spin**
+
+- `allowed_outbound_hosts` is enforced: a request to a host no entry allows
+  is refused with `http-request-denied`, as on Spin. An `ssrf` whose request
+  Spin refused is a warning that names the hosts the client can still pick;
+  with no allowed hosts there is none.
+- SSRF is found in apps that parse URLs with an SDK (Spin's, or any built
+  on the `http` crate): URL sinks are also tried with a URL whose host is
+  the canary, which those parsers accept.
+
 ## 0.5.0
 
 **Try it without an app of your own**

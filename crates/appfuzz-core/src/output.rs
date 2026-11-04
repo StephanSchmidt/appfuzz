@@ -505,6 +505,12 @@ pub fn canary(n: u64) -> String {
 /// command substitution.
 pub const SINK_TAIL: &str = "../;$(x)";
 
+/// A canary as the host of a URL, which URL parsers accept.
+pub fn url_canary(n: u64) -> String {
+    let c = canary(n);
+    format!("https://{}.example/", &c[..c.find('<').unwrap_or(c.len())])
+}
+
 /// A canary with the sink tail when the manifest labels sinks.
 pub fn canary_for(m: &Manifest, n: u64) -> String {
     if m.has_sinks() { format!("{}{SINK_TAIL}", canary(n)) } else { canary(n) }

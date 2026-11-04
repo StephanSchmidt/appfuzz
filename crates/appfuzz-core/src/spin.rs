@@ -175,6 +175,19 @@ fn from_str(text: &str, dir: &Path, component: Option<&str>) -> Result<Manifest>
         m.functions.insert(key.into(), FunctionSpec { rules: denied("database", &c.sqlite_databases), ..Default::default() });
     }
 
+    // Outbound requests: Spin refuses a URL no entry allows, before it
+    // leaves. An entry only Spin can resolve leaves the list unknown.
+    let allowed: Option<Vec<String>> = c.allowed_outbound_hosts.iter().map(|h| fill(h, &spin.variables, &c.variables).map(|e| url_pattern(&e))).collect();
+    if let Some(allowed) = allowed {
+        let when = if allowed.is_empty() { json!({ "any": true }) } else { json!({ "not": { "regex": format!("(?i)^(?:{})", allowed.join("|")) } }) };
+        let rule = Rule {
+            when: BTreeMap::from([("url".to_string(), when)]),
+            response: Response { ret: Some(json!({ "err": "http-request-denied" })), ..Default::default() },
+            result: None,
+        };
+        m.functions.insert(crate::wasi_http::CLIENT_KEY.into(), FunctionSpec { rules: vec![rule], ..Default::default() });
+    }
+
     m.grants.hosts = c.allowed_outbound_hosts.iter().filter_map(|h| host(h, &spin.variables, &c.variables)).collect();
     m.grants.hosts.sort();
     m.grants.hosts.dedup();
@@ -223,27 +236,62 @@ fn render(template: &str, app: &BTreeMap<String, AppVariable>) -> (Option<String
     (known.then_some(out), secret)
 }
 
+/// An `allowed_outbound_hosts` entry with its `{{ name }}` component
+/// variables filled in; `None` when only Spin can resolve one.
+fn fill(entry: &str, app: &BTreeMap<String, AppVariable>, vars: &BTreeMap<String, String>) -> Option<String> {
+    let mut s = entry.to_string();
+    for (name, template) in vars {
+        for pat in [format!("{{{{ {name} }}}}"), format!("{{{{{name}}}}}")] {
+            if s.contains(&pat) {
+                s = s.replace(&pat, &render(template, app).0?);
+            }
+        }
+    }
+    (!s.contains("{{")).then_some(s)
+}
+
+/// A regex for the URLs an `allowed_outbound_hosts` entry lets through
+/// (`scheme://host[:port]`; `*` for any scheme, host or port, `*.x` for
+/// x's subdomains, `self` for the app itself). Without a port, the
+/// scheme's default port.
+fn url_pattern(entry: &str) -> String {
+    let (scheme, rest) = entry.split_once("://").unwrap_or(("*", entry));
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let (host, port) = if auth.starts_with('[') {
+        let end = auth.find(']').map_or(auth.len(), |i| i + 1);
+        (&auth[..end], auth[end..].strip_prefix(':'))
+    } else {
+        match auth.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (auth, None),
+        }
+    };
+    let scheme_re = if scheme == "*" { "[a-z][a-z0-9+.-]*".to_string() } else { regex::escape(scheme) };
+    let host_re = match host {
+        "*" => r"[^/?#@:\[\]]+".to_string(),
+        "self" => r"self(?:\.alt)?".to_string(),
+        h if h.starts_with("*.") => format!(r"(?:[^/?#@:]+\.)?{}", regex::escape(&h[2..])),
+        h => regex::escape(h),
+    };
+    let default = match scheme {
+        "https" => "443",
+        "http" => "80",
+        _ => r"(?:80|443)",
+    };
+    let port_re = match port {
+        None => format!("(?::{default})?"),
+        Some(p) if p == "*" || p.contains('-') => r"(?::\d+)?".to_string(),
+        Some(p) if p == default => format!("(?::{p})?"),
+        Some(p) => format!(":{}", regex::escape(p)),
+    };
+    format!("{scheme_re}://(?:[^/?#@]*@)?{host_re}{port_re}(?:[/?#]|$)")
+}
+
 /// The host an `allowed_outbound_hosts` entry grants: `https://api.example.com`,
 /// `https://*.example.com:443`, `*://*:*` (any host). `self` is the app
 /// itself, and an entry that only Spin can resolve is skipped.
 fn host(entry: &str, app: &BTreeMap<String, AppVariable>, vars: &BTreeMap<String, String>) -> Option<String> {
-    let entry = if entry.contains("{{") {
-        // `{{ name }}` names a component variable.
-        let mut s = entry.to_string();
-        for (name, template) in vars {
-            for pat in [format!("{{{{ {name} }}}}"), format!("{{{{{name}}}}}")] {
-                if s.contains(&pat) {
-                    s = s.replace(&pat, &render(template, app).0?);
-                }
-            }
-        }
-        if s.contains("{{") {
-            return None;
-        }
-        s
-    } else {
-        entry.to_string()
-    };
+    let entry = fill(entry, app, vars)?;
     let rest = entry.split_once("://").map(|(_, r)| r).unwrap_or(&entry);
     let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let host = if host.starts_with('[') { host.split_inclusive(']').next().unwrap_or(host) } else { host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host) };
@@ -303,6 +351,33 @@ greeting = "{{ greeting }}, world"
         let label = |l: &str| crate::plan::resolve_rules(&open.rules, &[("label".to_string(), json!(l))], None).is_some();
         assert!(!label("default"));
         assert!(label("other"));
+        let out = &m.functions[crate::wasi_http::CLIENT_KEY];
+        let denied = |url: &str| crate::plan::resolve_rules(&out.rules, &[("url".to_string(), json!(url))], None).is_some();
+        for ok in
+            ["https://api.example.com/x", "https://API.example.com:443?q", "https://img.cdn.example/a.png", "http://self/admin", "https://u@api.example.com/"]
+        {
+            assert!(!denied(ok), "{ok}");
+        }
+        for no in [
+            "http://api.example.com/",
+            "https://api.example.com:8443/",
+            "https://api.example.com.evil.example/",
+            "https://169.254.169.254/",
+            "https://x@evil.example/",
+        ] {
+            assert!(denied(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn outbound_hosts_spin_cannot_resolve_deny_nothing() {
+        let any = APP.replace("\"https://{{ host }}\"", "\"https://{{ unknown }}\"");
+        let m = from_str(&any, Path::new("."), None).unwrap();
+        assert!(!m.functions.contains_key(crate::wasi_http::CLIENT_KEY));
+        let all = APP.replace("allowed_outbound_hosts = [", "allowed_outbound_hosts = [\"*://*:*\", ");
+        let m = from_str(&all, Path::new("."), None).unwrap();
+        let out = &m.functions[crate::wasi_http::CLIENT_KEY];
+        assert!(crate::plan::resolve_rules(&out.rules, &[("url".to_string(), json!("http://10.0.0.1:8080/"))], None).is_none());
     }
 
     #[test]
@@ -311,6 +386,8 @@ greeting = "{{ greeting }}, world"
         assert!(from_str(&two, Path::new("."), None).unwrap_err().to_string().contains("--component"));
         let m = from_str(&two, Path::new("."), Some("admin")).unwrap();
         assert!(m.grants.hosts.is_empty());
+        let out = &m.functions[crate::wasi_http::CLIENT_KEY];
+        assert!(crate::plan::resolve_rules(&out.rules, &[("url".to_string(), json!("https://api.example.com/"))], None).is_some(), "no host granted");
         let open = &m.functions["fermyon:spin/sqlite#[static]connection.open"];
         assert!(crate::plan::resolve_rules(&open.rules, &[("database".to_string(), json!("default"))], None).is_some(), "no database granted");
         assert!(from_str("spin_version = \"1\"", Path::new("."), None).is_err());

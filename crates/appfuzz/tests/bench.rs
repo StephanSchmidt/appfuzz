@@ -61,6 +61,11 @@ fn check(manifest: &Path, expected: &Value, state: &Path) -> (Vec<String>, Value
             let seen: Vec<String> = findings.iter().filter(|f| f["kind"] == kind).map(|f| format!("{} {}", f["severity"], f["title"])).collect();
             problems.push(format!("missed {kind} (≥ {}){}", e["min"], if seen.is_empty() { String::new() } else { format!(", only: {seen:?}") }));
         }
+        if let Some(max) = e["max"].as_str().map(rank)
+            && let Some(f) = findings.iter().find(|f| f["kind"] == kind && rank(f["severity"].as_str().unwrap_or_default()) > max)
+        {
+            problems.push(format!("{kind} above {}: {} {}", e["max"], f["severity"], f["title"]));
+        }
     }
     let allowed: Vec<&str> =
         expect.iter().filter_map(|e| e["kind"].as_str()).chain(expected["allow"].as_array().into_iter().flatten().filter_map(Value::as_str)).collect();

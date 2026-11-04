@@ -1349,6 +1349,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "spin-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "spin-sdk",
+]
+
+[[package]]
 name = "spin-sdk"
 version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,12 @@
+{
+  "app": "spin-proxy",
+  "bug": "a Spin component that fetches the URL in ?url=; Spin's allowed_outbound_hosts keeps it to two hosts, so the client picks among those (warn, not fail)",
+  "expect": [
+    {
+      "kind": "ssrf",
+      "min": "warn",
+      "max": "warn"
+    }
+  ],
+  "allow": []
+}

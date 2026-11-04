@@ -730,9 +730,15 @@ interfaces. The limits are appfuzz's defaults. Built-in labels for Spin's
 SQL, key-value, Redis and MQTT functions and for `wasi:keyvalue` apply to
 every component, with or without `spin.toml`.
 
-Spin enforces `allowed_outbound_hosts` at run time; appfuzz does not
-refuse requests to other hosts. A host written into the app that is not
-granted is `unexpected_destination`; a host the request decides is `ssrf`.
+`allowed_outbound_hosts` is also a rule on
+`wasi:http/outgoing-handler#handle`: a URL no entry allows (scheme, host and
+port; without a port the scheme's default) is `err("http-request-denied")`,
+as Spin answers. With no entries every request is refused; with an entry
+only Spin can resolve (`{{ var }}` without a default) none is. A host written
+into the app that is not granted is `unexpected_destination`. A host the
+request decides is `ssrf`: a fail when the request goes out, a warning
+naming the allowed hosts when the platform refused it (the client can still
+pick among them), and nothing when no host is allowed.
 
 ### witx platforms
 

@@ -1229,57 +1229,63 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
     let fixed: Vec<&String> = entry
         .map(|e| e.fields.iter().filter(|(_, r)| r.starts_with("clock.") || r.as_str() == "http.path" || r.as_str() == "http.method").map(|(p, _)| p).collect())
         .unwrap_or_default();
-    let mut req = base.clone();
-    let mut n = 0u64;
-    if let Some(a) = req.args.first_mut() {
-        let mut ptrs = Vec::new();
-        nodes(a, String::new(), &mut ptrs);
-        let fields = entry.map(|e| e.fields.clone()).unwrap_or_default();
-        let uri = role_path(&fields, a, "uri").filter(|p| crate::harness::field(a, p).is_some_and(Value::is_string));
-        let skip = |p: &str| {
-            let dotted = p.trim_start_matches('/').replace('/', ".");
-            fixed.iter().any(|f| dotted == **f || dotted.starts_with(&format!("{f}.")))
-                || ["path", "method"].contains(&dotted.as_str())
-                || uri.as_deref() == Some(dotted.as_str())
-        };
-        for p in ptrs {
-            if skip(&p) {
-                continue;
-            }
-            if let Some(v) = a.pointer_mut(&p)
-                && v.is_string()
-            {
-                n += 1;
-                *v = json!(crate::output::canary_for(&app.manifest, n));
-            }
-        }
-        if let Some(q) = role_path(&entry.map(|e| e.fields.clone()).unwrap_or_default(), a, "query")
-            && let Some(Value::Array(pairs)) = crate::harness::field_mut(a, &q)
-        {
-            for k in keys.iter().filter_map(|k| k.strip_prefix(&format!("{q}."))) {
-                if !pairs.iter().any(|p| p[0].as_str() == Some(k)) {
+    // A URL sink also gets each canary as the host of a URL: SDKs parse
+    // URLs and refuse the quotes of the plain canary before any request.
+    let url_sink = app.manifest.functions.values().any(|f| f.params.values().any(|l| *l == crate::labels::Label::Url));
+    for url in [false, true].into_iter().filter(|u| !u || url_sink) {
+        let make = |n: u64| if url { crate::output::url_canary(n) } else { crate::output::canary_for(&app.manifest, n) };
+        let mut req = base.clone();
+        let mut n = 0u64;
+        if let Some(a) = req.args.first_mut() {
+            let mut ptrs = Vec::new();
+            nodes(a, String::new(), &mut ptrs);
+            let fields = entry.map(|e| e.fields.clone()).unwrap_or_default();
+            let uri = role_path(&fields, a, "uri").filter(|p| crate::harness::field(a, p).is_some_and(Value::is_string));
+            let skip = |p: &str| {
+                let dotted = p.trim_start_matches('/').replace('/', ".");
+                fixed.iter().any(|f| dotted == **f || dotted.starts_with(&format!("{f}.")))
+                    || ["path", "method"].contains(&dotted.as_str())
+                    || uri.as_deref() == Some(dotted.as_str())
+            };
+            for p in ptrs {
+                if skip(&p) {
+                    continue;
+                }
+                if let Some(v) = a.pointer_mut(&p)
+                    && v.is_string()
+                {
                     n += 1;
-                    pairs.push(json!([k, crate::output::canary_for(&app.manifest, n)]));
+                    *v = json!(make(n));
                 }
             }
-        }
-        // A whole URL (Fastly, wasi:http): a canary as the path and as each
-        // query parameter the app reads, on the same origin.
-        if let Some(p) = uri
-            && let Some(slot) = crate::harness::field_mut(a, &p)
-        {
-            let origin = origin_of(slot.as_str().unwrap_or_default());
-            n += 1;
-            let mut u = format!("{origin}/{}", crate::output::canary_for(&app.manifest, n));
-            for k in keys.iter().filter_map(|k| k.strip_prefix(&format!("{p}?"))) {
-                n += 1;
-                u = scale::with_query(&u, k, &crate::output::canary_for(&app.manifest, n));
+            if let Some(q) = role_path(&entry.map(|e| e.fields.clone()).unwrap_or_default(), a, "query")
+                && let Some(Value::Array(pairs)) = crate::harness::field_mut(a, &q)
+            {
+                for k in keys.iter().filter_map(|k| k.strip_prefix(&format!("{q}."))) {
+                    if !pairs.iter().any(|p| p[0].as_str() == Some(k)) {
+                        n += 1;
+                        pairs.push(json!([k, make(n)]));
+                    }
+                }
             }
-            *slot = json!(u);
+            // A whole URL (Fastly, wasi:http): a canary as the path and as each
+            // query parameter the app reads, on the same origin.
+            if let Some(p) = uri
+                && let Some(slot) = crate::harness::field_mut(a, &p)
+            {
+                let origin = origin_of(slot.as_str().unwrap_or_default());
+                n += 1;
+                let mut u = format!("{origin}/{}", make(n));
+                for k in keys.iter().filter_map(|k| k.strip_prefix(&format!("{p}?"))) {
+                    n += 1;
+                    u = scale::with_query(&u, k, &make(n));
+                }
+                *slot = json!(u);
+            }
         }
-    }
-    if n > 0 {
-        out.push(req);
+        if n > 0 {
+            out.push(req);
+        }
     }
     let strings: Vec<&String> = funcs.iter().filter(|(_, t)| has_string(t)).map(|(k, _)| k).collect();
     let canary = if app.manifest.has_sinks() { "canary-sink" } else { "canary" };

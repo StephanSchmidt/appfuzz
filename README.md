@@ -468,7 +468,7 @@ give it.
 
 | In `spin.toml` | What the review does with it |
 |----------------|------------------------------|
-| `allowed_outbound_hosts` | the hosts your app may call; a call your code makes to any other host is reported |
+| `allowed_outbound_hosts` | the hosts your app may call; a call your code makes to any other host is reported, and a request to any other host is refused, as on Spin. A client that picks the host can then only reach the hosts you allow: a warning, not a fail |
 | `variables` marked `secret = true` | traced: a token that shows up in a page, a log or a request to the wrong host fails the review |
 | other variables | answered with their default value |
 | `key_value_stores`, `sqlite_databases` | opening any other store or database fails, as on Spin |

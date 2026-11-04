@@ -446,7 +446,17 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                     if label == Label::Html && trusted.contains(c.as_str()) {
                         continue;
                     }
-                    let Some((kind, sev, intact)) = sink_problem(label, &s, c.start(), c.end()) else { continue };
+                    let Some((kind, mut sev, intact)) = sink_problem(label, &s, c.start(), c.end()) else { continue };
+                    // The platform refused the request (Spin's
+                    // allowed_outbound_hosts): only the allowed hosts are
+                    // within reach, and none when nothing is allowed.
+                    let denied = kind == "ssrf" && e.result.as_ref().and_then(|v| v.get("err")).and_then(Value::as_str) == Some("http-request-denied");
+                    if denied {
+                        if m.grants.hosts.is_empty() {
+                            continue;
+                        }
+                        sev = Severity::Warn;
+                    }
                     let noun = match label {
                         Label::Sql => "SQL text",
                         Label::Path => "file path",
@@ -461,6 +471,12 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                             "{from} goes into the {noun} of {} (parameter {p}) with ../ intact: it reaches other endpoints of that API; percent-encode it",
                             e.func
                         )
+                    } else if denied {
+                        format!(
+                            "{from} decides the host of the URL of {} (parameter {p}); the platform refused this request, but the client can still send it to any allowed host ({}) with a path of its choice: build the URL from a fixed host",
+                            e.func,
+                            m.grants.hosts.join(", ")
+                        )
                     } else if kind == "escaped_by_hand" {
                         format!("{from} goes into the {noun} of {} (parameter {p}) with {intact}; pass it as a parameter or use a library", e.func)
                     } else {
@@ -471,7 +487,7 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                         &format!("{ex}\0{}\0{p}\0{from}", e.func),
                         sev,
                         title,
-                        json!({"func": e.func, "param": p, "label": label.name(), "source": from, "n": e.n, "canary": c.as_str(), "arg": s}),
+                        json!({"func": e.func, "param": p, "label": label.name(), "source": from, "n": e.n, "canary": c.as_str(), "arg": s, "refused": denied}),
                         run,
                     ));
                 }

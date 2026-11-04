@@ -1,0 +1,14 @@
+# appfuzz bench app: spin-proxy (a Spin component that fetches the URL in
+# its query string), reviewed from its Spin manifest alone: no appfuzz.toml.
+spin_manifest_version = 2
+
+[application]
+name = "spin-proxy"
+
+[[trigger.http]]
+route = "/..."
+component = "spin-proxy"
+
+[component.spin-proxy]
+source = "../../target/wasm32-wasip2/release/spin_proxy.wasm"
+allowed_outbound_hosts = ["https://api.example", "https://*.cdn.example"]
