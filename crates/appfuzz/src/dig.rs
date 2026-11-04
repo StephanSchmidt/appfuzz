@@ -556,8 +556,28 @@ pub fn explain(app: &App, store: &RunStore, r: &RunRecord) -> Result<Value> {
         "calls": r.call_counts().into_iter().map(|(f, n)| (f, json!(n))).collect::<serde_json::Map<_, _>>(),
         "failed_calls": failed,
         "vs_stored_runs": {"runs": others.len(), "metrics": compared, "unusual": unusual},
-        "findings": detect::per_run(r, &app.manifest).iter().map(|f| json!({"kind": f.kind, "severity": f.severity, "title": f.title})).collect::<Vec<_>>(),
+        "findings": detect::per_run(r, &app.manifest).iter().map(|f| {
+            let mut o = json!({"kind": f.kind, "severity": f.severity, "title": f.title});
+            if let Some(x) = evidence_excerpt(f, resp.body.as_deref()) {
+                o["excerpt"] = json!(x);
+            }
+            o
+        }).collect::<Vec<_>>(),
     }))
+}
+
+/// For a finding about a canary, the text around it as the app wrote it,
+/// markup included: the `<i>` in a page is what proves a reflection.
+fn evidence_excerpt(f: &Finding, body: Option<&str>) -> Option<String> {
+    let canary = f.detail.get("canary")?.as_str()?;
+    let text = match f.kind.as_str() {
+        "reflection" | "stored_reflection" => body?,
+        _ => f.detail.get("arg")?.as_str()?,
+    };
+    let at = text.find(canary)?;
+    let from = text[..at].char_indices().rev().nth(39).map_or(0, |(i, _)| i);
+    let to = text[at..].char_indices().nth(canary.len() + 40).map_or(text.len(), |(i, _)| at + i);
+    Some(format!("{}{}{}", if from > 0 { "…" } else { "" }, &text[from..to], if to < text.len() { "…" } else { "" }))
 }
 
 /// Host call sites in the code that no stored run reached, with the

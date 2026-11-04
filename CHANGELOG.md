@@ -81,6 +81,9 @@
 - Findings name where in the request a value came from: "the query
   parameter `url`", a form field, a header, the URL path or host, instead
   of "the request field uri".
+- `explain` shows the output around a reflected test string with its
+  markup (`<h1>Hello, cnry3b543<i>!</h1>`), and the argument around it for
+  SQL, shell, path and URL findings: the evidence, not just the page text.
 
 ## 0.5.0
 

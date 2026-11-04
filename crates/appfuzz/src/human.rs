@@ -298,6 +298,10 @@ fn findings(st: &Style, out: &Value, s: &mut String) {
         } else {
             let _ = writeln!(s, "  {severity}  {}  {}", st.bold(&format!("{kind:<width$}")), wrap(title, indent, st.cols));
         }
+        if let Some(x) = f["excerpt"].as_str() {
+            let at = if narrow { 10 } else { indent };
+            let _ = writeln!(s, "{:at$}{}", "", st.dim(x));
+        }
     }
 }
 
@@ -570,7 +574,8 @@ mod tests {
             "calls": {"a#all": 1, "a#get": 128},
             "failed_calls": [{"n": 3, "func": "a#get"}],
             "vs_stored_runs": {"runs": 1883, "unusual": ["host_calls is 64.5× the median"]},
-            "findings": [{"severity": "fail", "kind": "over_budget", "title": "129 cost"}],
+            "findings": [{"severity": "fail", "kind": "over_budget", "title": "129 cost"},
+                {"severity": "fail", "kind": "reflection", "title": "puts q into HTML", "excerpt": "Hello, cnry12ab7<i>!"}],
             "next": ["appfuzz show r1 --view timeline"]
         });
         let plain = strip(&render(&PLAIN, "show", &out));
@@ -582,6 +587,7 @@ mod tests {
             "  unusual   host_calls is 64.5× the median  (against 1,883 stored runs)\n",
             "  output    alpha\n",
             "  ✗ fail  over_budget  129 cost\n",
+            "  ✗ fail  reflection   puts q into HTML\n                       Hello, cnry12ab7<i>!\n",
             "Next\n  › appfuzz show r1 --view timeline\n",
         ] {
             assert!(plain.contains(line), "{line:?} in\n{plain}");
