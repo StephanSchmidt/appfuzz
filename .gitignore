@@ -26,6 +26,7 @@
 !/bench/prelude.rs
 !/bench/prelude-labelled.rs
 !/bench/apps.py
+!/bench/demo.sh
 !/bench/apps/
 !/bench/wit/
 !/bench/lang/
