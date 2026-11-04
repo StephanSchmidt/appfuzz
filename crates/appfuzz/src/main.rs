@@ -38,6 +38,7 @@ use commands::{run, run_with_app};
 mod acceptance;
 mod cases;
 mod cli;
+mod human;
 mod remote;
 mod sequences;
 use cli::*;
@@ -118,7 +119,7 @@ fn main() {
                 json!({"error": text.join(" ").trim_start_matches("error: ").to_string(), "usage": usage, "examples": examples})
             };
             out["help"] = json!(help);
-            println!("{}", serde_json::to_string_pretty(&out).expect("json"));
+            emit(human::wanted(args.iter().any(|a| a == "--json")), &path, &out);
             std::process::exit(3);
         }
     };
@@ -156,11 +157,12 @@ fn main() {
             }
             Err(e) => {
                 let o = json!({"error": format!("{e:#}"), "exit_code": 3});
-                println!("{}", serde_json::to_string_pretty(&o).expect("json"));
+                emit(human::wanted(cli.json), &path, &o);
                 std::process::exit(3);
             }
         }
     }
+    let human = human::wanted(cli.json);
     if let Some(n) = cli.jobs {
         let _ = rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global();
     }
@@ -176,7 +178,7 @@ fn main() {
             if let Some(d) = guide::doc(&path) {
                 o["examples"] = json!(d.examples);
             }
-            println!("{}", serde_json::to_string_pretty(&o).expect("json"));
+            emit(human, &path, &o);
             std::process::exit(3);
         }
     };
@@ -199,8 +201,18 @@ fn main() {
         "run" if out["asserts"].as_object().is_some_and(|a| a.values().any(|v| v["status"] == "broken")) => 2,
         _ => 0,
     };
-    println!("{}", serde_json::to_string_pretty(&out).expect("json"));
+    emit(human && !raw_output, &path, &out);
     std::process::exit(code);
+}
+
+/// Prints `out`: a summary for a person at a terminal when the command has
+/// one, JSON otherwise.
+fn emit(human: bool, path: &str, out: &Value) {
+    if human && let Some(text) = human::summary(path, out) {
+        print!("{text}");
+    } else {
+        println!("{}", serde_json::to_string_pretty(out).expect("json"));
+    }
 }
 
 /// Every leaf command with its one-line description.

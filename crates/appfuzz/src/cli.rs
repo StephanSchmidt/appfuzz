@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Parser)]
-#[command(name = "appfuzz", version, about = "Fuzz sandboxed WebAssembly components for bad patterns. Output is JSON.")]
+#[command(name = "appfuzz", version, about = "Fuzz sandboxed WebAssembly components for bad patterns. Output is JSON when piped.")]
 pub(crate) struct Cli {
     /// The manifest (default: ./appfuzz.toml if it exists).
     #[arg(short, long, global = true)]
@@ -15,6 +15,9 @@ pub(crate) struct Cli {
     /// more than one HTTP component.
     #[arg(long, global = true)]
     pub(crate) component: Option<String>,
+    /// Print JSON at a terminal too (piped output is always JSON).
+    #[arg(long, global = true)]
+    pub(crate) json: bool,
     /// Also download plain http:// URLs.
     #[arg(long, global = true)]
     pub(crate) allow_http: bool,

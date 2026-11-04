@@ -114,6 +114,11 @@ Downloads and their runs are kept in `~/.cache/appfuzz` (macOS:
 `~/Library/Caches/appfuzz`, or `$APPFUZZ_CACHE`), not in the current
 folder. `--wasm <url>` works with every command.
 
+At a terminal, `review`, `run`, `inspect` and `findings` print a short
+summary: the verdict, one line per finding, and what to run next. Piped
+output, as in CI or for an agent, is one JSON document; `--json` gives JSON
+at a terminal too.
+
 `appfuzz` without arguments tells you what to run next.
 `appfuzz <command> --help` shows examples.
 

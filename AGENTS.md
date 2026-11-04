@@ -8,7 +8,9 @@ robustness, consistency, output and data flow. appfuzz knows nothing about
 what the host functions *mean*. You supply that, by writing the manifest and
 host plans and by deciding which findings matter.
 
-Every command prints one JSON document. `appfuzz` without arguments prints a
+Every command prints one JSON document when its output is piped or with
+`--json`; at a terminal, `review`, `run`, `inspect` and `findings` print a
+short summary instead. `appfuzz` without arguments prints a
 guide with the state and what to run next. `appfuzz <command> --help` shows
 examples. Reports have a `next` field with suggested commands. Exported plans and raw
 run records omit it so they round-trip unchanged. JSON is always lossless.
