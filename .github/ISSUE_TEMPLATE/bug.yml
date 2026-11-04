@@ -1,0 +1,36 @@
+name: Bug or wrong finding
+description: appfuzz crashed, did something odd, or reported a finding that isn't real
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you got.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: appfuzz --version
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact command line.
+      render: sh
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output (JSON)
+      description: The command's JSON output, without --human. For a wrong finding, the finding and `appfuzz show <run> --view explanation`.
+      render: json
+  - type: textarea
+    id: app
+    attributes:
+      label: The app
+      description: Language and platform (Spin, Fastly, Extism, own WIT …), and a link to the .wasm or its source if you can share it. Your appfuzz.toml helps too.
