@@ -131,7 +131,7 @@ pub fn default_manifest(manifest: &mut Manifest, imports: &[Interface], exports:
             r#"
 description = "Sends an HTTP request and waits for the response."
 params = { url = "url", headers = "secret" }
-values = { status = "range:100..599" }
+values = { status = "range:200..599" }
 "#,
         )
         .context("default outgoing-handler spec")?;

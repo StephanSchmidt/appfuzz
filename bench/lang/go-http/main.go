@@ -1,6 +1,7 @@
 // appfuzz language test: a wasi:http handler in Go (TinyGo, net/http via
 // wasi-http-go). It searches one fixed API for ?q= and shows the answer
-// escaped. No bug: review should find nothing it can blame on the app.
+// escaped. Its one bug is wasi-http-go's: a page over 4 KB goes to one
+// blocking-write-and-flush, which wasmtime refuses above 4096 bytes.
 package main
 
 import (

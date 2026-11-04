@@ -160,7 +160,7 @@ pub fn drop_told(app: &crate::harness::App, r: &RunRecord, findings: &mut Vec<Fi
 
 /// `%XX` escapes and `+` as a space, as in a query string. Invalid escapes
 /// stay as they are.
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

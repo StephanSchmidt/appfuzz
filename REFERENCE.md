@@ -732,7 +732,8 @@ labels and values it leaves out.
 
 Its defaults are `params = { url = "url", headers = "secret" }` (the URL is
 an SSRF sink; headers may carry an API token) and
-`values = { status = "range:100..599" }`; a manifest section's own
+`values = { status = "range:200..599" }` (the client handles interim
+1xx responses; unplanned calls answer 200); a manifest section's own
 `params` or `values` replace them. An `err` text that is a wasi:http error code
 (`dns-timeout`, `destination-not-found`, `connection-refused`,
 `connection-timeout`, `tls-certificate-error`, `http-request-denied`, …)

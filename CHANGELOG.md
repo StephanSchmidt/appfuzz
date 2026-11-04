@@ -26,6 +26,24 @@
   on the `http` crate): URL sinks are also tried with a URL whose host is
   the canary, which those parsers accept.
 
+**HTTP handlers**
+
+- Outgoing requests answer 200 unless a plan says otherwise (before: 100,
+  which sent most handlers down their error path). Review now tests the
+  page users see; in the Go bench app it found a crash in wasi-http-go on
+  pages over 4 KB.
+- `findings` and `appfuzz` (the status) show what `review` found for HTTP
+  handlers, Spin apps and `wasi:keyvalue` users; before, they showed none.
+
+**Fewer false positives**
+
+- `error_ignored` is not reported when the page was already an error page,
+  or the call had already failed.
+- `busy_wait` needs a millisecond of spinning on the clock (1000 reads).
+  The JavaScript runtime reads it about 30 times per `fetch()`.
+- Invisible characters the request sent percent-encoded (`%E2%80%AE` in a
+  query) are no `hidden_text` when the page shows them decoded.
+
 ## 0.5.0
 
 **Try it without an app of your own**

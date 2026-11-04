@@ -97,7 +97,10 @@ pub const REDUNDANT_MIN: u32 = 2;
 pub const RETRY_MIN: u32 = 3;
 pub const PAYLOAD_MAX: usize = 64 * 1024;
 pub const OUTPUT_MAX: usize = 1 << 20;
-pub const CLOCK_READS_MAX: u64 = 50;
+/// Clock reads that make a busy wait: a millisecond of spinning (each read
+/// advances the clock). Runtimes read the clock on their own (the
+/// JavaScript one about 30 times per `fetch()`, however long it takes).
+pub const CLOCK_READS_MAX: u64 = 1_000_000 / crate::wasi::CLOCK_READ_STEP_NS;
 /// Host calls before a run counts as a serial chain.
 pub const SERIAL_MIN: u32 = 10;
 

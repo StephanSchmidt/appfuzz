@@ -236,7 +236,15 @@ pub fn compare(app: &App, base: &RunRecord, v: &Variant, vr: &RunRecord) -> Vec<
                 return out;
             }
             let retried = vr.events.iter().filter(|e| e.func == func).count() > base.events.iter().filter(|e| e.func == func).count();
-            if same && !retried {
+            // A base that already answers with an error, or already got one
+            // from this call, ignores nothing: the failure takes that path.
+            let failed_before = a.status.is_some_and(|s| s >= 400)
+                || base
+                    .events
+                    .iter()
+                    .find(|e| e.func == func && e.call == call)
+                    .is_some_and(|e| e.trap.is_some() || e.result.as_ref().is_some_and(|r| r.get("err").is_some()));
+            if same && !retried && !failed_before {
                 out.push(Finding::new(
                     "error_ignored",
                     &format!("{ex}\0{func}"),
