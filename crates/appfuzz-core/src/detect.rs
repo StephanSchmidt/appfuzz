@@ -580,8 +580,11 @@ pub fn panic_text(stderr: &str) -> Option<String> {
     Some(stderr[i..].lines().take(3).collect::<Vec<_>>().join(" ").chars().take(400).collect())
 }
 
+/// The first line of a message, without Rust's hint about backtraces.
 fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or("").chars().take(160).collect()
+    let line = s.lines().next().unwrap_or("");
+    let line = line.split(" note: run with `RUST_BACKTRACE").next().unwrap_or(line).trim_end();
+    line.chars().take(160).collect()
 }
 
 /// `out_of_fuel`, `stack_overflow`, …
@@ -677,5 +680,15 @@ impl FindingStore {
             crate::store::write_atomic(&self.path, &serde_json::to_vec_pretty(&all)?)?;
         }
         Ok(added)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn crash_titles_leave_out_the_backtrace_hint() {
+        let msg = "panicked at src/lib.rs:9:25: index out of bounds: the len is 0 but the index is 0 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace";
+        assert_eq!(super::first_line(msg), "panicked at src/lib.rs:9:25: index out of bounds: the len is 0 but the index is 0");
+        assert_eq!(super::first_line("a\nb"), "a");
     }
 }

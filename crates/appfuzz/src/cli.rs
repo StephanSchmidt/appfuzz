@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Parser)]
-#[command(name = "appfuzz", version, about = "Fuzz sandboxed WebAssembly components for bad patterns. Output is JSON when piped.")]
+#[command(name = "appfuzz", version, about = "Fuzz sandboxed WebAssembly components for bad patterns. Output is JSON; --human prints it for people.")]
 pub(crate) struct Cli {
     /// The manifest (default: ./appfuzz.toml if it exists).
     #[arg(short, long, global = true)]

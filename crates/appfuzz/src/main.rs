@@ -129,6 +129,15 @@ fn main() {
         Err(e) => e.exit(),
     };
     let raw_output = matches!(&cli.cmd, Some(Cmd::Plan { .. })) || matches!(&cli.cmd, Some(Cmd::Show { view, .. }) if view == "record");
+    // No manifest and no --wasm: the one .wasm in this folder, if there is one.
+    if cli.manifest.is_none()
+        && cli.wasm.is_none()
+        && !Path::new("appfuzz.toml").exists()
+        && !Path::new("spin.toml").exists()
+        && let [one] = wasm_files_here().as_slice()
+    {
+        cli.wasm = Some(one.clone());
+    }
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
     let mut prefix = String::from("appfuzz");
     if let Some(m) = &cli.manifest {
@@ -210,10 +219,16 @@ fn main() {
 
 /// Prints `out`: for a person with `--human`, JSON otherwise.
 fn emit(human: bool, path: &str, out: &Value) {
-    if human {
-        print!("{}", human::summary(path, out));
-    } else {
-        println!("{}", serde_json::to_string_pretty(out).expect("json"));
+    use std::io::Write;
+    let text = if human { human::summary(path, out) } else { format!("{}\n", serde_json::to_string_pretty(out).expect("json")) };
+    let mut stdout = std::io::stdout().lock();
+    if let Err(e) = stdout.write_all(text.as_bytes()).and_then(|()| stdout.flush()) {
+        // `appfuzz … | head` closes the pipe early: that is no error.
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        eprintln!("appfuzz: writing the output: {e}");
+        std::process::exit(3);
     }
 }
 
@@ -306,7 +321,10 @@ fn load_manifest(cli: &Cli) -> Result<Manifest> {
         (Some(p), _) if appfuzz_core::spin::is_spin(p) => appfuzz_core::spin::load(p, cli.component.as_deref())?,
         (Some(p), _) => Manifest::load(p)?,
         (None, Some(w)) => Manifest::for_wasm(w),
-        (None, None) => bail!("no appfuzz.toml or spin.toml here; pass --manifest or --wasm"),
+        (None, None) => match wasm_files_here().as_slice() {
+            [] => bail!("no appfuzz.toml, spin.toml or .wasm file here; pass --wasm app.wasm or --manifest appfuzz.toml"),
+            many => bail!("several .wasm files here ({}); pick one with --wasm", many.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")),
+        },
     };
     if cli.component.is_some() && !path.as_deref().is_some_and(appfuzz_core::spin::is_spin) {
         bail!("--component picks a component of a Spin app; it needs spin.toml");
@@ -315,6 +333,19 @@ fn load_manifest(cli: &Cli) -> Result<Manifest> {
         m.app.wasm = std::fs::canonicalize(w).unwrap_or(w.clone());
     }
     Ok(m)
+}
+
+/// The `.wasm` files in the current folder, sorted.
+fn wasm_files_here() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(".")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| PathBuf::from(e.file_name()))
+        .filter(|p| p.extension().is_some_and(|x| x == "wasm") && p.is_file())
+        .collect();
+    v.sort();
+    v
 }
 
 fn severity(s: &str) -> Result<Severity> {

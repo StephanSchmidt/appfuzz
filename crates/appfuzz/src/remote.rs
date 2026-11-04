@@ -24,13 +24,13 @@ pub(crate) fn is_url(s: &str) -> bool {
     l.starts_with("https://") || l.starts_with("http://")
 }
 
+/// The fuzzing time of `appfuzz URL`.
+const URL_REVIEW_TIME: &str = "10s";
+
 /// `appfuzz [options] URL [args]` becomes `appfuzz [options] --wasm URL
 /// review [args]`: a URL in place of a command reviews it. Someone trying a
 /// URL wants an answer soon, so the fuzzing time is 10s unless `--time`
 /// says otherwise.
-/// The fuzzing time of `appfuzz URL`.
-const URL_REVIEW_TIME: &str = "10s";
-
 pub(crate) fn rewrite_args(args: Vec<String>) -> Vec<String> {
     let mut i = 1;
     while i < args.len() {
