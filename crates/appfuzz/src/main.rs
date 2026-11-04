@@ -178,6 +178,7 @@ fn main() {
     if let Some(n) = cli.jobs {
         let _ = rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global();
     }
+    let (cli_manifest, cli_remote) = (cli.manifest.clone(), cli.remote);
     let out = if cli.cmd.is_none() { Ok(guide::overview(state(&cli), commands(&command, ""))) } else { run(cli) };
     let mut out = match out {
         Ok(v) => v,
@@ -194,6 +195,12 @@ fn main() {
             std::process::exit(3);
         }
     };
+    if let Value::Object(o) = &mut out
+        && !raw_output
+        && shadows_spin(&cli_manifest, cli_remote)
+    {
+        o.insert("warning".into(), json!(SPIN_IGNORED));
+    }
     if !path.is_empty()
         && let Value::Object(o) = &mut out
         && !raw_output
@@ -253,7 +260,10 @@ fn commands(c: &clap::Command, prefix: &str) -> Vec<(String, String)> {
 
 /// What is in the state directory, and what to run next.
 fn state(cli: &Cli) -> Value {
-    let manifest = cli.manifest.clone().or_else(|| Some(PathBuf::from("appfuzz.toml")).filter(|p| !cli.remote && p.exists()));
+    // The manifest load_manifest picks: appfuzz.toml, else spin.toml.
+    let manifest = cli.manifest.clone().or_else(|| {
+        ["appfuzz.toml", "spin.toml"].into_iter().map(PathBuf::from).find(|p| !cli.remote && p.exists() && (p != Path::new("spin.toml") || cli.wasm.is_none()))
+    });
     let mut st = json!({
         "manifest": manifest.as_ref().map(|p| p.display().to_string()),
         "wasm": cli.wasm.as_ref().map(|p| p.display().to_string()),
@@ -304,6 +314,14 @@ fn state(cli: &Cli) -> Value {
     }
     st["suggested"] = json!(next);
     st
+}
+
+const SPIN_IGNORED: &str = "spin.toml is ignored because appfuzz.toml is here: its allowed hosts, stores and secret variables don't apply. \
+Delete appfuzz.toml to review the Spin app as spin.toml describes it, or pass --manifest appfuzz.toml to keep this one.";
+
+/// appfuzz.toml was picked over a spin.toml next to it, without asking.
+fn shadows_spin(manifest: &Option<PathBuf>, remote: bool) -> bool {
+    manifest.is_none() && !remote && Path::new("appfuzz.toml").exists() && Path::new("spin.toml").exists()
 }
 
 fn load_manifest(cli: &Cli) -> Result<Manifest> {

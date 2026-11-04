@@ -105,6 +105,9 @@ fn render(st: &Style, path: &str, out: &Value) -> String {
         }
         return s;
     }
+    if let Some(w) = out["warning"].as_str() {
+        let _ = writeln!(s, "{} {}\n", st.badge("1;30;43", "WARNING"), wrap(w, 10, st.cols));
+    }
     match path {
         "review" => review(st, out, &mut s),
         "run" | "call" if out.get("totals").is_some() => run(st, out, &mut s),

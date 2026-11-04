@@ -309,6 +309,24 @@ fn probes_that_do_not_apply_say_so() {
 }
 
 #[test]
+fn an_ignored_spin_toml_is_named() {
+    let f = Fixture::new(false);
+    std::fs::write(f.dir.join("spin.toml"), "spin_manifest_version = 2\n").unwrap();
+    let here = |args: &[&str]| -> Value {
+        let out = Command::new(env!("CARGO_BIN_EXE_appfuzz")).current_dir(&f.dir).args(args).output().unwrap();
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let out = here(&["inspect"]);
+    assert!(out["warning"].as_str().unwrap().starts_with("spin.toml is ignored because appfuzz.toml is here"), "{out}");
+    let status = here(&[]);
+    assert_eq!(status["state"]["manifest"], "appfuzz.toml", "{status}");
+    // Picked on purpose: no warning.
+    assert!(here(&["--manifest", "appfuzz.toml", "inspect"])["warning"].is_null());
+    std::fs::remove_file(f.dir.join("spin.toml")).unwrap();
+    assert!(here(&["inspect"])["warning"].is_null());
+}
+
+#[test]
 fn last_is_the_run_just_shown() {
     // A run already in the store is not run again, but it is the latest.
     let f = Fixture::new(false);
