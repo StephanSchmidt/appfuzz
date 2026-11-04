@@ -437,6 +437,14 @@ pub fn next(path: &str, out: &Value) -> Vec<String> {
         }
         "inspect" => n.extend(["appfuzz plan template > plan.json".into(), "appfuzz run".into(), "appfuzz fuzz --time 2m".into()]),
         "plan template" => n.push("appfuzz run --plan plan.json".into()),
+        "timeline" | "calls" | "show" if out["host_calls"].is_array() || out["functions"].is_object() => {
+            // The first call, when the timeline says which it is.
+            let call = out["host_calls"][0]["n"].as_u64().map_or("<n>".to_string(), |c| c.to_string());
+            if let Some(r) = run {
+                n.push(format!("appfuzz show {r} --view stack --call {call}"));
+                n.push(format!("appfuzz show {r} --view provenance --call {call}"));
+            }
+        }
         "run" | "call" | "show" | "explain" => {
             if let Some(r) = run {
                 if path != "explain" && out.get("vs_stored_runs").is_none() {
@@ -444,12 +452,6 @@ pub fn next(path: &str, out: &Value) -> Vec<String> {
                 }
                 n.push(format!("appfuzz show {r} --view timeline"));
                 n.push(format!("appfuzz probe pairs {r}"));
-            }
-        }
-        "timeline" | "calls" => {
-            if let Some(r) = run {
-                n.push(format!("appfuzz show {r} --view stack --call <n>"));
-                n.push(format!("appfuzz show {r} --view provenance --call <n>"));
             }
         }
         "why" => n.push("appfuzz wasm disasm <func>".into()),

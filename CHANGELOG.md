@@ -84,6 +84,9 @@
 - `explain` shows the output around a reflected test string with its
   markup (`<h1>Hello, cnry3b543<i>!</h1>`), and the argument around it for
   SQL, shell, path and URL findings: the evidence, not just the page text.
+- `--human` shows a timeline with each host call's arguments in full, so
+  the URL or SQL text of a finding is no longer cut off. `--view stack`
+  without `--call` says which calls the run made.
 
 ## 0.5.0
 

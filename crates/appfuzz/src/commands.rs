@@ -82,8 +82,8 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                     "calls" => Cmd::Calls { run: run.clone(), func: func.clone() },
                     "timeline" => Cmd::Timeline { run: run.clone() },
                     "logs" => Cmd::Stdout { run: run.clone() },
-                    "stack" => Cmd::Why { run: run.clone(), n: call.ok_or_else(|| anyhow!("--view stack requires --call"))? },
-                    "provenance" => Cmd::Provenance { run: run.clone(), call: call.ok_or_else(|| anyhow!("--view provenance requires --call"))? },
+                    "stack" => Cmd::Why { run: run.clone(), n: call.ok_or_else(|| call_needed(&store, run, view))? },
+                    "provenance" => Cmd::Provenance { run: run.clone(), call: call.ok_or_else(|| call_needed(&store, run, view))? },
                     "fuel" => Cmd::Profile { run: run.clone(), top: 15 },
                     "explanation" => Cmd::Explain { run: run.clone() },
                     _ => bail!("unknown view {view:?}"),
@@ -573,5 +573,17 @@ fn platform(cli: &Cli, cmd: &PlatformCmd) -> Result<Value> {
             let types = host.types(&Default::default())?;
             Ok(hm::check(&host, &types))
         }
+    }
+}
+
+/// `--view stack` or `provenance` without `--call`: which calls there are.
+fn call_needed(store: &RunStore, run: &str, view: &str) -> anyhow::Error {
+    match store.load(run) {
+        Ok(r) => match (r.events.first(), r.events.last()) {
+            (Some(a), Some(b)) if a.n == b.n => anyhow!("--view {view} needs --call N: run {} made one host call, number {}", r.id, a.n),
+            (Some(a), Some(b)) => anyhow!("--view {view} needs --call N: run {} made host calls {} to {} (`--view timeline` lists them)", r.id, a.n, b.n),
+            _ => anyhow!("--view {view} needs --call N, but run {} made no host calls", r.id),
+        },
+        Err(e) => e,
     }
 }

@@ -118,6 +118,7 @@ fn render(st: &Style, path: &str, out: &Value) -> String {
             findings(st, out, &mut s);
         }
         "explain" | "show" if out.get("vs_stored_runs").is_some() => explain(st, out, &mut s),
+        "timeline" | "show" if out["host_calls"].is_array() => timeline(st, out, &mut s),
         "" if out.get("workflows").is_some() => overview(st, out, &mut s),
         _ => generic(st, path, out, &mut s),
     }
@@ -251,6 +252,57 @@ fn explain(st: &Style, out: &Value, s: &mut String) {
         let _ = writeln!(s, "  {} {}", label("output"), clip(t, 120));
     }
     findings(st, out, s);
+}
+
+/// `show --view timeline`: each host call, with its arguments in full. A
+/// URL or SQL text a finding is about must not be cut off.
+fn timeline(st: &Style, out: &Value, s: &mut String) {
+    const CALLS: usize = 50;
+    let calls = out["host_calls"].as_array().map_or(&[][..], Vec::as_slice);
+    let _ = writeln!(
+        s,
+        "{} {}  {}",
+        st.badge("1;30;46", "TIMELINE"),
+        st.bold(out["run"].as_str().unwrap_or("")),
+        st.dim(&format!("{} host call{}", thousands(calls.len() as u64), if calls.len() == 1 { "" } else { "s" }))
+    );
+    let label = |l: &str| st.dim(&format!("{l:<7}"));
+    for c in calls.iter().take(CALLS) {
+        let mut about = vec![format!("at {} ms", c["t_ms"]), format!("{} ms", c["latency_ms"])];
+        if c["cost"].as_u64().is_some_and(|n| n > 0) {
+            about.push(format!("cost {}", c["cost"]));
+        }
+        if let Some(src) = c["source"].as_str() {
+            about.push(src.to_string());
+        }
+        let _ = writeln!(s, "  {} {}  {}", st.bold(&format!("#{}", c["n"])), c["func"].as_str().unwrap_or(""), st.dim(&about.join(" · ")));
+        let args: Vec<String> = c["args"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(k, v)| {
+                let v = match v {
+                    Value::String(t) => clip(t, 300),
+                    v => clip(&v.to_string(), 120),
+                };
+                format!("{} {v}", st.dim(&format!("{k}:")))
+            })
+            .collect();
+        if !args.is_empty() {
+            let _ = writeln!(s, "      {} {}", label("args"), wrap(&args.join("  "), 14, st.cols));
+        }
+        if let Some(t) = c["trap"].as_str() {
+            let _ = writeln!(s, "      {} {}", label("trap"), st.paint("31", t));
+        } else if !c["result"].is_null() {
+            let _ = writeln!(s, "      {} {}", label("result"), clip(&c["result"].to_string(), 120));
+        }
+        if let Some(f) = c["from"].as_str() {
+            let _ = writeln!(s, "      {} {}", label("from"), st.dim(f));
+        }
+    }
+    if calls.len() > CALLS {
+        let _ = writeln!(s, "  {}", st.dim(&format!("… {} more (the JSON has all)", thousands((calls.len() - CALLS) as u64))));
+    }
 }
 
 fn inspect(st: &Style, out: &Value, s: &mut String) {
@@ -589,6 +641,27 @@ mod tests {
             "  ✗ fail  over_budget  129 cost\n",
             "  ✗ fail  reflection   puts q into HTML\n                       Hello, cnry12ab7<i>!\n",
             "Next\n  › appfuzz show r1 --view timeline\n",
+        ] {
+            assert!(plain.contains(line), "{line:?} in\n{plain}");
+        }
+    }
+
+    #[test]
+    fn a_timeline_keeps_the_arguments_whole() {
+        let url = format!("https://cnry3b543.example/{}", "a".repeat(80));
+        let out = json!({
+            "run": "r1",
+            "host_calls": [{"n": 1, "t_ms": 0.0, "func": "wasi:http/outgoing-handler#handle", "args": {"method": "POST", "url": url},
+                "latency_ms": 1.0, "cost": 1, "source": "generated", "result": {"ok": {"status": 200}}, "from": "handle"}],
+            "next": []
+        });
+        let plain = strip(&render(&PLAIN, "show", &out));
+        for line in [
+            "[TIMELINE] r1  1 host call\n",
+            "  #1 wasi:http/outgoing-handler#handle  at 0.0 ms · 1.0 ms · cost 1 · generated\n",
+            &format!("      args    method: POST  url: {url}\n"),
+            "      result  {\"ok\":{\"status\":200}}\n",
+            "      from    handle\n",
         ] {
             assert!(plain.contains(line), "{line:?} in\n{plain}");
         }
