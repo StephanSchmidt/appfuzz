@@ -727,7 +727,7 @@ mod tests {
         assert_eq!(k.length(a), 5);
         assert_eq!(k.block(a).unwrap(), b"hello");
         let b = k.alloc(3).unwrap();
-        assert!(b >= a + 5 && b % 8 == 0);
+        assert!(b >= a + 5 && b.is_multiple_of(8));
         k.store(b, b"abc").unwrap();
         assert_eq!(k.load(b + 1, 2).unwrap(), b"bc");
         assert!(k.load(b + 2, 8).is_err());
