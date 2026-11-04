@@ -447,6 +447,18 @@ pub(crate) enum ProbeCmd {
         #[command(flatten)]
         spec: SpecArgs,
     },
+    /// Requests without credentials and with forged ones (HTTP).
+    ///
+    /// Where the request without credentials is turned away (401, 403, a
+    /// redirect), sends a made-up token, an unsigned JWT, a JWT with a
+    /// wrong signature, Basic admin:admin and made-up session cookies. Also
+    /// tries paths of stored runs that were turned away.
+    Auth {
+        #[arg(long)]
+        export: Option<String>,
+        #[command(flatten)]
+        spec: SpecArgs,
+    },
     /// Every kind of value each host function may return.
     Values {
         /// Only host functions matching this.

@@ -169,6 +169,12 @@ pub const DOCS: &[Doc] = &[
         next: "`explain <run>` for a permissive_cors or host_header_injection finding",
     },
     Doc {
+        path: "probe auth",
+        examples: &["appfuzz probe auth"],
+        output: "the request without credentials and, where it is turned away, with forged ones (made-up token, unsigned JWT, wrong signature, Basic admin:admin, session cookies); also paths of stored runs that were turned away: those that did not end ok, findings",
+        next: "`explain <run>` for an auth_bypass finding",
+    },
+    Doc {
         path: "probe pairs",
         examples: &["appfuzz probe pairs last", "appfuzz probe pairs --set '{\"query\": [[\"days\", \"7\"]]}'"],
         output: "the run with one change each (list reversed, duplicate, seed, clock, one failure, one slow function) and whether the answer changed; findings",
@@ -453,7 +459,7 @@ pub fn next(path: &str, out: &Value) -> Vec<String> {
                 n.push(format!("appfuzz show {r} --view explanation"));
             }
         }
-        "fuzz" | "amplify" | "scale" | "probe values" | "probe times" | "probe web" | "probe pairs" => {
+        "fuzz" | "amplify" | "scale" | "probe values" | "probe times" | "probe web" | "probe auth" | "probe pairs" => {
             if path == "fuzz" {
                 if !findings.is_empty() {
                     n.push("appfuzz findings --min warn".into());

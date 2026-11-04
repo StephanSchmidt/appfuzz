@@ -150,6 +150,8 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
                 spec: o.spec.clone(),
             },
         );
+        // After the fuzz phase: it also tries paths the fuzzer saw turned away.
+        step("probe auth", Cmd::Probe { cmd: ProbeCmd::Auth { export: o.export.clone(), spec: o.spec.clone() } });
     }
     if executable && app.manifest.acceptance.is_some() {
         acceptance_results = step(

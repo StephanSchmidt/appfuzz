@@ -637,6 +637,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-jwt"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
 name = "http-length"
 version = "0.1.0"
 dependencies = [

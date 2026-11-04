@@ -27,7 +27,7 @@ fn pairs(v: Option<&Value>) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn header<'a>(h: &'a [(String, String)], name: &str) -> Option<&'a str> {
+pub(crate) fn header<'a>(h: &'a [(String, String)], name: &str) -> Option<&'a str> {
     h.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.trim())
 }
 

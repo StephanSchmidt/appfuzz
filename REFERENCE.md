@@ -677,6 +677,19 @@ would and as a request naming another host would:
 
 Both checks also judge every fuzz run.
 
+`probe auth` (part of `review`, after the fuzz phase) sends the request
+without credentials (no `Authorization`, `Proxy-Authorization`, `Cookie`,
+`X-API-Key`, `X-Auth-Token`). Where that is turned away (401, 403, or a
+redirect), it sends it again with forged ones: a made-up bearer token,
+`Bearer null`, an unsigned JWT (`alg: none`), a JWT with a wrong signature,
+`Basic admin:admin`, a made-up `X-API-Key`, and made-up session cookies
+(`session`, `sid`, `token`, `jwt`, …, also with the unsigned JWT). A 2xx is
+`auth_bypass` (fail): the app checks that a credential is there, or reads
+a JWT's claims without verifying it. A forged credential that went to a
+host call (a session lookup, a token service) is left out, since the
+simulated host decided. Besides the manifest's request, it tries up to
+eight paths of stored runs that were turned away.
+
 Outbound requests are the host function
 `wasi:http/outgoing-handler#handle(method: string, url: string, headers,
 body: string) -> result<response, string>`, where `response` is

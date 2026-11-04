@@ -458,7 +458,10 @@ other endpoints of that API, and the review reports that too.
 The review also sends your handler requests the way an attacker would:
 from another website, to catch CORS headers that let any site read a
 visitor's data, and naming another host, to catch password reset links
-and redirects built from the `Host` header.
+and redirects built from the `Host` header. Where your handler turns away
+a request without credentials, the review tries forged ones: a made-up
+token, a JWT nobody signed, `admin:admin`, a made-up session cookie. If one
+gets in, the review fails.
 
 ### Spin apps
 

@@ -252,6 +252,7 @@ an error.
 | "it breaks on some clock" | `probe times`, `sweep -f today --gen dates`, `run --now 2028-02-29T23:59:00` |
 | "it depends on order, duplicates, randomness" | `probe pairs <run>` |
 | "another site can read it", "it trusts the Host header" | `probe web` |
+| "it lets in any token", "it never checks the JWT's signature" | `probe auth` |
 | "it can't handle odd host values" | `probe values --fn X` |
 | "it breaks when a later host call fails, or retries forever" | `probe faults last --runs 256`, optionally `--fn X` |
 | "why do these two runs differ?" | `diff <a> <b>`, then `provenance <b> --call <n>` |
@@ -298,6 +299,7 @@ and `confirm <id>` makes it reproducible.
 | `reflection`, `stored_reflection`, `input_passthrough` | request or host text reaches HTML unescaped, or reaches a host call unchanged |
 | `sql_injection`, `path_traversal`, `command_injection`, `ssrf`, `url_path_injection`, `html_injection`, `regex_injection`, `escaped_by_hand` | request or host text reaches a labelled sink (§4) |
 | `pii_leak`, `secret_leak` | a labelled value reaches a place it must not (§4) |
+| `auth_bypass` | HTTP handlers: a request without credentials is turned away, one with forged credentials (made-up token, unsigned JWT, wrong signature) gets in (`probe auth`) |
 | `permissive_cors`, `host_header_injection` | HTTP handlers: another website may read the response with the visitor's cookies; a host the client names ends up in a link, redirect or outbound request (`probe web`) |
 | `script_in_output`, `unsafe_action`, `open_redirect`, `non_local_url` | the response breaks an output label: a script, a request the user didn't ask for, a URL off the app (§4 output labels) |
 | `foreign_user_access`, `missing_owner_check` | a user id that is not the caller's goes to a host call; another user's record shows in a page (§4 identity) |

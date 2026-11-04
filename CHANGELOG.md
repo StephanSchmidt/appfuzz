@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**Forged credentials**
+
+- `probe auth`, part of `review`: where a handler turns away a request
+  without credentials, it tries a made-up bearer token, `Bearer null`, an
+  unsigned JWT, a JWT with a wrong signature, `Basic admin:admin`, a
+  made-up API key and session cookies. One that gets a 2xx is
+  `auth_bypass` (fail). Paths the fuzzer saw turned away are tried too.
+
 **Spin**
 
 - `allowed_outbound_hosts` is enforced: a request to a host no entry allows

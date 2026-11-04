@@ -11,7 +11,7 @@ use crate::detect::{Finding, Severity};
 use crate::harness::App;
 use crate::par::{self, Runner};
 use crate::plan::{FnPlan, Response};
-use crate::record::{OutcomeKind, RunSpec};
+use crate::record::{OutcomeKind, RunRecord, RunSpec};
 use crate::scale::steady;
 use crate::value::GenOpts;
 use crate::wit::ImportKind;
@@ -255,6 +255,63 @@ pub fn web(app: &App, base: &RunSpec, run: Runner) -> (Vec<WebProbe>, Vec<Findin
     for ((what, _), r) in variants.iter().zip(runs) {
         probes.push(WebProbe { what: what.clone(), run: r.id.clone(), outcome: r.outcome.kind });
         findings.extend(crate::detect::per_run_checked(app, &r));
+    }
+    (probes, findings)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthProbe {
+    pub path: String,
+    pub what: String,
+    pub run: String,
+    pub outcome: OutcomeKind,
+}
+
+/// Each base request without credentials; where that is turned away, with
+/// forged ones (`auth::forged`). `auth_bypass` comes from comparing them.
+/// Bases with the same path are tried once.
+pub fn auth(app: &App, bases: &[RunSpec], run: Runner) -> (Vec<AuthProbe>, Vec<Finding>) {
+    let mut seen = std::collections::BTreeSet::new();
+    let anon: Vec<RunSpec> = bases
+        .iter()
+        .filter_map(|b| {
+            let req = crate::auth::anonymous(b.args.first()?)?;
+            seen.insert(crate::auth::path(&req)).then(|| {
+                let mut s = b.clone();
+                s.args[0] = req;
+                s
+            })
+        })
+        .collect();
+    let anon_runs = par::map(&anon, |s| run(s));
+    let mut probes = Vec::new();
+    let mut findings = Vec::new();
+    let mut found = false;
+    for (s, a) in anon.iter().zip(&anon_runs) {
+        let p = crate::auth::path(&s.args[0]);
+        probes.push(AuthProbe { path: p.clone(), what: "no credentials".into(), run: a.id.clone(), outcome: a.outcome.kind });
+        if found || crate::auth::rejected(a, &app.manifest).is_none() {
+            continue;
+        }
+        let forged = crate::auth::forged(&s.args[0]);
+        let specs: Vec<RunSpec> = forged
+            .iter()
+            .map(|f| {
+                let mut v = s.clone();
+                v.args[0] = f.request.clone();
+                v
+            })
+            .collect();
+        let runs = par::map(&specs, |s| run(s));
+        for (f, r) in forged.iter().zip(&runs) {
+            probes.push(AuthProbe { path: p.clone(), what: f.what.into(), run: r.id.clone(), outcome: r.outcome.kind });
+            findings.extend(crate::detect::per_run_checked(app, r));
+        }
+        let pairs: Vec<(&crate::auth::Forged, &RunRecord)> = forged.iter().zip(&runs).collect();
+        if let Some(f) = crate::auth::check(a, &pairs, &app.manifest) {
+            findings.push(f);
+            found = true;
+        }
     }
     (probes, findings)
 }

@@ -1,0 +1,11 @@
+{
+  "app": "http-jwt",
+  "bug": "an account API that turns away requests without a JWT but never checks the JWT's signature: any made-up token gets in",
+  "expect": [
+    {
+      "kind": "auth_bypass",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

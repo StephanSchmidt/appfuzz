@@ -2,6 +2,7 @@
 //! functions and measures what they do.
 
 pub mod agents;
+pub mod auth;
 pub mod check;
 pub mod constraints;
 pub mod dest;
