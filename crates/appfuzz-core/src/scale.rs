@@ -831,11 +831,19 @@ fn discover_keys(base: &RunSpec, prefix: &str, words: &[String], run: Runner) ->
         spec
     };
     let base_b = behaviour(&run(base));
-    // Per word: behaviour with value "1" and "10", and fuel with "1".
+    // Per word: behaviour with value "1" and "10", and fuel with "1". A key
+    // whose value only reaches a host call (`?sku=` pasted into SQL) changes
+    // neither the page nor the calls: a marker value shows it in the arguments.
+    let marker = "zq7xk2";
     let probes = par::map(words, |w| {
         let r1 = run(&with(&[(w, "1")]));
         let r10 = run(&with(&[(w, "10")]));
-        (behaviour(&r1), behaviour(&r10), r1.totals.fuel)
+        let (b1, b10) = (behaviour(&r1), behaviour(&r10));
+        let passed = b1 == b10 && b1 == base_b && {
+            let r = run(&with(&[(w, marker)]));
+            r.events.iter().any(|e| e.args.values().any(|v| v.to_string().contains(marker)))
+        };
+        (b1, b10, r1.totals.fuel, passed)
     });
     // Fuel of an unread key, per key length; None if unread keys of the
     // same length cost different fuel (fuel says nothing).
@@ -851,8 +859,8 @@ fn discover_keys(base: &RunSpec, prefix: &str, words: &[String], run: Runner) ->
         .collect();
     let mut keys: Vec<(String, String)> = Vec::new();
     let mut fuel_only: BTreeMap<usize, Vec<(u64, String)>> = BTreeMap::new();
-    for (w, (b1, b10, fuel)) in words.iter().zip(probes) {
-        if b1 != b10 || b1 != base_b {
+    for (w, (b1, b10, fuel, passed)) in words.iter().zip(probes) {
+        if b1 != b10 || b1 != base_b || passed {
             keys.push((w.clone(), b1));
         } else if unread[&w.len()].is_some_and(|f| f != fuel) {
             fuel_only.entry(w.len()).or_default().push((fuel, w.clone()));

@@ -125,7 +125,7 @@ fn sources(r: &RunRecord, m: &Manifest, unlabelled: bool) -> Vec<Source> {
     let mut seen = BTreeSet::new();
     for e in &r.events {
         let Some(v) = &e.result else { continue };
-        for (p, l) in m.result_labels(&e.func) {
+        for (p, l) in m.call_result_labels(&e.func, &e.args) {
             if matches!(l, Label::Pii | Label::Secret) {
                 for s in values_at(v, &p) {
                     if s.chars().count() >= ENCODED_MIN && seen.insert(s.clone()) {

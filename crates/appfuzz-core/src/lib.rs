@@ -29,6 +29,7 @@ pub mod probe;
 pub mod record;
 pub mod scale;
 pub mod shrink;
+pub mod spin;
 pub mod statics;
 pub mod store;
 pub mod urls;

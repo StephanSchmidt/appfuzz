@@ -468,6 +468,18 @@ impl Manifest {
         self.function(key).and_then(|f| f.result.as_ref()).map(ResultLabels::paths).unwrap_or_default()
     }
 
+    /// The result labels of one recorded call: a manifest rule can label the
+    /// results for some arguments differently.
+    pub fn call_result_labels(&self, key: &str, args: &serde_json::Map<String, serde_json::Value>) -> Vec<(String, Label)> {
+        match self.function(key) {
+            Some(f) if f.rules.iter().any(|r| r.result.is_some()) => {
+                let args: Vec<(String, serde_json::Value)> = args.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                crate::plan::result_labels_for(f.result.as_ref(), &f.rules, &args)
+            }
+            _ => self.result_labels(key),
+        }
+    }
+
     /// Whether the export's result has labels.
     pub fn has_output_labels(&self) -> bool {
         self.entry.as_ref().is_some_and(|e| !e.result.is_empty())

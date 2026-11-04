@@ -1,0 +1,20 @@
+# appfuzz bench app: http-spin (a well-behaved Spin HTTP component),
+# reviewed from its Spin manifest alone: no appfuzz.toml.
+spin_manifest_version = 2
+
+[application]
+name = "http-spin"
+
+[variables]
+api_token = { required = true, secret = true }
+
+[[trigger.http]]
+route = "/..."
+component = "http-spin"
+
+[component.http-spin]
+source = "../../target/wasm32-wasip2/release/http_spin.wasm"
+allowed_outbound_hosts = ["https://api.example"]
+
+[component.http-spin.variables]
+api_token = "{{ api_token }}"

@@ -668,6 +668,33 @@ arrives as that code; any other
 text arrives as `internal-error` with the text. A method or scheme the
 types reject, or an empty authority, fails before any host call.
 
+### Spin apps (`spin.toml`)
+
+Without `appfuzz.toml`, appfuzz reads `spin.toml` from the current
+directory (`-m spin.toml` names it). An `appfuzz.toml` wins; `--wasm`
+alone skips `spin.toml`. Only `spin_manifest_version = 2` is read. The
+component is `--component NAME`, else the only one with an HTTP trigger,
+else the only one. Its `source` must be a local path.
+
+| `spin.toml` | appfuzz |
+|-------------|---------|
+| `source` | `[app] wasm` |
+| `[application] name`, `description` | `[app] name`, `description` |
+| HTTP trigger `route` (`/shop/...`) | `[app] base = "/shop"`; the request is `GET https://app.example/shop/` |
+| `allowed_outbound_hosts` | `[grants] hosts`: the host of each entry, `*.example.com` as `example.com` and its subdomains, `*` as any host; `self` and `localhost` are skipped, `{{ var }}` is filled from the component's variables or the entry skipped |
+| `[component.X.variables]` | rules on `fermyon:spin/variables#get`, `spin:variables/variables#get` (`name`) and `wasi:config/store#get` (`key`): a variable whose template uses an application variable with `secret = true` has `result = "secret"` and a generated value; one whose template resolves through defaults returns that text; an undeclared name is `undefined` (`ok(none)` for `wasi:config`) |
+| `key_value_stores` | rules on `store.open` (`label`): any other store is `access-denied` |
+| `sqlite_databases` | rules on `connection.open` (`database`): any other database is `access-denied` |
+
+No `[grants] imports` or `wasi`: Spin links all of WASI and its own
+interfaces. The limits are appfuzz's defaults. Built-in labels for Spin's
+SQL, key-value, Redis and MQTT functions and for `wasi:keyvalue` apply to
+every component, with or without `spin.toml`.
+
+Spin enforces `allowed_outbound_hosts` at run time; appfuzz does not
+refuse requests to other hosts. A host written into the app that is not
+granted is `unexpected_destination`; a host the request decides is `ssrf`.
+
 ### witx platforms
 
 `witx = ["path/to/abi.witx", …]` (or `builtin:fastly`) gives the types: pointers

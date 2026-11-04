@@ -134,7 +134,9 @@ fn bench() {
     let mut failed = 0;
     for (i, (name, d, expected)) in apps.iter().enumerate() {
         let t = std::time::Instant::now();
-        let (problems, _) = check(&d.join("appfuzz.toml"), expected, &state_dir(name));
+        // A Spin app may come with its spin.toml alone.
+        let manifest = if d.join("appfuzz.toml").exists() { d.join("appfuzz.toml") } else { d.join("spin.toml") };
+        let (problems, _) = check(&manifest, expected, &state_dir(name));
         failed += usize::from(!problems.is_empty());
         let w = apps.len().to_string().len();
         println!(

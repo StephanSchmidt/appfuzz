@@ -51,6 +51,9 @@ struct Platform {
     latency_ms: BTreeMap<String, f64>,
     /// `pii` and `secret` result paths, whose generated strings are marked.
     marks: BTreeMap<String, Vec<(String, crate::labels::Label)>>,
+    /// Functions whose manifest rules label results by argument: their own
+    /// labels and the rules.
+    label_rules: BTreeMap<String, (Option<crate::labels::ResultLabels>, Vec<crate::plan::Rule>)>,
     /// Value constraints of host results.
     constraints: BTreeMap<String, Vec<(String, crate::constraints::Constraint)>>,
     argument_checks: BTreeMap<String, crate::value_contract::HostChecks>,
@@ -294,6 +297,7 @@ impl App {
             cost: BTreeMap::new(),
             latency_ms: BTreeMap::new(),
             marks: BTreeMap::new(),
+            label_rules: BTreeMap::new(),
             constraints: BTreeMap::new(),
             argument_checks: BTreeMap::new(),
             rules: BTreeMap::new(),
@@ -401,6 +405,9 @@ impl App {
                     .collect();
                 if !marks.is_empty() {
                     platform.marks.insert(f.key.clone(), marks);
+                }
+                if let Some(spec) = manifest.function(&f.key).filter(|s| s.rules.iter().any(|r| r.result.is_some())) {
+                    platform.label_rules.insert(f.key.clone(), (spec.result.clone(), spec.rules.clone()));
                 }
                 if let Some(spec) = manifest.function(&f.key).filter(|s| !s.rules.is_empty()) {
                     platform.rules.insert(f.key.clone(), crate::plan::compile_rules(&spec.rules));
@@ -901,6 +908,13 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     };
     let names = info.param_names();
     let args: Vec<(String, Value)> = names.iter().cloned().zip(params.iter().map(val_to_json)).collect();
+    // Labels that depend on the arguments (a secret variable, a public one).
+    let by_args: Option<Vec<_>> = platform.label_rules.get(key).map(|(own, rules)| {
+        crate::plan::result_labels_for(own.as_ref(), rules, &args)
+            .into_iter()
+            .filter(|(_, l)| matches!(l, crate::labels::Label::Pii | crate::labels::Label::Secret) || l.is_id())
+            .collect()
+    });
     let value_checks = platform.argument_checks.get(key).map(|checks| checks.check(&args));
     // The platform's rules come first: the host keeps its promises, whatever
     // the plan or the fuzzer says.
@@ -1067,7 +1081,7 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
             let seed = data.seed ^ blake3::hash(key.as_bytes()).as_bytes()[0] as u64 ^ ((call as u64) << 20);
             let mut g = Generator::new(seed, opts);
             let mut vals: Vec<Val> = result_types.iter().map(|t| g.gen_val(t)).collect();
-            if let (Some(marks), [v], [t]) = (platform.marks.get(key), vals.as_mut_slice(), result_types.as_slice()) {
+            if let (Some(marks), [v], [t]) = (by_args.as_ref().or(platform.marks.get(key)), vals.as_mut_slice(), result_types.as_slice()) {
                 let mut j = val_to_json(v);
                 crate::labels::mark(&mut j, marks, seed, &data.identity);
                 if let Ok(x) = json_to_val(&j, t) {

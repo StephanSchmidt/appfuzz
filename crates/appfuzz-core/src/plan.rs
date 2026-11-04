@@ -60,6 +60,30 @@ pub struct Rule {
     pub when: BTreeMap<String, Value>,
     #[serde(flatten)]
     pub response: Response,
+    /// Manifest only: the labels of results for these arguments, instead of
+    /// the function's (`variables#get` is secret for `api-token` only). A
+    /// rule with labels and no answer only labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::labels::ResultLabels>,
+}
+
+impl Rule {
+    /// Whether the rule answers the call, not only labels it.
+    fn answers(&self) -> bool {
+        self.result.is_none() || self.response.decides()
+    }
+}
+
+/// The result labels of one call: the first rule with labels whose `when`
+/// matches the arguments, else the function's own.
+pub fn result_labels_for(default: Option<&crate::labels::ResultLabels>, rules: &[Rule], args: &[(String, Value)]) -> Vec<(String, crate::labels::Label)> {
+    rules
+        .iter()
+        .find(|r| r.result.is_some() && r.when.iter().all(|(p, m)| arg(args, p).is_some_and(|a| matches(m, a))))
+        .and_then(|r| r.result.as_ref())
+        .or(default)
+        .map(crate::labels::ResultLabels::paths)
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -134,6 +158,9 @@ impl Plan {
             for (i, r) in f.rules.iter().enumerate() {
                 for m in r.when.values() {
                     matcher_ok(m).with_context(|| format!("{key}: rule {i}"))?;
+                }
+                if r.result.is_some() {
+                    bail!("{key}: rule {i} labels results; labels belong in the manifest (appfuzz.toml), not in a plan");
                 }
             }
         }
@@ -240,7 +267,7 @@ pub fn check_rule(r: &Rule) -> Result<()> {
 /// The first of the manifest's rules for a function that matches the
 /// arguments. These are the platform's promises: they come before any plan.
 pub fn resolve_rules(rules: &[Rule], args: &[(String, Value)], fn_latency: Option<f64>) -> Option<Resolved> {
-    let (i, rule) = rules.iter().enumerate().find(|(_, r)| r.when.iter().all(|(param, m)| arg(args, param).is_some_and(|a| matches(m, a))))?;
+    let (i, rule) = rules.iter().enumerate().find(|(_, r)| r.answers() && r.when.iter().all(|(param, m)| arg(args, param).is_some_and(|a| matches(m, a))))?;
     let r = &rule.response;
     let decision = if let Some(msg) = &r.commit_then_trap {
         Decision::CommitThenTrap(msg.clone())
@@ -259,6 +286,7 @@ pub fn resolve_rules(rules: &[Rule], args: &[(String, Value)], fn_latency: Optio
 pub(crate) struct CompiledRule {
     when: Vec<(String, CompiledMatcher)>,
     response: Response,
+    answers: bool,
 }
 enum CompiledMatcher {
     Any,
@@ -299,11 +327,15 @@ impl CompiledMatcher {
 pub(crate) fn compile_rules(rules: &[Rule]) -> Vec<CompiledRule> {
     rules
         .iter()
-        .map(|r| CompiledRule { when: r.when.iter().map(|(p, m)| (p.clone(), CompiledMatcher::new(m))).collect(), response: r.response.clone() })
+        .map(|r| CompiledRule {
+            when: r.when.iter().map(|(p, m)| (p.clone(), CompiledMatcher::new(m))).collect(),
+            response: r.response.clone(),
+            answers: r.answers(),
+        })
         .collect()
 }
 pub(crate) fn resolve_compiled_rules(rules: &[CompiledRule], args: &[(String, Value)], fn_latency: Option<f64>) -> Option<Resolved> {
-    let (i, rule) = rules.iter().enumerate().find(|(_, r)| r.when.iter().all(|(p, m)| arg(args, p).is_some_and(|v| m.matches(v))))?;
+    let (i, rule) = rules.iter().enumerate().find(|(_, r)| r.answers && r.when.iter().all(|(p, m)| arg(args, p).is_some_and(|v| m.matches(v))))?;
     let r = &rule.response;
     let decision = if let Some(msg) = &r.commit_then_trap {
         Decision::CommitThenTrap(msg.clone())
@@ -379,6 +411,27 @@ fn text(v: &Value) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rule_labels_by_argument() {
+        use crate::labels::{Label, ResultLabels};
+        let rules: Vec<Rule> = serde_json::from_value(serde_json::json!([
+            {"when": {"key": "api_token"}, "result": "secret"},
+            {"when": {"key": "greeting"}, "return": {"ok": "Hello"}}
+        ]))
+        .unwrap();
+        let args = |k: &str| vec![("key".to_string(), serde_json::json!(k))];
+        assert_eq!(result_labels_for(None, &rules, &args("api_token")), vec![(String::new(), Label::Secret)]);
+        assert!(result_labels_for(None, &rules, &args("greeting")).is_empty());
+        let own = ResultLabels::Whole(Label::Pii);
+        assert_eq!(result_labels_for(Some(&own), &rules, &args("other")), vec![(String::new(), Label::Pii)]);
+        // A rule that only labels does not answer: the next rule does.
+        let r = resolve_rules(&rules, &args("api_token"), None);
+        assert!(r.is_none());
+        assert!(resolve_rules(&rules, &args("greeting"), None).is_some());
+        let plan = Plan::parse(r#"{"a:b/c#d": {"rules": [{"when": {"x": 1}, "result": "secret"}]}}"#);
+        assert!(plan.is_err());
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -405,6 +458,7 @@ mod tests {
         let rules = vec![Rule {
             when: BTreeMap::from([("date".into(), json!({"not":{"regex":"^2026-"}}))]),
             response: Response { ret: Some(json!({"err":"date"})), latency_ms: Some(2.0), ..Default::default() },
+            result: None,
         }];
         let compiled = compile_rules(&rules);
         for value in ["2026-11-02", "bad"] {

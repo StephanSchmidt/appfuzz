@@ -370,6 +370,7 @@ too. Details: [REFERENCE.md](REFERENCE.md#request-sequences).
 |----------|---------------------------|----------------|
 | **Component** (wasm32-wasip2, jco, componentize-*) | the WIT inside it | nothing |
 | **HTTP handler** on `wasi:http` (Spin, wasmCloud, `wasmtime serve`) | built in | nothing |
+| **Spin app** | built in, plus your `spin.toml` | nothing |
 | **Fastly Compute app** (wasm32-wasip1) | Fastly's witx, bundled | `platform = "fastly"` |
 | **Module on another witx platform** | your platform's witx | a `platform.toml` |
 | **Extism plugin** (any PDK) | a WIT file you supply | a `platform.toml` with `abi = "extism"` |
@@ -405,6 +406,26 @@ appfuzz run --plan '{"wasi:http/outgoing-handler#handle": {"return": {"err": "co
 
 If text from the incoming request decides where an outgoing request goes,
 the review reports SSRF.
+
+### Spin apps
+
+Run `appfuzz review` next to your `spin.toml`. It needs no `appfuzz.toml`:
+appfuzz reads your component's settings and tests it with what Spin would
+give it.
+
+| In `spin.toml` | What the review does with it |
+|----------------|------------------------------|
+| `allowed_outbound_hosts` | the hosts your app may call; a call your code makes to any other host is reported |
+| `variables` marked `secret = true` | traced: a token that shows up in a page, a log or a request to the wrong host fails the review |
+| other variables | answered with their default value |
+| `key_value_stores`, `sqlite_databases` | opening any other store or database fails, as on Spin |
+| the HTTP trigger's `route` | the path the requests go to |
+
+The review also knows Spin's own APIs: a SQL statement built from request
+text is SQL injection, and a key-value or Redis write on a GET request is
+reported. If your app has several HTTP components, pick one with
+`--component NAME`. Add an `appfuzz.toml` when you want limits or your own
+labels; it replaces `spin.toml` for appfuzz.
 
 ### Fastly Compute
 

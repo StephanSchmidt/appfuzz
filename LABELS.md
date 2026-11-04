@@ -286,6 +286,24 @@ Matchers: a plain value (equal), `{ regex = "…" }`, `{ range = [lo, hi] }`,
 `{ contains = "…" }`, `{ any = true }`, `{ not = <matcher> }`. A rule that
 names a parameter the function doesn't have is an error.
 
+A rule can also label the results for its arguments, with `result` in
+the shape of a function's `result`. One function can then return a
+secret for some arguments and plain text for others:
+
+```toml
+[functions."fermyon:spin/variables#get"]
+rules = [
+  { when = { name = "api-token" }, result = "secret" },
+  { when = { name = "greeting" }, return = { ok = "Hello" } },
+]
+```
+
+The first rule with `result` whose `when` matches gives the call's
+labels; calls it doesn't match keep the function's own. A rule with
+`result` and no `return`, `generate` or `trap` only labels: the answer
+comes from the next matching rule, the plan or the fuzzer. Labels belong
+in the manifest; a plan rule with `result` is an error.
+
 ## Request fields: `[entry] fields = { <path> = "<role>" }`
 
 | Role | Means |

@@ -57,7 +57,10 @@ request is then generated from the WIT types.
 A `wasi:http` handler needs no platform: its request is
 `{method, uri, headers, body}`, and each outgoing request is the host function
 `wasi:http/outgoing-handler#handle` (url labelled for SSRF). See
-[REFERENCE](REFERENCE.md#wasihttp-handlers).
+[REFERENCE](REFERENCE.md#wasihttp-handlers). A Spin app needs no manifest
+either: without `appfuzz.toml`, appfuzz reads `spin.toml` (hosts, secret
+variables, stores; `--component NAME` picks one). See
+[REFERENCE](REFERENCE.md#spin-apps-spintoml).
 
 A plain module (not a component) needs `[app] platform`, which is a bundled
 name (`fastly`) or a `platform.toml` path. For an Extism plugin, the platform

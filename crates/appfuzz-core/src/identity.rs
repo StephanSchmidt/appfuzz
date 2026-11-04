@@ -83,7 +83,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             }
         }
         if let Some(v) = &e.result {
-            for (p, l) in m.result_labels(&e.func) {
+            for (p, l) in m.call_result_labels(&e.func, &e.args) {
                 if l == Label::Identity {
                     known.extend(ids_at(v, &p));
                 }
@@ -103,7 +103,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut foreign: Vec<(&crate::record::HostCall, String, String, &Map<String, Value>)> = Vec::new();
     for e in &r.events {
         let Some(v) = &e.result else { continue };
-        let owned: Vec<String> = m.result_labels(&e.func).into_iter().filter(|(_, l)| *l == Label::Owner).map(|(p, _)| p).collect();
+        let owned: Vec<String> = m.call_result_labels(&e.func, &e.args).into_iter().filter(|(_, l)| *l == Label::Owner).map(|(p, _)| p).collect();
         if owned.is_empty() {
             crate::output::strings(v, &mut elsewhere);
             continue;

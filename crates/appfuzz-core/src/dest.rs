@@ -136,7 +136,7 @@ pub fn is_internal(host: &str) -> bool {
 fn granted(host: &str, hosts: &[String]) -> bool {
     hosts.iter().any(|g| {
         let g = g.trim().trim_start_matches("*.").to_ascii_lowercase();
-        host == g || host.ends_with(&format!(".{g}"))
+        g == "*" || host == g || host.ends_with(&format!(".{g}"))
     })
 }
 

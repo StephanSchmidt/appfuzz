@@ -253,15 +253,21 @@ fn state(cli: &Cli) -> Value {
 }
 
 fn load_manifest(cli: &Cli) -> Result<Manifest> {
+    // appfuzz.toml, else a Spin app's spin.toml (unless a bare --wasm is given).
     let path = cli.manifest.clone().or_else(|| {
         let p = PathBuf::from("appfuzz.toml");
-        p.exists().then_some(p)
+        let spin = PathBuf::from("spin.toml");
+        if p.exists() { Some(p) } else { (cli.wasm.is_none() && spin.exists()).then_some(spin) }
     });
     let mut m = match (&path, &cli.wasm) {
+        (Some(p), _) if appfuzz_core::spin::is_spin(p) => appfuzz_core::spin::load(p, cli.component.as_deref())?,
         (Some(p), _) => Manifest::load(p)?,
         (None, Some(w)) => Manifest::for_wasm(w),
-        (None, None) => bail!("no appfuzz.toml here; pass --manifest or --wasm"),
+        (None, None) => bail!("no appfuzz.toml or spin.toml here; pass --manifest or --wasm"),
     };
+    if cli.component.is_some() && !path.as_deref().is_some_and(appfuzz_core::spin::is_spin) {
+        bail!("--component picks a component of a Spin app; it needs spin.toml");
+    }
     if let (Some(_), Some(w)) = (&path, &cli.wasm) {
         m.app.wasm = std::fs::canonicalize(w).unwrap_or(w.clone());
     }

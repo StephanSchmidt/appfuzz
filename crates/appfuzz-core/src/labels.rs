@@ -130,7 +130,7 @@ pub fn check_positions(m: &Manifest) -> Result<()> {
                 );
             }
         }
-        for (p, l) in f.result.iter().flat_map(ResultLabels::paths) {
+        for (p, l) in f.result.iter().chain(f.rules.iter().filter_map(|r| r.result.as_ref())).flat_map(ResultLabels::paths) {
             if !l.for_result() {
                 let at = if p.is_empty() { "result".to_string() } else { format!("result.{p}") };
                 bail!("[functions.\"{k}\"] {at} = \"{}\": a result label is one of untrusted, html, pii, secret, identity, owner", l.name());
@@ -158,7 +158,7 @@ pub fn check_wit(m: &Manifest, imports: &[Interface]) -> Result<()> {
                 _ => {}
             }
         }
-        for (p, l) in spec.result.iter().flat_map(ResultLabels::paths) {
+        for (p, l) in spec.result.iter().chain(spec.rules.iter().filter_map(|r| r.result.as_ref())).flat_map(ResultLabels::paths) {
             let Some(t) = f.ty.results().next() else { bail!("[functions.\"{k}\"] labels a result, but {} returns nothing", f.signature()) };
             if !path_ok(&t, &segs(&p), l.is_id()) {
                 bail!(
@@ -170,8 +170,8 @@ pub fn check_wit(m: &Manifest, imports: &[Interface]) -> Result<()> {
         }
         for (i, r) in spec.rules.iter().enumerate() {
             crate::plan::check_rule(r).with_context(|| format!("[functions.\"{k}\"] rule {i}"))?;
-            if !r.response.decides() {
-                bail!("[functions.\"{k}\"] rule {i} needs a `return`, `generate` or `trap`");
+            if !r.response.decides() && r.result.is_none() {
+                bail!("[functions.\"{k}\"] rule {i} needs a `return`, `generate`, `trap` or `result` labels");
             }
             for p in r.when.keys() {
                 let named = f.ty.params().any(|(n, _)| n == p || n.replace('-', "_") == *p);
@@ -326,7 +326,7 @@ pub fn trusted_html(r: &RunRecord, m: &Manifest) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for e in &r.events {
         let Some(v) = &e.result else { continue };
-        for (p, l) in m.result_labels(&e.func) {
+        for (p, l) in m.call_result_labels(&e.func, &e.args) {
             if l == Label::Html {
                 for s in values_at(v, &p) {
                     out.extend(CANARY.find_iter(&s).map(|c| c.as_str().to_string()));
@@ -473,7 +473,7 @@ fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut seen = std::collections::HashSet::new();
     for e in &r.events {
         let Some(v) = &e.result else { continue };
-        for (p, l) in m.result_labels(&e.func) {
+        for (p, l) in m.call_result_labels(&e.func, &e.args) {
             if matches!(l, Label::Pii | Label::Secret) {
                 for s in values_at(v, &p) {
                     if s.chars().count() >= 4 && seen.insert(s.clone()) {

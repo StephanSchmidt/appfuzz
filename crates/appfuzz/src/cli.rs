@@ -9,6 +9,10 @@ pub(crate) struct Cli {
     /// A component to use without a manifest (or instead of its [app] wasm).
     #[arg(long, global = true)]
     pub(crate) wasm: Option<PathBuf>,
+    /// The component of a Spin app (`spin.toml`) to review, when it has
+    /// more than one HTTP component.
+    #[arg(long, global = true)]
+    pub(crate) component: Option<String>,
     /// Where runs are kept.
     #[arg(long, global = true, default_value = ".appfuzz")]
     pub(crate) state: PathBuf,
