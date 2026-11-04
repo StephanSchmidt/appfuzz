@@ -121,11 +121,17 @@ pub enum Across {
     Scale { knob: Knob, sizes: Vec<u64>, context: Option<String> },
     /// Run a variant of the run and compare (`appfuzz probe pairs`).
     Pair { change: Change, func: Option<String> },
+    /// Forged credentials, a secret's prefixes or other random seeds
+    /// (`appfuzz probe auth`).
+    Auth { auth: crate::auth::Recipe },
 }
 
 impl Across {
     /// How `f` was found, if it came from comparing runs this way.
     pub fn of(f: &Finding) -> Option<Across> {
+        if let Some(auth) = f.detail.get("auth") {
+            return serde_json::from_value(auth.clone()).ok().map(|auth| Across::Auth { auth });
+        }
         if let Some(fault) = f.detail.get("fault") {
             return serde_json::from_value(fault.clone()).ok().map(|fault| Across::Fault { fault });
         }
@@ -143,7 +149,7 @@ impl Across {
     /// The run `f` was found from: the base of a pair, else `f`'s run.
     pub fn start_run<'a>(&self, f: &'a Finding) -> Option<&'a str> {
         match self {
-            Across::Pair { .. } | Across::Fault { .. } => f.detail.get("base_run").and_then(Value::as_str),
+            Across::Pair { .. } | Across::Fault { .. } | Across::Auth { .. } => f.detail.get("base_run").and_then(Value::as_str),
             Across::Scale { .. } => f.run.as_deref(),
         }
     }
@@ -180,6 +186,7 @@ impl Across {
                 let vs: Vec<_> = metamorphic::variants(app, &r).into_iter().filter(|v| v.change == *change && v.func == *func).collect();
                 vs.iter().find_map(|v| metamorphic::compare(app, &r, v, &run(&v.spec)).into_iter().find(|f| f.id == id))
             }
+            Across::Auth { auth } => crate::probe::auth_again(app, auth, spec, run).into_iter().find(|f| f.id == id),
         })
     }
 
@@ -188,6 +195,7 @@ impl Across {
         match self {
             Across::Scale { sizes, .. } => sizes.len().max(1) as u32,
             Across::Pair { .. } | Across::Fault { .. } => 2,
+            Across::Auth { auth } => auth.runs(),
         }
     }
 
@@ -196,6 +204,7 @@ impl Across {
             Across::Fault { fault } => json!({"fault": fault}),
             Across::Scale { knob, sizes, context } => json!({"scale": knob, "sizes": sizes, "context": context}),
             Across::Pair { change, func } => json!({"variant": {"change": change, "func": func}}),
+            Across::Auth { auth } => json!({"auth": auth}),
         }
     }
 }
@@ -584,6 +593,17 @@ fn request_edits(app: &App, s: &RunSpec, base: &[Value], lows: &Lows, out: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_findings_repeat_their_probe() {
+        let found = crate::detect::Finding::new("timing_unsafe_compare", "x", crate::detect::Severity::Warn, "t".into(), json!({}), Some("r2"));
+        let f = crate::auth::Recipe::Timing { forged: "a made-up API key".into() }.mark(found, "r1");
+        let a = Across::of(&f).unwrap();
+        assert_eq!(a.start_run(&f), Some("r1"));
+        assert_eq!(a.runs_per_test(), 27);
+        let back: Across = serde_json::from_value(serde_json::to_value(&a).unwrap()).unwrap();
+        assert_eq!(back.describe(), json!({"auth": {"check": "timing", "forged": "a made-up API key"}}));
+    }
 
     #[test]
     fn steps_down() {

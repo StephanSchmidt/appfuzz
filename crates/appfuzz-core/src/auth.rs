@@ -11,6 +11,7 @@
 //! call (a session lookup, a token service) is left out: there the
 //! simulated host decided, not the app.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::detect::{Finding, Severity};
@@ -109,6 +110,38 @@ pub fn rejected(r: &RunRecord, m: &Manifest) -> Option<i64> {
 
 /// The finding when forged credentials got a 2xx where the anonymous
 /// request was turned away. `runs` pairs each forged credential with its run.
+/// How `probe auth` found a finding, so `confirm` and `replay` can do it
+/// again from the run it started from (the finding's `base_run`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "check")]
+pub enum Recipe {
+    /// The request without credentials, then with this forged credential.
+    Bypass { forged: String },
+    /// Prefixes of the secret in place of this forged credential.
+    Timing { forged: String },
+    /// Other random seeds and a second later.
+    Token,
+}
+
+impl Recipe {
+    /// Runs one test costs, at most.
+    pub fn runs(&self) -> u32 {
+        match self {
+            Recipe::Bypass { .. } => 2,
+            // The run, up to 24 prefixes, the control and the whole secret.
+            Recipe::Timing { .. } => 27,
+            Recipe::Token => 4,
+        }
+    }
+
+    /// Records the recipe and its starting run on `f`.
+    pub fn mark(&self, mut f: Finding, base_run: &str) -> Finding {
+        f.detail["auth"] = json!(self);
+        f.detail["base_run"] = json!(base_run);
+        f
+    }
+}
+
 pub fn check(anon: &RunRecord, runs: &[(&Forged, &RunRecord)], m: &Manifest) -> Option<Finding> {
     let turned_away = rejected(anon, m)?;
     let accepted: Vec<(&Forged, &RunRecord, i64)> = runs
@@ -127,7 +160,7 @@ pub fn check(anon: &RunRecord, runs: &[(&Forged, &RunRecord)], m: &Manifest) -> 
         2 => " and 1 other forged credential".into(),
         n => format!(" and {} other forged credentials", n - 1),
     };
-    Some(Finding::new(
+    let f = Finding::new(
         "auth_bypass",
         &format!("{ex}\0auth"),
         Severity::Fail,
@@ -142,7 +175,8 @@ pub fn check(anon: &RunRecord, runs: &[(&Forged, &RunRecord)], m: &Manifest) -> 
             "accepted": accepted.iter().map(|(f, r, s)| json!({"what": f.what, "run": r.id, "status": s})).collect::<Vec<_>>(),
         }),
         Some(run.id.as_str()),
-    ))
+    );
+    Some(Recipe::Bypass { forged: first.what.into() }.mark(f, &anon.id))
 }
 
 /// Secrets a run read from host calls (results labelled `secret`).

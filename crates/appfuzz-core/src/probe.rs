@@ -299,28 +299,19 @@ pub fn auth(app: &App, bases: &[RunSpec], run: Runner) -> (Vec<AuthProbe>, Vec<F
         if crate::auth::rejected(a, m).is_none() {
             continue;
         }
-        let forged = crate::auth::forged(&s.args[0]);
-        let specs: Vec<RunSpec> = forged
-            .iter()
-            .map(|f| {
-                let mut v = s.clone();
-                v.args[0] = f.request.clone();
-                v
-            })
-            .collect();
-        let runs = par::map(&specs, |s| run(s));
-        for (f, r) in forged.iter().zip(&runs) {
+        let forged = forged_runs(s, None, run);
+        for (f, r) in &forged {
             probes.push(AuthProbe { path: p.clone(), what: f.what.into(), run: r.id.clone(), outcome: r.outcome.kind });
             findings.extend(crate::detect::per_run_checked(app, r));
         }
-        let pairs: Vec<(&crate::auth::Forged, &RunRecord)> = forged.iter().zip(&runs).collect();
+        let pairs: Vec<(&crate::auth::Forged, &RunRecord)> = forged.iter().map(|(f, r)| (f, r)).collect();
         if !bypass && let Some(f) = crate::auth::check(a, &pairs, m) {
             findings.push(f);
             bypass = true;
         }
         if !timing {
             for (f, r) in &pairs {
-                let Some((finding, with_secret)) = secret_prefixes(app, f, r, run, &mut probes) else { continue };
+                let Some((finding, with_secret)) = secret_prefixes(app, f.what, r, run, &mut probes) else { continue };
                 issuing.extend(with_secret);
                 if let Some(x) = finding {
                     findings.push(x);
@@ -334,17 +325,53 @@ pub fn auth(app: &App, bases: &[RunSpec], run: Runner) -> (Vec<AuthProbe>, Vec<F
     (probes, findings)
 }
 
-/// The forged credential replaced by prefixes of the secret the app read
-/// while checking it: the finding, and the run with the whole secret. Only
-/// for a credential the app compared (a bearer token or an API key).
-fn secret_prefixes(
-    app: &App,
-    f: &crate::auth::Forged,
-    r: &RunRecord,
-    run: Runner,
-    probes: &mut Vec<AuthProbe>,
-) -> Option<(Option<Finding>, Option<RunRecord>)> {
-    let (what, header, prefix) = match f.what {
+/// One of `probe auth`'s checks again, from `spec`: what `confirm` shrinks
+/// and `replay` repeats.
+pub fn auth_again(app: &App, recipe: &crate::auth::Recipe, spec: &RunSpec, run: Runner) -> Vec<Finding> {
+    use crate::auth::Recipe;
+    match recipe {
+        Recipe::Bypass { forged } => {
+            let Some(req) = spec.args.first().and_then(crate::auth::anonymous) else { return Vec::new() };
+            let mut s = spec.clone();
+            s.args[0] = req;
+            let a = run(&s);
+            if crate::auth::rejected(&a, &app.manifest).is_none() {
+                return Vec::new();
+            }
+            let forged = forged_runs(&s, Some(forged), run);
+            let pairs: Vec<(&crate::auth::Forged, &RunRecord)> = forged.iter().map(|(f, r)| (f, r)).collect();
+            crate::auth::check(&a, &pairs, &app.manifest).into_iter().collect()
+        }
+        Recipe::Timing { forged } => {
+            let r = run(spec);
+            secret_prefixes(app, forged, &r, run, &mut Vec::new()).and_then(|(f, _)| f).into_iter().collect()
+        }
+        Recipe::Token => predictable_tokens(app, &[run(spec)], run, &mut Vec::new()),
+    }
+}
+
+/// The request `s` (without credentials) with forged ones, all or the one
+/// named `only`, and their runs.
+fn forged_runs(s: &RunSpec, only: Option<&str>, run: Runner) -> Vec<(crate::auth::Forged, RunRecord)> {
+    let forged: Vec<crate::auth::Forged> = crate::auth::forged(&s.args[0]).into_iter().filter(|f| only.is_none_or(|w| f.what == w)).collect();
+    let specs: Vec<RunSpec> = forged
+        .iter()
+        .map(|f| {
+            let mut v = s.clone();
+            v.args[0] = f.request.clone();
+            v
+        })
+        .collect();
+    let runs = par::map(&specs, |s| run(s));
+    forged.into_iter().zip(runs).collect()
+}
+
+/// The forged credential `forged` in run `r` replaced by prefixes of the
+/// secret the app read while checking it: the finding, and the run with
+/// the whole secret. Only for a credential the app compared (a bearer
+/// token or an API key).
+fn secret_prefixes(app: &App, forged: &str, r: &RunRecord, run: Runner, probes: &mut Vec<AuthProbe>) -> Option<(Option<Finding>, Option<RunRecord>)> {
+    let (what, header, prefix) = match forged {
         "a made-up bearer token" => ("the bearer token", "authorization", "Bearer "),
         "a made-up API key" => ("the API key", "x-api-key", ""),
         _ => return None,
@@ -372,7 +399,8 @@ fn secret_prefixes(
         probes.push(AuthProbe { path: p.clone(), what: format!("{what}: {k} characters of the secret"), run: x.id.clone(), outcome: x.outcome.kind });
     }
     let refs: Vec<&RunRecord> = runs.iter().collect();
-    Some((crate::auth::timing(&r.spec.export, what, &lengths, &refs, &control), full))
+    let recipe = crate::auth::Recipe::Timing { forged: forged.into() };
+    Some((crate::auth::timing(&r.spec.export, what, &lengths, &refs, &control).map(|f| recipe.mark(f, &r.id)), full))
 }
 
 /// Runs that issue session tokens, again with two other random seeds and a
@@ -402,7 +430,7 @@ fn predictable_tokens(app: &App, issuing: &[RunRecord], run: Runner, probes: &mu
             probes.push(AuthProbe { path: p.clone(), what: format!("the session token with {what}"), run: x.id.clone(), outcome: x.outcome.kind });
         }
         let seeds: Vec<&RunRecord> = runs.iter().take(2).collect();
-        findings.extend(crate::auth::predictable(r, &seeds, runs.get(2), m));
+        findings.extend(crate::auth::predictable(r, &seeds, runs.get(2), m).into_iter().map(|f| crate::auth::Recipe::Token.mark(f, &r.id)));
     }
     findings
 }

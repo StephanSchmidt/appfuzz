@@ -87,6 +87,10 @@ fn check(manifest: &Path, expected: &Value, state: &Path) -> (Vec<String>, Value
     for s in review["steps"].as_array().into_iter().flatten().filter(|s| s.get("error").is_some()) {
         problems.push(format!("step {} failed: {}", s["step"], s["error"]));
     }
+    // An incomplete review (a finding confirm can't repeat, say) gives no verdict.
+    for e in review["errors"].as_array().into_iter().flatten() {
+        problems.push(format!("review incomplete: {e}"));
+    }
     (problems, review)
 }
 

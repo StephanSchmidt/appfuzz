@@ -201,7 +201,7 @@ pub const DOCS: &[Doc] = &[
     Doc {
         path: "confirm",
         examples: &["appfuzz confirm f8d860089", "appfuzz confirm r5166a18fdb --finding f8d860089 -n 5"],
-        output: "deterministic or not, the shrunk spec, the minimised run, a case file; for a finding from comparing runs, `reproduce` names the scale knob or the variant",
+        output: "deterministic or not, the shrunk spec, the minimised run, a case file; for a finding from comparing runs, `reproduce` names the scale knob, the variant or the `probe auth` check",
         next: "`explain <minimised run>`; `replay <case file>` after a fix",
     },
     Doc {
