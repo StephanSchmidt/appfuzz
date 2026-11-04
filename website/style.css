@@ -313,6 +313,25 @@ footer { border-top: 1px solid var(--rule); }
 .foot-in { display: flex; gap: 24px; align-items: center; padding-top: 28px; padding-bottom: 40px; color: var(--mute); font-size: 15px; }
 .foot-in .logo { color: var(--ink); font-size: 20px; }
 
+/* Formats */
+.formats-wrap { border: 1px solid var(--ink); }
+.formats { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 15.5px; line-height: 1.55; }
+.formats th, .formats td { text-align: left; vertical-align: top; padding: 20px 24px; border-left: 1px solid var(--rule); }
+.formats th:first-child, .formats td:first-child { border-left: 0; }
+.formats thead th { font-size: 24px; font-stretch: 80%; font-weight: 750; padding-bottom: 0; }
+.formats td { color: var(--ink2); }
+.formats td b { color: var(--ink); font-weight: 650; }
+@media (max-width: 700px) {
+  .formats thead { display: none; }
+  .formats, .formats tbody, .formats tr, .formats td { display: block; }
+  .formats td { border-left: 0; border-top: 1px solid var(--rule); }
+  .formats td:first-child { border-top: 0; }
+  .formats td::before { display: block; margin-bottom: 6px; font-size: 22px; font-stretch: 80%; font-weight: 750; color: var(--ink); }
+  .formats td:nth-child(1)::before { content: "Components"; }
+  .formats td:nth-child(2)::before { content: "Core modules"; }
+  .formats td:nth-child(3)::before { content: "Extism plugins"; }
+}
+
 /* Narrow screens */
 @media (max-width: 1000px) {
   .grid4.search-methods { grid-template-columns: 1fr; }

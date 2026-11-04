@@ -55,7 +55,7 @@
       <li class="has-drop"><a href="#minute">How it works</a><button type="button" class="drop-btn" aria-expanded="false" aria-controls="drop-1"><span class="sr-only">More: How it works</span></button>
         <ul class="drop" id="drop-1"><li><a href="#minute">Walkthrough</a></li><li><a href="#search">Search</a></li><li><a href="#why-wasm">Why Wasm</a></li><li><a href="#sandbox">Sandbox</a></li><li><a href="#agents">Your agent</a></li></ul></li>
       <li class="has-drop"><a href="#languages">Where it runs</a><button type="button" class="drop-btn" aria-expanded="false" aria-controls="drop-2"><span class="sr-only">More: Where it runs</span></button>
-        <ul class="drop" id="drop-2"><li><a href="#languages">Languages</a></li><li><a href="#fastly">Fastly Compute</a></li><li><a href="#appos">AppOS</a></li></ul></li>
+        <ul class="drop" id="drop-2"><li><a href="#languages">Languages</a></li><li><a href="#formats">Wasm formats</a></li><li><a href="#fastly">Fastly Compute</a></li><li><a href="#appos">AppOS</a></li></ul></li>
       <li><a href="#limits">Limits</a></li>
     </ul>
     <a class="gh" href="https://github.com/StephanSchmidt/appfuzz" aria-label="appfuzz on GitHub">
@@ -69,7 +69,7 @@
 
 <header class="frame hero">
   <div class="hero-text">
-    <p class="tag"><span>Open source</span> For WebAssembly components</p>
+    <p class="tag"><span>Open source</span> For WebAssembly components and modules</p>
     <h1>No more code reviews. Fuzz&nbsp;instead.</h1>
     <p class="sub">Agents and colleagues write apps faster than you can read them. appfuzz runs each one thousands of times before it ships and tells you what would break: a crash on an empty list, user text unescaped in the page, one query per row, a call to a server nobody approved. Pass or fail, in CI.</p>
     <p class="install-label">Install on Linux or macOS</p>
@@ -459,6 +459,28 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
       <p class="verdict warn"><b>warn</b> <span class="kind">redundant_calls</span> items#get: 2 of 4 calls repeat earlier calls with the same arguments</p>
     </div>
   </div>
+</section>
+
+<section id="formats" class="frame sec">
+  <div class="sec-head">
+    <h2>Components, modules and plugins.</h2>
+    <p>However your platform runs WebAssembly, your apps get the same review: the same search, the same checks, the same budgets, the same report.</p>
+  </div>
+  <div class="formats-wrap">
+    <table class="formats">
+      <thead>
+        <tr><th scope="col">Components</th><th scope="col">Core modules</th><th scope="col">Extism plugins</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>The standard for new apps, in Rust, Go, Python, JavaScript or C#. Each component describes itself in <b>WIT</b>, so you point appfuzz at the file and start.</td>
+          <td>Plain WASI modules on a <b>witx platform</b> such as <b>Fastly Compute</b>. Fastly works out of the box; your own platform takes one config file.</td>
+          <td>Plugins built with any <b>Extism</b> PDK, in any language. appfuzz plays the host your plugins run in, so you test them without your product.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="aside">A plain module only says which functions it calls, not what they take, so appfuzz asks which platform it runs on. Not yet simulated: outbound HTTP from Extism plugins. Setup in the <a href="https://github.com/StephanSchmidt/appfuzz#platforms-components-witx-and-extism">README</a>.</p>
 </section>
 
 <section id="speed" class="frame sec speed">
