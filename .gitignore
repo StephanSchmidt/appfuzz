@@ -28,6 +28,9 @@
 !/bench/prelude-labelled.rs
 !/bench/apps.py
 !/bench/demo.sh
+!/bench/demo.tape
+!/bench/record.sh
+!/bench/record-env.sh
 !/bench/apps/
 !/bench/wit/
 !/bench/lang/

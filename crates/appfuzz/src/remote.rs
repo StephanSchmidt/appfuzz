@@ -25,7 +25,12 @@ pub(crate) fn is_url(s: &str) -> bool {
 }
 
 /// `appfuzz [options] URL [args]` becomes `appfuzz [options] --wasm URL
-/// review [args]`: a URL in place of a command reviews it.
+/// review [args]`: a URL in place of a command reviews it. Someone trying a
+/// URL wants an answer soon, so the fuzzing time is 10s unless `--time`
+/// says otherwise.
+/// The fuzzing time of `appfuzz URL`.
+const URL_REVIEW_TIME: &str = "10s";
+
 pub(crate) fn rewrite_args(args: Vec<String>) -> Vec<String> {
     let mut i = 1;
     while i < args.len() {
@@ -44,6 +49,9 @@ pub(crate) fn rewrite_args(args: Vec<String>) -> Vec<String> {
         let mut out = args[..i].to_vec();
         out.extend(["--wasm".to_string(), a.clone(), "review".to_string()]);
         out.extend(args[i + 1..].iter().cloned());
+        if !args.iter().any(|a| a == "--time" || a.starts_with("--time=")) {
+            out.extend(["--time".to_string(), URL_REVIEW_TIME.to_string()]);
+        }
         return out;
     }
     args
@@ -136,7 +144,7 @@ fn short_hash(bytes: &[u8]) -> String {
 }
 
 /// Downloads `url` and its manifest into the cache.
-pub(crate) fn fetch(url: &str, allow_http: bool) -> Result<Fetched> {
+pub(crate) fn fetch(url: &str, allow_http: bool, human: bool) -> Result<Fetched> {
     if !allow_http && !url.to_ascii_lowercase().starts_with("https://") {
         bail!("{url}: only https:// URLs are downloaded; pass --allow-http for plain http");
     }
@@ -167,12 +175,16 @@ pub(crate) fn fetch(url: &str, allow_http: bool) -> Result<Fetched> {
     if let Some((_, text)) = &manifest {
         std::fs::write(&manifest_path, text).with_context(|| format!("writing {}", manifest_path.display()))?;
     }
-    eprintln!(
-        "appfuzz: downloaded {url} ({} bytes, {}), manifest: {}",
-        wasm.len(),
-        short_hash(&wasm),
-        manifest.as_ref().map_or("none".to_string(), |(m, _)| m.clone())
-    );
+    if human {
+        crate::human::downloaded(&format!("{stem}.wasm"), wasm.len() as u64, manifest.is_some().then(|| format!("{stem}.toml")).as_deref());
+    } else {
+        eprintln!(
+            "appfuzz: downloaded {url} ({} bytes, {}), manifest: {}",
+            wasm.len(),
+            short_hash(&wasm),
+            manifest.as_ref().map_or("none".to_string(), |(m, _)| m.clone())
+        );
+    }
     Ok(Fetched { wasm: wasm_path, manifest: manifest.map(|_| manifest_path), state: cache.join("state").join(short_hash(url.as_bytes())) })
 }
 
@@ -191,7 +203,7 @@ mod tests {
 
     #[test]
     fn a_url_in_place_of_a_command_reviews_it() {
-        assert_eq!(rewrite_args(args("appfuzz https://x/a.wasm")), args("appfuzz --wasm https://x/a.wasm review"));
+        assert_eq!(rewrite_args(args("appfuzz https://x/a.wasm")), args("appfuzz --wasm https://x/a.wasm review --time 10s"));
         assert_eq!(rewrite_args(args("appfuzz -j 2 https://x/a.wasm --time 5s")), args("appfuzz -j 2 --wasm https://x/a.wasm review --time 5s"));
         assert_eq!(rewrite_args(args("appfuzz --wasm https://x/a.wasm run")), args("appfuzz --wasm https://x/a.wasm run"));
         assert_eq!(rewrite_args(args("appfuzz run https://x")), args("appfuzz run https://x"));

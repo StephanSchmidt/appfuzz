@@ -89,6 +89,10 @@ h3 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: -.005em; }
   padding-top: 72px;
   padding-bottom: 80px;
 }
+.cast { padding-bottom: 72px; }
+.cast figure { margin: 0 6px 0 0; }
+.cast video { display: block; width: 100%; height: auto; background: #1e1e2e; border: 2px solid var(--ink); box-shadow: 6px 6px 0 var(--ink); }
+.cast figcaption { margin-top: 18px; font-size: 15px; color: var(--ink2); }
 .tag { display: inline-flex; gap: 10px; align-items: center; margin: 0 0 22px; font: 500 13px/1 var(--mono); color: var(--ink2); }
 .tag span { background: var(--hi); color: var(--ink); padding: 4px 7px; font-weight: 600; }
 h1 { font-size: clamp(46px, 7.4vw, 96px); }
@@ -322,6 +326,8 @@ footer { border-top: 1px solid var(--rule); }
 .formats td { color: var(--ink2); }
 .formats td b { color: var(--ink); font-weight: 650; }
 @media (max-width: 700px) {
+  .cast { padding-bottom: 48px; }
+  .cast video { box-shadow: 4px 4px 0 var(--ink); }
   .formats thead { display: none; }
   .formats, .formats tbody, .formats tr, .formats td { display: block; }
   .formats td { border-left: 0; border-top: 1px solid var(--rule); }

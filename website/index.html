@@ -136,6 +136,18 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
   </figure>
 </header>
 
+<section class="frame cast" aria-label="appfuzz reviewing a demo app">
+  <figure>
+    <video id="cast" autoplay loop muted playsinline poster="/demo.png" width="1280" height="460" aria-label="A terminal: appfuzz --human https://appfuzz.dev/demo/chatty.wasm prints FAIL with an n+1 and a cost over budget">
+      <source src="/demo-narrow.webm" type="video/webm" media="(max-width: 700px)">
+      <source src="/demo-narrow.mp4" type="video/mp4" media="(max-width: 700px)">
+      <source src="/demo.webm" type="video/webm">
+      <source src="/demo.mp4" type="video/mp4">
+    </video>
+    <figcaption><code>appfuzz --human https://appfuzz.dev/demo/chatty.wasm</code> finds the n+1 query in about ten seconds.</figcaption>
+  </figure>
+</section>
+
 <div class="strip">
   <div class="frame strip-in">
     <p>Works on apps built with</p>
@@ -729,6 +741,11 @@ http::fetch(&amp;format!(
 <script>
 (function () {
   var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // The recording: with reduced motion, only its poster (the last frame).
+  var cast = document.getElementById('cast');
+  if (cast && window.matchMedia('(max-width: 700px)').matches) cast.poster = '/demo-narrow.png';
+  if (cast && reduce) { cast.removeAttribute('autoplay'); cast.pause(); }
 
   // Nav: dropdowns open on hover and focus; buttons for touch and keyboard.
   (function () {

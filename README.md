@@ -27,6 +27,8 @@ curl -fsSL https://appfuzz.dev/install.sh | sh     # or: brew install stephansch
 appfuzz --human https://appfuzz.dev/demo/chatty.wasm
 ```
 
+![appfuzz reviewing the chatty demo: FAIL, an n+1 query and a cost over budget](website/demo.gif)
+
 That downloads a small demo app with a bug and reviews it. Four more are on
 [appfuzz.dev/demo](https://appfuzz.dev/demo/): an XSS, two crashes and one
 that passes. On your own app, run `appfuzz review` next to its `.wasm`.

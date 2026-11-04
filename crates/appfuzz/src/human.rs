@@ -14,6 +14,30 @@ pub(crate) fn wanted(human_flag: bool) -> bool {
     human_flag || std::env::var_os("APPFUZZ_HUMAN").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
+fn set(var: &str) -> bool {
+    std::env::var_os(var).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+fn stderr_style() -> Style {
+    Style { color: (std::io::stderr().is_terminal() || set("CLICOLOR_FORCE")) && !set("NO_COLOR"), cols: None }
+}
+
+/// Printed on stderr before a review starts, so a person knows it's working.
+pub(crate) fn starting(time: &str) {
+    eprintln!("{}", stderr_style().dim(&format!("Reviewing: probes, scaling, then {time} of fuzzing…\n")));
+}
+
+/// Printed on stderr after downloading an app by URL.
+pub(crate) fn downloaded(wasm: &str, bytes: u64, manifest: Option<&str>) {
+    let with = manifest.map_or_else(|| ", no manifest".to_string(), |m| format!(" and {m}"));
+    eprintln!("{}", stderr_style().dim(&format!("Downloaded {wasm} ({} bytes){with}", thousands(bytes))));
+}
+
+/// Columns of the terminal: the real one, else `COLUMNS`.
+fn columns() -> Option<usize> {
+    terminal_size::terminal_size().map(|(w, _)| w.0 as usize).or_else(|| std::env::var("COLUMNS").ok()?.parse().ok())
+}
+
 /// List items shown before "… N more".
 const LIST_MAX: usize = 12;
 /// Characters of one line before it is cut.
@@ -21,14 +45,15 @@ const WIDTH: usize = 110;
 
 struct Style {
     color: bool,
+    /// Terminal columns, to wrap long lines; `None`: don't wrap.
+    cols: Option<usize>,
 }
 
 impl Style {
     fn new() -> Self {
         Style {
-            color: std::io::stdout().is_terminal()
-                && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
-                && std::env::var("TERM").map_or(true, |t| t != "dumb"),
+            color: (std::io::stdout().is_terminal() || set("CLICOLOR_FORCE")) && !set("NO_COLOR") && std::env::var("TERM").map_or(true, |t| t != "dumb"),
+            cols: columns(),
         }
     }
     fn paint(&self, code: &str, s: &str) -> String {
@@ -64,7 +89,7 @@ pub(crate) fn summary(path: &str, out: &Value) -> String {
 fn render(st: &Style, path: &str, out: &Value) -> String {
     let mut s = String::new();
     if let Some(e) = out["error"].as_str() {
-        let _ = writeln!(s, "{} {e}", st.badge("1;97;41", "ERROR"));
+        let _ = writeln!(s, "{} {e}", st.badge("1;30;41", "ERROR"));
         for sub in out["subcommands"].as_array().into_iter().flatten() {
             let _ = writeln!(s, "  {}  {}", st.bold(sub["command"].as_str().unwrap_or("")), st.dim(sub["what"].as_str().unwrap_or("")));
         }
@@ -83,7 +108,7 @@ fn render(st: &Style, path: &str, out: &Value) -> String {
         "inspect" => inspect(st, out, &mut s),
         "findings" => {
             let n = out["count"].as_u64().unwrap_or(0);
-            let _ = writeln!(s, "{} {}", st.badge("1;97;44", "FINDINGS"), st.bold(&format!("{n} finding{}", if n == 1 { "" } else { "s" })));
+            let _ = writeln!(s, "{} {}", st.badge("1;30;46", "FINDINGS"), st.bold(&format!("{n} finding{}", if n == 1 { "" } else { "s" })));
             findings(st, out, &mut s);
         }
         "explain" | "show" if out.get("vs_stored_runs").is_some() => explain(st, out, &mut s),
@@ -95,10 +120,10 @@ fn render(st: &Style, path: &str, out: &Value) -> String {
 
 fn verdict_badge(st: &Style, verdict: &str) -> String {
     match verdict {
-        "pass" => st.badge("1;97;42", "PASS"),
+        "pass" => st.badge("1;30;42", "PASS"),
         "warn" => st.badge("1;30;43", "WARN"),
-        "fail" => st.badge("1;97;41", "FAIL"),
-        v => st.badge("1;97;45", &v.to_uppercase()),
+        "fail" => st.badge("1;30;41", "FAIL"),
+        v => st.badge("1;30;45", &v.to_uppercase()),
     }
 }
 
@@ -125,7 +150,7 @@ fn review(st: &Style, out: &Value, s: &mut String) {
 }
 
 fn outcome_badge(st: &Style, kind: &str) -> String {
-    if kind == "ok" { st.badge("1;97;42", "OK") } else { st.badge("1;97;41", &kind.to_uppercase()) }
+    if kind == "ok" { st.badge("1;30;42", "OK") } else { st.badge("1;30;41", &kind.to_uppercase()) }
 }
 
 fn run(st: &Style, out: &Value, s: &mut String) {
@@ -213,7 +238,7 @@ fn inspect(st: &Style, out: &Value, s: &mut String) {
     let app = &out["app"];
     let name = app["name"].as_str().or_else(|| app["wasm"].as_str()).unwrap_or("app");
     let _ =
-        writeln!(s, "{} {}  {}", st.badge("1;97;44", "INSPECT"), st.bold(name), st.dim(&format!("{} bytes", thousands(app["bytes"].as_u64().unwrap_or(0)))));
+        writeln!(s, "{} {}  {}", st.badge("1;30;46", "INSPECT"), st.bold(name), st.dim(&format!("{} bytes", thousands(app["bytes"].as_u64().unwrap_or(0)))));
     for e in out["exports"].as_array().into_iter().flatten() {
         let _ = writeln!(s, "  {} {}", st.paint("32", "export"), e["sig"].as_str().or_else(|| e["key"].as_str()).unwrap_or(""));
     }
@@ -241,16 +266,19 @@ fn findings(st: &Style, out: &Value, s: &mut String) {
         return;
     }
     let width = list.iter().filter_map(|f| f["kind"].as_str()).map(str::len).max().unwrap_or(0);
+    let indent = 2 + 6 + 2 + width + 2;
+    // In a narrow terminal the title goes on its own line, under the kind.
+    let narrow = st.cols.is_some_and(|c| c < indent + 40);
     let _ = writeln!(s);
     for f in list {
         let kind = f["kind"].as_str().unwrap_or("");
-        let _ = writeln!(
-            s,
-            "  {}  {}  {}",
-            st.severity(f["severity"].as_str().unwrap_or("info")),
-            st.bold(&format!("{kind:<width$}")),
-            f["title"].as_str().unwrap_or("")
-        );
+        let severity = st.severity(f["severity"].as_str().unwrap_or("info"));
+        let title = f["title"].as_str().unwrap_or("");
+        if narrow {
+            let _ = writeln!(s, "  {severity}  {}\n{:10}{}", st.bold(kind), "", wrap(title, 10, st.cols));
+        } else {
+            let _ = writeln!(s, "  {severity}  {}  {}", st.bold(&format!("{kind:<width$}")), wrap(title, indent, st.cols));
+        }
     }
 }
 
@@ -268,7 +296,7 @@ fn next(st: &Style, out: &Value, s: &mut String) {
 /// Any other command: its JSON laid out for reading.
 fn generic(st: &Style, path: &str, out: &Value, s: &mut String) {
     let title = if path.is_empty() { "appfuzz" } else { path };
-    let mut head = st.badge("1;97;44", &title.to_uppercase());
+    let mut head = st.badge("1;30;46", &title.to_uppercase());
     if let Some(v) = out["verdict"].as_str().or(out["status"].as_str()) {
         let _ = write!(head, " {}", verdict_badge(st, v));
     }
@@ -380,6 +408,28 @@ fn words(k: &str) -> String {
     k.replace('_', " ")
 }
 
+/// `text` in lines that fit `cols`, the lines after the first indented by
+/// `indent` (where the text starts on the first line).
+fn wrap(text: &str, indent: usize, cols: Option<usize>) -> String {
+    let Some(room) = cols.map(|c| c.saturating_sub(indent + 1)).filter(|r| *r >= 30) else {
+        return text.to_string();
+    };
+    let mut lines: Vec<String> = vec![String::new()];
+    for word in text.split(' ') {
+        let line = lines.last_mut().expect("a line");
+        let len = line.chars().count();
+        if len > 0 && len + 1 + word.chars().count() > room {
+            lines.push(word.to_string());
+        } else {
+            if len > 0 {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+    }
+    lines.join(&format!("\n{}", " ".repeat(indent)))
+}
+
 fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max { s.to_string() } else { format!("{}…", s.chars().take(max).collect::<String>()) }
 }
@@ -432,7 +482,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const PLAIN: Style = Style { color: false };
+    const PLAIN: Style = Style { color: false, cols: None };
 
     #[test]
     fn a_review_shows_the_verdict_each_finding_and_what_next() {
@@ -518,6 +568,23 @@ mod tests {
         assert_eq!(clip_visible("abcdef", 3), "abc…");
         assert_eq!(clip_visible("\x1b[2mabcdef\x1b[0m", 2), "\x1b[2mab…\x1b[0m");
         assert_eq!(clip_visible("ab", 3), "ab");
+    }
+
+    #[test]
+    fn long_titles_wrap_under_themselves() {
+        assert_eq!(wrap("aaa bbb ccc", 4, None), "aaa bbb ccc");
+        let text = "one two three four five six seven eight nine ten eleven twelve";
+        assert_eq!(wrap(text, 4, Some(40)), "one two three four five six seven\n    eight nine ten eleven twelve");
+    }
+
+    #[test]
+    fn in_a_narrow_terminal_titles_go_under_the_kind() {
+        let st = Style { color: false, cols: Some(50) };
+        let out =
+            json!({"findings": [{"severity": "fail", "kind": "slow_host_sensitivity", "title": "handle takes 321 ms (limit 200) when get answers in 20 ms"}]});
+        let mut s = String::new();
+        findings(&st, &out, &mut s);
+        assert_eq!(s, "\n  ✗ fail  slow_host_sensitivity\n          handle takes 321 ms (limit 200) when\n          get answers in 20 ms\n");
     }
 
     #[test]

@@ -147,7 +147,7 @@ fn main() {
         prefix += &format!(" --state {}", quote(&cli.state.to_string_lossy()));
     }
     if let Some(url) = cli.wasm.as_ref().map(|w| w.to_string_lossy().to_string()).filter(|w| remote::is_url(w)) {
-        match remote::fetch(&url, cli.allow_http) {
+        match remote::fetch(&url, cli.allow_http, human::wanted(cli.human)) {
             Ok(f) => {
                 cli.wasm = Some(f.wasm);
                 cli.remote = true;
@@ -168,6 +168,9 @@ fn main() {
     let human = human::wanted(cli.human);
     if let Some(n) = cli.jobs {
         let _ = rayon::ThreadPoolBuilder::new().num_threads(n.max(1)).build_global();
+    }
+    if human && let Some(Cmd::Review { time, .. }) = &cli.cmd {
+        human::starting(time);
     }
     let out = if cli.cmd.is_none() { Ok(guide::overview(state(&cli), commands(&command, ""))) } else { run(cli) };
     let mut out = match out {
