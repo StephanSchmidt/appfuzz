@@ -20,6 +20,28 @@ It tests what you deploy, not your source:
 
 Website: https://appfuzz.dev
 
+## Try it in 30 seconds
+
+```sh
+curl -fsSL https://appfuzz.dev/install.sh | sh     # or: brew install stephanschmidt/appfuzz/appfuzz
+appfuzz https://appfuzz.dev/demo/chatty.wasm
+```
+
+That downloads a small demo app with a bug and reviews it. Four more are on
+[appfuzz.dev/demo](https://appfuzz.dev/demo/): an XSS, two crashes and one
+that passes. On your own app, run `appfuzz review` next to its `.wasm`.
+
+**Who it's for:** platforms that run code other people wrote (plugins,
+extensions, customer scripts), teams whose agents write more code than anyone
+reviews, and developers of Wasm apps on Fastly, Spin, wasmCloud or Extism.
+
+**How it differs:** unit tests and proptest need you to write inputs and
+checks; appfuzz brings both. cargo-fuzz finds crashes in a fuzzing build;
+appfuzz runs your release build and also reports slow pages, XSS, leaked data
+and wasteful calls. Semgrep and CodeQL read code; appfuzz runs it, so each
+finding comes with the input that causes it. More on
+[appfuzz.dev](https://appfuzz.dev/#different).
+
 ## Example
 
 `bench/apps/chatty` lists items, then fetches each one again:
@@ -37,24 +59,24 @@ simulated backend returns and counts the calls:
 
 ```
 $ appfuzz review --time 10s
-{
-  "verdict": "fail",
-  "exit_code": 2,
-  "counts": { "fail": 2, "warn": 3, "info": 1, "confirmed": 5 },
-  "coverage": { "unreached_call_sites": 0 },
-  "findings": [
-    { "severity": "fail", "kind": "n_plus_1",
-      "title": "calls to bench:web/items#get grow as 1·n with n = length of the list bench:web/items#all returns; cost breaks its limit at n = 100" },
-    { "severity": "fail", "kind": "over_budget",
-      "title": "bench:web/handler#handle uses 129 cost, the limit is 100" },
-    …
-  ],
-  "next": [ "appfuzz show rff6825faed --view explanation", "appfuzz findings --min info" ]
-}
+appfuzz review FAIL  2 fail, 4 warn, 1 info  · 96,676 runs in 10.6s
+
+  fail  n_plus_1               calls to bench:web/items#get grow as 1·n with n = length of the list bench:web/items#all returns; cost breaks its limit at n = 100
+  fail  over_budget            bench:web/handler#handle uses 129 cost, the limit is 100
+  warn  chatty                 bench:web/items#get is called for each element bench:web/items#all returned (2 calls for 2 elements)
+  warn  redundant_calls        bench:web/items#get: 2 of 4 calls repeat earlier calls with the same arguments
+  warn  serial_chain           bench:web/handler#handle waits 129 ms for 129 host calls in a row (128 × bench:web/items#get: 128 ms), the latency limit is 200 ms
+  warn  slow_host_sensitivity  bench:web/handler#handle takes 321.04 ms (limit 200) when bench:web/items#get answers in 20 ms; it calls it 16 times
+
+Next:
+  appfuzz show r9e5a645b84 --view explanation
+  appfuzz findings --min info
 ```
 
-Output shortened. The same loop written in Zig, TypeScript, JavaScript, Go,
-C# and Python gets the same findings (`bench/lang`).
+The exit code is 2 (fail), so CI stops. Piped or with `--json`, the same
+command prints the full report as JSON. The same loop written in Zig,
+TypeScript, JavaScript, Go, C# and Python gets the same findings
+(`bench/lang`).
 
 ## Install
 
