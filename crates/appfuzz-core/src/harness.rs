@@ -277,6 +277,12 @@ impl App {
     fn from_bytes_engine(mut manifest: Manifest, bytes: Vec<u8>, engine: Engine) -> Result<Self> {
         manifest.binary = crate::manifest::Binary::of(&bytes);
         let hash = component_hash(&bytes);
+        // The manifest as written identifies the contract. Built-in labels
+        // added below follow from the component and appfuzz's version, both
+        // already in the key, and commands that only read stored runs and
+        // findings never load the component to add them.
+        let contract = manifest.fingerprint();
+        let state_key = manifest.state_key(&hash);
         let extism_abi = manifest.host.as_ref().is_some_and(|h| h.platform.abi.as_deref() == Some("extism"));
         let mut plugin = None;
         let (component, core, imports, exports) = if wasmparser::Parser::is_core_wasm(&bytes) && extism_abi {
@@ -458,8 +464,6 @@ impl App {
             });
         }
 
-        let contract = manifest.fingerprint();
-        let state_key = manifest.state_key(&hash);
         Ok(App {
             contract,
             state_key,

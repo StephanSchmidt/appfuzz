@@ -223,7 +223,8 @@ impl Envelope {
     pub fn build(runs: &[RunRecord], m: &Manifest) -> Self {
         let mut e = Envelope { version: VERSION, margin: MARGIN, runs: runs.len(), ..Default::default() };
         e.component = runs.first().map(|r| r.spec.component.clone()).unwrap_or_default();
-        e.contract = m.fingerprint();
+        // The runs carry the contract as written, before built-in labels.
+        e.contract = runs.first().map_or_else(|| m.fingerprint(), |r| r.spec.contract.clone());
         e.requirements = m.requirements_fingerprint();
         for r in runs {
             for (f, n) in r.call_counts() {

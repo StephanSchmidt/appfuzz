@@ -225,6 +225,32 @@ fn repeat_reviews_preserve_confirmed_failures_even_when_fresh() {
 }
 
 #[test]
+fn findings_are_listed_for_apps_with_built_in_labels() {
+    // An import appfuzz has built-in labels for (wasi:keyvalue, Spin, an
+    // HTTP handler) adds them to the manifest when the app loads; the
+    // commands that read stored findings must look in the same place.
+    let f = Fixture::new(true);
+    let bytes = component(
+        "package test:workflow; package wasi:keyvalue { interface atomics { increment: func(key: string, delta: u64) -> u64; } } world app { import wasi:keyvalue/atomics; export run: func(input: string) -> string; }",
+        r#"
+            (module
+              (import "wasi:keyvalue/atomics" "increment" (func (param i32 i32 i64) (result i64)))
+              (memory (export "memory") 4)
+              (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
+              (func (export "run") (param i32 i32) (result i32)
+                (i32.store (i32.const 0) (local.get 0))
+                (i32.store (i32.const 4) (local.get 1))
+                (i32.const 0)))"#,
+    );
+    std::fs::write(f.dir.join("app.wasm"), bytes).unwrap();
+    let (code, review) = f.cli(&["review", "--runs", "40"]);
+    assert_eq!(code, 2, "{review}");
+    let reflection = review["findings"].as_array().unwrap().iter().find(|v| v["kind"] == "reflection").unwrap_or_else(|| panic!("{review}"))["id"].clone();
+    let (_, listed) = f.cli(&["findings", "--min", "info"]);
+    assert!(listed["findings"].as_array().unwrap().iter().any(|v| v["id"] == reflection), "{listed}");
+}
+
+#[test]
 fn nonexecuting_reviews_are_incomplete() {
     let f = Fixture::new(false);
     f.edit("export = \"run\"", "export = \"missing\"");
