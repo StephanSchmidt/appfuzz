@@ -18,11 +18,14 @@
 .demo-hero { padding-top: 64px; padding-bottom: 40px; }
 .demo-hero h1 { font-size: clamp(40px, 6vw, 72px); margin: 0 0 18px; }
 .demo-hero .sub { max-width: 36em; }
-.demos { display: grid; gap: 28px; padding-bottom: 88px; }
-.demo .card-body { display: grid; gap: 16px; }
+.demo-hero .install { max-width: 640px; }
+.demos { display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; padding-bottom: 88px; }
+.demo { min-width: 0; }
+.demo .card-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 .demo .install { max-width: none; }
 .demo .install code { font-size: 14px; }
-.demo .code { margin: 0; }
+.demo .code { margin: 0; overflow-x: auto; }
+@media (max-width: 600px) { .demo .card-body { padding: 18px 16px; } }
 .verdict.pass { border-left-color: #1f7a3f; background: #eaf5ee; }
 .verdict.pass b { color: #1f7a3f; }
 </style>
