@@ -113,6 +113,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "appfuzz-core",
+ "benchfmt",
  "clap",
  "mimalloc",
  "rayon",
@@ -210,6 +211,11 @@ name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
+name = "benchfmt"
+version = "0.1.0"
+source = "git+https://github.com/bwplotka/benchfmt.rs?rev=f9c07f05c28a5c7c0fc5068fd83374525fd601c4#f9c07f05c28a5c7c0fc5068fd83374525fd601c4"
 
 [[package]]
 name = "bit-set"

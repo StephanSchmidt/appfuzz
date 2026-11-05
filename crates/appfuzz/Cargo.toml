@@ -27,3 +27,9 @@ terminal_size = "0.4"
 wat = "1.262"
 wit-parser = "0.262"
 wit-component.workspace = true
+# The speed benchmark: Go's benchmark format, for benchstat.
+benchfmt = { git = "https://github.com/bwplotka/benchfmt.rs", rev = "f9c07f05c28a5c7c0fc5068fd83374525fd601c4" }
+
+[[bench]]
+name = "speed"
+harness = false

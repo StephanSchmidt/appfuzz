@@ -42,3 +42,5 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Dev only, pinned to a commit: the speed benchmark (crates/appfuzz/benches).
+allow-git = ["https://github.com/bwplotka/benchfmt.rs"]

@@ -592,6 +592,10 @@ rustup target add wasm32-wasip2
 cargo test --release -p appfuzz --test bench -- --ignored bench --nocapture
 ```
 
+`make speed` measures how fast appfuzz loads, runs, checks and fuzzes four
+bench apps. Save its output before and after a change, then compare the two
+with `benchstat old.txt new.txt`.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).

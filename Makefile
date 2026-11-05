@@ -5,7 +5,7 @@
 COV = cargo llvm-cov --workspace
 SKIP_BENCH = -- --exact --skip bench
 
-.PHONY: coverage coverage-html coverage-lcov
+.PHONY: coverage coverage-html coverage-lcov speed
 
 coverage:
 	$(COV) --summary-only $(SKIP_BENCH)
@@ -15,3 +15,12 @@ coverage-html:
 
 coverage-lcov:
 	$(COV) --lcov --output-path lcov.info $(SKIP_BENCH)
+
+# Engine speed in Go's benchmark format, mostly on one thread. Compare two
+# builds with benchstat (go install golang.org/x/perf/cmd/benchstat@latest):
+#   make speed > old.txt; change something; make speed > new.txt
+#   benchstat old.txt new.txt
+SPEED_ARGS ?= -count 6
+
+speed:
+	@cargo bench -p appfuzz --bench speed -- $(SPEED_ARGS)
