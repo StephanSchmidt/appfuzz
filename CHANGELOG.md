@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 **Forged credentials**
 
@@ -63,6 +63,10 @@
   The JavaScript runtime reads it about 30 times per `fetch()`.
 - Invisible characters the request sent percent-encoded (`%E2%80%AE` in a
   query) are no `hidden_text` when the page shows them decoded.
+- A test string that arrives cut short (`cnry12ab7` without its `'"../`)
+  is no `sql_injection`, `path_traversal` or `command_injection` because
+  the app's own quote or `;` follows it. Each needs the request or host to
+  have sent that character.
 
 **Clearer reports**
 
@@ -76,6 +80,9 @@
   instead of "error while executing at wasm backtrace:".
 - `last` is the run a command just showed, also when that run was stored
   before.
+- `nested_fan_out` can be confirmed: `confirm` turns both knobs again
+  and shrinks the run. Before, it said no predicate reproduces it, and
+  `review` was incomplete.
 - A confirmed finding points at its shrunk run, so `explain` and the next
   steps of `review` show the small input instead of the one the fuzzer
   found. Shrinking also drops test strings and parts of long text the
