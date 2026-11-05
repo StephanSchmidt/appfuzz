@@ -181,7 +181,7 @@ impl Search {
         Self { traces: VecDeque::new(), seen: BTreeSet::new(), coverage: Coverage::default() }
     }
     pub fn enqueue(&mut self, app: &App, record: Arc<RunRecord>) {
-        if record.outcome.kind != OutcomeKind::Ok || !crate::constraints::broken_request(&record.spec.args, &app.manifest).is_empty() {
+        if record.outcome.kind != OutcomeKind::Ok || !crate::constraints::broken_request_for(&record, &app.manifest).is_empty() {
             return;
         }
         if !record.events.iter().any(|e| failure(app, e).is_some()) {

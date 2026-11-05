@@ -13,13 +13,18 @@
 
 use std::fmt;
 
+use crate::value_contract::Decimal;
+
+#[path = "constraints_typed.rs"]
+mod typed;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
+pub(crate) use typed::{conform_host, conform_request_typed, validate_type};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constraint {
-    Range(Option<f64>, Option<f64>),
+    Range(Option<Decimal>, Option<Decimal>),
     Len(Option<usize>, Option<usize>),
     Enum(Vec<String>),
     Format(Format),
@@ -53,17 +58,25 @@ impl Constraint {
         Ok(match kind {
             "range" => {
                 let (lo, hi) = bounds(arg)?;
-                let num = |x: Option<String>| -> Result<Option<f64>> {
-                    x.map(|x| x.parse::<f64>().map_err(|_| anyhow::anyhow!("{s:?}: {x:?} is not a number"))).transpose()
+                let num = |x: Option<String>| -> Result<Option<Decimal>> {
+                    x.map(|x| Decimal::parse(&x).ok_or_else(|| anyhow::anyhow!("{s:?}: {x:?} is not a finite decimal number"))).transpose()
                 };
-                Constraint::Range(num(lo)?, num(hi)?)
+                let (lo, hi) = (num(lo)?, num(hi)?);
+                if lo.as_ref().zip(hi.as_ref()).is_some_and(|(lo, hi)| lo.cmp(hi).is_gt()) {
+                    bail!("{s:?}: lower bound exceeds upper bound");
+                }
+                Constraint::Range(lo, hi)
             }
             "len" => {
                 let (lo, hi) = bounds(arg)?;
                 let num = |x: Option<String>| -> Result<Option<usize>> {
                     x.map(|x| x.parse::<usize>().map_err(|_| anyhow::anyhow!("{s:?}: {x:?} is not a length"))).transpose()
                 };
-                Constraint::Len(num(lo)?, num(hi)?)
+                let (lo, hi) = (num(lo)?, num(hi)?);
+                if lo.zip(hi).is_some_and(|(lo, hi)| lo > hi) {
+                    bail!("{s:?}: lower length exceeds upper length");
+                }
+                Constraint::Len(lo, hi)
             }
             "unique" => Constraint::Unique(arg.split(',').map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect()),
             "enum" if !arg.is_empty() => Constraint::Enum(arg.split(',').map(|x| x.trim().to_string()).collect()),
@@ -87,13 +100,13 @@ impl Constraint {
     pub fn holds(&self, v: &Value) -> bool {
         match (self, v) {
             (Constraint::Range(lo, hi), _) => match number(v) {
-                Some(n) => lo.is_none_or(|l| n >= l) && hi.is_none_or(|h| n <= h),
+                Some(n) => lo.as_ref().is_none_or(|l| n.cmp(l).is_ge()) && hi.as_ref().is_none_or(|h| n.cmp(h).is_le()),
                 None => !v.is_string(),
             },
             (Constraint::Len(lo, hi), Value::String(s)) => in_len(s.chars().count(), *lo, *hi),
             (Constraint::Len(lo, hi), Value::Array(a)) => in_len(a.len(), *lo, *hi),
             (Constraint::Enum(xs), Value::String(s)) => xs.contains(s),
-            (Constraint::Enum(xs), x @ Value::Number(_)) => xs.contains(&x.to_string()),
+            (Constraint::Enum(xs), x @ Value::Number(_)) => number(x).is_some_and(|n| xs.iter().filter_map(|s| Decimal::parse(s)).any(|x| n.cmp(&x).is_eq())),
             (Constraint::Format(f), Value::String(s)) => format_ok(*f, s),
             (Constraint::Unique(fields), Value::Array(a)) => {
                 let mut seen = std::collections::BTreeSet::new();
@@ -109,30 +122,23 @@ impl Constraint {
             return v.clone();
         }
         match (self, v) {
-            (Constraint::Range(lo, hi), _) => {
-                let n = number(v).unwrap_or(lo.unwrap_or(0.0)).clamp(lo.unwrap_or(f64::MIN), hi.unwrap_or(f64::MAX));
-                let n = if v.as_f64().is_some_and(|x| x.fract() != 0.0) { n } else { n.round() };
-                match v {
-                    Value::String(_) => json!(fmt_num(n)),
-                    Value::Number(x) if x.is_f64() => json!(n),
-                    _ => json!(n as i64),
-                }
-            }
+            (Constraint::Range(lo, hi), _) => self.conform_range(v, lo.as_ref(), hi.as_ref()),
             (Constraint::Len(lo, hi), Value::String(s)) => {
                 let mut t: String = s.chars().take(hi.unwrap_or(usize::MAX)).collect();
-                while t.chars().count() < lo.unwrap_or(0) {
-                    t.push('a');
-                }
+                t.extend(std::iter::repeat_n('a', lo.unwrap_or(0).saturating_sub(t.chars().count())));
                 json!(t)
             }
             (Constraint::Len(lo, hi), Value::Array(a)) => {
                 let mut a: Vec<Value> = a.iter().take(hi.unwrap_or(usize::MAX)).cloned().collect();
-                while a.len() < lo.unwrap_or(0) && !a.is_empty() {
-                    a.push(a[a.len() - 1].clone());
+                while a.len() < lo.unwrap_or(0) {
+                    a.push(a.last().cloned().unwrap_or(Value::Null));
                 }
                 Value::Array(a)
             }
-            (Constraint::Enum(xs), Value::Number(_)) => xs[(seed % xs.len() as u64) as usize].parse::<i64>().map(Value::from).unwrap_or(v.clone()),
+            (Constraint::Enum(xs), Value::Number(_)) => {
+                let numbers: Vec<_> = xs.iter().filter_map(|s| s.parse::<serde_json::Number>().ok()).map(Value::Number).filter(|v| self.holds(v)).collect();
+                if numbers.is_empty() { json!(xs[(seed % xs.len() as u64) as usize]) } else { numbers[(seed % numbers.len() as u64) as usize].clone() }
+            }
             (Constraint::Enum(xs), _) => json!(xs[(seed % xs.len() as u64) as usize]),
             (Constraint::Format(f), _) => json!(example(*f, seed)),
             (Constraint::Unique(fields), Value::Array(a)) => {
@@ -142,30 +148,64 @@ impl Constraint {
             (Constraint::Len(..) | Constraint::Unique(_), _) => v.clone(),
         }
     }
+
+    fn conform_range(&self, value: &Value, lo: Option<&Decimal>, hi: Option<&Decimal>) -> Value {
+        let original = number(value).unwrap_or_else(|| Decimal::parse("0").unwrap());
+        let target = if let Some(lo) = lo.filter(|lo| original.cmp(lo).is_lt()) {
+            lo
+        } else if let Some(hi) = hi.filter(|hi| original.cmp(hi).is_gt()) {
+            hi
+        } else {
+            &original
+        };
+        if value.is_string() {
+            return json!(target.to_string());
+        }
+        if !value.as_number().is_some_and(serde_json::Number::is_f64) {
+            for up in [true, false] {
+                if let Some(integer) = target.rounded_integer(up)
+                    && let Some(candidate) = integer_json(integer)
+                    && self.holds(&candidate)
+                {
+                    return candidate;
+                }
+            }
+        }
+        if let Ok(float) = target.to_string().parse::<f64>() {
+            for n in [float, float.next_up(), float.next_down()] {
+                if n.is_finite() {
+                    let candidate = json!(n);
+                    if self.holds(&candidate) {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        json!(target.to_string())
+    }
+}
+
+fn integer_json(value: i128) -> Option<Value> {
+    i64::try_from(value).map(Value::from).ok().or_else(|| u64::try_from(value).map(Value::from).ok())
 }
 
 /// What makes a list element unique: the element, or its `fields`.
 fn unique_key(x: &Value, fields: &[String]) -> String {
-    if fields.is_empty() {
-        return x.to_string();
-    }
-    fields.iter().map(|f| x.get(f).map(Value::to_string).unwrap_or_default()).collect::<Vec<_>>().join("\0")
+    let mut key = if fields.is_empty() { x.clone() } else { json!(fields.iter().map(|field| (x.get(field).is_some(), x.get(field))).collect::<Vec<_>>()) };
+    key.sort_all_objects();
+    key.to_string()
 }
 
 fn in_len(n: usize, lo: Option<usize>, hi: Option<usize>) -> bool {
     lo.is_none_or(|l| n >= l) && hi.is_none_or(|h| n <= h)
 }
 
-fn number(v: &Value) -> Option<f64> {
+fn number(v: &Value) -> Option<Decimal> {
     match v {
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.trim().parse().ok(),
+        Value::Number(n) => Decimal::parse(&n.to_string()),
+        Value::String(s) => Decimal::parse(s),
         _ => None,
     }
-}
-
-fn fmt_num(n: f64) -> String {
-    if n.fract() == 0.0 && n.abs() < 1e15 { format!("{}", n as i64) } else { n.to_string() }
 }
 
 pub(crate) fn format_ok(f: Format, s: &str) -> bool {
@@ -224,7 +264,7 @@ impl fmt::Display for Constraint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let b = |lo: Option<String>, hi: Option<String>| format!("{}..{}", lo.unwrap_or_default(), hi.unwrap_or_default());
         match self {
-            Constraint::Range(lo, hi) => write!(f, "range:{}", b(lo.map(fmt_num), hi.map(fmt_num))),
+            Constraint::Range(lo, hi) => write!(f, "range:{}", b(lo.as_ref().map(ToString::to_string), hi.as_ref().map(ToString::to_string))),
             Constraint::Len(lo, hi) => write!(f, "len:{}", b(lo.map(|x| x.to_string()), hi.map(|x| x.to_string()))),
             Constraint::Enum(xs) => write!(f, "enum:{}", xs.join(",")),
             Constraint::Unique(xs) if xs.is_empty() => write!(f, "unique"),
@@ -313,6 +353,14 @@ pub fn broken_request(args: &[Value], m: &crate::manifest::Manifest) -> Vec<(Str
         .collect()
 }
 
+pub(crate) fn broken_request_for(record: &crate::record::RunRecord, m: &crate::manifest::Manifest) -> Vec<(String, String, Value)> {
+    if m.entry.as_ref().is_some_and(|entry| crate::harness::fn_key_eq(&entry.export, &record.spec.export)) {
+        broken_request(&record.spec.args, m)
+    } else {
+        Vec::new()
+    }
+}
+
 /// Makes the request's constrained fields keep to their constraints.
 pub fn conform_request(args: &mut [Value], m: &crate::manifest::Manifest, seed: u64) {
     let Some(e) = &m.entry else { return };
@@ -327,6 +375,65 @@ pub fn conform_request(args: &mut [Value], m: &crate::manifest::Manifest, seed: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whole_record_uniqueness_ignores_json_object_key_order() {
+        let c = Constraint::parse("unique").unwrap();
+        let rows = json!([{"id":1,"name":"A"},{"name":"A","id":1}]);
+        assert!(!c.holds(&rows));
+        assert_eq!(c.conform(&rows, 1), json!([{"id":1,"name":"A"}]));
+    }
+
+    #[test]
+    fn range_constraints_keep_exact_integer_bounds_when_checked_and_serialized() {
+        let text = "range:9007199254740993..9007199254740993";
+        let c = Constraint::parse(text).unwrap();
+        assert!(!c.holds(&json!(9007199254740992u64)));
+        assert!(c.holds(&json!(9007199254740993u64)));
+        assert_eq!(c.to_string(), text);
+        let repaired = c.conform(&json!(0), 1);
+        assert_eq!(repaired, json!(9007199254740993u64));
+        let max = Constraint::parse("range:18446744073709551615..18446744073709551615").unwrap();
+        assert_eq!(max.conform(&json!(0), 1), json!(u64::MAX));
+    }
+
+    #[test]
+    fn fractional_range_repairs_stay_inside_the_declared_range() {
+        for (domain, value) in [("range:0.1..0.2", json!("0")), ("range:0.1..0.2", json!(0.0)), ("range:1.2..2.2", json!(0)), ("range:-2.2..-1.2", json!(0))] {
+            let c = Constraint::parse(domain).unwrap();
+            let repaired = c.conform(&value, 1);
+            assert!(c.holds(&repaired), "{domain} repaired {value} to {repaired}");
+        }
+    }
+
+    #[test]
+    fn numeric_enums_repair_unsigned_and_fractional_values() {
+        for (domain, expected) in [("enum:18446744073709551615", json!(u64::MAX)), ("enum:0.25", json!(0.25))] {
+            let c = Constraint::parse(domain).unwrap();
+            assert_eq!(c.conform(&json!(0), 1), expected);
+        }
+    }
+
+    #[test]
+    fn impossible_or_nonfinite_bounds_are_rejected() {
+        for text in ["range:10..1", "range:NaN..1", "range:1..NaN", "range:-inf..1", "range:1..inf", "len:10..1"] {
+            assert!(Constraint::parse(text).is_err(), "accepted {text}");
+        }
+        for text in ["range:1..1", "range:..", "range:-1.5..2.5", "range:1e999..1e1000", "len:0..0", "len:.."] {
+            assert!(Constraint::parse(text).is_ok(), "rejected {text}");
+        }
+    }
+
+    #[test]
+    fn nonfinite_text_is_not_a_number_in_a_value_domain() {
+        for domain in ["range:..", "range:1..", "range:..10"] {
+            let c = Constraint::parse(domain).unwrap();
+            for value in ["NaN", "inf", "-inf"] {
+                assert!(!c.holds(&json!(value)), "{value} satisfies {domain}");
+                assert!(c.holds(&c.conform(&json!(value), 0)), "could not repair {value} for {domain}");
+            }
+        }
+    }
 
     #[test]
     fn constraints() {

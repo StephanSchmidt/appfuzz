@@ -5,7 +5,7 @@
 //!              + host call latencies (from manifest or plan)
 //!              + WASI sleeps
 //!              + a small step for every clock read.
-//! The guest part is brought up to date at every platform host call, and
+//! The guest part is brought up to date before every guest-to-host call, and
 //! each clock read adds a step, so a loop that watches the clock sees time
 //! move without real waiting.
 
@@ -36,7 +36,10 @@ pub struct ClockState {
 
 impl ClockState {
     pub fn elapsed_ns(&self) -> u64 {
-        self.guest_ns + self.host_ns + self.sleep_ns + (self.wall_reads + self.monotonic_reads) * CLOCK_READ_STEP_NS
+        self.guest_ns
+            .saturating_add(self.host_ns)
+            .saturating_add(self.sleep_ns)
+            .saturating_add(self.wall_reads.saturating_add(self.monotonic_reads).saturating_mul(CLOCK_READ_STEP_NS))
     }
 }
 
@@ -53,7 +56,7 @@ impl VirtualClock {
     }
 
     pub fn monotonic_now(&self) -> u64 {
-        self.with(|c| MONOTONIC_START_NS + c.elapsed_ns())
+        self.with(|c| MONOTONIC_START_NS.saturating_add(c.elapsed_ns()))
     }
 }
 
@@ -66,8 +69,8 @@ impl wasmtime_wasi::HostWallClock for WallClock {
     }
     fn now(&self) -> Duration {
         self.0.with(|c| {
-            c.wall_reads += 1;
-            Duration::from_nanos(c.base_wall_ns + c.elapsed_ns())
+            c.wall_reads = c.wall_reads.saturating_add(1);
+            Duration::from_nanos(c.base_wall_ns.saturating_add(c.elapsed_ns()))
         })
     }
 }
@@ -78,8 +81,8 @@ impl wasmtime_wasi::HostMonotonicClock for MonotonicClock {
     }
     fn now(&self) -> u64 {
         self.0.with(|c| {
-            c.monotonic_reads += 1;
-            MONOTONIC_START_NS + c.elapsed_ns()
+            c.monotonic_reads = c.monotonic_reads.saturating_add(1);
+            MONOTONIC_START_NS.saturating_add(c.elapsed_ns())
         })
     }
 }
@@ -115,7 +118,7 @@ impl TryRng for CountingRng {
     }
 }
 
-/// A pollable that is ready at once: sleeps cost virtual time only.
+/// A pollable that is ready at once.
 pub struct Ready;
 
 #[async_trait::async_trait]
@@ -126,16 +129,33 @@ impl wasmtime_wasi::p2::Pollable for Ready {
 /// `YYYY-MM-DDTHH:MM:SS` (or `YYYY-MM-DD`) → Unix seconds (UTC).
 pub fn parse_datetime(s: &str) -> Option<i64> {
     let (date, time) = s.split_once(['T', ' ']).unwrap_or((s, "00:00:00"));
-    let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
-    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
-    if !(1..=12).contains(&m) || !(1..=31).contains(&day) {
+    let number = |text: &str, width: usize| -> Option<i64> {
+        if text.len() != width || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        text.parse().ok()
+    };
+    let parts: Vec<_> = date.split('-').collect();
+    let [year, month, day] = parts.as_slice() else { return None };
+    let (y, m, day) = (number(year, 4)?, number(month, 2)?, number(day, 2)?);
+    if y == 0 || !(1..=12).contains(&m) || !(1..=31).contains(&day) {
         return None;
     }
-    let mut t = time.trim_end_matches('Z').split(':').map(|p| p.parse::<i64>().ok());
-    let h = t.next().flatten().unwrap_or(0);
-    let mi = t.next().flatten().unwrap_or(0);
-    let sec = t.next().flatten().unwrap_or(0);
-    Some(days_from_civil(y, m, day) * 86_400 + h * 3600 + mi * 60 + sec)
+    let days = days_from_civil(y, m, day);
+    if civil_from_days(days) != (y, m, day) {
+        return None;
+    }
+    let time = time.strip_suffix('Z').unwrap_or(time);
+    let parts: Vec<_> = time.split(':').collect();
+    let (h, mi, sec) = match parts.as_slice() {
+        [h, mi] => (number(h, 2)?, number(mi, 2)?, 0),
+        [h, mi, sec] => (number(h, 2)?, number(mi, 2)?, number(sec, 2)?),
+        _ => return None,
+    };
+    if h >= 24 || mi >= 60 || sec >= 60 {
+        return None;
+    }
+    Some(days * 86_400 + h * 3600 + mi * 60 + sec)
 }
 
 /// Unix seconds → (`YYYY-MM-DD`, `HH:MM`, `HH:MM:SS`).
@@ -182,5 +202,54 @@ mod tests {
         assert_eq!(parse_datetime("1970-01-01"), Some(0));
         assert_eq!(format_datetime(parse_datetime("2024-02-29").unwrap()).0, "2024-02-29");
         assert!(parse_datetime("2026-13-01").is_none());
+    }
+
+    #[test]
+    fn invalid_calendar_dates_and_malformed_times_are_rejected() {
+        for text in [
+            "2026-02-29",
+            "2026-04-31",
+            "0000-01-01",
+            "2026-11-02-extra",
+            "2026-11-02Tbad",
+            "2026-11-02T10:xx:00",
+            "2026-11-02T24:00:00",
+            "2026-11-02T10:60:00",
+            "2026-11-02T10:00:60",
+            "2026-11-02T10:00:00:01",
+            "2026-11-02T10:00:00ZZ",
+            "9223372036854775807-01-01",
+            "2026-11-02T9223372036854775807:00:00",
+        ] {
+            assert_eq!(parse_datetime(text), None, "accepted {text}");
+        }
+        let expected = parse_datetime("2026-11-02T10:15:00").unwrap();
+        for text in ["2026-11-02T10:15", "2026-11-02 10:15:00", "2026-11-02T10:15:00Z"] {
+            assert_eq!(parse_datetime(text), Some(expected), "rejected {text}");
+        }
+    }
+
+    #[test]
+    fn calendar_parsing_agrees_with_an_independent_calendar() {
+        for year in [1, 4, 100, 400, 1900, 1970, 2000, 2024, 9999] {
+            for month in 1..=12 {
+                for day in 1..=31 {
+                    let text = format!("{year:04}-{month:02}-{day:02}T23:59:59");
+                    let expected = chrono::NaiveDate::from_ymd_opt(year, month, day).map(|date| date.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp());
+                    assert_eq!(parse_datetime(&text), expected, "{text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn virtual_time_saturates_without_wrapping_or_panicking() {
+        let state = ClockState { guest_ns: u64::MAX, host_ns: 1, sleep_ns: 1, wall_reads: u64::MAX, monotonic_reads: 1, ..Default::default() };
+        assert_eq!(state.elapsed_ns(), u64::MAX);
+        let clock = VirtualClock::new(u64::MAX);
+        clock.with(|c| c.sleep_ns = u64::MAX);
+        assert_eq!(clock.monotonic_now(), u64::MAX);
+        assert_eq!(wasmtime_wasi::HostWallClock::now(&WallClock(clock.clone())), Duration::from_nanos(u64::MAX));
+        assert_eq!(wasmtime_wasi::HostMonotonicClock::now(&MonotonicClock(clock)), u64::MAX);
     }
 }

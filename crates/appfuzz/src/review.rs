@@ -134,7 +134,7 @@ fn recheck_earlier(
 fn settle(rows: &mut [Value], all: &[Finding]) {
     for row in rows.iter_mut().filter(|r| r["status"].is_null()) {
         let found = row.as_object_mut().and_then(|o| o.remove("found")) == Some(json!(true));
-        row["status"] = json!(if found || all.iter().any(|f| f.id == row["id"]) { "found_again" } else { "not_found" });
+        row["status"] = json!(if found || all.iter().any(|f| row["id"].as_str().is_some_and(|id| f.matches_id(id))) { "found_again" } else { "not_found" });
     }
 }
 

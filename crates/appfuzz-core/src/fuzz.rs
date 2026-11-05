@@ -447,6 +447,7 @@ struct State {
     last_new: u64,
     max_corpus: usize,
     stopped: Option<&'static str>,
+    capture_error: Option<String>,
     /// Call shapes whose runs had their pair checks.
     checked: BTreeSet<String>,
 }
@@ -483,11 +484,19 @@ fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
 }
 
 impl State {
+    fn observe_capture(&mut self, r: &RunRecord, manifest: &crate::manifest::Manifest) {
+        if r.capture_limited && crate::constraints::broken_request_for(r, manifest).is_empty() {
+            self.capture_error.get_or_insert_with(|| format!("run {}: {}", r.id, r.outcome.message.as_deref().unwrap_or("evidence capture is incomplete")));
+            self.stopped = Some("capture_limit");
+        }
+    }
+
     /// Keeps a run if it is new in any way, and collects its findings.
     /// Returns the run, whether it was kept, and the findings new in it.
-    fn admit(&mut self, spec: RunSpec, stage: Stage, ex: Executed) -> (Arc<RunRecord>, bool, Vec<Finding>) {
+    fn admit(&mut self, spec: RunSpec, stage: Stage, ex: Executed, manifest: &crate::manifest::Manifest) -> (Arc<RunRecord>, bool, Vec<Finding>) {
         let Executed { feedback, asserts, r, findings, features: feats, metrics } = ex;
         self.runs += 1;
+        self.observe_capture(&r, manifest);
         let assert_reasons = match asserts {
             Some(obs) => self.observe(&r, obs, stage),
             None if r.outcome.kind == OutcomeKind::Ok => {
@@ -919,7 +928,7 @@ impl Mutator<'_> {
         if self.rng.random_bool(p) {
             let c = self.consts;
             o.numbers = match self.pick(c) {
-                Some(c) if self.rng.random_bool(0.5) => Some(format!("={c}")),
+                Some(c) if self.rng.random_bool(0.5) => Some(format!("cast:{c}")),
                 _ => Some(self.pick(&["small", "edge"]).expect("non-empty").to_string()),
             };
         }
@@ -943,7 +952,15 @@ impl Mutator<'_> {
             .unwrap_or_default()
     }
 
-    fn set_generate(plan: &mut Plan, key: &str, opts: GenOpts) {
+    fn set_generate(plan: &mut Plan, key: &str, ty: &Type, mut opts: GenOpts) {
+        if opts.validate_for_type(ty).is_err()
+            && let Some(text) = opts.numbers.as_deref().and_then(|n| n.strip_prefix('='))
+        {
+            opts.numbers = Some(format!("cast:{text}"));
+            if opts.validate_for_type(ty).is_err() {
+                opts.numbers = Some("edge".into());
+            }
+        }
         let fp = plan.0.entry(key.to_string()).or_default();
         fp.response = Response { generate: Some(opts), latency_ms: fp.response.latency_ms, ..Default::default() };
     }
@@ -974,7 +991,7 @@ impl Mutator<'_> {
                 }
                 // Mostly requests the platform lets through.
                 if self.rng.random_bool(0.85) {
-                    crate::constraints::conform_request(&mut spec.args, &self.app.manifest, self.rng.random());
+                    crate::constraints::conform_request_typed(&mut spec.args, self.app, &spec.export, self.rng.random()).ok()?;
                 }
                 any.then_some(())?;
             }
@@ -984,7 +1001,7 @@ impl Mutator<'_> {
                 if !changed && !self.mutate_request(&mut spec.args) {
                     return None;
                 }
-                crate::constraints::conform_request(&mut spec.args, &self.app.manifest, self.rng.random());
+                crate::constraints::conform_request_typed(&mut spec.args, self.app, &spec.export, self.rng.random()).ok()?;
             }
             Stage::Structured => {
                 // Request strings and observed host-result strings use the same
@@ -1008,7 +1025,7 @@ impl Mutator<'_> {
                     let slot = root.pointer_mut(path)?;
                     *slot = json!(crate::structured::mutate(slot.as_str()?, &mut self.rng, self.words, self.consts)?);
                     spec.args = root.as_array()?.clone();
-                    crate::constraints::conform_request(&mut spec.args, &self.app.manifest, spec.seed);
+                    crate::constraints::conform_request_typed(&mut spec.args, self.app, &spec.export, spec.seed).ok()?;
                 } else {
                     let (event, paths) = self.pick(&host_values)?;
                     let path = self.pick(paths)?;
@@ -1024,17 +1041,17 @@ impl Mutator<'_> {
                 }
             }
             Stage::HostValues => {
-                let (key, _) = self.pick(self.funcs)?.clone();
+                let (key, ty) = self.pick(self.funcs)?.clone();
                 if self.app.manifest.function(&key).is_some_and(|f| f.query.is_some()) {
                     spec.plan.0.entry("_defaults".into()).or_default().dataset_seed = Some(self.rng.random());
                     return Some(spec);
                 }
                 let o = self.gen_opts(Self::current_opts(&spec.plan, &key));
-                Self::set_generate(&mut spec.plan, &key, o);
+                Self::set_generate(&mut spec.plan, &key, &ty, o);
             }
             Stage::GrowList => {
                 let fs: Vec<_> = self.funcs.iter().filter(|(_, t)| has_list(t)).cloned().collect();
-                let (key, _) = self.pick(&fs)?.clone();
+                let (key, ty) = self.pick(&fs)?.clone();
                 if let Some(q) = self.app.manifest.function(&key).and_then(|f| f.query.as_ref()) {
                     let n = *self.pick(&[0usize, 1, 2, 4, 8, 16, 32])?;
                     spec.plan.0.entry("_defaults".into()).or_default().dataset_rows.insert(q.dataset.clone(), n);
@@ -1043,7 +1060,7 @@ impl Mutator<'_> {
                 let mut o = Self::current_opts(&spec.plan, &key);
                 // Bigger lists are `amplify`'s job; here they would only slow runs.
                 o.list_len = Some(*self.pick(&[4usize, 8, 16, 32]).expect("non-empty"));
-                Self::set_generate(&mut spec.plan, &key, o);
+                Self::set_generate(&mut spec.plan, &key, &ty, o);
             }
             Stage::GrowInput => {
                 let (knobs, _) = request_knobs(&spec.args);
@@ -1287,15 +1304,16 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
             out.push(req);
         }
     }
-    let strings: Vec<&String> = funcs.iter().filter(|(_, t)| has_string(t)).map(|(k, _)| k).collect();
+    let strings: Vec<_> = funcs.iter().filter(|(_, t)| has_string(t)).collect();
     let canary = if app.manifest.has_sinks() { "canary-sink" } else { "canary" };
     if !strings.is_empty() {
         let mut s = base.clone();
-        for k in strings {
+        for (k, ty) in strings {
             let o = Mutator::current_opts(&s.plan, k);
             Mutator::set_generate(
                 &mut s.plan,
                 k,
+                ty,
                 GenOpts { strings: Some(canary.into()), results: Some("ok".into()), options: Some("some".into()), list_len: Some(2), ..o },
             );
         }
@@ -1428,6 +1446,7 @@ pub fn fuzz(
         last_new: 0,
         max_corpus: opts.max_corpus,
         stopped: None,
+        capture_error: None,
         checked: BTreeSet::new(),
     });
     let jobs = par::jobs();
@@ -1440,9 +1459,17 @@ pub fn fuzz(
     if opts.discover {
         let counted = |s: &RunSpec| {
             discovery_runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            app.run(s)
+            let r = app.run(s);
+            if r.capture_limited {
+                lock(&state).observe_capture(&r, &app.manifest);
+                on_run(&r, true, &[]);
+            }
+            r
         };
         let d = scale::discover(app, &steady_base, opts.dict_limit, &counted)?;
+        if let Some(error) = &lock(&state).capture_error {
+            anyhow::bail!("{error}");
+        }
         keys = d.keys;
         for c in d.contexts {
             modes.push(c.label);
@@ -1491,19 +1518,22 @@ pub fn fuzz(
             let mut ex = execute(app, &st, &v.spec, opts.property.as_ref(), &probe, &judge);
             ex.findings.retain(|f| !metamorphic::expected(&v, f));
             ex.findings.extend(metamorphic::compare(app, r, &v, &ex.r));
-            let (vr, keep, found) = lock(&state).admit(v.spec, Stage::Check, ex);
-            on_run(&vr, keep, &found);
+            let (vr, keep, found) = lock(&state).admit(v.spec, Stage::Check, ex, &app.manifest);
+            on_run(&vr, keep || vr.capture_limited, &found);
         }
     };
     let done = par::map(&seeds, |s| execute(app, &st, s, opts.property.as_ref(), &probe, &judge));
     let mut kept_seeds = Vec::new();
     for (spec, ex) in seeds.into_iter().zip(done) {
-        let (r, keep, found) = lock(&state).admit(spec, Stage::Seed, ex);
+        let (r, keep, found) = lock(&state).admit(spec, Stage::Seed, ex, &app.manifest);
         lock(&state).faults.enqueue(app, r.clone());
-        on_run(&r, keep, &found);
+        on_run(&r, keep || r.capture_limited, &found);
         kept_seeds.push(r);
     }
     par::map(&kept_seeds, |r| check(r));
+    if let Some(error) = &lock(&state).capture_error {
+        anyhow::bail!("{error}");
+    }
     if lock(&state).corpus.is_empty() {
         anyhow::bail!("the seed request does not run; check it with `appfuzz run`");
     }
@@ -1554,7 +1584,7 @@ pub fn fuzz(
                     metamorphic::Variant { change: metamorphic::Change::Fault, func: Some(recipe.func.clone()), call: Some(recipe.call), spec: spec.clone() };
                 ex.findings.extend(crate::faults::compare(app, base, recipe, &variant, &ex.r));
             }
-            let (r, keep, found) = lock(&state).admit(spec, stage, ex);
+            let (r, keep, found) = lock(&state).admit(spec, stage, ex, &app.manifest);
             // A sampled-out run that showed something new is judged anyway.
             if keep && sampled_out {
                 let obs = judge.judge(&r, &app.manifest);
@@ -1565,7 +1595,7 @@ pub fn fuzz(
             if keep && stage != Stage::Fault {
                 lock(&state).faults.enqueue(app, r.clone());
             }
-            on_run(&r, keep, &found);
+            on_run(&r, keep || r.capture_limited, &found);
             if keep {
                 check(&r);
             }
@@ -1578,6 +1608,9 @@ pub fn fuzz(
         }
     });
     let fz = state.into_inner().unwrap_or_else(|e| e.into_inner());
+    if let Some(error) = fz.capture_error {
+        anyhow::bail!("{error}");
+    }
     let mut maxima: Vec<Maximum> = fz.maxima.iter().map(|(m, (v, r))| Maximum { metric: m.clone(), value: *v, run: r.clone() }).collect();
     maxima.sort_by(|a, b| a.metric.cmp(&b.metric));
     let report = FuzzReport {
@@ -1609,6 +1642,19 @@ pub fn fuzz(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generation_mutations_keep_constants_representable_in_the_new_type() {
+        use crate::value::GenOpts;
+        use wasmtime::component::Type;
+        for (number, expected) in [("=-1", "cast:-1"), ("=13.5", "edge"), ("=1e100", "edge")] {
+            let mut plan = crate::plan::Plan::default();
+            super::Mutator::set_generate(&mut plan, "x:y/data#get", &Type::U8, GenOpts { numbers: Some(number.into()), ..Default::default() });
+            let opts = plan.0["x:y/data#get"].response.generate.as_ref().unwrap();
+            assert_eq!(opts.numbers.as_deref(), Some(expected));
+            opts.validate_for_type(&Type::U8).unwrap();
+        }
+    }
+
     use super::*;
 
     #[test]

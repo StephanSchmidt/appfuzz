@@ -235,7 +235,7 @@ impl Check {
         let Some(class) = self.input_class else {
             return true;
         };
-        if !crate::constraints::broken_request(&r.spec.args, m).is_empty() {
+        if !crate::constraints::broken_request_for(r, m).is_empty() {
             return false;
         }
         let Some(entry) = &m.entry else {

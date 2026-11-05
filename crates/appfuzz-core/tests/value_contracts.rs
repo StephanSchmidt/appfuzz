@@ -97,6 +97,131 @@ fn nested_lists_optional_values_and_conjunctions_have_concrete_witness_paths() {
 }
 
 #[test]
+fn dataset_guarantees_compare_typed_values_and_record_failed_host_calls() {
+    let wit =
+        "package test:values; interface source {record item {id:u32,score:f64} get:func()->list<item>;} world app {import source;export run:func()->f64;}";
+    let wat = r#"(module (import "test:values/source" "get" (func $get (param i32)))
+        (memory (export "memory") 4)
+        (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
+        (func (export "run") (result f64) (call $get (i32.const 0)) (f64.load (i32.add (i32.load (i32.const 0)) (i32.const 8)))))"#;
+    for (range, outcome) in [("0..100", OutcomeKind::Ok), ("5..10", OutcomeKind::PlanError)] {
+        let m = toml::from_str(&format!("[app]\nwasm='x'\n[datasets.items]\nrows=1\nkey='id'\ntemplate={{id=1,score=1}}\n[functions.\"test:values/source#get\"]\nquery={{dataset='items'}}\nvalues={{score='range:{range}'}}\n")).unwrap();
+        let a = App::from_bytes(m, component(wit, wat)).unwrap();
+        let r = a.run(&a.spec(a.export("run").unwrap(), vec![], Plan::default(), 1));
+        assert_eq!(r.outcome.kind, outcome, "{range}: {:?}", r.outcome);
+        assert_eq!(r.events.len(), 1);
+        if outcome == OutcomeKind::Ok {
+            assert_eq!(r.result, Some(json!(1.0)));
+        } else {
+            assert!(r.events[0].trap.is_some());
+        }
+    }
+}
+
+#[test]
+fn uniqueness_is_repaired_after_fields_are_constrained() {
+    let wit = "package test:values; interface source {record item {id:u32} get:func()->list<item>;} world app {import source;export run:func()->u32;}";
+    let wat = r#"(module (import "test:values/source" "get" (func $get (param i32)))
+        (memory (export "memory") 4)
+        (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
+        (func (export "run") (result i32) (call $get (i32.const 0)) (i32.load (i32.const 4))))"#;
+    let m = toml::from_str("[app]\nwasm='x'\n[functions.\"test:values/source#get\"]\nvalues={''='unique:id',id='enum:1'}\n").unwrap();
+    let a = App::from_bytes(m, component(wit, wat)).unwrap();
+    let plan = Plan::parse(r#"{"test:values/source#get":{"return":[{"id":2},{"id":3}]}}"#).unwrap();
+    let r = a.run(&a.spec(a.export("run").unwrap(), vec![], plan, 1));
+    assert_eq!(r.outcome.kind, OutcomeKind::Ok, "{:?}", r.outcome);
+    assert_eq!(r.result, Some(json!(1)));
+    assert_eq!(r.events[0].result, Some(json!([{"id":1}])));
+}
+
+#[test]
+fn host_float32_ranges_are_checked_after_wit_rounding() {
+    let wit = "package test:values; interface source {get:func()->f32;} world app {import source;export run:func()->f32;}";
+    let wat = r#"(module (import "test:values/source" "get" (func $get (result f32))) (func (export "run") (result f32) (call $get)))"#;
+    let m = toml::from_str("[app]\nwasm='x'\n[functions.\"test:values/source#get\"]\nvalues={''='range:1.2..2.2'}\n").unwrap();
+    let a = App::from_bytes(m, component(wit, wat)).unwrap();
+    for value in [0.0, 99.0] {
+        let plan = Plan::parse(&json!({"test:values/source#get":{"return":value}}).to_string()).unwrap();
+        let r = a.run(&a.spec(a.export("run").unwrap(), vec![], plan, 1));
+        assert_eq!(r.outcome.kind, OutcomeKind::Ok, "{:?}", r.outcome);
+        let result = r.result.unwrap().as_f64().unwrap();
+        assert!((1.2..=2.2).contains(&result), "{result}");
+    }
+    let m = toml::from_str("[app]\nwasm='x'\n[functions.\"test:values/source#get\"]\nvalues={''='range:1.2..1.2'}\n").unwrap();
+    assert!(App::from_bytes(m, component(wit, wat)).is_err());
+}
+
+#[test]
+fn scaling_request_guarantees_only_applies_to_the_declared_entry() {
+    let wit = "package test:values; world app {export entry:func(n:u32)->u32;export other:func(n:u32)->u32;}";
+    let wat = r#"(module (func (export "entry") (param i32) (result i32) (local.get 0)) (func (export "other") (param i32) (result i32) (local.get 0)))"#;
+    let m = toml::from_str("[app]\nwasm='x'\n[entry]\nexport='entry'\nvalues={''='range:1..31'}\n").unwrap();
+    let a = App::from_bytes(m, component(wit, wat)).unwrap();
+    let knob = appfuzz_core::scale::Knob::Field("@0".into());
+    for (name, expected) in [("entry", 1), ("other", 0)] {
+        let spec = a.spec(a.export(name).unwrap(), vec![json!(10)], Plan::default(), 1);
+        let scaled = appfuzz_core::scale::apply(&a, &spec, &knob, 0).unwrap();
+        assert_eq!(scaled.args, vec![json!(expected)]);
+    }
+}
+
+#[test]
+fn impossible_host_guarantees_and_unknown_request_paths_are_configuration_errors() {
+    let wit = "package test:values; interface source { get:func()->u32; } world app { import source;export run:func(n:u32)->u32; }";
+    let wat = r#"(module (import "test:values/source" "get" (func $get (result i32))) (func (export "run") (param i32) (result i32) (call $get)))"#;
+    for domain in ["range:0.1..0.2", "range:4294967296..", "enum:open,closed", "len:1..2", "format:date"] {
+        let m = toml::from_str(&format!("[app]\nwasm='x'\n[functions.\"test:values/source#get\"]\nvalues={{''='{domain}'}}\n")).unwrap();
+        assert!(App::from_bytes(m, component(wit, wat)).is_err(), "accepted {domain}");
+    }
+    let m = toml::from_str("[app]\nwasm='x'\n[entry]\nexport='run'\nvalues={missing='range:1..6'}\n").unwrap();
+    assert!(App::from_bytes(m, component(wit, wat)).is_err());
+}
+
+#[test]
+fn representable_integer_ranges_are_intersected_with_wit_limits() {
+    let wit = "package test:values; interface source { get:func()->u8; } world app {import source;export run:func()->u8;}";
+    let wat = r#"(module (import "test:values/source" "get" (func $get (result i32))) (func (export "run") (result i32) (call $get)))"#;
+    for (domain, value, expected) in [("range:-100..10", -1000, 0), ("range:250..1000", 2000, 255), ("enum:-1,255,256", 0, 255)] {
+        let m = toml::from_str(&format!("[app]\nwasm='x'\n[functions.\"test:values/source#get\"]\nvalues={{''='{domain}'}}\n")).unwrap();
+        let a = App::from_bytes(m, component(wit, wat)).unwrap();
+        let plan = Plan::parse(&json!({"test:values/source#get":{"return":value}}).to_string()).unwrap();
+        let r = a.run(&a.spec(a.export("run").unwrap(), vec![], plan, 1));
+        assert_eq!(r.outcome.kind, OutcomeKind::Ok, "{domain}: {:?}", r.outcome);
+        assert_eq!(r.result, Some(json!(expected)), "{domain}");
+    }
+}
+
+#[test]
+fn generated_and_scripted_host_numbers_keep_exact_platform_guarantees() {
+    let wit = "package test:values; interface source { get:func()->u64; } world app { import source;export run:func()->u64; }";
+    let wat = r#"(module (import "test:values/source" "get" (func $get (result i64))) (func (export "run") (result i64) (call $get)))"#;
+    let m =
+        toml::from_str("[app]\nwasm='x'\n[functions.\"test:values/source#get\"]\nvalues={''='range:18446744073709551615..18446744073709551615'}\n").unwrap();
+    let a = App::from_bytes(m, component(wit, wat)).unwrap();
+    for plan in [Plan::default(), Plan::parse(r#"{"test:values/source#get":{"return":0}}"#).unwrap()] {
+        let r = a.run(&a.spec(a.export("run").unwrap(), vec![], plan, 1));
+        assert_eq!(r.outcome.kind, OutcomeKind::Ok, "{:?}", r.outcome);
+        assert_eq!(r.result, Some(json!(u64::MAX)));
+    }
+}
+
+#[test]
+fn host_minimum_list_lengths_are_kept_even_for_empty_generated_lists() {
+    let wit = "package test:values; interface source { get:func()->list<u32>; } world app {import source;export run:func()->u32;}";
+    let wat = r#"(module (import "test:values/source" "get" (func $get (param i32)))
+        (memory (export "memory") 4)
+        (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
+        (func (export "run") (result i32) (call $get (i32.const 0)) (i32.load (i32.const 4))))"#;
+    let m = toml::from_str("[app]\nwasm='x'\n[functions.\"test:values/source#get\"]\nvalues={''='len:2..4'}\n").unwrap();
+    let a = App::from_bytes(m, component(wit, wat)).unwrap();
+    for plan in [Plan::parse(r#"{"_defaults":{"generate":{"list_len":0}}}"#).unwrap(), Plan::parse(r#"{"test:values/source#get":{"return":[]}}"#).unwrap()] {
+        let r = a.run(&a.spec(a.export("run").unwrap(), vec![], plan, 1));
+        assert_eq!(r.outcome.kind, OutcomeKind::Ok, "{:?}", r.outcome);
+        assert_eq!(r.result, Some(json!(2)));
+    }
+}
+
+#[test]
 fn absent_optional_inputs_do_not_hide_other_invalid_fields() {
     let wit = "package test:values; world app { record request { form:list<tuple<string,string>> } export run:func(req:request)->u32; }";
     let wat = r#"(module (memory (export "memory") 8) (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 4096)) (func (export "run") (param i32 i32) (result i32) (i32.const 400)))"#;

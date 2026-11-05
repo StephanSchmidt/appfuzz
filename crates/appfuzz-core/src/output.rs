@@ -48,7 +48,7 @@ pub fn response(r: &RunRecord, m: &Manifest) -> Response {
             out.body = Some(s.clone());
             out.body_len = Some(s.len());
         }
-        Some(Value::Array(a)) if !a.is_empty() && a.iter().all(|x| x.as_u64().is_some_and(|n| n < 256)) => {
+        Some(Value::Array(a)) if a.iter().all(|x| x.as_u64().is_some_and(|n| n < 256)) => {
             let bytes: Vec<u8> = a.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect();
             out.body_len = Some(bytes.len());
             match String::from_utf8(bytes) {
@@ -733,6 +733,18 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn empty_byte_bodies_are_present_and_have_zero_length() {
+        let m: Manifest = toml::from_str("[app]\nwasm = 'x.wasm'\n[entry]\nexport = 'run'\noutput = { body = 'body' }\n").unwrap();
+        for bytes in [json!([]), json!([104, 105]), json!([255])] {
+            let r = crate::envelope::Trace { export: "run".into(), result: Some(json!({"body":bytes})), ..Default::default() }.to_record();
+            let response = response(&r, &m);
+            assert_eq!(response.body_len, Some(bytes.as_array().unwrap().len()));
+            assert!(response.body.is_some());
+            assert_eq!(response.body_not_utf8, bytes == json!([255]));
+        }
+    }
 
     #[test]
     fn request_places_are_named_as_developers_do() {

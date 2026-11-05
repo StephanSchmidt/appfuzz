@@ -3,7 +3,7 @@
 //! and where they came from. A run only receives the request and host
 //! results, so a target found in neither was written into the app.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use serde_json::{Value, json};
@@ -153,12 +153,8 @@ fn strings(v: &Value, out: &mut Vec<String>) {
 /// Where the deciding part of a destination came from. `before`: only host
 /// results of calls before this one count.
 pub fn origin(r: &RunRecord, d: &Dest, before: Option<u32>) -> Origin {
-    let ts: Vec<String> = [&d.target, &d.written].iter().filter(|t| !t.is_empty()).map(|t| t.to_ascii_lowercase()).collect();
-    let hit = |s: &String| {
-        let s = s.to_ascii_lowercase();
-        // The input holds the target, or at least half of it.
-        ts.iter().any(|t| s.contains(t.as_str()) || t.contains(s.as_str()) && s.len() * 2 >= t.len())
-    };
+    let ts = origin_targets(d);
+    let hit = |s: &String| origin_matches(&s.to_ascii_lowercase(), &ts);
     let mut req = Vec::new();
     r.spec.args.iter().for_each(|a| strings(a, &mut req));
     if let Some(s) = req.iter().find(|s| hit(s)) {
@@ -174,6 +170,53 @@ pub fn origin(r: &RunRecord, d: &Dest, before: Option<u32>) -> Origin {
         }
     }
     Origin::Binary
+}
+
+fn origin_targets(d: &Dest) -> Vec<String> {
+    [&d.target, &d.written].iter().filter(|t| !t.is_empty()).map(|t| t.to_ascii_lowercase()).collect()
+}
+
+fn origin_matches(source: &str, targets: &[String]) -> bool {
+    // The input holds the target, or at least half of it.
+    targets.iter().any(|target| source.contains(target.as_str()) || target.contains(source) && source.len() * 2 >= target.len())
+}
+
+/// Reuse source matching when checking many destinations in one trace. Keep
+/// the earliest matching call number, so future results never explain an
+/// earlier call, even when callers supply events with nonmonotonic numbers.
+pub(crate) struct OriginIndex {
+    request: BTreeSet<String>,
+    host: BTreeMap<String, u32>,
+    cache: BTreeMap<(String, String), (bool, Option<u32>)>,
+}
+
+impl OriginIndex {
+    pub(crate) fn new(r: &RunRecord) -> Self {
+        let mut request = Vec::new();
+        r.spec.args.iter().for_each(|value| strings(value, &mut request));
+        let request = request.into_iter().map(|source| source.to_ascii_lowercase()).collect();
+        let mut host = BTreeMap::<String, u32>::new();
+        for event in &r.events {
+            let mut sources = Vec::new();
+            if let Some(value) = &event.result {
+                strings(value, &mut sources);
+            }
+            for source in sources {
+                host.entry(source.to_ascii_lowercase()).and_modify(|n| *n = (*n).min(event.n)).or_insert(event.n);
+            }
+        }
+        Self { request, host, cache: BTreeMap::new() }
+    }
+
+    pub(crate) fn is_binary(&mut self, d: &Dest, before: Option<u32>) -> bool {
+        let (request, first_host) = self.cache.entry((d.target.clone(), d.written.clone())).or_insert_with(|| {
+            let targets = origin_targets(d);
+            let request = self.request.iter().any(|source| origin_matches(source, &targets));
+            let first_host = self.host.iter().filter(|(source, _)| origin_matches(source, &targets)).map(|(_, n)| *n).min();
+            (request, first_host)
+        });
+        !*request && first_host.is_none_or(|n| before.is_some_and(|cutoff| n >= cutoff))
+    }
 }
 
 /// Destinations in a host argument: absolute URLs anywhere in the text,
@@ -305,6 +348,40 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_origins_preserve_source_and_call_boundaries() {
+        use crate::envelope::{Trace, TraceCall};
+
+        for request in [json!(null), json!({"nested":["API.Example", "1024"]}), json!(["abc", "éé", "éééé"])] {
+            let mut run = Trace {
+                args: vec![request],
+                events: [json!("API.Example"), json!({"nested":["other.example", "1024"]}), json!("API.Example"), json!(["abc", "éé", "éééé"])]
+                    .into_iter()
+                    .map(|result| TraceCall { result: Some(result), ..Default::default() })
+                    .collect(),
+                ..Default::default()
+            }
+            .to_record();
+            // Imported traces need not put call numbers in ascending order.
+            for (event, n) in run.events.iter_mut().zip([9, 2, 2, 1]) {
+                event.n = n;
+            }
+            let mut index = OriginIndex::new(&run);
+            for target in ["api.example", "other.example", "unseen.example", "abc", "éé", "éééé", "0.0.4.0"] {
+                let written = if target == "0.0.4.0" { "1024" } else { target };
+                let d = Dest { url: String::new(), class: Class::OffHost, target: target.into(), endpoint: target.into(), written: written.into() };
+                for before in [None, Some(0), Some(1), Some(2), Some(3), Some(9), Some(10), Some(u32::MAX)] {
+                    assert_eq!(
+                        index.is_binary(&d, before),
+                        origin(&run, &d, before) == Origin::Binary,
+                        "target={target}, before={before:?}, request={:?}",
+                        run.spec.args
+                    );
+                }
+            }
+        }
+    }
 
     fn manifest(extra: &str) -> Manifest {
         toml::from_str(&format!("[app]\nwasm = \"x.wasm\"\nbase = \"/apps/me\"\n{extra}")).unwrap()

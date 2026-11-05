@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 use wasmparser::{ExternalKind, FunctionBody, KnownCustom, Name, Operator, Parser, Payload, TypeRef};
 
@@ -18,6 +18,95 @@ use crate::wit::is_runtime_wasi;
 #[derive(Debug, Clone, Serialize)]
 pub struct Statics {
     pub modules: Vec<ModuleInfo>,
+}
+
+pub(crate) struct ModuleLocation {
+    pub range: std::ops::Range<u64>,
+    pub id: String,
+}
+
+/// Wasmtime does not invoke the store's memory limiter for shared memories.
+/// Keep that unsupported profile explicit, including when pooling falls back.
+/// Memory64 uses on-demand allocation so a 32-bit pool reservation cannot clip it.
+pub(crate) fn memory_requires_on_demand(bytes: &[u8]) -> Result<bool> {
+    let mut memory64 = false;
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload? {
+            Payload::MemorySection(memories) => {
+                for memory in memories {
+                    let memory = memory?;
+                    if memory.shared {
+                        bail!("shared linear memories cannot be reviewed: the runtime cannot meter their allocations");
+                    }
+                    memory64 |= memory.memory64;
+                }
+            }
+            Payload::ImportSection(imports) => {
+                for import in imports.into_imports() {
+                    if let TypeRef::Memory(memory) = import?.ty {
+                        if memory.shared {
+                            bail!("shared linear memories cannot be reviewed: the runtime cannot meter their allocations");
+                        }
+                        memory64 |= memory.memory64;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(memory64)
+}
+
+fn unique_module_id(base: String, seen: &mut BTreeMap<String, usize>) -> String {
+    let n = seen.entry(base.clone()).or_default();
+    let id = if *n == 0 { base } else { format!("{base}_{n}") };
+    *n += 1;
+    id
+}
+
+/// Read module boundaries and interface names without disassembling function bodies.
+pub(crate) fn module_locations(bytes: &[u8]) -> Result<Vec<ModuleLocation>> {
+    let mut modules = Vec::new();
+    let mut seen = BTreeMap::new();
+    let mut depth = 0;
+    let mut module_depth = usize::MAX;
+    let mut start = None;
+    let mut imports = Vec::new();
+    let mut exports = Vec::new();
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload? {
+            Payload::Version { encoding, range, .. } => {
+                depth += 1;
+                if encoding == wasmparser::Encoding::Module {
+                    module_depth = depth;
+                    start = Some(range.start);
+                    imports.clear();
+                    exports.clear();
+                }
+            }
+            Payload::End(end) => {
+                if depth == module_depth {
+                    let base = module_id(imports.iter().copied(), exports.iter().copied());
+                    modules.push(ModuleLocation { range: start.take().expect("module start")..end, id: unique_module_id(base, &mut seen) });
+                    module_depth = usize::MAX;
+                }
+                depth -= 1;
+            }
+            Payload::ImportSection(r) if start.is_some() => {
+                for import in r.into_imports() {
+                    let import = import?;
+                    imports.push((import.module, import.name));
+                }
+            }
+            Payload::ExportSection(r) if start.is_some() => {
+                for export in r {
+                    exports.push(export?.name);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(modules)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,6 +219,7 @@ pub struct LoopInfo {
 impl Statics {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let mut modules: Vec<ModuleInfo> = Vec::new();
+        let mut seen = BTreeMap::new();
         // Stack of modules being parsed (core modules do not nest, but
         // components may nest components).
         let mut cur: Option<ModuleInfo> = None;
@@ -170,7 +260,8 @@ impl Statics {
                         && let Some(mut m) = cur.take()
                     {
                         m.end = offset;
-                        m.id = module_id(m.imports.iter().map(|i| (i.module.as_str(), i.name.as_str())), m.exports.iter().map(|e| e.0.as_str()));
+                        let base = module_id(m.imports.iter().map(|i| (i.module.as_str(), i.name.as_str())), m.exports.iter().map(|e| e.0.as_str()));
+                        m.id = unique_module_id(base, &mut seen);
                         modules.push(m);
                         cur_depth = usize::MAX;
                     }
@@ -267,13 +358,18 @@ impl Statics {
         self.modules.iter().find(|m| m.id == id || m.index.to_string() == id)
     }
 
+    /// Offsets also disambiguate frames saved before module IDs were unique.
+    pub fn frame_module(&self, frame: &Frame) -> Option<&ModuleInfo> {
+        frame.offset.and_then(|offset| self.modules.iter().find(|m| m.start <= offset as u64 && (offset as u64) < m.end)).or_else(|| self.module(&frame.module))
+    }
+
     pub fn main(&self) -> Option<&ModuleInfo> {
         self.modules.iter().find(|m| m.role == "main")
     }
 
     /// The first frame of a stack that is app code (not a shim or adapter).
     pub fn app_frame<'a>(&self, stack: &'a [Frame]) -> Option<&'a Frame> {
-        stack.iter().find(|f| self.module(&f.module).is_some_and(|m| m.role == "main" || m.role == "other")).or(stack.first())
+        stack.iter().find(|f| self.frame_module(f).is_some_and(|m| m.role == "main" || m.role == "other")).or(stack.first())
     }
 
     /// `name` or `module:index` of a frame's function.
@@ -281,7 +377,7 @@ impl Statics {
         if let Some(n) = &f.name {
             return demangle(n);
         }
-        self.module(&f.module).and_then(|m| m.func_name(f.func)).unwrap_or_else(|| format!("{}:{}", f.module, f.func))
+        self.frame_module(f).and_then(|m| m.func_name(f.func)).unwrap_or_else(|| format!("{}:{}", f.module, f.func))
     }
 }
 

@@ -262,7 +262,7 @@ pub fn sweep(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, path: &str,
         set_value(req, path, v)?;
         specs.push(s);
     }
-    let runs = appfuzz_core::par::map(&specs, |s| run_cached(app, store, s).unwrap_or_else(|_| app.run(s)));
+    let runs = appfuzz_core::par::map(&specs, |s| run_cached(app, store, s)).into_iter().collect::<Result<Vec<_>>>()?;
     let mut found = Vec::new();
     let mut rows = Vec::new();
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();

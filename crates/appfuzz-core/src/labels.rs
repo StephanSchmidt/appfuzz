@@ -177,11 +177,12 @@ pub fn check_wit(m: &Manifest, imports: &[Interface]) -> Result<()> {
                 bail!("[functions.\"{k}\"] rule {i} matches the parameter {p}, but {} has no such parameter", f.signature());
             }
         }
-        for p in spec.values.keys() {
+        for (p, constraint) in &spec.values {
             let Some(t) = f.ty.results().next() else { bail!("[functions.\"{k}\"] constrains a result, but {} returns nothing", f.signature()) };
             if !path_exists(&t, &segs(p)) {
                 bail!("[functions.\"{k}\"] constrains the result path {p:?}, which {} does not have", f.signature());
             }
+            crate::constraints::validate_type(&t, p, constraint).with_context(|| format!("[functions.\"{k}\"] values {p:?}"))?;
         }
     }
     Ok(())
@@ -255,6 +256,7 @@ fn path_exists(ty: &Type, segs: &[&str]) -> bool {
     match ty {
         _ if segs.is_empty() => true,
         Type::List(l) => path_exists(&l.ty(), segs),
+        Type::FixedLengthList(l) => path_exists(&l.ty(), segs),
         Type::Option(o) => path_exists(&o.ty(), segs),
         Type::Result(r) => r.ok().is_some_and(|t| path_exists(&t, segs)),
         Type::Record(r) => r.fields().find(|f| f.name == segs[0]).is_some_and(|f| path_exists(&f.ty, &segs[1..])),
@@ -632,6 +634,11 @@ fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     for (name, text) in [("stdout", &r.stdout), ("stderr", &r.stderr)] {
         for i in find.hits(text) {
             add(i, format!("the log ({name})"), Severity::Fail, json!({}));
+        }
+    }
+    if let Some(text) = &r.guest_error {
+        for i in find.hits(text) {
+            add(i, "the guest error".into(), Severity::Fail, json!({}));
         }
     }
     let mut texts = Vec::new();
@@ -1138,6 +1145,8 @@ mod tests {
             result: Some(result),
             totals: Totals::default(),
             events: vec![call],
+            guest_error: None,
+            capture_limited: false,
             stdout: stdout.into(),
             stderr: String::new(),
         }

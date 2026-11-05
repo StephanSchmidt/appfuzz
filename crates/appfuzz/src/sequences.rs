@@ -65,7 +65,7 @@ pub(super) fn command(app: &App, state: &Path, cmd: &SequenceCmd) -> Result<Valu
             }
             let report = sequence::run(app, &artifact.scenario)?;
             let reproduced = if *against_current {
-                artifact.finding.as_ref().is_some_and(|id| report.findings.iter().any(|f| &f.id == id))
+                artifact.finding.as_ref().is_some_and(|id| report.findings.iter().any(|f| f.matches_id(id)))
             } else {
                 report.digest() == artifact.digest
             };

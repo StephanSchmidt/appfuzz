@@ -56,14 +56,21 @@ value.
 
 | `detail.what` | Severity | Means |
 |---------------|----------|-------|
+| `evidence` | fail | the library received an incomplete execution or capture; the CLI reports incomplete evidence with exit code 3 |
+| `production_budget` | fail | execution stopped with a measured production-budget violation |
 | `function` | fail | a host function no reviewed run called |
 | `destination` | fail | a destination of the app's own that no reviewed run named for this function |
 | `output_destination` | fail | the output fires a request to a destination of its own that no reviewed output did |
 | `script` | fail | a script in the output, where no reviewed output had one |
 | `destination_from_input` | warn | a destination taken from input, where reviewed runs only named fixed ones |
+| `output_destination_from_input` | warn | an output request takes its destination from input, where reviewed outputs only named fixed ones |
 | `site` | warn | a host call from code no reviewed run called it from |
 | `calls` | warn | more than `margin × max_calls` calls to one function |
-| `budget` | warn | more than `margin ×` the most fuel, cost, latency or memory |
+| `budget` | warn | more than `margin ×` the most fuel, cost, latency, memory or total host calls |
+
+Zero is an observed budget too: using a resource no reviewed run used is
+outside the envelope. Each budget is checked independently, including when
+the trace reports zero fuel.
 
 A new call site is a warn, not a fail: requests the fuzzer never made can
 reach ordinary code. A new destination named by the app itself is a fail:
@@ -102,6 +109,21 @@ without it the `site` check is skipped. Totals are required for CLI checks;
 use complete `Totals` fields as emitted by `show`, including zero-valued
 counters. Build or contract mismatches cannot pass. A stored run (`appfuzz show <run>`) is a trace too, so
 `envelope check last` works.
+
+The optional `guest_error` field retains explicit guest failure text for run
+detectors, including leak, encoded-flow and reviewer-directed-text checks. The
+optional `outcome` preserves execution status and diagnostics when reading a
+stored run as a trace. Without an explicit outcome, nonempty guest error text
+indicates a failed request.
+`capture_limited = true` marks a prefix retained after a reviewer resource guard
+stopped the run. Trace conversion preserves this marker and the original error;
+it cannot represent a complete successful execution. Such traces cannot pass
+an envelope check.
+
+Every event must name its function and include its argument object (use `{}`
+for a function with no arguments), and the event count must equal
+`totals.host_calls`. A declared output body must be present as text or bytes;
+empty text and empty byte lists are valid bodies.
 
 ## In a platform
 

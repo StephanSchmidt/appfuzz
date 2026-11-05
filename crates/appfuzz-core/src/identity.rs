@@ -261,6 +261,8 @@ mod tests {
             result: Some(json!({"status": 200, "body": body})),
             totals: Totals::default(),
             events,
+            guest_error: None,
+            capture_limited: false,
             stdout: String::new(),
             stderr: String::new(),
         }

@@ -112,9 +112,9 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             Ok(json!({
                 "run": r.id, "n": n, "func": e.func, "args": e.args,
                 "stack": e.stack.iter().map(|f| {
-                    let m = st.module(&f.module);
+                    let m = st.frame_module(f);
                     json!({
-                        "module": f.module, "role": m.map(|m| m.role.clone()), "func": f.func,
+                        "module": m.map(|m| m.id.as_str()).unwrap_or(&f.module), "role": m.map(|m| m.role.clone()), "func": f.func,
                         "name": st.frame_name(f), "offset": f.offset.map(|o| format!("{o:x}")),
                     })
                 }).collect::<Vec<_>>(),
@@ -144,12 +144,15 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let knob = Knob::parse(knob)?;
             let sizes = if sizes.is_empty() { scale::default_sizes(&knob) } else { sizes.clone() };
             let per_run = Mutex::new(Vec::new());
+            let recorder = Recorder::new(app, &store);
             let runner = |s: &RunSpec| {
-                let r = run_cached(app, &store, s).unwrap_or_else(|_| app.run(s));
+                let r = recorder.cached(s);
                 lock(&per_run).extend(detect::per_run_checked(app, &r).into_iter().map(|f| ((r.totals.host_calls, r.totals.fuel), f)));
                 r
             };
-            let rep = scale::scale(app, &base, knob, &sizes, &runner)?;
+            let rep = scale::scale(app, &base, knob, &sizes, &runner);
+            recorder.check()?;
+            let rep = rep?;
             let mut found = rep.findings.clone();
             found.extend(sorted(per_run));
             let mut out = json!({
@@ -171,13 +174,15 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let app = load()?;
             let base = build_spec(app, export.as_deref(), spec)?;
             let per_run = Mutex::new(Vec::new());
+            let recorder = Recorder::new(app, &store);
             let runner = |s: &RunSpec| {
-                let r = app.run(s);
+                let r = recorder.fresh(s);
                 lock(&per_run).extend(detect::per_run_checked(app, &r).into_iter().map(|f| ((r.totals.host_calls, r.totals.fuel), f)));
-                let _ = store.save(&r);
                 r
             };
-            let rep = scale::amplify(app, &base, func.as_deref(), *dict, &runner)?;
+            let rep = scale::amplify(app, &base, func.as_deref(), *dict, &runner);
+            recorder.check()?;
+            let rep = rep?;
             let mut found: Vec<Finding> = rep.reports.iter().flat_map(|r| r.findings.clone()).chain(rep.findings.clone()).collect();
             found.extend(sorted(per_run));
             let growing: Vec<Value> = rep
@@ -199,11 +204,13 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
         }
         Cmd::Probe { cmd: ProbeCmd::Faults { run, func, runs, export, spec } } => {
             let app = load()?;
-            let runner = |s: &RunSpec| run_cached(app, &store, s).unwrap_or_else(|_| app.run(s));
+            let recorder = Recorder::new(app, &store);
+            let runner = |s: &RunSpec| recorder.cached(s);
             let base = match run {
                 Some(id) => store.load(id)?,
                 None => runner(&build_spec(app, export.as_deref(), spec)?),
             };
+            recorder.check()?;
             if base.spec.component != app.hash || base.spec.contract != app.contract {
                 anyhow::bail!("fault probes require this build and platform contract");
             }
@@ -211,6 +218,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 anyhow::bail!("fault probes need a successful baseline; run {} ended {:?}", base.id, base.outcome.kind);
             }
             let (probes, found, exhausted) = appfuzz_core::faults::probe(app, &base, func.as_deref(), *runs, &runner);
+            recorder.check()?;
             let attempted = probes.len();
             let injected = probes.iter().filter(|p| p.injected).count();
             let applicable = attempted > 0;
@@ -226,8 +234,10 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
         Cmd::Probe { cmd: ProbeCmd::Values { func, export, spec } } => {
             let app = load()?;
             let base = build_spec(app, export.as_deref(), spec)?;
-            let runner = |s: &RunSpec| run_cached(app, &store, s).unwrap_or_else(|_| app.run(s));
+            let recorder = Recorder::new(app, &store);
+            let runner = |s: &RunSpec| recorder.cached(s);
             let (probes, found) = appfuzz_core::probe::values(app, &base, func.as_deref(), &runner);
+            recorder.check()?;
             let failed: Vec<Value> = probes
                 .iter()
                 .filter(|p| p.outcome != appfuzz_core::record::OutcomeKind::Ok)
@@ -249,11 +259,13 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
         }
         Cmd::Probe { cmd: ProbeCmd::Pairs { run, export, spec } } => {
             let app = load()?;
-            let runner = |s: &RunSpec| run_cached(app, &store, s).unwrap_or_else(|_| app.run(s));
+            let recorder = Recorder::new(app, &store);
+            let runner = |s: &RunSpec| recorder.cached(s);
             let base = match run {
                 Some(id) => store.load(id)?,
                 None => runner(&build_spec(app, export.as_deref(), spec)?),
             };
+            recorder.check()?;
             if base.outcome.kind != appfuzz_core::record::OutcomeKind::Ok {
                 anyhow::bail!("run {} did not end ok ({:?}); pairs need an ok run", base.id, base.outcome.kind);
             }
@@ -261,13 +273,16 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 anyhow::bail!("run {} has host results too long to replay; pairs need every result in full", base.id);
             }
             let (_, lines, found) = appfuzz_core::metamorphic::pairs(app, &base, &runner);
+            recorder.check()?;
             Ok(json!({"run": base.id, "pairs": lines, "findings": record_findings(&cli, app, found)?}))
         }
         Cmd::Probe { cmd: ProbeCmd::Times { export, spec } } => {
             let app = load()?;
             let base = build_spec(app, export.as_deref(), spec)?;
-            let runner = |s: &RunSpec| run_cached(app, &store, s).unwrap_or_else(|_| app.run(s));
+            let recorder = Recorder::new(app, &store);
+            let runner = |s: &RunSpec| recorder.cached(s);
             let (probes, found) = appfuzz_core::probe::times(app, &base, &runner);
+            recorder.check()?;
             let failed: Vec<Value> = probes
                 .iter()
                 .filter(|p| p.outcome != appfuzz_core::record::OutcomeKind::Ok)
@@ -278,8 +293,10 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
         Cmd::Probe { cmd: ProbeCmd::Web { export, spec } } => {
             let app = load()?;
             let base = build_spec(app, export.as_deref(), spec)?;
-            let runner = |s: &RunSpec| run_cached(app, &store, s).unwrap_or_else(|_| app.run(s));
+            let recorder = Recorder::new(app, &store);
+            let runner = |s: &RunSpec| recorder.cached(s);
             let (probes, found) = appfuzz_core::probe::web(app, &base, &runner);
+            recorder.check()?;
             let failed: Vec<Value> = probes
                 .iter()
                 .filter(|p| p.outcome != appfuzz_core::record::OutcomeKind::Ok)
@@ -312,8 +329,10 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                     bases.push(r.spec);
                 }
             }
-            let runner = |s: &RunSpec| run_cached(app, &store, s).unwrap_or_else(|_| app.run(s));
+            let recorder = Recorder::new(app, &store);
+            let runner = |s: &RunSpec| recorder.cached(s);
             let (probes, found) = appfuzz_core::probe::auth(app, &bases, &runner);
+            recorder.check()?;
             let failed: Vec<Value> = probes
                 .iter()
                 .filter(|p| p.outcome != appfuzz_core::record::OutcomeKind::Ok)
@@ -395,6 +414,9 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                     if v.get("events").and_then(Value::as_array).is_none() || !v.get("totals").is_some_and(Value::is_object) {
                         bail!("trace requires events and totals; missing evidence cannot pass");
                     }
+                    if v["totals"]["host_calls"].as_u64() != v["events"].as_array().map(|events| events.len() as u64) {
+                        bail!("trace events must account for every host call in totals");
+                    }
                     if v.get("spec").is_some() || v.get("outcome").is_some() {
                         serde_json::from_value::<RunRecord>(v).context("invalid run record")?
                     } else {
@@ -405,10 +427,13 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             if r.spec.component.is_empty() || r.spec.contract.is_empty() || r.spec.export.is_empty() {
                 bail!("trace requires component, contract and export identity");
             }
+            if r.totals.host_calls as usize != r.events.len() || r.events.iter().any(|e| e.func.is_empty()) {
+                bail!("trace requires complete host call events with function identity");
+            }
             if matches!(r.outcome.kind, appfuzz_core::record::OutcomeKind::Error | appfuzz_core::record::OutcomeKind::PlanError) {
                 bail!("trace did not execute");
             }
-            if m.entry.as_ref().is_some_and(|e| e.output.body.is_some()) && r.result.is_none() {
+            if m.entry.as_ref().is_some_and(|e| e.output.body.is_some()) && appfuzz_core::output::response(&r, &m).body_len.is_none() {
                 bail!("trace is missing the output to check");
             }
             let mut findings = env.check(&r, &m);
@@ -471,7 +496,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let known = findings.all()?.into_iter().map(|f| f.id).collect();
             let save_err = Mutex::new(None);
             let on_run = |r: &RunRecord, kept: bool, found: &[Finding]| {
-                if (kept || !found.is_empty())
+                if (kept || !found.is_empty() || r.capture_limited)
                     && let Err(e) = store.save(r)
                 {
                     *lock(&save_err) = Some(e);

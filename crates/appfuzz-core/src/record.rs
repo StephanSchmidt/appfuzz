@@ -38,9 +38,19 @@ pub struct RunSpec {
 impl RunSpec {
     pub fn id(&self) -> String {
         let bytes = serde_json::to_vec(self).expect("spec serializes");
-        let h = blake3::hash(&bytes).to_hex();
-        format!("r{}", &h[..10])
+        hashed_id('r', &bytes)
     }
+
+    /// Compare the exact serialized inputs used by the run identity. Unlike
+    /// `PartialEq`, this preserves distinctions such as positive and negative zero.
+    pub fn same_inputs(&self, other: &Self) -> bool {
+        serde_json::to_vec(self).expect("spec serializes") == serde_json::to_vec(other).expect("spec serializes")
+    }
+}
+
+/// Keep 128 bits for persisted identities; callers may still use unique prefixes.
+pub(crate) fn hashed_id(prefix: char, bytes: &[u8]) -> String {
+    format!("{prefix}{}", &blake3::hash(bytes).to_hex()[..32])
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,6 +71,8 @@ pub enum OutcomeKind {
     Trap,
     /// appfuzz could not run the call (bad arguments, instantiation).
     Error,
+    /// Execution stopped with a measured production-budget violation.
+    BudgetExceeded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +158,13 @@ pub struct RunRecord {
     pub result: Option<Value>,
     pub totals: Totals,
     pub events: Vec<HostCall>,
+    /// A reviewer resource guard stopped evidence capture.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub capture_limited: bool,
+    /// Error text explicitly reported by the guest, separate from engine and
+    /// host-plan diagnostics in outcome.message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_error: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stdout: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -166,8 +185,8 @@ impl RunRecord {
     }
 }
 
-/// Short id of a core module from its import and export names, so frames
-/// seen at run time map to modules found by static analysis.
+/// Base id of a core module from its import and export names. Static analysis
+/// adds an occurrence suffix when needed; runtime byte offsets identify that occurrence.
 pub fn module_id<'a>(imports: impl Iterator<Item = (&'a str, &'a str)>, exports: impl Iterator<Item = &'a str>) -> String {
     let mut h = blake3::Hasher::new();
     for (m, n) in imports {

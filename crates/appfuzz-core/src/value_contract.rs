@@ -20,14 +20,14 @@ enum Rule {
 
 /// A decimal represented without rounding integer bounds through f64.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Decimal {
+pub struct Decimal {
     negative: bool,
     digits: String,
     exponent: i64,
     integer: Option<i128>,
 }
 impl Decimal {
-    fn parse(text: &str) -> Option<Self> {
+    pub fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
         let negative = text.starts_with('-');
         let text = text.strip_prefix(['-', '+']).unwrap_or(text);
@@ -36,7 +36,7 @@ impl Decimal {
             None => (text, 0),
         };
         let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-        if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+        if (whole.is_empty() && fraction.is_empty()) || !whole.bytes().all(|b| b.is_ascii_digit()) || !fraction.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
         let mut digits = format!("{whole}{fraction}").trim_start_matches('0').to_string();
@@ -56,7 +56,7 @@ impl Decimal {
             .and_then(|n| if negative { n.checked_neg() } else { Some(n) });
         Some(Self { negative, digits, exponent, integer })
     }
-    fn cmp(&self, other: &Self) -> Ordering {
+    pub(crate) fn cmp(&self, other: &Self) -> Ordering {
         let zero = self.digits == "0";
         let other_zero = other.digits == "0";
         if zero && other_zero {
@@ -74,6 +74,42 @@ impl Decimal {
             }),
         };
         if self.negative { order.reverse() } else { order }
+    }
+
+    pub(crate) fn rounded_integer(&self, up: bool) -> Option<i128> {
+        if let Some(integer) = self.integer {
+            return Some(integer);
+        }
+        if self.exponent >= 0 {
+            return None;
+        }
+        let point = self.exponent + self.digits.len() as i64;
+        let whole = if point <= 0 { 0 } else { self.digits[..point as usize].parse::<i128>().ok()? };
+        if self.negative {
+            if up { whole.checked_neg() } else { whole.checked_neg()?.checked_sub(1) }
+        } else if up {
+            whole.checked_add(1)
+        } else {
+            Some(whole)
+        }
+    }
+}
+
+impl std::fmt::Display for Decimal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(integer) = self.integer {
+            return write!(f, "{integer}");
+        }
+        let sign = if self.negative { "-" } else { "" };
+        let point = self.exponent + self.digits.len() as i64;
+        if self.exponent < 0 && point > 0 {
+            let point = point as usize;
+            write!(f, "{sign}{}.{}", &self.digits[..point], &self.digits[point..])
+        } else if self.exponent < 0 && point > -8 {
+            write!(f, "{sign}0.{}{}", "0".repeat((-point) as usize), self.digits)
+        } else {
+            write!(f, "{sign}{}e{}", self.digits, self.exponent)
+        }
     }
 }
 
@@ -560,6 +596,45 @@ pub fn coverage(app: &crate::harness::App, runs: &[crate::record::RunRecord]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decimal_rounding_and_serialization_agree_with_integer_arithmetic() {
+        for coefficient in -1000i128..=1000 {
+            for exponent in 0..=5 {
+                let scale = 10i128.pow(exponent);
+                let decimal = Decimal::parse(&format!("{coefficient}e-{exponent}")).unwrap();
+                let floor = coefficient.div_euclid(scale);
+                let ceil = floor + i128::from(coefficient.rem_euclid(scale) != 0);
+                assert_eq!(decimal.rounded_integer(false), Some(floor));
+                assert_eq!(decimal.rounded_integer(true), Some(ceil));
+                assert!(decimal.cmp(&Decimal::parse(&decimal.to_string()).unwrap()).is_eq());
+            }
+        }
+    }
+
+    #[test]
+    fn decimal_comparison_agrees_with_scaled_integer_arithmetic() {
+        use rand::{RngExt, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7241);
+        for _ in 0..5000 {
+            let a = rng.random_range(-1_000_000i128..=1_000_000);
+            let b = rng.random_range(-1_000_000i128..=1_000_000);
+            let a_exp = rng.random_range(-6i32..=6);
+            let b_exp = rng.random_range(-6i32..=6);
+            let a_text = format!("{a}e{a_exp}");
+            let b_text = format!("{b}e{b_exp}");
+            let scaled_a = a * 10i128.pow((a_exp + 6) as u32);
+            let scaled_b = b * 10i128.pow((b_exp + 6) as u32);
+            assert_eq!(Decimal::parse(&a_text).unwrap().cmp(&Decimal::parse(&b_text).unwrap()), scaled_a.cmp(&scaled_b), "{a_text} versus {b_text}");
+        }
+        for (a, b) in [(".5", "5e-1"), ("-.5", "-0.50"), ("-0", ".0"), ("+1.", "01")] {
+            assert!(Decimal::parse(a).unwrap().cmp(&Decimal::parse(b).unwrap()).is_eq());
+        }
+        for text in [".", "-.", "NaN", "inf", "1e9223372036854775807"] {
+            assert!(Decimal::parse(text).is_none(), "{text}");
+        }
+    }
+
     fn domain(rules: &[&str]) -> Domain {
         Domain::parse(rules.iter().map(|s| s.to_string()).collect()).unwrap()
     }

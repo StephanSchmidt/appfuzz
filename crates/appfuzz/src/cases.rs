@@ -4,7 +4,7 @@ use appfuzz_core::{record::OutcomeKind, shrink::Across};
 
 pub(super) fn matches(f: &Finding, r: &RunRecord, app: &App) -> bool {
     let found = detect::per_run_checked(app, r);
-    if found.iter().any(|x| x.id == f.id) {
+    if found.iter().any(|x| x.matches_id(&f.id)) {
         return true;
     }
     // Probe findings name the stimulus, but their predicate is the underlying
@@ -41,7 +41,7 @@ pub(super) fn replay(app: &App, store: &RunStore, path: &str, current: bool) -> 
         bail!("{e}");
     }
     let reproduced = if case["per_run"] == true {
-        matches(&finding, &first, app)
+        if current { shows_again(&finding, &first, app) } else { matches(&finding, &first, app) }
     } else {
         let recipe = case
             .get("recipe")
@@ -184,18 +184,24 @@ pub(super) fn confirm(cli: &Cli, app: &App, store: &RunStore, target: &str, find
         let (spec, n) = shrink::minimise(app, &orig.spec, &base, &keeps, max_runs, &runner);
         let min = app.run(&spec);
         store.save(&min)?;
-        let shrunk = detect::per_run_checked(app, &min).into_iter().find(|g| g.id == f.id);
+        let shrunk = detect::per_run_checked(app, &min).into_iter().find(|g| g.matches_id(&f.id));
         (orig.spec.clone(), spec, n, min.id, shrunk)
     } else if let Some((a, start)) = &across {
         let per = a.runs_per_test();
         let (spec, n) = shrink::shrink(app, start, &base, &|c| a.shows(app, &f.id, c, &runner).is_some(), (max_runs / per).max(1));
         // Once more, keeping the runs: the finding's run is one of them.
+        let save_error = Mutex::new(None);
         let saving = |s: &RunSpec| {
             let r = app.run(s);
-            let _ = store.save(&r);
+            if let Err(error) = store.save(&r) {
+                *lock(&save_error) = Some(error);
+            }
             r
         };
         let shown = a.shows(app, &f.id, &spec, &saving);
+        if let Some(error) = lock(&save_error).take() {
+            return Err(error.context("saving comparison confirmation runs"));
+        }
         let run = shown.as_ref().and_then(|x| x.run.clone()).unwrap_or_else(|| orig.id.clone());
         (start.clone(), spec, n * per, run, shown)
     } else {
@@ -226,7 +232,7 @@ pub(super) fn confirm(cli: &Cli, app: &App, store: &RunStore, target: &str, find
         "version": 1, "finding": f, "per_run": per_run, "spec": spec, "reproduce": reproduce, "recipe": across.as_ref().map(|(a, _)| a), "original_run": orig.id, "run": min,
         "size_before": size_before, "size_after": size_after, "plan_size": shrink::plan_size(&spec), "note": note,
     });
-    std::fs::write(&path, serde_json::to_vec_pretty(&case)?)?;
+    appfuzz_core::store::write_atomic(&path, &serde_json::to_vec_pretty(&case)?)?;
     fstore.update(&f)?;
     out["finding"] = finding_json(&f);
     out["confirmed"] = json!(true);

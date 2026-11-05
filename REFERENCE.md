@@ -31,6 +31,8 @@ fail and warn findings of earlier reviews of the same app file, and lists each
 under `earlier_builds`: `found_again` (it is among this review's findings),
 `not_found`, or `not_rerun` with the reason (an input the new build can't take).
 A crash on the same input counts as found again even when it moved in the code.
+Case replay with `--against-current` uses the same rule for crashes and stack
+overflows; moving a trap does not make a regression pass.
 `findings` on a build that has no review yet says how many fail and warn
 findings earlier reviews had.
 
@@ -54,6 +56,22 @@ Stored-run views are `record`, `summary`, `calls`, `timeline`, `logs`, `stack`,
 `provenance`, `fuel`, and `explanation`. Older `call`, `calls`, `timeline`, `why`,
 `stdout`, `provenance`, `profile`, and `explain` commands remain compatibility
 interfaces. Prefer `run --trace` and `show --view` for new integrations.
+
+Run and finding IDs retain 128 bits of their input hash; sequence run IDs
+include the modeled state too. A unique run prefix or `last` still selects a
+stored run, and older short run IDs remain readable. Case replay recognizes
+legacy short finding IDs; new finding IDs must match in full. Cache reuse
+checks the complete specification.
+Saving a different specification under an existing ID is an error and leaves
+the original evidence intact, including when writers run concurrently.
+Finite floating-point inputs retain their exact value through JSON storage,
+cache reuse and replay, including the sign of zero.
+Finding updates serialize the read, merge and write so simultaneous commands
+retain every distinct finding.
+
+Core module IDs are unique within a component. Modules with the same imports
+and exports receive an occurrence suffix. Stack and provenance views use the
+original binary offsets, including nested components, to select the correct code.
 
 ## Search inside the compiled Wasm
 
@@ -138,6 +156,110 @@ request/plan reductions; saved cases replay the original binary.
 The `structured` stage runs automatically. Its evaluations and kept inputs appear
 under `stages.structured` in fuzz reports. Findings use the existing detectors and
 ordinary `confirm`/`replay`.
+
+## Memory accounting and allocation
+
+The run's memory cap applies to the sum of its WebAssembly linear memories,
+including the Extism kernel, and GC-heap backing memory (including collector
+overhead). Importing the same memory into several instances counts it once.
+The peak is the largest combined usage at one instant, rather than the sum of
+independent peaks. Freed kernel blocks can be reused, but retained linear-memory
+pages remain counted. Failed growth does not increase `peak_memory`;
+allocator failures roll back the attempted increase. Successful allocations remain counted when a later growth fails.
+
+Instance pooling is an optimization: a component that exceeds a pool's shape
+limits is retried with on-demand allocation. An explicit run cap is not clipped
+to the pool's initial sizing. Memory64 uses on-demand allocation. Shared linear
+memories are unsupported because Wasmtime does not invoke the store limiter for
+their allocations; loading one reports an error rather than an unmetered run.
+
+Initialization is part of the run: guest start code consumes the same fuel and
+virtual-time budget as the entry function. Startup host calls, logs, stacks and
+memory remain in the record even if initialization traps. Guest startup hangs
+and memory exhaustion use the ordinary failure outcomes; infrastructure errors
+remain incomplete runs. A plain module's `proc_exit(0)` also ends normally when
+called during initialization.
+
+Host-call trace capture stops before servicing another call once it contains
+65,536 calls or 32 MiB of compact JSON. The complete call that crosses the byte
+threshold is retained, so capture may exceed that threshold by one event. A
+request that finishes on that event still has complete evidence. Startup and
+the entry share one capture budget. Capture stops use `capture_limited = true`
+and an `error` outcome, preserve the captured calls and their cost/time totals,
+and make CLI analyses incomplete (exit code 3). Fuzzing preserves the limited run
+and reports the campaign error; it does not discard it as an invalid sample.
+These reviewer resource guards are separate from production limits. If a
+production-budget violation is already measured when capture must stop, the
+outcome is `budget_exceeded` and retains that failing witness. It is neither a
+guest crash nor an unknown result. Without such a violation, the capture remains
+incomplete. Requests excluded by the platform's `[entry] values` do not make a
+fuzz campaign incomplete; `input_values` still permits invalid incoming inputs.
+
+Extism kernel `alloc` returns zero for empty allocations and allocation failures,
+so guests can handle failure. Host-side allocations still report errors.
+Null input and output setters leave their previous locations and lengths
+unchanged, including when the supplied length is zero. To clear selected output,
+use a valid non-null pointer with zero length. The pinned upstream Wasm kernel
+runs in the same store as the plugin, so its allocator and metadata operations
+consume guest fuel. Memory accounting includes its actual linear memory,
+including metadata and retained backing pages. The bundled kernel starts with
+16 pages (1 MiB); `memory_bytes` reports allocator capacity, a separate value.
+Freeing a block or resetting the allocator does not shrink those pages.
+Input bytes are allocated once before the plugin export, even if the guest
+ignores them or reads them without asking for an input offset. Preparation uses
+the same memory cap as other allocations. Input reads observe writes through
+the input handle; freeing that block clears its input length. Input reads rejected
+by the kernel's bounds checks return zero, including empty and short inputs.
+`input_set` replaces the input location without allocating a copy or freeing the
+previous input block. `reset` clears all kernel blocks, input, output and error
+locations while preserving host variables, collected logs and peak usage.
+Variable and configuration lookups consume their key blocks. Variable writes
+consume both the key and value on success; deletion consumes the key. Logging
+consumes its message block while retaining the log text. These releases happen
+before a lookup allocates its result. The variable store uses the SDK's default
+1 MiB limit, including entry bookkeeping, separately from live kernel blocks.
+Variable and configuration keys must be valid UTF-8; invalid keys trap before
+consuming their handles. A null key is the empty string, and variable values
+remain arbitrary bytes.
+Extism log capture is separately bounded to 1 MiB of formatted text per run,
+including level prefixes and newlines. Startup and the export share this limit;
+`reset` does not erase it. Exceeding capture capacity preserves the recorded
+prefix and reports incomplete evidence (`error`, exit code 3), so review cannot
+approve the request or create an envelope. This is a reviewer resource guard,
+separate from production limits. Invalid UTF-8 messages emit a small error
+diagnostic, as in the SDK, instead of displaying replacement characters.
+
+Output and error setters retain kernel memory locations. The final response
+observes later writes to those locations, including output slices within a
+block. `error_get` returns the existing error handle without allocating a copy.
+`output_offset` and `output_length` report the currently selected output span,
+including slices and explicit empty output.
+Clearing or freeing the error handle removes its active error; initialization
+reset also clears retained output locations. A nonempty kernel error remains a
+failure even when the export returns zero or WASI exits with status zero.
+Run records retain explicit guest failure text as `guest_error`, separately from
+engine and host-plan diagnostics. Leak, encoded-flow and reviewer-directed-text
+checks inspect this text, as does `check not_contains`. Host-plan diagnostics
+alone do not count as guest output.
+
+## Host value generation
+
+A plan's `generate.numbers` applies to every numeric field: `small`, `edge`
+(zero, one and the WIT type's finite minimum and maximum), or `=NUMBER`.
+Fixed numbers preserve the full integer range, including `u64::MAX`, and use
+the WIT float type's normal rounding. A fixed value that overflows a float or
+cannot fit an integer result is a plan error, rather than a wrapped or random
+value. Optional `none`, empty lists and unselected result payloads do not need
+to contain that value. Platform value constraints still govern generated results.
+
+`cast:INTEGER` explicitly converts an integer constant to each WIT integer
+width with wrapping, and to float fields with normal rounding. The fuzzer and
+binary-constant probes use this mode when interpreting Wasm integer constants.
+Use `cast:-1` when the intention is an unsigned maximum; `=-1` requires a
+signed or floating-point result.
+
+Generation mode names are validated in defaults, rules and individual calls.
+Misspelled `numbers`, `strings`, `results` or `options` modes are errors.
 
 ## Host failure sweeps
 
@@ -230,6 +352,15 @@ syntax. Syntax alone establishes no UUID version, ownership or existence.
 results, including present options. Generated/supplied host data is conformed to
 those guarantees so guest code receives a valid UUID when the platform promises
 one. This is format-conforming generation, not a new UUID search stage.
+
+Existing `values` ranges also preserve exact decimal bounds. Host repairs respect
+the WIT type, including integer limits and floating-point rounding. Ranges and
+enums with no representable WIT value, incompatible constraint types and unknown
+paths are configuration errors. Growing an empty host list creates typed
+elements; field repairs run before uniqueness checks. Dataset responses are
+compared as typed values and are never rewritten to satisfy a contradictory
+guarantee. Request filters apply only to the declared entry export; findings
+from requests outside that platform filter are reported as information.
 
 Guest acceptance domains are separate from platform request filters:
 
@@ -410,6 +541,12 @@ Text may include units but must contain only one number. Numeric comparisons use
 floating-point values; integers outside the exact range ±(2^53−1) are unexercised.
 Missing, ambiguous or nonnumeric values produce `not_exercised`, never `holds`.
 Fixed examples and properties likewise require applicable selector matches.
+
+Single-run `value_range` and `max` properties compare decimal values exactly,
+including all integer bits and fractional thresholds. JSON arrays and objects
+are not numeric scalar matches. A `max` property includes resources consumed
+before a guest or host trap. Counterexample evidence uses a numeric string when
+JSON's floating-point representation would lose decimal precision.
 
 Every review executes the saved suite and reports each check's origin, status,
 match count, evidence run ids and counterexample case. Broken checks fail with
@@ -630,6 +767,20 @@ Commands print lossless JSON with suggested `next` commands. Exported artifacts
 command can read them unchanged. The old `--full` flag remains a compatibility
 no-op.
 
+Run summaries retain exact `virtual_ns`, `guest_ns`, `host_ns` and `sleep_ns`
+counters alongside their millisecond conversions. JSON milliseconds are not
+rounded for display, and the summary's latency limit uses the same conversion
+as the findings detector.
+
+Analysis commands require their run evidence to be stored. A run-cache read or
+write error exits 3 before publishing findings. This applies to scaling,
+amplification, probes and sweeps; restoring storage permits the analysis to run
+normally again. Confirmation also requires every final reproduction run to be
+saved before it writes the case and updates the finding. Run and case writers
+reserve temporary files exclusively and replace the destination entry by
+rename. Existing temporary files are skipped, and case-file symlinks are
+replaced without modifying their targets.
+
 A probe that tried nothing says why in `note`: `probe web` and `probe auth` on
 an export that takes no HTTP request, `probe auth` where no path turned away a
 request without credentials, `probe values` on an app without host functions.
@@ -650,6 +801,33 @@ sandbox. Other `wasi:` interfaces, such as `wasi:keyvalue`, `wasi:config` and
 `wasi:blobstore`, are services of the platform: each function is a host call
 like the platform's own, with generated results that a plan or rules can
 replace. `[grants] wasi` grants them like the rest of WASI.
+
+Clock reads and absolute sleep deadlines include fuel spent since the previous
+host call. Guest time is synchronized before every call into the host, including
+WASI Preview 1 calls and startup code. A zero `ns_per_fuel` disables the fuel
+contribution while retaining the small step for each clock read.
+
+Component timer subscriptions register future readiness without moving time.
+A pollable's `ready` query is nonblocking. `block` waits only for that pollable;
+`poll` waits for the earliest selected timer if nothing is already ready.
+Overlapping timers share elapsed time, and unused or dropped subscriptions do
+not count as sleeps. Ready streams return immediately alongside timers already
+due; duplicate poll entries retain their separate indices.
+
+WASI Preview 1 `poll_oneoff` advances virtual time instead of waiting in real
+time. Relative timers and absolute wall or monotonic deadlines wait for the
+earliest timer; timers due together may return together. Ready descriptors
+return immediately, alongside any timers already due. Descriptor readiness,
+errors and event metadata use the same sandbox descriptor table as other WASI
+calls, including after close or renumber operations. Invalid subscription
+values return WASI errors; invalid memory pointers trap.
+
+Timing limits, host latencies and `ns_per_fuel` must be finite and
+non-negative. Start times use real calendar dates (`YYYY-MM-DD`, optionally
+followed by `THH:MM[:SS]` and `Z`; a space may replace `T`). Invalid dates and
+times are errors. Virtual nanosecond counters, clock readings and accumulated
+cost saturate at their unsigned 64-bit maximum, so extreme sleeps or host
+latencies remain over budget instead of wrapping to small values.
 
 ### wasi:http handlers
 
@@ -833,6 +1011,14 @@ service limits: 128 MiB memory, fuel for about 50 ms of CPU, and a 2-minute
 wall-clock latency limit.
 
 ### Extism
+
+Plugins initialize their language runtime before input preparation: Haskell's
+reactor runs before `hs_init`; other plugins prefer `__wasm_call_ctors` over
+`_initialize`. Compatible initialization functions run once per run, under its
+fuel and memory limits. Temporary kernel allocations are reset before the input
+is prepared, while their peak remains counted. Exports may return an `i32`
+status or no value (success); `proc_exit(0)` also succeeds unless an Extism error
+is set. Nonzero exits remain failures.
 
 With `abi = "extism"`, values cross as JSON through the Extism kernel.
 appfuzz emulates `extism:host/env` and types the JSON with a WIT file. WIT is

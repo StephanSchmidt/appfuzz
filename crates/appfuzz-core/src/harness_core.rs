@@ -118,7 +118,7 @@ impl CoreApp {
 
     pub(super) fn link(&self, engine: &Engine) -> Result<wasmtime::InstancePre<Host>> {
         let mut linker: wasmtime::Linker<Host> = wasmtime::Linker::new(engine);
-        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |h: &mut Host| h.p1.as_mut().expect("plain-module runs have a WASI p1 context"))?;
+        super::p1::link(&mut linker)?;
         for imp in self.module.imports() {
             let ExternType::Func(ft) = imp.ty() else { continue };
             let (m, n) = (imp.module(), imp.name());

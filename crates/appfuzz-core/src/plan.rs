@@ -48,6 +48,16 @@ pub struct Response {
 }
 
 impl Response {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if let Some(generate) = &self.generate {
+            generate.validate()?;
+        }
+        if let Some(latency) = self.latency_ms {
+            crate::manifest::validate_timing_value("latency_ms", latency)?;
+        }
+        Ok(())
+    }
+
     pub fn decides(&self) -> bool {
         self.ret.is_some() || self.generate.is_some() || self.trap.is_some() || self.commit_then_trap.is_some()
     }
@@ -142,6 +152,13 @@ impl Plan {
 
     pub fn validate(&self) -> Result<()> {
         for (key, f) in &self.0 {
+            f.response.validate().with_context(|| format!("{key}: response"))?;
+            if let Some(response) = &f.default {
+                response.validate().with_context(|| format!("{key}: default"))?;
+            }
+            for (call, response) in &f.on_call {
+                response.validate().with_context(|| format!("{key}: on_call {call}"))?;
+            }
             if (!f.dataset_rows.is_empty() || f.dataset_seed.is_some()) && key != "_defaults" {
                 bail!("dataset_rows belongs under _defaults");
             }
@@ -156,9 +173,7 @@ impl Plan {
                 }
             }
             for (i, r) in f.rules.iter().enumerate() {
-                for m in r.when.values() {
-                    matcher_ok(m).with_context(|| format!("{key}: rule {i}"))?;
-                }
+                check_rule(r).with_context(|| format!("{key}: rule {i}"))?;
                 if r.result.is_some() {
                     bail!("{key}: rule {i} labels results; labels belong in the manifest (appfuzz.toml), not in a plan");
                 }
@@ -283,6 +298,7 @@ pub(crate) fn call_start(key: &str) -> Option<(u32, bool)> {
 
 /// Checks a rule's matchers (a bad regex is an error).
 pub fn check_rule(r: &Rule) -> Result<()> {
+    r.response.validate()?;
     r.when.values().try_for_each(matcher_ok)
 }
 
@@ -434,6 +450,20 @@ fn text(v: &Value) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn misspelled_generation_modes_are_rejected_in_every_response_position() {
+        for options in
+            [json!({"numbers":"edges"}), json!({"numbers":"=nonsense"}), json!({"strings":"unicod"}), json!({"results":"error"}), json!({"options":"missing"})]
+        {
+            let generation = json!({"generate":options});
+            for entry in
+                [generation.clone(), json!({"default":generation}), json!({"on_call":{"2":generation}}), json!({"rules":[{"when":{},"generate":options}]})]
+            {
+                assert!(Plan::parse(&json!({"x:y/a#get":entry}).to_string()).is_err(), "accepted {entry}");
+            }
+        }
+    }
+
+    #[test]
     fn rule_labels_by_argument() {
         use crate::labels::{Label, ResultLabels};
         let rules: Vec<Rule> = serde_json::from_value(serde_json::json!([
@@ -560,6 +590,24 @@ mod tests {
         assert!(!matches(&json!({"range": [1, 3]}), &json!(5)));
         assert!(matches(&json!({"not": {"contains": "x"}}), &json!("abc")));
         assert!(matches(&json!("a"), &json!({"some": "a"})));
+    }
+
+    #[test]
+    fn negative_latencies_are_rejected_in_every_response_position() {
+        for entry in [
+            json!({"latency_ms":-1}),
+            json!({"default":{"latency_ms":-1,"return":0}}),
+            json!({"on_call":{"2":{"latency_ms":-1,"return":0}}}),
+            json!({"rules":[{"when":{},"latency_ms":-1,"return":0}]}),
+        ] {
+            assert!(Plan::parse(&json!({"x:y/a#get":entry}).to_string()).is_err(), "accepted {entry}");
+        }
+        for latency in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut plan = Plan::default();
+            plan.0.entry("_defaults".into()).or_default().response.latency_ms = Some(latency);
+            assert!(plan.validate().is_err(), "accepted {latency}");
+        }
+        assert!(Plan::parse(r#"{"_defaults":{"latency_ms":0}}"#).is_ok());
     }
 
     #[test]

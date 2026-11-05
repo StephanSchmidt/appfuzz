@@ -53,3 +53,5 @@ pub mod faults;
 pub mod feedback;
 
 mod structured;
+
+mod memory;

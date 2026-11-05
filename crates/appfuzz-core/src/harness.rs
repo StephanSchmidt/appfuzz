@@ -17,9 +17,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value};
 use wasmtime::component::types::ComponentFunc;
-use wasmtime::component::{Component, InstancePre, Linker, Resource, ResourceTable, Val};
+use wasmtime::component::{Component, InstancePre, Linker, ResourceTable, Val};
 use wasmtime::{Config, Engine, Store, StoreContextMut, Trap, WasmBacktrace};
-use wasmtime_wasi::p2::DynPollable;
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
@@ -27,7 +26,7 @@ use crate::manifest::{Manifest, fn_key};
 use crate::plan::{Decision, Plan};
 use crate::record::{Frame, HostCall, Outcome, OutcomeKind, RunRecord, RunSpec, Totals, module_id};
 use crate::value::{Generator, json_to_val, val_to_json, val_to_json_with};
-use crate::wasi::{CountingRng, MonotonicClock, Ready, VirtualClock, WallClock, format_datetime, parse_datetime};
+use crate::wasi::{CountingRng, MonotonicClock, VirtualClock, WallClock, format_datetime, parse_datetime};
 use crate::wit::{self, FuncInfo, ImportKind, Interface};
 
 #[path = "harness_core.rs"]
@@ -38,13 +37,38 @@ mod extism;
 #[path = "harness_http.rs"]
 mod http;
 use extism::ExtismApp;
+#[path = "harness_p1.rs"]
+mod p1;
+#[path = "harness_p2.rs"]
+mod p2;
 
 const EPOCH_TICK: Duration = Duration::from_millis(10);
 const MAX_FRAMES: usize = 32;
 const OUTPUT_CAPACITY: usize = 1 << 20;
+const TRACE_CALL_CAPACITY: usize = 65_536;
+const TRACE_BYTE_CAPACITY: usize = 32 << 20;
+
+#[derive(Debug)]
+enum TraceCaptureLimit {
+    Calls,
+    Bytes,
+}
+
+impl std::fmt::Display for TraceCaptureLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (limit, unit) = match self {
+            Self::Calls => (TRACE_CALL_CAPACITY, "calls"),
+            Self::Bytes => (TRACE_BYTE_CAPACITY, "bytes"),
+        };
+        write!(f, "host-call trace capture reached {limit} {unit}; run evidence is incomplete")
+    }
+}
+
+impl std::error::Error for TraceCaptureLimit {}
 
 /// What the interceptors need to know about the platform.
 struct Platform {
+    modules: Vec<crate::statics::ModuleLocation>,
     funcs: BTreeMap<String, FuncInfo>,
     granted: BTreeMap<String, bool>,
     cost: BTreeMap<String, u64>,
@@ -79,6 +103,7 @@ enum Pre {
     /// An Extism plugin; a run calls the export's function of the module.
     Extism {
         pre: wasmtime::InstancePre<Host>,
+        kernel: wasmtime::Module,
         abi: Arc<crate::extism::Abi>,
         names: Arc<BTreeMap<String, String>>,
     },
@@ -133,9 +158,12 @@ struct Host {
     /// The caller's id for generated `identity` and `owner` values.
     identity: String,
     clock: VirtualClock,
+    timers: p2::Timers,
     fuel_start: u64,
     ns_per_fuel: f64,
     events: Vec<HostCall>,
+    trace_bytes: usize,
+    production_limits: Option<crate::manifest::Limits>,
     calls: BTreeMap<String, u32>,
     /// When the next host call started, if before it was answered: an
     /// outgoing HTTP request is in flight from `handle` until the guest
@@ -168,19 +196,24 @@ impl WasiView for Host {
 }
 
 struct Limiter {
-    max: u64,
-    peak: u64,
-    hit: bool,
+    budget: crate::memory::Budget,
+    pending: Option<crate::memory::Checkpoint>,
 }
 
 impl wasmtime::ResourceLimiter for Limiter {
-    fn memory_growing(&mut self, _current: usize, desired: usize, _maximum: Option<usize>) -> wasmtime::Result<bool> {
-        if desired as u64 > self.max {
-            self.hit = true;
+    fn memory_growing(&mut self, current: usize, desired: usize, maximum: Option<usize>) -> wasmtime::Result<bool> {
+        self.pending = None;
+        if maximum.is_some_and(|maximum| desired > maximum) {
             return Ok(false);
         }
-        self.peak = self.peak.max(desired as u64);
-        Ok(true)
+        self.pending = self.budget.reserve(desired.saturating_sub(current) as u64);
+        Ok(self.pending.is_some())
+    }
+    fn memory_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
+        if let Some(before) = self.pending.take() {
+            self.budget.rollback(before);
+        }
+        Ok(())
     }
     fn table_growing(&mut self, _current: usize, desired: usize, _maximum: Option<usize>) -> wasmtime::Result<bool> {
         Ok(desired <= 1_000_000)
@@ -188,14 +221,67 @@ impl wasmtime::ResourceLimiter for Limiter {
 }
 
 impl Host {
+    fn exceeded_budget(&self, fuel: u64) -> Option<&'static str> {
+        let limits = self.production_limits.as_ref()?;
+        if fuel > limits.fuel {
+            return Some("fuel");
+        }
+        if self.limiter.budget.peak() > limits.memory {
+            return Some("memory");
+        }
+        if limits.max_latency_ms.is_some_and(|limit| self.clock.with(|clock| crate::detect::ms(clock.elapsed_ns())) > limit) {
+            return Some("latency");
+        }
+        let cost = self.events.iter().fold(0u64, |sum, event| sum.saturating_add(event.cost));
+        limits.cost_per_request.filter(|limit| cost > *limit).map(|_| "host cost")
+    }
+
+    fn check_trace_capacity(&self) -> Result<()> {
+        if self.events.len() >= TRACE_CALL_CAPACITY {
+            return Err(TraceCaptureLimit::Calls.into());
+        }
+        if self.trace_bytes >= TRACE_BYTE_CAPACITY {
+            return Err(TraceCaptureLimit::Bytes.into());
+        }
+        Ok(())
+    }
+
+    fn record_event(&mut self, event: HostCall) {
+        // Keep the complete crossing event, including effects and accounting.
+        // Stop before servicing another call rather than dropping completed work.
+        self.trace_bytes = self.trace_bytes.saturating_add(crate::value::json_len(&event));
+        self.events.push(event);
+    }
+
     /// Brings the guest part of virtual time up to date from fuel spent.
-    fn sync_guest_time(store: &mut StoreContextMut<'_, Host>) -> u64 {
+    fn sync_guest_time(store: &impl wasmtime::AsContext<Data = Host>) -> u64 {
+        let store = store.as_context();
         let left = store.get_fuel().unwrap_or(0);
         let data = store.data();
         let used = data.fuel_start.saturating_sub(left);
         let ns = (used as f64 * data.ns_per_fuel) as u64;
         data.clock.with(|c| c.guest_ns = ns);
         used
+    }
+}
+
+#[cfg(test)]
+mod memory_limit_tests {
+    use super::Limiter;
+    use wasmtime::ResourceLimiter;
+
+    #[test]
+    fn allocator_failure_rolls_back_only_the_failed_growth() {
+        const PAGE: u64 = 65_536;
+        let mut limiter = Limiter { budget: crate::memory::Budget::new(3 * PAGE), pending: None };
+        assert!(limiter.memory_growing(0, PAGE as usize, None).unwrap());
+        assert!(limiter.memory_growing(PAGE as usize, 2 * PAGE as usize, None).unwrap());
+        limiter.memory_grow_failed(wasmtime::Error::msg("simulated allocation failure")).unwrap();
+        assert_eq!(limiter.budget.peak(), PAGE);
+        assert!(limiter.memory_growing(0, PAGE as usize, None).unwrap());
+        assert_eq!(limiter.budget.peak(), 2 * PAGE);
+        assert!(!limiter.memory_growing(0, 2 * PAGE as usize, None).unwrap());
+        assert_eq!(limiter.budget.peak(), 2 * PAGE);
     }
 }
 
@@ -242,7 +328,7 @@ fn pooled_engine(max_memory: u64) -> Result<Engine> {
         .max_core_instances_per_component(16)
         .max_memories_per_component(4)
         .max_tables_per_component(8)
-        .max_memory_size(max_memory as usize)
+        .max_memory_size(usize::try_from(max_memory.max(1u64 << 32)).unwrap_or(usize::MAX))
         // A small app's memory is cleared in place, not unmapped.
         .linear_memory_keep_resident(4 << 20)
         .table_keep_resident(64 << 10);
@@ -263,8 +349,15 @@ impl App {
     }
 
     pub fn from_bytes(manifest: Manifest, bytes: Vec<u8>) -> Result<Self> {
+        if crate::statics::memory_requires_on_demand(&bytes)? {
+            return Self::from_bytes_engine(manifest, bytes, engine()?);
+        }
         let engine = pooled_engine(manifest.limits.memory.saturating_mul(4))?;
-        Self::from_bytes_engine(manifest, bytes, engine)
+        match Self::from_bytes_engine(manifest.clone(), bytes.clone(), engine) {
+            Ok(app) => Ok(app),
+            // Pool capacity is an optimization, not a restriction on the app.
+            Err(_) => Self::from_bytes_engine(manifest, bytes, self::engine()?),
+        }
     }
 
     pub(crate) fn from_feedback(manifest: Manifest, bytes: Vec<u8>, readers: Vec<String>) -> Result<Self> {
@@ -274,6 +367,7 @@ impl App {
     }
 
     fn from_bytes_engine(mut manifest: Manifest, bytes: Vec<u8>, engine: Engine) -> Result<Self> {
+        manifest.validate_timing()?;
         manifest.binary = crate::manifest::Binary::of(&bytes);
         let hash = component_hash(&bytes);
         // The manifest as written identifies the contract. Built-in labels
@@ -305,6 +399,7 @@ impl App {
         };
 
         let mut platform = Platform {
+            modules: crate::statics::module_locations(&bytes)?,
             funcs: BTreeMap::new(),
             granted: BTreeMap::new(),
             cost: BTreeMap::new(),
@@ -322,6 +417,15 @@ impl App {
         };
         crate::labels::check_names(&written, &imports)?;
         crate::labels::check_wit(&manifest, &imports)?;
+        if let Some(entry) = &manifest.entry
+            && !entry.values.is_empty()
+        {
+            let export = exports.iter().find(|e| fn_key_eq(&e.key, &entry.export)).context("values export not found")?;
+            let (_, ty) = export.ty.params().next().context("values needs a request argument")?;
+            for (path, constraint) in &entry.values {
+                crate::constraints::validate_type(&ty, path, constraint).with_context(|| format!("entry.values {path:?}"))?;
+            }
+        }
         if let Some(entry) = &mut manifest.entry
             && !entry.input_values.is_empty()
         {
@@ -447,7 +551,7 @@ impl App {
             platform.handles = Some(spec);
         }
         let pre = match (component, core, plugin) {
-            (_, _, Some(p)) => Pre::Extism { pre: p.link(&engine)?, abi: p.abi.clone(), names: p.names.clone() },
+            (_, _, Some(p)) => Pre::Extism { pre: p.link(&engine)?, kernel: p.kernel.clone(), abi: p.abi.clone(), names: p.names.clone() },
             (_, Some(core), _) => Pre::Core { pre: core.link(&engine)?, start: core.start },
             (Some(component), None, None) => Pre::Component(link_component(&engine, &component, &imports, crate::wasi_http::uses_http(&imports, &exports))?),
             (None, None, None) => unreachable!("one of them"),
@@ -588,7 +692,7 @@ impl App {
         let id = if let Some(s) = &state {
             let mut bytes = serde_json::to_vec(&*s.lock().unwrap_or_else(|e| e.into_inner())).expect("state serializes");
             bytes.extend_from_slice(spec.id().as_bytes());
-            format!("s{}", &blake3::hash(&bytes).to_hex()[..16])
+            crate::record::hashed_id('s', &bytes)
         } else {
             spec.id()
         };
@@ -599,6 +703,8 @@ impl App {
             result: None,
             totals: Totals::default(),
             events: vec![],
+            guest_error: None,
+            capture_limited: false,
             stdout: String::new(),
             stderr: String::new(),
         };
@@ -627,6 +733,7 @@ impl App {
         if spec.contract != self.contract {
             bail!("saved run uses a different platform contract or engine; use replay --against-current for a regression check");
         }
+        crate::manifest::validate_timing_value("run ns_per_fuel", spec.ns_per_fuel)?;
         let export = self.export(&spec.export)?.clone();
         let params: Vec<_> = export.ty.params().collect();
         if params.len() != spec.args.len() {
@@ -652,8 +759,9 @@ impl App {
             .stderr(stderr.clone());
         // Plain modules use WASI preview 1, made the same way.
         let (ctx, p1) = if self.pre.plain() { (WasiCtx::builder().build(), Some(builder.build_p1())) } else { (builder.build(), None) };
+        let memory = crate::memory::Budget::new(spec.memory);
         let kernel = match &self.pre {
-            Pre::Extism { abi, .. } => Some(crate::extism::Kernel::new(extism::input(abi, &export, &args), spec.memory as usize)),
+            Pre::Extism { .. } => Some(crate::extism::Kernel::default()),
             _ => None,
         };
         let host = Host {
@@ -670,15 +778,18 @@ impl App {
             seed: spec.seed,
             identity: crate::identity::caller(spec, &self.manifest),
             clock: clock.clone(),
+            timers: Default::default(),
             fuel_start: spec.fuel,
             ns_per_fuel: spec.ns_per_fuel,
             events: vec![],
             calls: BTreeMap::new(),
+            trace_bytes: 0,
+            production_limits: crate::constraints::broken_request_for(record, &self.manifest).is_empty().then(|| self.manifest.limits.clone()),
             call_started_ns: None,
             call_deadline_ns: None,
             plan_error: None,
             host_trap: None,
-            limiter: Limiter { max: spec.memory, peak: 0, hit: false },
+            limiter: Limiter { budget: memory, pending: None },
             handles: Default::default(),
             request: matches!(self.pre, Pre::Core { .. }).then(|| spec.args.first().cloned()).flatten(),
             read_limit: None,
@@ -689,55 +800,79 @@ impl App {
         let mut store = Store::new(&self.engine, host);
         store.limiter(|h| &mut h.limiter);
         store.set_fuel(spec.fuel)?;
+        // WASI clock callbacks only receive the clock object, not the store.
+        // Update before every guest-to-host transition, including Preview 1
+        // and startup calls, so they see the fuel consumed since the last call.
+        store.call_hook(|store, transition| {
+            if matches!(transition, wasmtime::CallHook::CallingHost) {
+                Host::sync_guest_time(&store);
+            }
+            Ok(())
+        });
         let ticks = (self.manifest.limits.wall_timeout_ms / EPOCH_TICK.as_millis() as u64).max(1);
         store.set_epoch_deadline(ticks);
         store.epoch_deadline_trap();
 
         let mut instance = None;
+        let mut initializing = true;
         let call = match &self.pre {
-            Pre::Component(pre) => {
-                let inst = pre.instantiate(&mut store).map_err(anyhow::Error::from).context("instantiating the component")?;
-                // Instantiation may run start code; measure from here.
-                let fuel_start = store.get_fuel()?;
-                store.data_mut().fuel_start = fuel_start;
-                let func = lookup_export(&inst, &mut store, &export)?;
-                let call = if crate::wasi_http::is_handler(&export) {
-                    // The request record becomes an incoming request; the
-                    // response set on the outparam becomes the result.
-                    let request = spec.args.first().cloned().unwrap_or(Value::Null);
-                    // The response JSON is the result as it is: the carrier
-                    // type has no place for binary bodies or trailers.
-                    http::call_handler(&mut store, func, &request)?.map(|response| {
-                        store.data_mut().http.result = Some(response);
-                        vec![]
-                    })
-                } else {
-                    let mut results = vec![Val::Bool(false); export.ty.results().len()];
-                    func.call(&mut store, &args, &mut results).and_then(|()| http::flush(&mut store)).map(|()| results)
-                };
-                instance = Some(inst);
-                call
-            }
+            Pre::Component(pre) => match pre.instantiate(&mut store) {
+                Err(error) => Err(error.context("instantiating the component")),
+                Ok(inst) => {
+                    initializing = false;
+                    let func = lookup_export(&inst, &mut store, &export)?;
+                    let call = if crate::wasi_http::is_handler(&export) {
+                        // The request record becomes an incoming request; the
+                        // response set on the outparam becomes the result.
+                        let request = spec.args.first().cloned().unwrap_or(Value::Null);
+                        // The response JSON is the result as it is: the carrier
+                        // type has no place for binary bodies or trailers.
+                        http::call_handler(&mut store, func, &request)?.map(|response| {
+                            store.data_mut().http.result = Some(response);
+                            vec![]
+                        })
+                    } else {
+                        let mut results = vec![Val::Bool(false); export.ty.results().len()];
+                        func.call(&mut store, &args, &mut results).and_then(|()| http::flush(&mut store)).map(|()| results)
+                    };
+                    instance = Some(inst);
+                    call
+                }
+            },
             Pre::Core { pre, start } => {
-                let inst = pre.instantiate(&mut store).map_err(anyhow::Error::from).context("instantiating the module")?;
-                let fuel_start = store.get_fuel()?;
-                store.data_mut().fuel_start = fuel_start;
-                let func = inst.get_typed_func::<(), ()>(&mut store, start).map_err(anyhow::Error::from)?;
-                match func.call(&mut store, ()) {
+                let call = match pre.instantiate(&mut store) {
+                    Err(error) => Err(error.context("instantiating the module")),
+                    Ok(inst) => {
+                        initializing = false;
+                        let func = inst.get_typed_func::<(), ()>(&mut store, start).map_err(anyhow::Error::from)?;
+                        func.call(&mut store, ())
+                    }
+                };
+                match call {
                     Ok(()) => Ok(vec![]),
-                    // `proc_exit(0)` ends a run normally.
+                    // `proc_exit(0)` ends a run normally, including in start code.
                     Err(e) if e.downcast_ref::<wasmtime_wasi::I32Exit>().is_some_and(|x| x.0 == 0) => Ok(vec![]),
                     Err(e) => Err(e),
                 }
             }
-            Pre::Extism { pre, names, .. } => {
-                let inst = pre.instantiate(&mut store).map_err(anyhow::Error::from).context("instantiating the plugin")?;
-                let fuel_start = store.get_fuel()?;
-                store.data_mut().fuel_start = fuel_start;
-                let name = names.get(&export.key).ok_or_else(|| anyhow!("the plugin does not export {}", export.key))?;
-                let func = inst.get_typed_func::<(), i32>(&mut store, name).map_err(anyhow::Error::from)?;
-                func.call(&mut store, ()).map(|status| vec![Val::S32(status)])
-            }
+            Pre::Extism { pre, kernel, names, abi } => match crate::extism::Runtime::instantiate(&mut store, kernel).and_then(|runtime| {
+                store.data_mut().kernel.as_mut().expect("plugin runs have a kernel").runtime = Some(runtime);
+                pre.instantiate(&mut store)
+            }) {
+                Err(error) => Err(error.context("instantiating the plugin")),
+                Ok(inst) => {
+                    initializing = false;
+                    let name = names.get(&export.key).ok_or_else(|| anyhow!("the plugin does not export {}", export.key))?;
+                    extism::initialize(&mut store, &inst)
+                        .and_then(|()| {
+                            let input = extism::input(abi, &export, &args);
+                            let rt = store.data().kernel.as_ref().expect("plugin runs have a kernel").runtime.expect("kernel was installed");
+                            rt.set_input(&mut store, &input).map_err(wasmtime::Error::from_anyhow)
+                        })
+                        .and_then(|()| extism::invoke(&mut store, &inst, name))
+                        .map(|status| vec![Val::S32(status)])
+                }
+            },
         };
         let fuel_start = store.data().fuel_start;
 
@@ -756,9 +891,13 @@ impl App {
                     _ => 0,
                 };
                 let k = store.data().kernel.as_ref().expect("plugin runs have a kernel");
-                match extism::answer(abi, &export, status, k.output.as_deref(), k.error.as_deref()) {
+                match extism::answer(abi, &export, status, k) {
                     Ok(v) => record.result = Some(v),
-                    Err(message) => record.outcome = Outcome { kind: OutcomeKind::Trap, message: Some(message), stack: vec![] },
+                    Err(message) => {
+                        record.guest_error =
+                            k.error_bytes().ok().flatten().filter(|bytes| !bytes.is_empty()).map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+                        record.outcome = Outcome { kind: OutcomeKind::Trap, message: Some(message), stack: vec![] };
+                    }
                 }
             }
             Ok(results) => {
@@ -768,21 +907,37 @@ impl App {
                     many => Value::Array(many.iter().map(val_to_json).collect()),
                 });
             }
-            Err(err) => record.outcome = classify(&err, store.data()),
+            Err(err) => {
+                record.outcome = classify(&err, store.data_mut(), used);
+                record.capture_limited = record.outcome.kind == OutcomeKind::Error
+                    && (err.downcast_ref::<TraceCaptureLimit>().is_some() || err.downcast_ref::<crate::extism::LogCaptureLimit>().is_some());
+                // Allocation/linking failures without guest execution are
+                // infrastructure errors. Guest start traps use normal outcomes.
+                if initializing
+                    && record.outcome.kind == OutcomeKind::Trap
+                    && err.downcast_ref::<Trap>().is_none()
+                    && err.downcast_ref::<WasmBacktrace>().is_none()
+                {
+                    record.outcome.kind = OutcomeKind::Error;
+                }
+                if !matches!(record.outcome.kind, OutcomeKind::HostTrap | OutcomeKind::PlanError | OutcomeKind::Error) {
+                    record.guest_error = err.downcast_ref::<extism::GuestError>().map(|error| error.0.clone());
+                }
+            }
         }
 
         let data = store.data_mut();
         let c = clock.with(|c| c.clone());
         record.totals = Totals {
             fuel: used,
-            peak_memory: data.limiter.peak + data.kernel.as_ref().map_or(0, |k| k.peak as u64),
+            peak_memory: data.limiter.budget.peak(),
             virtual_ns: c.elapsed_ns(),
             guest_ns: c.guest_ns,
             host_ns: c.host_ns,
             sleep_ns: c.sleep_ns,
             host_calls: data.events.len() as u32,
-            cost: data.events.iter().map(|e| e.cost).sum(),
-            clock_reads: c.wall_reads + c.monotonic_reads,
+            cost: data.events.iter().fold(0u64, |total, e| total.saturating_add(e.cost)),
+            clock_reads: c.wall_reads.saturating_add(c.monotonic_reads),
             random_bytes: *drawn.lock().unwrap_or_else(|e| e.into_inner()),
             wall_us: 0,
         };
@@ -817,28 +972,8 @@ fn link_component(engine: &Engine, component: &Component, imports: &[Interface],
     if uses_http {
         http::link(&mut linker)?;
     }
-    // Sleeps return at once and advance virtual time. Defined under the
-    // version wasmtime-wasi provides, so semver matching routes older
-    // 0.2.x imports (componentize-py uses 0.2.9) here too; a definition
-    // under the import's own older name would not share the host's
-    // `pollable` resource type and fail to link.
     if imports.iter().any(|i| i.name.starts_with("wasi:clocks/monotonic-clock@")) {
-        let mut inst = linker.instance(WASI_MONOTONIC_CLOCK)?;
-        inst.func_wrap("subscribe-duration", |mut store: StoreContextMut<'_, Host>, (d,): (u64,)| {
-            store.data().clock.with(|c| {
-                c.sleep_ns += d;
-                c.sleeps += 1;
-            });
-            Ok((ready(&mut store)?,))
-        })?;
-        inst.func_wrap("subscribe-instant", |mut store: StoreContextMut<'_, Host>, (when,): (u64,)| {
-            let now = store.data().clock.monotonic_now();
-            store.data().clock.with(|c| {
-                c.sleep_ns += when.saturating_sub(now);
-                c.sleeps += 1;
-            });
-            Ok((ready(&mut store)?,))
-        })?;
+        p2::link(&mut linker)?;
     }
     let resources: BTreeMap<String, Vec<String>> = component
         .component_type()
@@ -914,17 +1049,16 @@ fn lookup_export(instance: &wasmtime::component::Instance, store: &mut Store<Hos
     instance.get_func(&mut *store, idx).ok_or_else(|| anyhow!("{} is not a function", export.key))
 }
 
-/// The monotonic-clock interface as wasmtime-wasi 50 provides it.
-const WASI_MONOTONIC_CLOCK: &str = "wasi:clocks/monotonic-clock@0.2.12";
-
-fn ready(store: &mut StoreContextMut<'_, Host>) -> wasmtime::Result<Resource<DynPollable>> {
-    let table = &mut store.data_mut().table;
-    let r = table.push(Ready)?;
-    wasmtime_wasi::p2::subscribe(table, r)
+fn plan_value_error(data: &mut Host, mut event: HostCall, message: String) -> anyhow::Error {
+    data.plan_error = Some(message.clone());
+    event.trap = Some(format!("plan error: {message}"));
+    data.record_event(event);
+    anyhow!("plan error: {message}")
 }
 
 fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], results: &mut [Val]) -> Result<()> {
-    let fuel_before = Host::sync_guest_time(&mut store);
+    store.data().check_trace_capacity()?;
+    let fuel_before = Host::sync_guest_time(&store);
     let stack = frames(&mut store);
     let data = store.data_mut();
     let platform = data.platform.clone();
@@ -1044,7 +1178,7 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     let t_ns = data.clock.with(|c| {
         let now = c.elapsed_ns();
         let t = started.map_or(now, |s| s.min(now));
-        c.host_ns += (t + latency_ns).saturating_sub(now);
+        c.host_ns = c.host_ns.saturating_add(t.saturating_add(latency_ns).saturating_sub(now));
         t
     });
 
@@ -1076,14 +1210,20 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
             // The host keeps its promises, whatever the plan says.
             if let (Some(c), 1) = (platform.constraints.get(key), result_types.len()) {
                 if resolved.source.starts_with("dataset ") {
-                    let mut conformed = v.clone();
-                    crate::constraints::conform_at(&mut conformed, c, data.seed);
-                    if conformed != v {
-                        data.plan_error = Some(format!("dataset response for {key} contradicts value constraints"));
-                        bail!("dataset response contradicts value constraints");
+                    let canonical = match json_to_val(&v, &result_types[0]) {
+                        Ok(value) => val_to_json(&value),
+                        Err(error) => return Err(plan_value_error(data, event, format!("{key}: {error:#}"))),
+                    };
+                    let mut conformed = canonical.clone();
+                    if let Err(error) = crate::constraints::conform_host(&mut conformed, &result_types[0], c, data.seed) {
+                        return Err(plan_value_error(data, event, format!("{key}: {error:#}")));
                     }
-                } else {
-                    crate::constraints::conform_at(&mut v, c, data.seed);
+                    if conformed != canonical {
+                        return Err(plan_value_error(data, event, format!("dataset response for {key} contradicts value constraints")));
+                    }
+                    v = canonical;
+                } else if let Err(error) = crate::constraints::conform_host(&mut v, &result_types[0], c, data.seed) {
+                    return Err(plan_value_error(data, event, format!("{key}: {error:#}")));
                 }
             }
             let vals: Result<Vec<Val>> = match result_types.len() {
@@ -1102,7 +1242,7 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
                     if let Some(msg) = commit_trap {
                         event.trap = Some(msg.clone());
                         data.host_trap = Some(msg.clone());
-                        data.events.push(event);
+                        data.record_event(event);
                         bail!("host response lost after commit: {msg}");
                     }
                     event.result = Some(compact(v));
@@ -1120,6 +1260,9 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
             }
         }
         Decision::Generate(opts) => {
+            if let Err(error) = opts.validate().and_then(|()| result_types.iter().try_for_each(|t| opts.validate_for_type(t))) {
+                return Err(plan_value_error(data, event, format!("{key}: invalid generation options: {error:#}")));
+            }
             let seed = data.seed ^ blake3::hash(key.as_bytes()).as_bytes()[0] as u64 ^ ((call as u64) << 20);
             let mut g = Generator::new(seed, opts);
             let mut vals: Vec<Val> = result_types.iter().map(|t| g.gen_val(t)).collect();
@@ -1132,10 +1275,10 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
             }
             if let (Some(c), [v], [t]) = (platform.constraints.get(key), vals.as_mut_slice(), result_types.as_slice()) {
                 let mut j = val_to_json(v);
-                crate::constraints::conform_at(&mut j, c, seed);
-                if let Ok(x) = json_to_val(&j, t) {
-                    *v = x;
+                if let Err(error) = crate::constraints::conform_host(&mut j, t, c, seed) {
+                    return Err(plan_value_error(data, event, format!("{key}: {error:#}")));
                 }
+                *v = json_to_val(&j, t)?;
             }
             event.result = Some(match vals.as_slice() {
                 [] => Value::Null,
@@ -1163,7 +1306,7 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
             event.result = Some(compact(j));
         }
     }
-    data.events.push(event);
+    data.record_event(event);
     outcome
 }
 
@@ -1341,18 +1484,38 @@ fn compact(mut v: Value) -> Value {
 
 fn frames(store: &mut StoreContextMut<'_, Host>) -> Vec<Frame> {
     let bt = WasmBacktrace::capture(&*store);
-    let cache = &mut store.data_mut().modules;
-    bt.frames()
+    record_frames(bt.frames(), store.data_mut())
+}
+
+fn record_frames(frames: &[wasmtime::FrameInfo], host: &mut Host) -> Vec<Frame> {
+    let frames = &frames[..frames.len().min(MAX_FRAMES)];
+    let cache = &mut host.modules;
+    let modules = &host.platform.modules;
+    // A prologue frame may have no instruction offset. Another frame from
+    // the same runtime module can still identify it unambiguously.
+    for f in frames {
+        if let Some(id) = module_at(f.module_offset(), modules) {
+            match cache.iter_mut().find(|(m, _)| wasmtime::Module::same(m, f.module())) {
+                Some((_, cached)) if cached != id => id.clone_into(cached),
+                Some(_) => {}
+                None => cache.push((f.module().clone(), id.to_string())),
+            }
+        }
+    }
+    frames
         .iter()
-        .take(MAX_FRAMES)
         .map(|f| {
             let m = f.module();
-            let id = match cache.iter().find(|(c, _)| wasmtime::Module::same(c, m)) {
-                Some((_, id)) => id.clone(),
-                None => {
-                    let id = module_id_of(m);
-                    cache.push((m.clone(), id.clone()));
-                    id
+            let id = if let Some(id) = module_at(f.module_offset(), modules) {
+                id.to_string()
+            } else {
+                match cache.iter().find(|(c, _)| wasmtime::Module::same(c, m)) {
+                    Some((_, id)) => id.clone(),
+                    None => {
+                        let id = module_id_of(m);
+                        cache.push((m.clone(), id.clone()));
+                        id
+                    }
                 }
             };
             Frame { module: id, func: f.func_index(), name: f.func_name().map(str::to_string), offset: f.module_offset() }
@@ -1364,8 +1527,11 @@ fn module_id_of(m: &wasmtime::Module) -> String {
     module_id(m.imports().map(|i| (i.module(), i.name())), m.exports().map(|e| e.name()))
 }
 
-fn frame(f: &wasmtime::FrameInfo) -> Frame {
-    Frame { module: module_id_of(f.module()), func: f.func_index(), name: f.func_name().map(str::to_string), offset: f.module_offset() }
+fn module_at(offset: Option<usize>, modules: &[crate::statics::ModuleLocation]) -> Option<&str> {
+    let offset = offset? as u64;
+    let index = modules.partition_point(|m| m.range.start <= offset).checked_sub(1)?;
+    let module = &modules[index];
+    module.range.contains(&offset).then_some(module.id.as_str())
 }
 
 /// Frames before a bad memory access counts as a shadow stack overflow.
@@ -1377,11 +1543,25 @@ fn recursive(stack: &[Frame]) -> bool {
     stack.iter().any(|f| stack.iter().filter(|g| g.func == f.func && g.module == f.module).count() * 2 >= stack.len())
 }
 
-fn classify(err: &wasmtime::Error, host: &Host) -> Outcome {
+fn classify(err: &wasmtime::Error, host: &mut Host, fuel: u64) -> Outcome {
     let bt = err.downcast_ref::<WasmBacktrace>();
-    let stack: Vec<Frame> = bt.map(|bt| bt.frames().iter().take(MAX_FRAMES).map(frame).collect()).unwrap_or_default();
+    let stack = bt.map(|bt| record_frames(bt.frames(), host)).unwrap_or_default();
     let depth = bt.map(|bt| bt.frames().len()).unwrap_or(0);
     let mut message = Some(short_message(err));
+    if let Some(limit) = err
+        .downcast_ref::<TraceCaptureLimit>()
+        .map(ToString::to_string)
+        .or_else(|| err.downcast_ref::<crate::extism::LogCaptureLimit>().map(ToString::to_string))
+    {
+        if let Some(metric) = host.exceeded_budget(fuel) {
+            return Outcome {
+                kind: OutcomeKind::BudgetExceeded,
+                message: Some(format!("execution stopped after exceeding the production {metric} budget")),
+                stack,
+            };
+        }
+        return Outcome { kind: OutcomeKind::Error, message: Some(limit), stack };
+    }
     if let Some(msg) = &host.plan_error {
         return Outcome { kind: OutcomeKind::PlanError, message: Some(msg.clone()), stack };
     }
@@ -1392,11 +1572,11 @@ fn classify(err: &wasmtime::Error, host: &Host) -> Outcome {
         Some(Trap::OutOfFuel) => OutcomeKind::OutOfFuel,
         Some(Trap::Interrupt) => OutcomeKind::Timeout,
         Some(Trap::StackOverflow) => OutcomeKind::StackOverflow,
-        Some(Trap::UnreachableCodeReached) if host.limiter.hit => OutcomeKind::OutOfMemory,
+        Some(Trap::UnreachableCodeReached) if host.limiter.budget.hit() => OutcomeKind::OutOfMemory,
         Some(Trap::UnreachableCodeReached) => OutcomeKind::Unreachable,
         Some(Trap::MemoryOutOfBounds) => OutcomeKind::MemoryOutOfBounds,
         Some(_) => OutcomeKind::Trap,
-        None if host.limiter.hit => OutcomeKind::OutOfMemory,
+        None if host.limiter.budget.hit() => OutcomeKind::OutOfMemory,
         None => OutcomeKind::Trap,
     };
     // A shadow stack in linear memory (Rust, C) runs out before the

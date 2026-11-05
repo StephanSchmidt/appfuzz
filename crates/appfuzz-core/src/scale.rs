@@ -140,7 +140,7 @@ pub fn apply(app: &App, base: &RunSpec, knob: &Knob, n: u64) -> Result<RunSpec> 
                 set_field(req, path, n, len)?;
             }
             // The platform lets no other value through.
-            crate::constraints::conform_request(&mut spec.args, &app.manifest, spec.seed);
+            crate::constraints::conform_request_typed(&mut spec.args, app, &spec.export, spec.seed)?;
         }
     }
     Ok(spec)
@@ -522,7 +522,7 @@ fn findings(app: &App, knob: &Knob, points: &[Point], growth: &[Growth]) -> Vec<
             worst,
         ));
     }
-    if let Some(p) = points.iter().find(|p| p.outcome != OutcomeKind::Ok)
+    if let Some(p) = points.iter().find(|p| !matches!(p.outcome, OutcomeKind::Ok | OutcomeKind::Error | OutcomeKind::PlanError | OutcomeKind::BudgetExceeded))
         && points.first().is_some_and(|f| f.outcome == OutcomeKind::Ok)
     {
         out.push(Finding::new(
@@ -945,6 +945,9 @@ pub struct Discovery {
 /// Finds knobs, keys and modes, from the example request (already steady).
 pub fn discover(app: &App, base: &RunSpec, dict_limit: usize, run: Runner) -> Result<Discovery> {
     let base_run = run(base);
+    if base_run.capture_limited {
+        bail!("run {}: {}", base_run.id, base_run.outcome.message.as_deref().unwrap_or("evidence capture is incomplete"));
+    }
     let base_b = behaviour(&base_run);
     let base_cb = calls_behaviour(&base_run);
     let st = Statics::parse(&app.bytes)?;
@@ -1084,7 +1087,7 @@ pub fn discover(app: &App, base: &RunSpec, dict_limit: usize, run: Runner) -> Re
         let values: Vec<(String, String)> = consts
             .iter()
             .filter(|_| nums)
-            .map(|c| (format!("={c}"), format!("numbers = {c}")))
+            .map(|c| (format!("cast:{c}"), format!("numbers = {c}")))
             .chain(words.iter().filter(|_| strs).map(|w| (format!("={w}"), format!("strings = {w:?}"))))
             .collect();
         for (v, what) in values {

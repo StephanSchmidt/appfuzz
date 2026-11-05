@@ -215,7 +215,7 @@ pub fn shrink(app: &App, scenario: &Scenario, finding: &str, budget: u64) -> Res
                 continue;
             }
             attempts += 1;
-            if run(app, &candidate).is_ok_and(|r| r.errors.is_empty() && r.findings.iter().any(|f| f.id == finding)) {
+            if run(app, &candidate).is_ok_and(|r| r.errors.is_empty() && r.findings.iter().any(|f| f.matches_id(finding))) {
                 current = candidate;
                 changed = true;
             } else {

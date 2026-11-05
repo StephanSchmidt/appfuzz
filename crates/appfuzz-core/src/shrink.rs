@@ -179,7 +179,7 @@ impl Across {
                     return Ok(None);
                 };
                 let actual = run(&variant.spec);
-                crate::faults::compare(app, &base, fault, &variant, &actual).into_iter().find(|f| f.id == id)
+                crate::faults::compare(app, &base, fault, &variant, &actual).into_iter().find(|f| f.matches_id(id))
             }
             Across::Scale { knob, sizes, context } => {
                 let found = scale::scale(app, spec, knob.clone(), sizes, run)?.findings.into_iter();
@@ -188,15 +188,15 @@ impl Across {
                         Some(c) => scale::in_context(f, c),
                         None => f,
                     })
-                    .find(|f| f.id == id)
+                    .find(|f| f.matches_id(id))
             }
-            Across::Nested { func, outer, inner } => scale::nested_again(app, spec, func, outer, inner, run).filter(|f| f.id == id),
+            Across::Nested { func, outer, inner } => scale::nested_again(app, spec, func, outer, inner, run).filter(|f| f.matches_id(id)),
             Across::Pair { change, func } => {
                 let r = run(spec);
                 let vs: Vec<_> = metamorphic::variants(app, &r).into_iter().filter(|v| v.change == *change && v.func == *func).collect();
-                vs.iter().find_map(|v| metamorphic::compare(app, &r, v, &run(&v.spec)).into_iter().find(|f| f.id == id))
+                vs.iter().find_map(|v| metamorphic::compare(app, &r, v, &run(&v.spec)).into_iter().find(|f| f.matches_id(id)))
             }
-            Across::Auth { auth } => crate::probe::auth_again(app, auth, spec, run).into_iter().find(|f| f.id == id),
+            Across::Auth { auth } => crate::probe::auth_again(app, auth, spec, run).into_iter().find(|f| f.matches_id(id)),
         })
     }
 

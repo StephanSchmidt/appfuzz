@@ -83,6 +83,186 @@ impl Fixture {
     }
 }
 
+fn assert_legacy_finding_case_replays(f: &Fixture, case: &str, sequence: bool) {
+    let mut saved: Value = serde_json::from_slice(&std::fs::read(case).unwrap()).unwrap();
+    let id = if sequence { &mut saved["finding"] } else { &mut saved["finding"]["id"] };
+    let original = id.as_str().unwrap();
+    assert_eq!(original.len(), 33);
+    *id = json!(&original[..9]);
+    let path = f.dir.join("legacy-case.json");
+    std::fs::write(&path, saved.to_string()).unwrap();
+    let mut command = if sequence { vec!["sequence", "replay", path.to_str().unwrap()] } else { vec!["replay", path.to_str().unwrap()] };
+    let (code, replayed) = f.cli(&command);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true, "{replayed}");
+    command.push("--against-current");
+    let (code, replayed) = f.cli(&command);
+    assert_eq!(code, 2, "{replayed}");
+    assert_eq!(replayed["reproduced"], true, "{replayed}");
+}
+
+#[test]
+fn crash_case_regressions_still_fail_when_the_crash_moves() {
+    let f = Fixture::new(false);
+    let wit = "package test:workflow; world app {export run:func(n:u32)->u32;}";
+    std::fs::write(f.dir.join("app.wasm"), component(wit, r#"(module (func (export "run") (param i32) (result i32) unreachable))"#)).unwrap();
+    let (_, first) = f.cli(&["run"]);
+    let original = first["findings"].as_array().unwrap().iter().find(|f| f["kind"] == "crash").unwrap()["id"].as_str().unwrap();
+    let (_, confirmed) = f.cli(&["confirm", original, "--max-runs", "10"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    std::fs::write(f.dir.join("app.wasm"), component(wit, r#"(module (func (export "run") (param i32) (result i32) nop unreachable))"#)).unwrap();
+    let (_, moved) = f.cli(&["run"]);
+    let changed = moved["findings"].as_array().unwrap().iter().find(|f| f["kind"] == "crash").unwrap();
+    assert_ne!(changed["id"], original);
+    let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!(code, 2, "{replayed}");
+    assert_eq!(replayed["reproduced"], true);
+    std::fs::write(f.dir.join("app.wasm"), component(wit, r#"(module (func (export "run") (param i32) (result i32) (i32.const 7)))"#)).unwrap();
+    let (code, fixed) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!(code, 0, "{fixed}");
+    assert_eq!(fixed["reproduced"], false);
+}
+
+#[test]
+fn extism_error_leaks_survive_storage_confirmation_and_replay() {
+    let f = Fixture::new(false);
+    std::fs::write(
+        f.dir.join("plugin.wit"),
+        "package extism:host; interface user { credential:func()->string; } world plugin { import user; export run:func()->string; }",
+    )
+    .unwrap();
+    std::fs::write(f.dir.join("platform.toml"), "[platform]\nname='errors'\nabi='extism'\nwit='plugin.wit'\n").unwrap();
+    std::fs::write(
+        &f.manifest,
+        "[app]\nwasm='app.wasm'\nplatform='platform.toml'\n[entry]\nexport='run'\n[functions.\"extism:host/user#credential\"]\nresult='secret'\n",
+    )
+    .unwrap();
+    let wasm = wat::parse_str(
+        r#"(module
+        (import "extism:host/user" "credential" (func $credential (result i64)))
+        (import "extism:host/env" "error_set" (func $error (param i64)))
+        (func (export "run") (result i32) (call $error (call $credential)) (i32.const 0)))"#,
+    )
+    .unwrap();
+    std::fs::write(f.dir.join("app.wasm"), wasm).unwrap();
+    let (_, run) = f.cli(&["run"]);
+    let finding = run["findings"].as_array().unwrap().iter().find(|v| v["kind"] == "secret_leak").unwrap_or_else(|| panic!("{run}"));
+    let (_, stored) = f.cli(&["show", run["run"].as_str().unwrap()]);
+    assert!(stored["guest_error"].as_str().is_some_and(|text| text.starts_with("sk_")), "{stored}");
+    let (_, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "10"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let (code, replayed) = f.cli(&["replay", case]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true);
+    let fixed = wat::parse_str(
+        r#"(module
+        (import "extism:host/user" "credential" (func $credential (result i64)))
+        (func (export "run") (result i32) (drop (call $credential)) (i32.const 0)))"#,
+    )
+    .unwrap();
+    std::fs::write(f.dir.join("app.wasm"), fixed).unwrap();
+    let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], false);
+}
+
+#[test]
+fn overflowing_extism_log_capture_cannot_pass_review_or_create_an_envelope() {
+    let f = Fixture::new(false);
+    std::fs::write(f.dir.join("plugin.wit"), "package test:logging; world plugin { export run:func()->string; }").unwrap();
+    std::fs::write(f.dir.join("platform.toml"), "[platform]\nname='logging'\nabi='extism'\nwit='plugin.wit'\n").unwrap();
+    std::fs::write(&f.manifest, "[app]\nwasm='app.wasm'\nplatform='platform.toml'\n[entry]\nexport='run'\n").unwrap();
+    let wasm = wat::parse_str(
+        r#"(module
+        (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+        (import "extism:host/env" "log_info" (func $log (param i64)))
+        (func (export "run") (result i32) (call $log (call $alloc (i64.const 2097152))) (i32.const 0)))"#,
+    )
+    .unwrap();
+    std::fs::write(f.dir.join("app.wasm"), wasm).unwrap();
+    let (code, run) = f.cli(&["run"]);
+    assert_eq!(code, 3, "{run}");
+    assert_eq!(run["outcome"]["kind"], "error");
+    assert!(run["outcome"]["message"].as_str().unwrap().contains("log capture"));
+    assert!(!run["findings"].as_array().unwrap().iter().any(|finding| finding["kind"] == "crash"));
+    let (code, review) = f.cli(&["review", "--runs", "1", "--time", "1ms", "--confirm", "0"]);
+    assert_eq!(code, 3, "{review}");
+    assert_eq!(review["verdict"], "incomplete");
+    assert_eq!(review["status"], "incomplete");
+    let (code, envelope) = f.cli(&["envelope", "--review", review["session"].as_str().unwrap()]);
+    assert_eq!(code, 3, "{envelope}");
+    assert!(envelope["error"].as_str().unwrap().contains("complete passing review"));
+}
+
+#[test]
+fn trace_capture_limits_are_incomplete_in_run_scale_fuzz_and_review() {
+    let f = Fixture::new(false);
+    let wit = "package test:workflow; interface db { get:func(id:u32)->u32; } world app { import db; export run:func(n:u32)->u32; }";
+    let wat = r#"(module
+        (import "test:workflow/db" "get" (func $get (param i32) (result i32)))
+        (memory (export "memory") 1)
+        (func (export "run") (param $n i32) (result i32) (local $i i32)
+            (loop $again
+                (drop (call $get (local.get $i)))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br_if $again (i32.lt_u (local.get $i) (local.get $n))))
+            (local.get $n)))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    f.edit("fuel = 1000000", "fuel = 100000000");
+    f.edit("[limits]\n", "[limits]\nwall_timeout_ms=30000\n");
+    let mut manifest = std::fs::read_to_string(&f.manifest).unwrap();
+    manifest.push_str("\n[functions.\"test:workflow/db#get\"]\ncost=0\nlatency_ms=0\n");
+    std::fs::write(&f.manifest, manifest).unwrap();
+    let (code, run) = f.cli(&["run", "--args", "[65537]"]);
+    assert_eq!(code, 3, "{run}");
+    assert_eq!(run["outcome"]["kind"], "error");
+    assert_eq!(run["totals"]["host_calls"], 65536);
+    let (_, stored) = f.cli(&["show", run["run"].as_str().unwrap()]);
+    assert_eq!(stored["capture_limited"], true);
+    drop(stored);
+    let (code, scaled) = f.cli(&["scale", "field:@0", "--sizes", "1,65537"]);
+    assert_eq!(code, 3, "{scaled}");
+    assert!(scaled["error"].as_str().unwrap().contains("trace capture"));
+    let (code, fuzzed) = f.cli(&["fuzz", "--args", "[65537]", "--runs", "1", "--time", "1ms"]);
+    assert_eq!(code, 3, "{fuzzed}");
+    assert!(fuzzed["error"].as_str().unwrap().contains("trace capture"));
+    let (code, review) = f.cli(&["review", "--args", "[65537]", "--runs", "1", "--time", "1ms", "--confirm", "0"]);
+    assert_eq!(code, 3, "{review}");
+    assert_eq!(review["verdict"], "incomplete");
+    let (code, envelope) = f.cli(&["envelope", "--review", review["session"].as_str().unwrap()]);
+    assert_eq!(code, 3, "{envelope}");
+    f.edit("cost=0", "cost=1");
+    let (code, budget) = f.cli(&["run", "--args", "[65537]"]);
+    assert_eq!(code, 0, "{budget}");
+    assert_eq!(budget["outcome"]["kind"], "budget_exceeded");
+    let finding = budget["findings"].as_array().unwrap().iter().find(|f| f["kind"] == "over_budget").unwrap();
+    assert!(!budget["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "crash" || f["kind"] == "hang"));
+    let (_, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "24"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let (_, minimized) = f.cli(&["show", confirmed["minimised_run"].as_str().unwrap()]);
+    assert_eq!(minimized["outcome"]["kind"], "ok");
+    assert_ne!(minimized["capture_limited"], true);
+}
+
+#[test]
+fn generation_configuration_errors_are_distinct_from_guest_crashes() {
+    let f = Fixture::new(false);
+    let (code, invalid_mode) = f.cli(&["run", "--plan", r#"{"test:workflow/db#get":{"generate":{"numbers":"edges"}}}"#]);
+    assert_eq!(code, 3, "{invalid_mode}");
+    assert!(invalid_mode["error"].as_str().unwrap().contains("generation mode"));
+
+    let (code, invalid_value) = f.cli(&["run", "--plan", r#"{"test:workflow/db#get":{"generate":{"numbers":"=-1"}}}"#]);
+    assert_eq!(code, 3, "{invalid_value}");
+    assert_eq!(invalid_value["outcome"]["kind"], "plan_error");
+    assert!(!invalid_value["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "crash"));
+
+    let (code, converted) = f.cli(&["run", "--plan", r#"{"test:workflow/db#get":{"generate":{"numbers":"cast:-1"}}}"#]);
+    assert_eq!(code, 0, "{converted}");
+    assert_eq!(converted["result"], json!(u32::MAX));
+}
+
 #[test]
 fn semantic_host_argument_violations_confirm_replay_and_regress() {
     let f = Fixture::new(false);
@@ -98,6 +278,7 @@ fn semantic_host_argument_violations_confirm_replay_and_regress() {
     assert_eq!(confirmed["spec"]["args"][0], 7, "shrinking must keep an upper-bound violation above six");
     let case = confirmed["case"].as_str().unwrap();
     assert_eq!(f.cli(&["replay", case]).0, 0);
+    assert_legacy_finding_case_replays(&f, case, false);
     let bytes = component(
         "package test:workflow; interface db { get:func(id:u32)->u32; } world app {import db;export run:func(n:u32)->u32;}",
         r#"(module (import "test:workflow/db" "get" (func $get (param i32) (result i32))) (func (export "run") (param i32) (result i32) (call $get (i32.const 1))))"#,
@@ -106,6 +287,211 @@ fn semantic_host_argument_violations_confirm_replay_and_regress() {
     let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
     assert_eq!(code, 0, "{replayed}");
     assert_eq!(replayed["reproduced"], false);
+}
+
+#[test]
+fn cached_execution_preserves_float_inputs_exactly() {
+    let f = Fixture::new(false);
+    std::fs::write(
+        f.dir.join("app.wasm"),
+        component(
+            "package test:workflow; world app {export run:func(n:f64)->f64;}",
+            r#"(module (func (export "run") (param f64) (result f64) (local.get 0)))"#,
+        ),
+    )
+    .unwrap();
+    f.edit("\nrequest = 1\n", "\nrequest = 3.3413571213205546e-193\n");
+    let (code, first) = f.cli(&["run"]);
+    assert_eq!(code, 0, "{first}");
+    let (code, second) = f.cli(&["run"]);
+    assert_eq!(code, 0, "{second}");
+    assert_eq!(first["run"], second["run"]);
+    assert_eq!(second["result"].as_f64().unwrap().to_bits(), 1727240679746839071);
+    let (code, replayed) = f.cli(&["replay", "last"]);
+    assert_eq!(code, 0, "{replayed}");
+}
+
+#[test]
+fn cached_execution_distinguishes_positive_and_negative_zero() {
+    let f = Fixture::new(false);
+    std::fs::write(
+        f.dir.join("app.wasm"),
+        component(
+            "package test:workflow; world app {export run:func(n:f64)->f64;}",
+            r#"(module (func (export "run") (param f64) (result f64) (local.get 0)))"#,
+        ),
+    )
+    .unwrap();
+    f.edit("\nrequest = 1\n", "\nrequest = 0.0\n");
+    let (code, first) = f.cli(&["run"]);
+    assert_eq!(code, 0, "{first}");
+    let path = f.dir.join("state/runs").join(format!("{}.json", first["run"].as_str().unwrap()));
+    let mut stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    stored["spec"]["args"][0] = json!(-0.0);
+    std::fs::write(path, stored.to_string()).unwrap();
+    let (code, second) = f.cli(&["run"]);
+    assert_eq!(code, 3, "{second}");
+}
+
+#[test]
+fn cached_execution_refuses_evidence_for_a_different_specification() {
+    let f = Fixture::new(false);
+    let (code, first) = f.cli(&["run", "--seed", "1"]);
+    assert_eq!(code, 0, "{first}");
+    let id = first["run"].as_str().unwrap();
+    let path = f.dir.join("state/runs").join(format!("{id}.json"));
+    let mut stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    stored["spec"]["seed"] = json!(2);
+    std::fs::write(&path, stored.to_string()).unwrap();
+    let (code, second) = f.cli(&["run", "--seed", "1"]);
+    assert_eq!(code, 3, "{second}");
+    assert!(second["error"].as_str().unwrap().contains("specification"), "{second}");
+}
+
+#[test]
+fn host_numeric_guarantees_are_repaired_as_representable_wit_values() {
+    let f = Fixture::new(false);
+    let mut manifest = std::fs::read_to_string(&f.manifest).unwrap();
+    manifest.push_str("\n[functions.\"test:workflow/db#get\"]\nvalues={''='range:1.2..2.2'}\n");
+    std::fs::write(&f.manifest, manifest).unwrap();
+    for args in [vec!["run"], vec!["run", "--plan", r#"{"test:workflow/db#get":{"return":0}}"#]] {
+        let (code, run) = f.cli(&args);
+        assert_eq!(code, 0, "{run}");
+        assert_eq!(run["result"], 2, "{run}");
+    }
+    f.edit("range:1.2..2.2", "range:0.1..0.2");
+    let (code, run) = f.cli(&["run"]);
+    assert_eq!(code, 3, "{run}");
+}
+
+#[test]
+fn exact_request_guarantees_distinguish_adjacent_large_integer_inputs() {
+    let f = Fixture::new(false);
+    std::fs::write(
+        f.dir.join("app.wasm"),
+        component(
+            "package test:workflow; world app {export run:func(n:u64)->u32;}",
+            r#"(module (func (export "run") (param i64) (result i32) (unreachable)))"#,
+        ),
+    )
+    .unwrap();
+    f.edit("\nrequest = 1\n", "\nrequest = 9007199254740992\nvalues={''='range:9007199254740993..9007199254740993'}\n");
+    let (code, outside) = f.cli(&["run"]);
+    assert_eq!(code, 0, "{outside}");
+    assert!(outside["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "crash" && f["severity"] == "info"), "{outside}");
+    let (code, allowed) = f.cli(&["run", "--request", "9007199254740993"]);
+    assert_eq!(code, 0, "{allowed}");
+    assert!(allowed["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "crash" && f["severity"] == "fail"), "{allowed}");
+}
+
+#[test]
+fn numeric_properties_keep_exact_thresholds_and_acceptance_cases_replay() {
+    for (value, upper) in [("9007199254740993", "9007199254740992"), ("0.10000000000000000001", "0.1")] {
+        let f = Fixture::new(true);
+        f.edit("request = \"safe\"", &format!("request = \"{value}\""));
+        let (code, checked) = f.cli(&["check", "value_range", "$", "0", upper, "--runs", "1", "--time", "1s", "--max-runs", "10"]);
+        assert_eq!(code, 2, "{checked}");
+        let mut manifest = std::fs::read_to_string(&f.manifest).unwrap();
+        manifest.push_str(&format!(
+            "\n[acceptance]\nversion=1\n[acceptance.checks.precise]\norigin='marketing'\nsearch=false\nproperty=['value_range','$','0','{upper}']\n"
+        ));
+        std::fs::write(&f.manifest, manifest).unwrap();
+        let (code, acceptance) = f.cli(&["acceptance", "run"]);
+        assert_eq!(code, 2, "{acceptance}");
+        let case = acceptance["checks"][0]["case"].as_str().unwrap();
+        let (code, replayed) = f.cli(&["replay", case]);
+        assert_eq!(code, 0, "{replayed}");
+        assert_eq!(replayed["reproduced"], true);
+    }
+    let f = Fixture::new(false);
+    let (code, checked) = f.cli(&[
+        "check",
+        "max",
+        "cost",
+        "18446744073709551614",
+        "--plan",
+        r#"{"test:workflow/db#get":{"return":1,"cost":18446744073709551615}}"#,
+        "--runs",
+        "1",
+        "--time",
+        "1s",
+        "--max-runs",
+        "10",
+    ]);
+    assert_eq!(code, 2, "{checked}");
+    assert_eq!(checked["counterexample"]["detail"]["value"], u64::MAX);
+    assert_eq!(checked["counterexample"]["detail"]["max"], u64::MAX - 1);
+}
+
+#[test]
+fn metric_checks_include_charges_before_a_host_trap() {
+    let f = Fixture::new(false);
+    let (code, checked) = f.cli(&[
+        "check",
+        "max",
+        "cost",
+        "0",
+        "--plan",
+        r#"{"test:workflow/db#get":{"trap":"service down","cost":1}}"#,
+        "--runs",
+        "1",
+        "--time",
+        "1s",
+        "--max-runs",
+        "10",
+    ]);
+    assert_eq!(code, 2, "{checked}");
+    assert_eq!(checked["counterexample"]["detail"]["value"], 1);
+}
+
+#[test]
+fn invalid_times_and_timing_settings_cannot_pass_a_review() {
+    let f = Fixture::new(false);
+    for time in ["2026-02-29", "2026-11-02T10:xx:00", "9223372036854775807-01-01"] {
+        let (code, review) = f.cli(&["review", "--runs", "1", "--time", "0s", "--now", time]);
+        assert_eq!(code, 3, "{time}: {review}");
+        assert_ne!(review["verdict"], "pass");
+    }
+    f.edit("max_latency_ms = 200", "max_latency_ms = nan");
+    let (code, result) = f.cli(&["run"]);
+    assert_eq!(code, 3, "{result}");
+    assert!(result["error"].as_str().unwrap().contains("finite"));
+}
+
+#[test]
+fn huge_host_budgets_are_reported_without_crashing_the_cli() {
+    let f = Fixture::new(false);
+    let bytes = component(
+        "package test:workflow; interface db {get:func(id:u32)->u32;} world app {import db;export run:func(n:u32)->u32;}",
+        r#"(module (import "test:workflow/db" "get" (func $get (param i32) (result i32)))
+          (func (export "run") (param i32) (result i32)
+            (drop (call $get (local.get 0))) (call $get (local.get 0))))"#,
+    );
+    std::fs::write(f.dir.join("app.wasm"), bytes).unwrap();
+    let (code, run) = f.cli(&["run", "--plan", r#"{"test:workflow/db#get":{"return":1,"cost":18446744073709551615,"latency_ms":1e30}}"#]);
+    assert_eq!(code, 0, "{run}");
+    assert_eq!(run["totals"]["cost"], u64::MAX);
+    assert!(run["totals"]["virtual_ms"].as_f64().unwrap() > 1e12);
+    let (_, raw) = f.cli(&["show", "last"]);
+    assert_eq!(raw["totals"]["virtual_ns"], u64::MAX);
+    let (code, calls) = f.cli(&["show", "last", "--view", "calls"]);
+    assert_eq!(code, 0, "{calls}");
+    assert_eq!(calls["functions"]["test:workflow/db#get"]["cost"], u64::MAX);
+    assert!(calls["functions"]["test:workflow/db#get"]["latency_ms"].as_f64().unwrap() > 1e12);
+    let (code, explained) = f.cli(&["show", "last", "--view", "explanation"]);
+    assert_eq!(code, 0, "{explained}");
+}
+
+#[test]
+fn invalid_platform_value_bounds_are_reported_as_configuration_errors() {
+    for constraint in ["range:10..1", "range:NaN..1", "range:1..inf", "len:10..1"] {
+        let f = Fixture::new(false);
+        f.edit("\nrequest = 1\n", &format!("\nrequest = 1\nvalues = {{ '' = '{constraint}' }}\n"));
+        let (code, result) = f.cli(&["run"]);
+        assert_eq!(code, 3, "{constraint}: {result}");
+        let error = result["error"].as_str().unwrap();
+        assert!(error.contains("lower") || error.contains("finite"), "{result}");
+    }
 }
 
 #[test]
@@ -210,6 +596,7 @@ fn nested_fan_out_is_confirmed_by_scaling_both_fields() {
     let (code, replayed) = f.cli(&["replay", case]);
     assert_eq!(code, 0, "{replayed}");
     assert_eq!(replayed["reproduced"], true, "{replayed}");
+    assert_legacy_finding_case_replays(&f, case, false);
 }
 
 #[test]
@@ -406,10 +793,11 @@ fn nonexecuting_reviews_are_incomplete() {
     assert_eq!(code, 3, "{v}");
     assert_eq!(v["verdict"], "incomplete");
     f.edit("export = \"missing\"", "export = \"run\"");
-    f.edit("request = 1", "request = \"wrong type\"");
+    f.edit("\nrequest = 1\n", "\nrequest = \"wrong type\"\n");
     let (code, v) = f.review();
     assert_eq!(code, 3, "{v}");
     assert_eq!(v["verdict"], "incomplete");
+    assert!(v["errors"].as_array().unwrap().iter().any(|error| error.to_string().contains("argument")), "{v}");
 }
 
 #[test]
@@ -507,8 +895,76 @@ fn envelope_requires_accepted_review_and_ignores_later_exploration() {
     let (_, mut malformed) = f.cli(&["show", "last"]);
     malformed["outcome"] = json!({"kind": "invalid"});
     assert_eq!(f.cli(&["envelope", "check", &malformed.to_string(), "--envelope", path]).0, 3);
-    f.edit("request = 1", "request = 2");
+    f.edit("\nrequest = 1\n", "\nrequest = 2\n");
     assert_eq!(f.cli(&["envelope", "check", "last", "--envelope", path]).0, 3);
+}
+
+#[test]
+fn envelope_checks_budgets_even_without_guest_fuel() {
+    let f = Fixture::new(false);
+    let (code, review) = f.review();
+    assert_eq!(code, 0, "{review}");
+    let path = f.dir.join("envelope.json");
+    let path = path.to_str().unwrap();
+    assert_eq!(f.cli(&["envelope", "--out", path]).0, 0);
+    let env: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    f.cli(&["run"]);
+    let (_, mut trace) = f.cli(&["show", "last"]);
+    trace["totals"]["fuel"] = json!(0);
+    trace["totals"]["cost"] = json!(env["budget"]["cost"].as_u64().unwrap() * 2 + 1);
+    let (code, checked) = f.cli(&["envelope", "check", &trace.to_string(), "--envelope", path]);
+    assert_eq!(code, 1, "{checked}");
+    assert!(checked["findings"].as_array().unwrap().iter().any(|f| f["detail"]["budget"] == "cost"));
+}
+
+#[test]
+fn envelope_requires_output_and_complete_call_evidence() {
+    for echo in [true, false] {
+        let f = Fixture::new(echo);
+        if echo {
+            f.edit("request = \"safe\"", "request = \"safe\"\nvalues = { '' = 'enum:safe' }");
+        }
+        let (code, review) = f.review();
+        assert_eq!(code, 0, "{review}");
+        let path = f.dir.join("envelope.json");
+        let path = path.to_str().unwrap();
+        assert_eq!(f.cli(&["envelope", "--out", path]).0, 0);
+        f.cli(&["run"]);
+        let (_, record) = f.cli(&["show", "last"]);
+        let trace = json!({
+            "component":record["spec"]["component"], "contract":record["spec"]["contract"],
+            "export":record["spec"]["export"], "args":record["spec"]["args"],
+            "events":record["events"], "totals":record["totals"], "result":record["result"]
+        });
+        assert_eq!(f.cli(&["envelope", "check", &trace.to_string(), "--envelope", path]).0, 0);
+        let mut malformed = trace.clone();
+        if echo {
+            malformed["result"] = json!({});
+        } else {
+            malformed["events"][0].as_object_mut().unwrap().remove("args");
+        }
+        let (code, checked) = f.cli(&["envelope", "check", &malformed.to_string(), "--envelope", path]);
+        assert_eq!(code, 3, "incomplete evidence must not pass: {checked}");
+        if echo {
+            for empty_body in [json!(""), json!([])] {
+                let mut valid = trace.clone();
+                valid["result"] = empty_body;
+                let (code, checked) = f.cli(&["envelope", "check", &valid.to_string(), "--envelope", path]);
+                assert_eq!(code, 0, "an empty body is complete evidence: {checked}");
+            }
+        } else {
+            malformed = trace.clone();
+            malformed["events"] = json!([]);
+            let (code, checked) = f.cli(&["envelope", "check", &malformed.to_string(), "--envelope", path]);
+            assert_eq!(code, 3, "omitted calls must not pass: {checked}");
+            malformed = trace.clone();
+            malformed["totals"]["host_calls"] = json!(0);
+            assert_eq!(f.cli(&["envelope", "check", &malformed.to_string(), "--envelope", path]).0, 3);
+            malformed = trace.clone();
+            malformed["events"][0]["func"] = json!("");
+            assert_eq!(f.cli(&["envelope", "check", &malformed.to_string(), "--envelope", path]).0, 3);
+        }
+    }
 }
 
 #[test]
@@ -577,7 +1033,8 @@ fn unreadable_historical_evidence_cannot_turn_into_a_pass() {
     let f = Fixture::new(true);
     let (_, review) = f.review();
     assert_eq!(review["verdict"], "fail");
-    let files: Vec<_> = std::fs::read_dir(f.dir.join("state/findings")).unwrap().map(|e| e.unwrap().path()).collect();
+    let files: Vec<_> =
+        std::fs::read_dir(f.dir.join("state/findings")).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
     assert_eq!(files.len(), 1);
     std::fs::write(&files[0], b"broken JSON").unwrap();
     let (code, v) = f.cli(&["review", "--fresh", "--runs", "10"]);
@@ -760,6 +1217,7 @@ fn sequences_persist_writes_find_double_submits_shrink_and_replay() {
     let (code, replay) = f.cli(&["sequence", "replay", case]);
     assert_eq!(code, 0, "{replay}");
     assert_eq!(replay["reproduced"], true);
+    assert_legacy_finding_case_replays(&f, case, true);
     let fixed = booking_fixture(true);
     std::fs::copy(fixed.dir.join("app.wasm"), f.dir.join("app.wasm")).unwrap();
     assert_eq!(f.cli(&["sequence", "replay", case]).0, 3);
@@ -1365,4 +1823,154 @@ fn a_rebuild_is_checked_against_the_findings_of_the_last_one() {
     assert_eq!(row(&r, "earlier_builds")["status"], "found_again", "{r}");
     let (code, r) = f.cli(&["replay", run, "--against-current"]);
     assert_eq!(code, 2, "{r}");
+}
+
+#[test]
+fn comparison_confirmation_requires_the_reproduction_runs_to_be_saved() {
+    let f = Fixture::new(false);
+    f.edit("max_latency_ms = 200", "max_latency_ms = 10");
+    f.edit("request = 1\n", "request = 9\n");
+    let (code, run) = f.cli(&["run"]);
+    assert_eq!(code, 0, "{run}");
+    let (code, probed) = f.cli(&["probe", "pairs", run["run"].as_str().unwrap()]);
+    assert_eq!(code, 0, "{probed}");
+    let finding = probed["findings"].as_array().unwrap().iter().find(|finding| finding["kind"] == "slow_host_sensitivity").expect("slow host finding");
+    let id = finding["id"].as_str().unwrap();
+    let lock = f.dir.join("state/runs/.save.lock");
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    let (code, failed) = f.cli(&["confirm", id, "--max-runs", "30"]);
+    if failed["confirmed"] == true {
+        let missing = failed["minimised_run"].as_str().unwrap();
+        assert!(!f.dir.join("state/runs").join(format!("{missing}.json")).exists(), "the fixture must require new evidence");
+    }
+    assert_eq!(code, 3, "{failed}");
+    assert_ne!(failed["confirmed"], true, "{failed}");
+    assert!(!f.dir.join("state/cases").exists(), "a failed save must not publish a case");
+
+    std::fs::remove_dir(&lock).unwrap();
+    let (code, confirmed) = f.cli(&["confirm", id, "--max-runs", "30"]);
+    assert_eq!(code, 0, "{confirmed}");
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let (code, replayed) = f.cli(&["replay", confirmed["case"].as_str().unwrap()]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true, "{replayed}");
+}
+
+#[test]
+fn pair_probes_cannot_succeed_with_missing_run_records() {
+    let f = Fixture::new(false);
+    let (code, run) = f.cli(&["run"]);
+    assert_eq!(code, 0, "{run}");
+    let id = run["run"].as_str().unwrap();
+    let lock = f.dir.join("state/runs/.save.lock");
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    let (code, failed) = f.cli(&["probe", "pairs", id]);
+    if code == 0 {
+        assert!(
+            failed["pairs"].as_array().unwrap().iter().any(|pair| {
+                let id = pair["run"].as_str().unwrap();
+                !f.dir.join("state/runs").join(format!("{id}.json")).exists()
+            }),
+            "the fixture must require missing evidence: {failed}"
+        );
+    }
+    assert_eq!(code, 3, "{failed}");
+    std::fs::remove_dir(&lock).unwrap();
+    let (code, recovered) = f.cli(&["probe", "pairs", id]);
+    assert_eq!(code, 0, "{recovered}");
+    for pair in recovered["pairs"].as_array().unwrap() {
+        let id = pair["run"].as_str().unwrap();
+        assert!(f.dir.join("state/runs").join(format!("{id}.json")).exists());
+    }
+}
+
+#[test]
+fn run_summary_preserves_sub_millisecond_latency_and_limits() {
+    let f = Fixture::new(false);
+    f.edit("max_latency_ms = 200", "max_latency_ms = 0.0001");
+    let mut manifest = std::fs::read_to_string(&f.manifest).unwrap();
+    manifest.push_str("\n[functions.\"test:workflow/db#get\"]\nlatency_ms = 0.001\n");
+    std::fs::write(&f.manifest, manifest).unwrap();
+    let (code, run) = f.cli(&["run"]);
+    assert_eq!(code, 0, "{run}");
+    assert!(run["over_limits"].as_array().unwrap().iter().any(|limit| limit["limit"] == "max_latency_ms"), "{run}");
+    assert_eq!(run["totals"]["host_ms"], 0.001, "{run}");
+    assert_eq!(run["totals"]["host_ns"], 1000, "{run}");
+    assert!(run["totals"]["virtual_ns"].as_u64().unwrap() >= 1000, "{run}");
+    assert!(run["totals"]["virtual_ms"].as_f64().unwrap() > 0.0001, "{run}");
+}
+
+fn http_probe_fixture() -> Fixture {
+    let f = Fixture::new(false);
+    let wit = "package test:workflow; world app { record request { uri: string, headers: list<tuple<string,string>> } export run: func(req: request) -> u32; }";
+    let wat = r#"(module (memory (export "memory") 1)
+      (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
+      (func (export "run") (param i32 i32 i32 i32) (result i32) (i32.const 200)))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    f.edit("request = 1\n", "request = { uri = \"/\", headers = [[\"authorization\", \"Bearer real\"]] }\n");
+    f
+}
+
+#[test]
+fn analysis_commands_reject_storage_failures_before_publishing_findings() {
+    let cases: &[(&[&str], bool)] = &[
+        (&["scale", "field:", "--sizes", "1,2"], false),
+        (&["amplify", "--dict", "0"], false),
+        (&["probe", "faults", "last", "--runs", "32"], false),
+        (&["probe", "values"], false),
+        (&["probe", "times"], false),
+        (&["probe", "web"], true),
+        (&["probe", "auth"], true),
+        (&["sweep", "--field", "uri", "--values", "/a,/b"], true),
+    ];
+    let mut problems = Vec::new();
+    for &(args, http) in cases {
+        let f = if http { http_probe_fixture() } else { Fixture::new(false) };
+        assert_eq!(f.cli(&["run"]).0, 0);
+        let before = f.cli(&["findings"]);
+        assert_eq!(before.0, 0, "{}", before.1);
+        let lock = f.dir.join("state/runs/.save.lock");
+        std::fs::remove_file(&lock).unwrap();
+        std::fs::create_dir(&lock).unwrap();
+        let (code, failed) = f.cli(args);
+        if code != 3 {
+            problems.push(format!("{args:?} returned {code}: {}", failed["error"]));
+        }
+        let after = f.cli(&["findings"]);
+        assert_eq!(after.0, 0, "{}", after.1);
+        if before.1["findings"] != after.1["findings"] {
+            problems.push(format!("{args:?} published findings despite failed evidence storage"));
+        }
+        std::fs::remove_dir(&lock).unwrap();
+        let (code, recovered) = f.cli(args);
+        assert_eq!(code, 0, "{args:?}: {recovered}");
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn confirmation_replaces_a_case_symlink_without_overwriting_its_target() {
+    let f = Fixture::new(true);
+    let args = json!(["cnry1a2b7<i>'\""]).to_string();
+    let (code, run) = f.cli(&["run", "--args", &args]);
+    assert_eq!(code, 0, "{run}");
+    let finding = run["findings"].as_array().unwrap().iter().find(|finding| finding["kind"] == "reflection").expect("reflection finding");
+    let id = finding["id"].as_str().unwrap();
+    let dir = f.dir.join("state/cases");
+    std::fs::create_dir_all(&dir).unwrap();
+    let case = dir.join(format!("{id}.json"));
+    let victim = f.dir.join("unrelated.txt");
+    std::fs::write(&victim, b"preserve this file").unwrap();
+    std::os::unix::fs::symlink(&victim, &case).unwrap();
+    let (code, confirmed) = f.cli(&["confirm", id, "--max-runs", "10"]);
+    assert_eq!(code, 0, "{confirmed}");
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserve this file");
+    assert!(!std::fs::symlink_metadata(&case).unwrap().file_type().is_symlink());
+    let (code, replayed) = f.cli(&["replay", case.to_str().unwrap()]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true, "{replayed}");
 }

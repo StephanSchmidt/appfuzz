@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::{Map, Value, json};
 
-use appfuzz_core::detect::{self, Finding, FindingStore, Severity};
+use appfuzz_core::detect::{self, Finding, FindingStore, Severity, ms};
 use appfuzz_core::fuzz;
 use appfuzz_core::harness::App;
 use appfuzz_core::manifest::Manifest;
@@ -436,13 +436,69 @@ fn sorted(m: Mutex<Vec<((u32, u64), Finding)>>) -> Vec<Finding> {
 }
 
 fn run_cached(app: &App, store: &RunStore, spec: &RunSpec) -> Result<RunRecord> {
-    if let Some(r) = store.get(&spec.id())? {
+    let id = spec.id();
+    if let Some(r) = store.get(&id)? {
+        if r.id != id || !r.spec.same_inputs(spec) {
+            bail!("cached run {id} does not match the requested specification");
+        }
         store.set_last(&r.id)?;
         return Ok(r);
     }
     let r = app.run(spec);
     store.save(&r)?;
     Ok(r)
+}
+
+/// Core analyses use infallible callbacks. Keep storage errors until the
+/// command can return them, before publishing its findings or report.
+struct Recorder<'a> {
+    app: &'a App,
+    store: &'a RunStore,
+    error: Mutex<Option<anyhow::Error>>,
+}
+
+impl<'a> Recorder<'a> {
+    fn new(app: &'a App, store: &'a RunStore) -> Self {
+        Self { app, store, error: Mutex::new(None) }
+    }
+
+    fn remember(&self, error: anyhow::Error, id: &str) {
+        *lock(&self.error) = Some(error.context(format!("storing run {id}")));
+    }
+
+    fn cached(&self, spec: &RunSpec) -> RunRecord {
+        let run = match run_cached(self.app, self.store, spec) {
+            Ok(run) => run,
+            Err(error) => {
+                self.remember(error, &spec.id());
+                self.app.run(spec)
+            }
+        };
+        self.check_capture(&run);
+        run
+    }
+
+    fn fresh(&self, spec: &RunSpec) -> RunRecord {
+        let run = self.app.run(spec);
+        self.check_capture(&run);
+        if let Err(error) = self.store.save(&run) {
+            self.remember(error, &run.id);
+        }
+        run
+    }
+
+    fn check_capture(&self, run: &RunRecord) {
+        if run.capture_limited {
+            lock(&self.error).get_or_insert_with(|| anyhow!("run {}: {}", run.id, run.outcome.message.as_deref().unwrap_or("evidence capture is incomplete")));
+        }
+    }
+
+    fn check(&self) -> Result<()> {
+        match lock(&self.error).take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
 }
 
 fn build_spec(app: &App, export: Option<&str>, a: &SpecArgs) -> Result<RunSpec> {
@@ -494,10 +550,6 @@ fn merge(base: &mut Value, patch: Value) {
     }
 }
 
-fn ms(ns: u64) -> f64 {
-    (ns as f64 / 1e4).round() / 100.0
-}
-
 fn summary(app: &App, r: &RunRecord) -> Value {
     let l = &app.manifest.limits;
     let t = &r.totals;
@@ -526,6 +578,10 @@ fn summary(app: &App, r: &RunRecord) -> Value {
         "totals": {
             "fuel": t.fuel,
             "peak_memory": t.peak_memory,
+            "virtual_ns": t.virtual_ns,
+            "guest_ns": t.guest_ns,
+            "host_ns": t.host_ns,
+            "sleep_ns": t.sleep_ns,
             "virtual_ms": ms(t.virtual_ns),
             "guest_ms": ms(t.guest_ns),
             "host_ms": ms(t.host_ns),
@@ -625,7 +681,7 @@ fn timeline(r: &RunRecord, st: &Statics) -> Value {
                 let chain: Vec<String> = e
                     .stack
                     .iter()
-                    .filter(|f| st.module(&f.module).is_none_or(|m| m.role == "main" || m.role == "other"))
+                    .filter(|f| st.frame_module(f).is_none_or(|m| m.role == "main" || m.role == "other"))
                     .take(3)
                     .map(|f| st.frame_name(f))
                     .collect();
@@ -654,8 +710,8 @@ fn by_function(r: &RunRecord, only: Option<&str>) -> Value {
             json!({
                 "calls": n,
                 "distinct_args": distinct.len(),
-                "cost": calls.iter().map(|e| e.cost).sum::<u64>(),
-                "latency_ms": ms(calls.iter().map(|e| e.latency_ns).sum()),
+                "cost": calls.iter().fold(0u64, |total, e| total.saturating_add(e.cost)),
+                "latency_ms": ms(calls.iter().fold(0u64, |total, e| total.saturating_add(e.latency_ns))),
                 "args": args,
             }),
         );

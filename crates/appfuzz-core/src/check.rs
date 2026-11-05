@@ -8,11 +8,12 @@ use anyhow::{Result, anyhow, bail};
 use regex::Regex;
 use serde_json::{Value, json};
 
-use crate::detect::{Finding, Severity, ms};
+use crate::detect::{Finding, Severity};
 use crate::harness::field;
 use crate::manifest::Manifest;
 use crate::output::response;
 use crate::record::{OutcomeKind, RunRecord};
+use crate::value_contract::Decimal;
 
 type Test = dyn Fn(&RunRecord, &Manifest) -> Option<(String, Value)> + Send + Sync;
 type Scope = dyn Fn(&RunRecord, &Manifest) -> bool + Send + Sync;
@@ -53,18 +54,7 @@ impl Property {
             Ok(n)
         };
         let test: Arc<Test> = match w.as_slice() {
-            ["value_range", sel, lo, hi] => {
-                let (lo, hi) = (num(lo)?, num(hi)?);
-                if lo > hi {
-                    bail!("lower bound exceeds upper bound");
-                }
-                let sel = Selector::parse(sel)?;
-                Arc::new(move |r, m| {
-                    let bad: Vec<(String, f64)> =
-                        sel.values(r, m).into_iter().filter_map(|t| number(&t).map(|x| (t, x))).filter(|(_, x)| *x < lo || *x > hi).collect();
-                    bad.first().map(|(t, x)| (format!("{} is {x}, outside {lo}–{hi}", sel.text), json!({"value": x, "text": t, "lo": lo, "hi": hi})))
-                })
-            }
+            ["value_range", sel, lo, hi] => range_test(sel, lo, hi)?,
             ["max_calls", f, n] => {
                 let count = num(n)?;
                 if count < 0.0 || count > u32::MAX as f64 || count.fract() != 0.0 {
@@ -84,20 +74,12 @@ impl Property {
                 let re = Regex::new(re)?;
                 Arc::new(move |r, m| {
                     let text = response(r, m).body.or_else(|| r.result.as_ref().map(Value::to_string)).unwrap_or_default();
-                    re.find(&text).map(|x| (format!("the output contains {:?}", x.as_str()), json!({"match": x.as_str()})))
+                    re.find(&text)
+                        .or_else(|| r.guest_error.as_deref().and_then(|error| re.find(error)))
+                        .map(|x| (format!("the output contains {:?}", x.as_str()), json!({"match": x.as_str()})))
                 })
             }
-            ["max", metric, n] => {
-                let (metric, n) = (metric.to_string(), num(n)?);
-                if !METRICS.contains(&metric.as_str()) {
-                    bail!("unknown metric {metric:?}. {HELP}");
-                }
-                Arc::new(move |r, _| {
-                    let v = metric_of(&metric, r)?;
-                    (r.outcome.kind == OutcomeKind::Ok && v > n)
-                        .then(|| (format!("{metric} is {v}, at most {n} allowed"), json!({"metric": metric, "value": v, "max": n})))
-                })
-            }
+            ["max", metric, n] => maximum_test(metric, n)?,
             _ => bail!("unknown property {text:?}. {HELP}"),
         };
         let selector = if let ["value_range", sel, ..] = w.as_slice() { Some(Selector::parse(sel)?) } else { None };
@@ -153,9 +135,7 @@ impl Property {
         if let Some(c) = &self.count {
             return c(r, m);
         }
-        self.selector
-            .as_ref()
-            .map_or(1, |s| if self.numeric { s.values(r, m).iter().filter(|v| number(v).is_some_and(f64::is_finite)).count() } else { s.selected(r, m).len() })
+        self.selector.as_ref().map_or(1, |s| if self.numeric { s.numeric_values(r, m).len() } else { s.selected(r, m).len() })
     }
 
     /// How the run breaks the property, if it does.
@@ -196,23 +176,73 @@ impl Property {
     }
 }
 
+fn range_test(selector: &str, lo: &str, hi: &str) -> Result<Arc<Test>> {
+    let (lo_text, hi_text) = (lo.to_string(), hi.to_string());
+    let lo = Decimal::parse(lo).ok_or_else(|| anyhow!("{lo:?} is not a finite decimal number"))?;
+    let hi = Decimal::parse(hi).ok_or_else(|| anyhow!("{hi:?} is not a finite decimal number"))?;
+    if lo.cmp(&hi).is_gt() {
+        bail!("lower bound exceeds upper bound");
+    }
+    let selector = Selector::parse(selector)?;
+    Ok(Arc::new(move |r, m| {
+        for (text, token, value) in selector.numeric_values(r, m) {
+            if value.cmp(&lo).is_lt() || value.cmp(&hi).is_gt() {
+                return Some((
+                    format!("{} is {token}, outside {lo_text}–{hi_text}", selector.text),
+                    json!({"value": exact_json_number(&token), "text": text, "lo": exact_json_number(&lo_text), "hi": exact_json_number(&hi_text)}),
+                ));
+            }
+        }
+        None
+    }))
+}
+
+fn maximum_test(metric: &str, bound: &str) -> Result<Arc<Test>> {
+    let (metric, bound_text) = (metric.to_string(), bound.to_string());
+    let bound = Decimal::parse(bound).ok_or_else(|| anyhow!("{bound:?} is not a finite decimal number"))?;
+    if !METRICS.contains(&metric.as_str()) {
+        bail!("unknown metric {metric:?}. {HELP}");
+    }
+    Ok(Arc::new(move |r, _| {
+        let value_text = metric_of(&metric, r)?;
+        let value = Decimal::parse(&value_text)?;
+        (!matches!(r.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) && value.cmp(&bound).is_gt()).then(|| {
+            (
+                format!("{metric} is {value_text}, at most {bound_text} allowed"),
+                json!({"metric": metric, "value": exact_json_number(&value_text), "max": exact_json_number(&bound_text)}),
+            )
+        })
+    }))
+}
+
 const METRICS: &[&str] = &["fuel", "memory", "host_calls", "virtual_ms", "cost", "clock_reads", "output_bytes"];
 
-fn metric_of(name: &str, r: &RunRecord) -> Option<f64> {
+fn metric_of(name: &str, r: &RunRecord) -> Option<String> {
     let t = &r.totals;
     Some(match name {
-        "fuel" => t.fuel as f64,
-        "memory" => t.peak_memory as f64,
-        "host_calls" => t.host_calls as f64,
-        "virtual_ms" => ms(t.virtual_ns),
-        "cost" => t.cost as f64,
-        "clock_reads" => t.clock_reads as f64,
-        "output_bytes" => r.result.as_ref().map_or(0, |v| v.to_string().len()) as f64,
+        "fuel" => t.fuel.to_string(),
+        "memory" => t.peak_memory.to_string(),
+        "host_calls" => t.host_calls.to_string(),
+        "virtual_ms" => format!("{}.{:06}", t.virtual_ns / 1_000_000, t.virtual_ns % 1_000_000),
+        "cost" => t.cost.to_string(),
+        "clock_reads" => t.clock_reads.to_string(),
+        "output_bytes" => r.result.as_ref().map_or(0, |v| v.to_string().len()).to_string(),
         _ => return None,
     })
 }
 
-static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-?\d[\d,]*(?:\.\d+)?").unwrap());
+/// Keep exact evidence even when a JSON floating-point number cannot hold it.
+fn exact_json_number(text: &str) -> Value {
+    if let Ok(number) = text.parse::<serde_json::Number>()
+        && let (Some(original), Some(serialized)) = (Decimal::parse(text), Decimal::parse(&number.to_string()))
+        && original.cmp(&serialized).is_eq()
+    {
+        return Value::Number(number);
+    }
+    json!(text)
+}
+
+static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-?(?:\d[\d,]*(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?").unwrap());
 pub(crate) fn scalar_number(value: &Value) -> Option<f64> {
     let n = match value {
         Value::Number(n) => n.as_f64()?,
@@ -249,6 +279,22 @@ enum SelKind {
 }
 
 impl Selector {
+    fn numeric_values(&self, r: &RunRecord, m: &Manifest) -> Vec<(String, String, Decimal)> {
+        self.selected(r, m)
+            .into_iter()
+            .filter_map(|value| {
+                let text = match value {
+                    Value::String(s) => s,
+                    Value::Number(n) => n.to_string(),
+                    _ => return None,
+                };
+                let token = NUMBER.find(&text)?.as_str().replace(',', "");
+                let number = Decimal::parse(&token)?;
+                Some((text, token, number))
+            })
+            .collect()
+    }
+
     pub fn parse(s: &str) -> Result<Self> {
         let kind = if let Some(c) = s.strip_prefix('.') {
             SelKind::Class(c.to_string())
@@ -327,10 +373,104 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ranges_preserve_large_integers_and_precise_decimals() {
+        let m = Manifest::for_wasm(std::path::Path::new("x.wasm"));
+        for (lo, hi, value) in [
+            ("0", "9007199254740992", json!(9007199254740993u64)),
+            ("0", "18446744073709551614", json!(u64::MAX)),
+            ("-9007199254740992", "0", json!(-9007199254740993i64)),
+            ("0", "0.1", json!("0.10000000000000000001")),
+            ("0.10000000000000000001", "1", json!("0.1")),
+        ] {
+            let property = Property::parse(&["value_range".into(), "$.usage".into(), lo.into(), hi.into()]).unwrap();
+            let record = crate::envelope::Trace { result: Some(json!({"usage":value})), ..Default::default() }.to_record();
+            assert_eq!(property.matches(&record, &m), 1);
+            let (_, detail) = property.broken(&record, &m).unwrap_or_else(|| panic!("accepted {value} in {lo}..{hi}"));
+            if value == json!("0.10000000000000000001") || value.is_u64() || value.is_i64() {
+                assert_eq!(detail["value"], value);
+            }
+        }
+        for (lo, hi) in [("9007199254740993", "9007199254740992"), ("0.10000000000000000001", "0.1")] {
+            assert!(Property::parse(&["value_range".into(), "$".into(), lo.into(), hi.into()]).is_err());
+        }
+    }
+
+    #[test]
+    fn maximum_metrics_compare_exact_values_and_keep_boundary_evidence() {
+        let m = Manifest::for_wasm(std::path::Path::new("x.wasm"));
+        let mut record = crate::envelope::Trace::default().to_record();
+        record.totals.fuel = u64::MAX;
+        record.totals.cost = u64::MAX;
+        record.totals.peak_memory = u64::MAX;
+        record.totals.clock_reads = u64::MAX;
+        record.totals.virtual_ns = u64::MAX;
+        for metric in ["fuel", "memory", "cost", "clock_reads"] {
+            let property = Property::parse(&["max".into(), metric.into(), (u64::MAX - 1).to_string()]).unwrap();
+            let (_, detail) = property.broken(&record, &m).unwrap_or_else(|| panic!("accepted {metric}"));
+            assert_eq!(detail["value"], u64::MAX);
+            assert_eq!(detail["max"], u64::MAX - 1);
+            let equal = Property::parse(&["max".into(), metric.into(), u64::MAX.to_string()]).unwrap();
+            assert!(equal.broken(&record, &m).is_none());
+        }
+        let latency = Property::parse(&["max".into(), "virtual_ms".into(), "18446744073709.551614".into()]).unwrap();
+        let (_, detail) = latency.broken(&record, &m).unwrap();
+        assert_eq!(detail["value"], "18446744073709.551615");
+        assert_eq!(detail["max"], "18446744073709.551614");
+        record.result = Some(json!("12345678"));
+        let bytes = Property::parse(&["max".into(), "output_bytes".into(), "9.99999999999999999999".into()]).unwrap();
+        assert!(bytes.broken(&record, &m).is_some());
+    }
+
+    #[test]
+    fn structured_fields_are_not_exercised_as_scalar_numbers() {
+        let m = Manifest::for_wasm(std::path::Path::new("x.wasm"));
+        let p = Property::parse(&["value_range".into(), "$.usage".into(), "0".into(), "100".into()]).unwrap();
+        for value in [json!({"count":12}), json!([12]), Value::Null, json!(false)] {
+            let record = crate::envelope::Trace { result: Some(json!({"usage":value})), ..Default::default() }.to_record();
+            assert_eq!(p.matches(&record, &m), 0, "{value}");
+            assert!(p.broken(&record, &m).is_none());
+        }
+    }
+
+    #[test]
+    fn maximum_metrics_include_work_performed_before_a_trap() {
+        let m = Manifest::for_wasm(std::path::Path::new("x.wasm"));
+        let p = Property::parse(&["max".into(), "cost".into(), "0".into()]).unwrap();
+        let mut record = crate::envelope::Trace::default().to_record();
+        record.totals.cost = 1;
+        for outcome in [OutcomeKind::Trap, OutcomeKind::HostTrap, OutcomeKind::OutOfFuel, OutcomeKind::Timeout] {
+            record.outcome.kind = outcome;
+            assert_eq!(p.matches(&record, &m), 1);
+            assert!(p.broken(&record, &m).is_some(), "ignored {outcome:?}");
+        }
+        for outcome in [OutcomeKind::Error, OutcomeKind::PlanError] {
+            record.outcome.kind = outcome;
+            assert_eq!(p.matches(&record, &m), 0);
+            assert!(p.broken(&record, &m).is_none());
+        }
+    }
+
+    #[test]
     fn numbers() {
         assert_eq!(number("used 1,234.5 %"), Some(1234.5));
         assert_eq!(number("-3 left"), Some(-3.0));
         assert_eq!(number("none"), None);
+    }
+
+    #[test]
+    fn ranges_check_complete_scientific_and_fractional_values() {
+        let m = Manifest::for_wasm(std::path::Path::new("x.wasm"));
+        let p = Property::parse(&["value_range".into(), "$.usage".into(), "0".into(), "100".into()]).unwrap();
+        for value in [json!(1e100), json!("1e3"), json!("1e3 %"), json!("-.5")] {
+            let r = crate::envelope::Trace { result: Some(json!({"usage":value})), ..Default::default() }.to_record();
+            assert!(p.broken(&r, &m).is_some(), "range accepted {value}");
+        }
+        let fraction = Property::parse(&["value_range".into(), "$.usage".into(), "0".into(), "1".into()]).unwrap();
+        for value in [json!(".5"), json!("5e-1 %"), json!("100e-3")] {
+            let r = crate::envelope::Trace { result: Some(json!({"usage":value})), ..Default::default() }.to_record();
+            assert_eq!(fraction.matches(&r, &m), 1);
+            assert!(fraction.broken(&r, &m).is_none(), "range rejected {value}");
+        }
     }
 
     #[test]

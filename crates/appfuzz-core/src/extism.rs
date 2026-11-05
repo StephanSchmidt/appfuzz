@@ -17,7 +17,7 @@
 //! like serde with `#[serde(default)]`: keys match ignoring case and
 //! separators, and missing fields take their type's empty value.
 
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -461,202 +461,212 @@ pub fn args_shape(params: &[(String, Shape)]) -> Option<Shape> {
     }
 }
 
-/// The kernel's byte store: blocks addressed by offset, outside the plugin.
+/// The pinned upstream kernel. Its code executes in the plugin's store, so
+/// allocator loops and memory growth use the same fuel and allocation budget.
+pub const KERNEL_BYTES: &[u8] = include_bytes!("../assets/extism/kernel.wasm");
+const LOG_CAPACITY: usize = 1 << 20;
+
 #[derive(Debug, Default)]
 pub struct Kernel {
-    bytes: Vec<u8>,
-    /// Block start → length.
-    blocks: BTreeMap<u64, u64>,
-    pub input: Vec<u8>,
-    input_block: Option<u64>,
+    pub runtime: Option<Runtime>,
+    /// Snapshots taken after execution, before decoding the platform result.
     pub output: Option<Vec<u8>>,
     pub error: Option<Vec<u8>>,
-    error_block: Option<u64>,
     vars: BTreeMap<Vec<u8>, Vec<u8>>,
     pub logs: Vec<(String, String)>,
-    /// The most bytes the store may hold.
-    pub max: usize,
-    pub peak: usize,
+    log_bytes: usize,
 }
 
-/// Offsets start here: 0 means "no block".
-const BASE: u64 = 8;
+#[derive(Debug, Clone, Copy)]
+pub struct Runtime {
+    instance: wasmtime::Instance,
+    memory: wasmtime::Memory,
+}
+
+#[derive(Debug)]
+pub(crate) struct LogCaptureLimit;
+impl std::fmt::Display for LogCaptureLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Extism log capture exceeded {LOG_CAPACITY} bytes; run evidence is incomplete")
+    }
+}
+impl std::error::Error for LogCaptureLimit {}
 
 impl Kernel {
-    pub fn new(input: Vec<u8>, max: usize) -> Kernel {
-        Kernel { input, max, ..Default::default() }
+    pub fn module(engine: &wasmtime::Engine) -> wasmtime::Result<wasmtime::Module> {
+        wasmtime::Module::new(engine, KERNEL_BYTES)
     }
 
-    pub fn alloc(&mut self, n: u64) -> Result<u64> {
-        let at = (BASE + self.bytes.len() as u64 + 7) & !7;
-        let end = at.checked_add(n).ok_or_else(|| anyhow!("alloc of {n} bytes"))?;
-        let live: u64 = self.blocks.values().sum::<u64>() + n;
-        if live as usize > self.max || (end - BASE) as usize > self.max.saturating_mul(4) {
-            bail!("the Extism kernel ran out of memory ({n} bytes asked, {live} live)");
-        }
-        self.bytes.resize((end - BASE) as usize, 0);
-        self.blocks.insert(at, n);
-        self.peak = self.peak.max(live as usize);
-        Ok(at)
+    pub fn output_bytes(&self) -> Result<Option<&[u8]>> {
+        Ok(self.output.as_deref())
+    }
+    pub fn error_bytes(&self) -> Result<Option<&[u8]>> {
+        Ok(self.error.as_deref())
     }
 
-    /// A block holding these bytes.
-    pub fn put(&mut self, data: &[u8]) -> Result<u64> {
-        let at = self.alloc(data.len() as u64)?;
-        let i = (at - BASE) as usize;
-        self.bytes[i..i + data.len()].copy_from_slice(data);
-        Ok(at)
-    }
-
-    pub fn free(&mut self, at: u64) {
-        self.blocks.remove(&at);
-    }
-
-    pub fn length(&self, at: u64) -> u64 {
-        self.blocks.get(&at).copied().unwrap_or(0)
-    }
-
-    fn range(&self, at: u64, n: u64) -> Result<std::ops::Range<usize>> {
-        let s = at.checked_sub(BASE).ok_or_else(|| anyhow!("kernel offset {at} is out of bounds"))?;
-        let e = s.checked_add(n).filter(|e| *e as usize <= self.bytes.len()).ok_or_else(|| anyhow!("kernel offset {at}+{n} is out of bounds"))?;
-        Ok(s as usize..e as usize)
-    }
-
-    pub fn load(&self, at: u64, n: u64) -> Result<&[u8]> {
-        Ok(&self.bytes[self.range(at, n)?])
-    }
-
-    pub fn store(&mut self, at: u64, data: &[u8]) -> Result<()> {
-        let r = self.range(at, data.len() as u64)?;
-        self.bytes[r].copy_from_slice(data);
-        Ok(())
-    }
-
-    /// The bytes of the block at `at`.
-    pub fn block(&self, at: u64) -> Result<Vec<u8>> {
-        if at == 0 {
-            return Ok(Vec::new());
-        }
-        let n = self.blocks.get(&at).copied().ok_or_else(|| anyhow!("kernel offset {at} is not a block"))?;
-        Ok(self.load(at, n)?.to_vec())
-    }
-
-    pub fn input_offset(&mut self) -> Result<u64> {
-        if let Some(b) = self.input_block {
-            return Ok(b);
-        }
-        let input = std::mem::take(&mut self.input);
-        let at = self.put(&input)?;
-        self.input = input;
-        self.input_block = Some(at);
-        Ok(at)
-    }
-
-    pub fn input_load(&self, at: u64, n: u64) -> Result<&[u8]> {
-        let s = at as usize;
-        self.input.get(s..s.saturating_add(n as usize)).ok_or_else(|| anyhow!("input offset {at}+{n} is out of bounds"))
-    }
-
-    pub fn error_get(&mut self) -> Result<u64> {
-        match (&self.error, self.error_block) {
-            (_, Some(b)) => Ok(b),
-            (Some(e), None) => {
-                let e = e.clone();
-                let b = self.put(&e)?;
-                self.error_block = Some(b);
-                Ok(b)
+    fn check_variable(&self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
+        if let Some(value) = value {
+            let overhead = size_of::<String>() + size_of::<Vec<u8>>();
+            let size = self.vars.iter().fold(overhead.saturating_add(key.len()).saturating_add(value.len()), |size, (key, value)| {
+                size.saturating_add(overhead).saturating_add(key.len()).saturating_add(value.len())
+            });
+            if size > 1024 * 1024 {
+                bail!("Variable store is full");
             }
-            (None, None) => Ok(0),
         }
-    }
-
-    pub fn set_error(&mut self, e: Option<Vec<u8>>) {
-        self.error = e;
-        self.error_block = None;
-    }
-
-    pub fn var_get(&mut self, key: &[u8]) -> Result<u64> {
-        match self.vars.get(key).cloned() {
-            Some(v) => self.put(&v),
-            None => Ok(0),
-        }
-    }
-
-    pub fn var_set(&mut self, key: Vec<u8>, value: Option<Vec<u8>>) {
-        match value {
-            Some(v) => self.vars.insert(key, v),
-            None => self.vars.remove(&key),
-        };
+        Ok(())
     }
 }
 
-/// The kernel's import module: memory, input and output, not the platform.
+impl Runtime {
+    pub fn instantiate<T: 'static>(mut store: impl wasmtime::AsContextMut<Data = T>, module: &wasmtime::Module) -> wasmtime::Result<Self> {
+        let instance = wasmtime::Instance::new(&mut store, module, &[])?;
+        let memory = instance.get_memory(&mut store, "memory").ok_or_else(|| wasmtime::Error::msg("Extism kernel has no memory"))?;
+        Ok(Self { instance, memory })
+    }
+
+    pub fn call<T: 'static, P: wasmtime::WasmParams, R: wasmtime::WasmResults>(
+        &self,
+        mut store: impl wasmtime::AsContextMut<Data = T>,
+        name: &str,
+        params: P,
+    ) -> wasmtime::Result<R> {
+        self.instance.get_typed_func::<P, R>(&mut store, name)?.call(&mut store, params)
+    }
+
+    pub fn load<'a, T: 'static>(&self, store: wasmtime::StoreContext<'a, T>, at: u64, n: u64) -> Result<&'a [u8]> {
+        let start = usize::try_from(at)?;
+        let end = at.checked_add(n).and_then(|end| usize::try_from(end).ok()).ok_or_else(|| anyhow!("kernel range {at}+{n} is out of bounds"))?;
+        self.memory.data(store).get(start..end).ok_or_else(|| anyhow!("kernel range {at}+{n} is out of bounds"))
+    }
+
+    fn block_length<T: 'static>(&self, mut store: impl wasmtime::AsContextMut<Data = T>, at: u64) -> Result<u64> {
+        let n = self.call::<_, _, i64>(&mut store, "length", at as i64)? as u64;
+        if at != 0 && n == 0 {
+            bail!("kernel offset {at} is not a block");
+        }
+        Ok(n)
+    }
+
+    pub fn block<T: 'static>(&self, mut store: impl wasmtime::AsContextMut<Data = T>, at: u64) -> Result<Vec<u8>> {
+        let n = self.block_length(&mut store, at)?;
+        Ok(self.load(store.as_context(), at, n)?.to_vec())
+    }
+
+    pub fn put<T: 'static>(&self, mut store: impl wasmtime::AsContextMut<Data = T>, bytes: &[u8]) -> Result<u64> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let at = self.call::<_, _, i64>(&mut store, "alloc", bytes.len() as i64)? as u64;
+        if at == 0 {
+            bail!("the Extism kernel ran out of memory ({} bytes asked)", bytes.len());
+        }
+        self.memory.write(&mut store, usize::try_from(at)?, bytes)?;
+        Ok(at)
+    }
+
+    pub fn set_input<T: 'static>(&self, mut store: impl wasmtime::AsContextMut<Data = T>, input: &[u8]) -> Result<()> {
+        self.call::<_, _, ()>(&mut store, "reset", ())?;
+        let at = self.put(&mut store, input)?;
+        self.call::<_, _, ()>(&mut store, "input_set", (at as i64, input.len() as i64))?;
+        Ok(())
+    }
+
+    /// Query through the kernel as the SDK does. These calls also consume fuel.
+    pub fn capture<T: 'static>(&self, mut store: impl wasmtime::AsContextMut<Data = T>) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+        let at = self.call::<_, _, i64>(&mut store, "output_offset", ())? as u64;
+        let n = self.call::<_, _, i64>(&mut store, "output_length", ())? as u64;
+        let output = self.load(store.as_context(), at, n)?.to_vec();
+        let error = self.call::<_, _, i64>(&mut store, "error_get", ())? as u64;
+        let n = self.call::<_, _, i64>(&mut store, "length", error as i64)? as u64;
+        let error = if n == 0 { None } else { Some(self.load(store.as_context(), error, n)?.to_vec()) };
+        Ok((output, error))
+    }
+}
+
+fn runtime<T: 'static>(mut store: impl wasmtime::AsContextMut<Data = T>, kernel: fn(&mut T) -> &mut Kernel) -> wasmtime::Result<Runtime> {
+    kernel(store.as_context_mut().data_mut()).runtime.ok_or_else(|| wasmtime::Error::msg("Extism kernel is not initialized"))
+}
+
 pub const KERNEL_MODULE: &str = "extism:host/env";
 
-/// Links `extism:host/env`, the kernel, to `kernel` in the store's data.
-pub fn link_kernel<T: 'static>(linker: &mut wasmtime::Linker<T>, kernel: fn(&mut T) -> &mut Kernel) -> Result<()> {
-    use wasmtime::Caller;
+/// Link kernel exports through store-local instances, with native host services.
+pub fn link_kernel<T: 'static>(linker: &mut wasmtime::Linker<T>, module: &wasmtime::Module, kernel: fn(&mut T) -> &mut Kernel) -> Result<()> {
+    use wasmtime::{AsContext, Caller, ExternType};
     const ENV: &str = KERNEL_MODULE;
-    let err = |e: anyhow::Error| wasmtime::Error::from_anyhow(e);
-    linker.func_wrap(ENV, "alloc", move |mut c: Caller<'_, T>, n: i64| kernel(c.data_mut()).alloc(n as u64).map(|x| x as i64).map_err(err))?;
-    linker.func_wrap(ENV, "free", move |mut c: Caller<'_, T>, at: i64| kernel(c.data_mut()).free(at as u64))?;
-    linker.func_wrap(ENV, "length", move |mut c: Caller<'_, T>, at: i64| kernel(c.data_mut()).length(at as u64) as i64)?;
-    linker.func_wrap(ENV, "length_unsafe", move |mut c: Caller<'_, T>, at: i64| kernel(c.data_mut()).length(at as u64) as i64)?;
-    linker.func_wrap(ENV, "load_u8", move |mut c: Caller<'_, T>, at: i64| kernel(c.data_mut()).load(at as u64, 1).map(|b| b[0] as i32).map_err(err))?;
-    linker.func_wrap(ENV, "load_u64", move |mut c: Caller<'_, T>, at: i64| {
-        kernel(c.data_mut()).load(at as u64, 8).map(|b| i64::from_le_bytes(b.try_into().expect("8 bytes"))).map_err(err)
+    let err = |error: anyhow::Error| wasmtime::Error::from_anyhow(error);
+    for export in module.exports() {
+        let ExternType::Func(ty) = export.ty() else { continue };
+        let name = export.name().to_string();
+        linker.func_new(ENV, export.name(), ty, move |mut caller, args, results| {
+            let rt = runtime(&mut caller, kernel)?;
+            let func = rt.instance.get_func(&mut caller, &name).ok_or_else(|| wasmtime::Error::msg(format!("missing Extism kernel export {name}")))?;
+            func.call(&mut caller, args, results)
+        })?;
+    }
+    linker.func_wrap(ENV, "config_get", move |mut caller: Caller<'_, T>, key: i64| {
+        let rt = runtime(&mut caller, kernel)?;
+        let name = rt.block(&mut caller, key as u64).map_err(err)?;
+        std::str::from_utf8(&name).map_err(|error| err(error.into()))?;
+        rt.call::<_, _, ()>(&mut caller, "free", key)?;
+        Ok(0i64)
     })?;
-    linker.func_wrap(ENV, "store_u8", move |mut c: Caller<'_, T>, at: i64, v: i32| kernel(c.data_mut()).store(at as u64, &[v as u8]).map_err(err))?;
-    linker.func_wrap(ENV, "store_u64", move |mut c: Caller<'_, T>, at: i64, v: i64| kernel(c.data_mut()).store(at as u64, &v.to_le_bytes()).map_err(err))?;
-    linker.func_wrap(ENV, "input_length", move |mut c: Caller<'_, T>| kernel(c.data_mut()).input.len() as i64)?;
-    linker.func_wrap(ENV, "input_offset", move |mut c: Caller<'_, T>| kernel(c.data_mut()).input_offset().map(|x| x as i64).map_err(err))?;
-    linker.func_wrap(ENV, "input_load_u8", move |mut c: Caller<'_, T>, at: i64| {
-        kernel(c.data_mut()).input_load(at as u64, 1).map(|b| b[0] as i32).map_err(err)
+    linker.func_wrap(ENV, "var_get", move |mut caller: Caller<'_, T>, key: i64| {
+        let rt = runtime(&mut caller, kernel)?;
+        let name = rt.block(&mut caller, key as u64).map_err(err)?;
+        std::str::from_utf8(&name).map_err(|error| err(error.into()))?;
+        rt.call::<_, _, ()>(&mut caller, "free", key)?;
+        let value = kernel(caller.data_mut()).vars.get(&name).cloned();
+        value.map_or(Ok(0), |bytes| rt.put(&mut caller, &bytes)).map(|at| at as i64).map_err(err)
     })?;
-    linker.func_wrap(ENV, "input_load_u64", move |mut c: Caller<'_, T>, at: i64| {
-        kernel(c.data_mut()).input_load(at as u64, 8).map(|b| i64::from_le_bytes(b.try_into().expect("8 bytes"))).map_err(err)
-    })?;
-    linker.func_wrap(ENV, "output_set", move |mut c: Caller<'_, T>, at: i64, n: i64| {
-        let k = kernel(c.data_mut());
-        let out = k.load(at as u64, n as u64).map_err(err)?.to_vec();
-        k.output = Some(out);
-        Ok(())
-    })?;
-    linker.func_wrap(ENV, "error_set", move |mut c: Caller<'_, T>, at: i64| {
-        let k = kernel(c.data_mut());
-        let e = if at == 0 { None } else { Some(k.block(at as u64).map_err(err)?) };
-        k.set_error(e);
-        Ok(())
-    })?;
-    linker.func_wrap(ENV, "error_get", move |mut c: Caller<'_, T>| kernel(c.data_mut()).error_get().map(|x| x as i64).map_err(err))?;
-    linker.func_wrap(ENV, "config_get", move |_c: Caller<'_, T>, _key: i64| 0i64)?;
-    linker.func_wrap(ENV, "var_get", move |mut c: Caller<'_, T>, key: i64| {
-        let k = kernel(c.data_mut());
-        let key = k.block(key as u64).map_err(err)?;
-        k.var_get(&key).map(|x| x as i64).map_err(err)
-    })?;
-    linker.func_wrap(ENV, "var_set", move |mut c: Caller<'_, T>, key: i64, value: i64| {
-        let k = kernel(c.data_mut());
-        let key = k.block(key as u64).map_err(err)?;
-        let value = if value == 0 { None } else { Some(k.block(value as u64).map_err(err)?) };
-        k.var_set(key, value);
+    linker.func_wrap(ENV, "var_set", move |mut caller: Caller<'_, T>, key: i64, value: i64| {
+        let rt = runtime(&mut caller, kernel)?;
+        let name = rt.block(&mut caller, key as u64).map_err(err)?;
+        std::str::from_utf8(&name).map_err(|error| err(error.into()))?;
+        let bytes = if value == 0 { None } else { Some(rt.block(&mut caller, value as u64).map_err(err)?) };
+        kernel(caller.data_mut()).check_variable(&name, bytes.as_deref()).map_err(err)?;
+        rt.call::<_, _, ()>(&mut caller, "free", value)?;
+        rt.call::<_, _, ()>(&mut caller, "free", key)?;
+        match bytes {
+            Some(bytes) => {
+                kernel(caller.data_mut()).vars.insert(name, bytes);
+            }
+            None => {
+                kernel(caller.data_mut()).vars.remove(&name);
+            }
+        }
         Ok(())
     })?;
     for level in ["trace", "debug", "info", "warn", "error"] {
-        linker.func_wrap(ENV, &format!("log_{level}"), move |mut c: Caller<'_, T>, at: i64| {
-            let k = kernel(c.data_mut());
-            let text = String::from_utf8_lossy(&k.block(at as u64).map_err(err)?).into_owned();
-            k.logs.push((level.to_string(), text));
+        linker.func_wrap(ENV, &format!("log_{level}"), move |mut caller: Caller<'_, T>, at: i64| {
+            let rt = runtime(&mut caller, kernel)?;
+            let n = rt.block_length(&mut caller, at as u64).map_err(err)?;
+            let logged = kernel(caller.data_mut()).log_bytes;
+            let raw = rt.load(caller.as_context(), at as u64, n).map_err(err)?;
+            let (level, text) = match std::str::from_utf8(raw) {
+                Ok(text) => (level, Cow::Borrowed(text)),
+                Err(error) => ("error", Cow::Owned(format!("unable to log message: Err({error})"))),
+            };
+            let bytes = text.len().saturating_add(level.len()).saturating_add(4);
+            if logged.saturating_add(bytes) > LOG_CAPACITY {
+                return Err(err(LogCaptureLimit.into()));
+            }
+            let text = text.into_owned();
+            let state = kernel(caller.data_mut());
+            state.log_bytes += bytes;
+            state.logs.push((level.to_string(), text));
+            // The SDK emits the message before consuming its handle. Preserve
+            // that evidence even if allocator metadata or fuel makes free fail.
+            rt.call::<_, _, ()>(&mut caller, "free", at)?;
             Ok(())
         })?;
     }
-    // Every level is enabled: appfuzz wants to see all logs.
-    linker.func_wrap(ENV, "get_log_level", move |_c: Caller<'_, T>| 0i32)?;
-    linker.func_wrap(ENV, "http_request", move |_c: Caller<'_, T>, _req: i64, _body: i64| -> wasmtime::Result<i64> {
+    linker.func_wrap(ENV, "get_log_level", |_caller: Caller<'_, T>| 0i32)?;
+    linker.func_wrap(ENV, "http_request", |_caller: Caller<'_, T>, _req: i64, _body: i64| -> wasmtime::Result<i64> {
         Err(wasmtime::Error::msg("extism:host/env#http_request is not simulated by appfuzz yet"))
     })?;
-    linker.func_wrap(ENV, "http_status_code", move |_c: Caller<'_, T>| 0i32)?;
-    linker.func_wrap(ENV, "http_headers", move |_c: Caller<'_, T>| 0i64)?;
+    linker.func_wrap(ENV, "http_status_code", |_caller: Caller<'_, T>| 0i32)?;
+    linker.func_wrap(ENV, "http_headers", |_caller: Caller<'_, T>| 0i64)?;
     Ok(())
 }
 
@@ -721,22 +731,5 @@ mod tests {
         // Several arguments are one object.
         let p = args_shape(&a.funcs["page"].params).unwrap();
         assert_eq!(a.encode(&json!({"org-id": "o", "limit": 3}), &p), br#"{"org_id":"o","limit":3}"#);
-    }
-
-    #[test]
-    fn kernel_blocks() {
-        let mut k = Kernel::new(b"in".to_vec(), 1 << 20);
-        let a = k.put(b"hello").unwrap();
-        assert_eq!(k.length(a), 5);
-        assert_eq!(k.block(a).unwrap(), b"hello");
-        let b = k.alloc(3).unwrap();
-        assert!(b >= a + 5 && b.is_multiple_of(8));
-        k.store(b, b"abc").unwrap();
-        assert_eq!(k.load(b + 1, 2).unwrap(), b"bc");
-        assert!(k.load(b + 2, 8).is_err());
-        assert_eq!(k.input_load(1, 1).unwrap(), b"n");
-        k.free(a);
-        assert_eq!(k.length(a), 0);
-        assert!(Kernel::new(vec![], 4).alloc(5).is_err());
     }
 }

@@ -323,6 +323,9 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     scan(&r.stdout, false, &inputs, ex, "the log (stdout)", run, &mut out);
     scan(&r.stderr, false, &inputs, ex, "the log (stderr)", run, &mut out);
+    if let Some(text) = &r.guest_error {
+        scan(text, false, &inputs, ex, "the guest error", run, &mut out);
+    }
     for e in &r.events {
         for (p, a) in &e.args {
             let mut ss = Vec::new();

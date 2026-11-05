@@ -1,0 +1,11 @@
+Extism kernel, shipped upstream runtime artifact.
+Source: https://github.com/extism/extism/blob/main/runtime/src/extism-runtime.wasm
+Upstream tree: 051b765bb6abe4fe95d5e4f489f03ad7b137edbc
+Git blob: 618a34e66ea9524c27c2c322b8de9d39945dff9b
+SHA-256: d1389b31abecf23eec65b4430d86f99f736aeb05c40948dbbe2f88cb17815803
+Kernel source blob: 96542f7aef203c84ee37a78e549dccea0a87a594
+Bounds checking enabled; upstream default artifact.
+See LICENSE in this directory.
+Shipped Wasm memory: 16 initial 64 KiB pages.
+Initial allocator capacity returned by memory_bytes: 65,472 bytes.
+These are distinct quantities; do not infer linear memory size from capacity.

@@ -31,6 +31,7 @@ wasmparser.workspace = true
 wasm-encoder.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
+wiggle.workspace = true
 wasmtime-wasi-http.workspace = true
 bytes.workspace = true
 http.workspace = true

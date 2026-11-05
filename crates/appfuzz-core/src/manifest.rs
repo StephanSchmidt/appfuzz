@@ -382,7 +382,35 @@ pub fn fn_key(interface: &str, func: &str) -> String {
     if interface.is_empty() { func.to_string() } else { format!("{}#{func}", strip_version(interface)) }
 }
 
+pub(crate) fn validate_timing_value(name: &str, value: f64) -> Result<()> {
+    if !value.is_finite() || value < 0.0 {
+        bail!("{name} must be finite and non-negative");
+    }
+    Ok(())
+}
+
 impl Manifest {
+    pub(crate) fn validate_timing(&self) -> Result<()> {
+        for (name, value) in [
+            ("limits.max_latency_ms", self.limits.max_latency_ms),
+            ("limits.default_host_latency_ms", Some(self.limits.default_host_latency_ms)),
+            ("limits.ns_per_fuel", Some(self.limits.ns_per_fuel)),
+        ] {
+            if let Some(value) = value {
+                validate_timing_value(name, value)?;
+            }
+        }
+        for (name, function) in &self.functions {
+            if let Some(value) = function.latency_ms {
+                validate_timing_value(&format!("{name}.latency_ms"), value)?;
+            }
+            for (i, rule) in function.rules.iter().enumerate() {
+                rule.response.validate().with_context(|| format!("{name}: rule {i}"))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Identity of the effective platform contract, independent of its location.
     /// Bump the execution schema when simulation/detector semantics change.
     /// Acceptance checks are requirements, not contract: editing one keeps runs and corpora.
@@ -399,7 +427,8 @@ impl Manifest {
             }
         }
         let mut h = blake3::Hasher::new();
-        h.update(b"appfuzz-execution-v3");
+        h.update(b"appfuzz-execution-v27");
+        h.update(crate::extism::KERNEL_BYTES);
         h.update(env!("CARGO_PKG_VERSION").as_bytes());
         h.update(include_bytes!("../../../Cargo.lock"));
         h.update(&serde_json::to_vec(&v).expect("manifest serializes"));
@@ -435,6 +464,7 @@ impl Manifest {
             bail!("{}: [entry] needs export = \"interface#function\"", path.display());
         }
         crate::labels::check_positions(&m).with_context(|| format!("in {}", path.display()))?;
+        m.validate_timing().with_context(|| format!("in {}", path.display()))?;
         Ok(m)
     }
 

@@ -245,10 +245,11 @@ pub struct GenOpts {
     /// `../;$(x)`), `edge` (a mix of the above).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strings: Option<String>,
-    /// Numbers: `small` (default), `edge` (0, 1, max, min), `=13` (always 13).
+    /// Numbers: `small` (default), `edge` (0, 1, max, min), `=13` (fixed),
+    /// or `cast:-1` (wrap an integer constant to the WIT integer width).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub numbers: Option<String>,
-    /// For `result`: `ok` (default, mostly ok), `err`, `mixed`.
+    /// For `result`: `ok` (default), `err`, `mixed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub results: Option<String>,
     /// For `option`: unset (mostly some), `some` (always), `none`, `mixed`.
@@ -256,6 +257,97 @@ pub struct GenOpts {
     pub options: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+}
+
+impl GenOpts {
+    pub fn validate(&self) -> Result<()> {
+        if let Some(mode) = self.numbers.as_deref() {
+            let fixed =
+                mode.strip_prefix('=').is_some_and(|n| crate::value_contract::Decimal::parse(n).is_some() && n.trim().parse::<f64>().is_ok_and(f64::is_finite));
+            let cast = mode.strip_prefix("cast:").is_some_and(|n| fixed_integer(n).is_some());
+            if !matches!(mode, "small" | "edge") && !fixed && !cast {
+                bail!("unknown number generation mode {mode:?}: use small, edge, =NUMBER (finite) or cast:INTEGER");
+            }
+        }
+        for (name, mode, choices) in [
+            (
+                "strings",
+                self.strings.as_deref(),
+                &["words", "empty", "long", "unicode", "html", "utf8-2", "utf8-3", "utf8-4", "utf8-3o", "canary", "canary-sink", "edge"][..],
+            ),
+            ("results", self.results.as_deref(), &["ok", "err", "mixed"][..]),
+            ("options", self.options.as_deref(), &["some", "none", "mixed"][..]),
+        ] {
+            if let Some(mode) = mode
+                && !choices.contains(&mode)
+                && !(name == "strings" && mode.starts_with('='))
+            {
+                bail!("unknown {name} generation mode {mode:?}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Check fixed values against the types this configuration may generate.
+    pub fn validate_for_type(&self, ty: &Type) -> Result<()> {
+        self.validate()?;
+        let Some(text) = self.numbers.as_deref().and_then(|n| n.strip_prefix('=')).map(str::trim) else { return Ok(()) };
+        self.fixed_fits(ty, text)
+    }
+
+    fn fixed_fits(&self, ty: &Type, text: &str) -> Result<()> {
+        match ty {
+            Type::Float32 => {
+                if !text.parse::<f32>()?.is_finite() {
+                    bail!("fixed number {text:?} overflows WIT f32");
+                }
+            }
+            Type::Float64 => {
+                if !text.parse::<f64>()?.is_finite() {
+                    bail!("fixed number {text:?} overflows WIT f64");
+                }
+            }
+            Type::S8 | Type::U8 | Type::S16 | Type::U16 | Type::S32 | Type::U32 | Type::S64 | Type::U64 => {
+                let n = fixed_integer(text).with_context(|| format!("fixed number {text:?} is not a representable WIT integer"))?;
+                let value = if let Ok(n) = i64::try_from(n) { json!(n) } else { json!(u64::try_from(n)?) };
+                json_to_val(&value, ty).with_context(|| format!("fixed number {text:?} cannot fit {ty:?}"))?;
+            }
+            Type::List(l) if self.list_len != Some(0) => self.fixed_fits(&l.ty(), text)?,
+            Type::FixedLengthList(l) if l.len() > 0 => self.fixed_fits(&l.ty(), text)?,
+            Type::Map(m) if self.list_len != Some(0) => {
+                self.fixed_fits(&m.key(), text)?;
+                self.fixed_fits(&m.value(), text)?;
+            }
+            Type::Tuple(t) => t.types().try_for_each(|t| self.fixed_fits(&t, text))?,
+            Type::Record(r) => r.fields().try_for_each(|f| self.fixed_fits(&f.ty, text).with_context(|| format!("field {}", f.name)))?,
+            Type::Variant(v) => v.cases().filter_map(|c| c.ty).try_for_each(|t| self.fixed_fits(&t, text))?,
+            Type::Option(o) if self.options.as_deref() != Some("none") => self.fixed_fits(&o.ty(), text)?,
+            Type::Result(r) => {
+                let mode = self.results.as_deref().unwrap_or("ok");
+                if mode != "err"
+                    && let Some(t) = r.ok()
+                {
+                    self.fixed_fits(&t, text)?;
+                }
+                if mode != "ok"
+                    && let Some(t) = r.err()
+                {
+                    self.fixed_fits(&t, text)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+fn fixed_integer(text: &str) -> Option<i128> {
+    if let Ok(n) = text.parse() {
+        return Some(n);
+    }
+    let number = crate::value_contract::Decimal::parse(text)?;
+    let n = number.rounded_integer(true)?;
+    number.cmp(&crate::value_contract::Decimal::parse(&n.to_string())?).is_eq().then_some(n)
 }
 
 const WORDS: &[&str] = &[
@@ -287,7 +379,8 @@ impl Generator {
 
     pub fn gen_val(&mut self, ty: &Type) -> Val {
         let edge = self.opts.numbers.as_deref() == Some("edge");
-        let fixed: Option<i64> = self.opts.numbers.as_deref().and_then(|s| s.strip_prefix('=')).and_then(|s| s.parse().ok());
+        let fixed_text = self.opts.numbers.as_deref().and_then(|s| s.strip_prefix('=').or_else(|| s.strip_prefix("cast:"))).map(str::trim);
+        let fixed = fixed_text.and_then(fixed_integer);
         macro_rules! num {
             ($t:ty, $v:ident) => {{
                 let n: $t = if let Some(c) = fixed {
@@ -296,6 +389,18 @@ impl Generator {
                     *[0 as $t, 1 as $t, <$t>::MAX, <$t>::MIN].get(self.rng.random_range(0..4)).unwrap()
                 } else {
                     self.rng.random_range(0..100u8) as $t
+                };
+                Val::$v(n)
+            }};
+        }
+        macro_rules! float {
+            ($t:ty, $v:ident) => {{
+                let n: $t = if let Some(n) = fixed_text.and_then(|s| s.parse::<$t>().ok()) {
+                    n
+                } else if edge {
+                    [0.0, 1.0, <$t>::MAX, <$t>::MIN][self.rng.random_range(0..4)]
+                } else {
+                    self.rng.random_range(0.0..100.0)
                 };
                 Val::$v(n)
             }};
@@ -310,8 +415,8 @@ impl Generator {
             Type::U32 => num!(u32, U32),
             Type::S64 => num!(i64, S64),
             Type::U64 => num!(u64, U64),
-            Type::Float32 => Val::Float32(self.rng.random_range(0.0..100.0)),
-            Type::Float64 => Val::Float64(self.rng.random_range(0.0..100.0)),
+            Type::Float32 => float!(f32, Float32),
+            Type::Float64 => float!(f64, Float64),
             Type::Char => Val::Char(self.pick(&["a", "z", "é", "\u{0}"]).chars().next().unwrap()),
             Type::String => Val::String(self.gen_string()),
             Type::List(l) => {
@@ -409,5 +514,52 @@ pub fn fakeable(ty: &Type) -> bool {
         Type::Option(o) => fakeable(&o.ty()),
         Type::Result(r) => r.ok().as_ref().is_none_or(fakeable) && r.err().as_ref().is_none_or(fakeable),
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_integral_notation_is_exact_and_casting_is_explicit() {
+        for number in ["=13.0", "=13e0", "=+13", "= 13 ", "cast: 13 "] {
+            let opts = GenOpts { numbers: Some(number.into()), ..Default::default() };
+            opts.validate_for_type(&Type::U8).unwrap();
+            assert_eq!(Generator::new(1, opts.clone()).gen_json(&Type::U8), json!(13));
+            assert_eq!(Generator::new(1, opts).gen_json(&Type::Float32), json!(13.0));
+        }
+        let opts = GenOpts { numbers: Some("cast:-1".into()), ..Default::default() };
+        opts.validate_for_type(&Type::U8).unwrap();
+        assert_eq!(Generator::new(1, opts).gen_json(&Type::U8), json!(u8::MAX));
+        for number in ["=256", "=-1", "=13.5"] {
+            assert!(GenOpts { numbers: Some(number.into()), ..Default::default() }.validate_for_type(&Type::U8).is_err());
+        }
+    }
+
+    #[test]
+    fn fixed_numbers_apply_to_floating_point_values() {
+        for ty in [Type::Float32, Type::Float64] {
+            let mut generator = Generator::new(1, GenOpts { numbers: Some("=13".into()), ..Default::default() });
+            for _ in 0..16 {
+                assert_eq!(generator.gen_json(&ty), json!(13.0));
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_unsigned_numbers_keep_all_sixty_four_bits() {
+        let mut generator = Generator::new(1, GenOpts { numbers: Some(format!("={}", u64::MAX)), ..Default::default() });
+        assert_eq!(generator.gen_json(&Type::U64), json!(u64::MAX));
+    }
+
+    #[test]
+    fn edge_generation_reaches_both_floating_point_limits() {
+        for (ty, min, max) in [(Type::Float32, f32::MIN as f64, f32::MAX as f64), (Type::Float64, f64::MIN, f64::MAX)] {
+            let mut generator = Generator::new(1, GenOpts { numbers: Some("edge".into()), ..Default::default() });
+            let values: Vec<_> = (0..128).map(|_| generator.gen_json(&ty).as_f64().unwrap()).collect();
+            assert!(values.contains(&min), "{ty:?}: minimum was never generated");
+            assert!(values.contains(&max), "{ty:?}: maximum was never generated");
+        }
     }
 }

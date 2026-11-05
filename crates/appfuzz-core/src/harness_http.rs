@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
@@ -281,13 +282,17 @@ pub(super) fn link(linker: &mut Linker<Host>) -> Result<()> {
         let deadline_ns = match options {
             Some(o) => {
                 let o = store.data_mut().table.delete(o)?;
-                o.first_byte_timeout.map(|f| (f + o.connect_timeout.unwrap_or_default()).as_nanos() as u64)
+                o.first_byte_timeout.map(|f| response_deadline_ns(f, o.connect_timeout.unwrap_or_default()))
             }
             None => None,
         };
         Ok((send(&mut store, req, deadline_ns)?,))
     })?;
     Ok(())
+}
+
+fn response_deadline_ns(first_byte: Duration, connect: Duration) -> u64 {
+    first_byte.saturating_add(connect).as_nanos().min(u64::MAX as u128) as u64
 }
 
 /// `outgoing-handler.handle`: checks the request like the real host and
@@ -575,7 +580,15 @@ pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value)
 
 #[cfg(test)]
 mod tests {
-    use super::deliver_uri;
+    use super::{deliver_uri, response_deadline_ns};
+    use std::time::Duration;
+
+    #[test]
+    fn response_deadlines_do_not_wrap_when_timeouts_add_up() {
+        assert_eq!(response_deadline_ns(Duration::from_millis(2), Duration::from_millis(3)), 5_000_000);
+        assert_eq!(response_deadline_ns(Duration::from_nanos(u64::MAX), Duration::from_nanos(1)), u64::MAX);
+        assert_eq!(response_deadline_ns(Duration::MAX, Duration::MAX), u64::MAX);
+    }
 
     #[test]
     fn uris_arrive_as_an_attacker_sends_them() {

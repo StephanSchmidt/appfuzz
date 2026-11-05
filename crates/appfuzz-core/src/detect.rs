@@ -41,6 +41,12 @@ pub struct Finding {
 }
 
 impl Finding {
+    /// Compare with an archived ID, accepting the eight-hex-digit IDs written
+    /// by older engines. New IDs must match completely.
+    pub fn matches_id(&self, id: &str) -> bool {
+        self.id == id || (self.id.len() == 33 && id.len() == 9 && self.id.starts_with(id))
+    }
+
     /// The nature of the evidence is independent of its policy severity.
     pub fn evidence(&self) -> &'static str {
         match self.kind.as_str() {
@@ -87,8 +93,8 @@ impl Finding {
     }
 
     pub fn new(kind: &str, key: &str, severity: Severity, title: String, detail: Value, run: Option<&str>) -> Self {
-        let h = blake3::hash(format!("{kind}\0{key}").as_bytes()).to_hex();
-        Finding { id: format!("f{}", &h[..8]), kind: kind.to_string(), severity, title, detail, run: run.map(str::to_string), confirmed: None }
+        let id = crate::record::hashed_id('f', format!("{kind}\0{key}").as_bytes());
+        Finding { id, kind: kind.to_string(), severity, title, detail, run: run.map(str::to_string), confirmed: None }
     }
 }
 
@@ -103,6 +109,18 @@ pub const OUTPUT_MAX: usize = 1 << 20;
 pub const CLOCK_READS_MAX: u64 = 1_000_000 / crate::wasi::CLOCK_READ_STEP_NS;
 /// Host calls before a run counts as a serial chain.
 pub const SERIAL_MIN: u32 = 10;
+
+fn over_budget<T: Serialize + std::fmt::Display>(r: &RunRecord, what: &str, used: T, limit: T) -> Finding {
+    let ex = &r.spec.export;
+    Finding::new(
+        "over_budget",
+        &format!("{ex}\0{what}"),
+        Severity::Fail,
+        format!("{ex} uses {used} {what}, the limit is {limit}"),
+        json!({"limit": what, "used": used, "limit_value": limit, "host_calls": r.totals.host_calls}),
+        Some(&r.id),
+    )
+}
 
 /// Everything one run shows on its own.
 pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
@@ -128,6 +146,7 @@ pub fn per_run_text(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut out = crate::dest::check(r, m);
     out.extend(crate::payload::check(r, m));
     out.extend(crate::agents::check(r, m));
+    downgrade_rejected_request(r, m, &mut out);
     out
 }
 
@@ -139,7 +158,7 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let o = &r.outcome;
     let panic = panic_text(&r.stderr);
     match o.kind {
-        OutcomeKind::Ok | OutcomeKind::HostTrap | OutcomeKind::PlanError | OutcomeKind::Error => {}
+        OutcomeKind::Ok | OutcomeKind::HostTrap | OutcomeKind::PlanError | OutcomeKind::Error | OutcomeKind::BudgetExceeded => {}
         OutcomeKind::OutOfFuel | OutcomeKind::Timeout => out.push(Finding::new(
             "hang",
             ex,
@@ -172,25 +191,17 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     let l = &m.limits;
     let t = &r.totals;
-    let mut over = |what: &str, used: f64, limit: f64| {
-        if used > limit {
-            out.push(Finding::new(
-                "over_budget",
-                &format!("{ex}\0{what}"),
-                Severity::Fail,
-                format!("{ex} uses {} {what}, the limit is {}", fmt(used), fmt(limit)),
-                json!({"limit": what, "used": used, "limit_value": limit, "host_calls": t.host_calls}),
-                run,
-            ));
+    for (what, used, limit) in [("fuel", t.fuel, Some(l.fuel)), ("memory", t.peak_memory, Some(l.memory)), ("cost", t.cost, l.cost_per_request)] {
+        if let Some(limit) = limit
+            && used > limit
+        {
+            out.push(over_budget(r, what, used, limit));
         }
-    };
-    over("fuel", t.fuel as f64, l.fuel as f64);
-    over("memory", t.peak_memory as f64, l.memory as f64);
-    if let Some(c) = l.cost_per_request {
-        over("cost", t.cost as f64, c as f64);
     }
-    if let Some(ml) = l.max_latency_ms {
-        over("latency_ms", ms(t.virtual_ns), ml);
+    if let Some(limit) = l.max_latency_ms
+        && ms(t.virtual_ns) > limit
+    {
+        out.push(over_budget(r, "latency_ms", ms(t.virtual_ns), limit));
     }
 
     // Redundant calls: same function, same arguments.
@@ -313,7 +324,7 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         for e in &r.events {
             let x = per.entry(&e.func).or_default();
             x.0 += 1;
-            x.1 += e.latency_ns;
+            x.1 = x.1.saturating_add(e.latency_ns);
         }
         let (f, (n, ns)) = per.iter().max_by_key(|(_, (_, ns))| *ns).map(|(f, x)| (*f, *x)).unwrap_or_default();
         out.push(Finding::new(
@@ -365,17 +376,21 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         ));
     }
     // A request the platform would reject never reaches the app.
-    let broken = crate::constraints::broken_request(&r.spec.args, m);
+    downgrade_rejected_request(r, m, &mut out);
+    dedupe(out)
+}
+
+fn downgrade_rejected_request(r: &RunRecord, m: &Manifest, out: &mut [Finding]) {
+    let broken = crate::constraints::broken_request_for(r, m);
     if !broken.is_empty() {
         let why: Vec<Value> = broken.iter().map(|(p, c, v)| json!({"field": p, "constraint": c, "value": v})).collect();
-        for f in &mut out {
+        for f in out {
             f.severity = Severity::Info;
             if let Value::Object(d) = &mut f.detail {
                 d.insert("invalid_request".into(), json!(why));
             }
         }
     }
-    dedupe(out)
 }
 
 /// A function called once per element of a list another call returned.
@@ -617,7 +632,7 @@ pub fn kind_name(k: OutcomeKind) -> String {
 }
 
 pub fn ms(ns: u64) -> f64 {
-    (ns as f64 / 1e4).round() / 100.0
+    ns as f64 / 1_000_000.0
 }
 
 fn fmt(x: f64) -> String {
@@ -630,6 +645,16 @@ pub struct FindingStore {
 }
 
 impl FindingStore {
+    fn lock_for_write(&self) -> anyhow::Result<std::fs::File> {
+        use anyhow::Context;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(self.path.with_extension("lock"))?;
+        lock.lock().context("locking finding storage")?;
+        Ok(lock)
+    }
+
     /// Findings of one component (by hash).
     pub fn new(state: &std::path::Path, component: &str) -> Self {
         FindingStore { path: state.join("findings").join(format!("{component}.json")) }
@@ -664,6 +689,7 @@ impl FindingStore {
 
     /// Replaces a stored finding (same id).
     pub fn update(&self, f: &Finding) -> anyhow::Result<()> {
+        let _lock = self.lock_for_write()?;
         let mut all = self.all()?;
         match all.iter_mut().find(|x| x.id == f.id) {
             Some(x) => *x = f.clone(),
@@ -678,6 +704,7 @@ impl FindingStore {
 
     /// Adds findings; returns the ids that were new.
     pub fn add(&self, new: &[Finding]) -> anyhow::Result<Vec<String>> {
+        let _lock = self.lock_for_write()?;
         let mut all = self.all()?;
         let mut added = Vec::new();
         for f in new {
@@ -705,6 +732,163 @@ impl FindingStore {
 
 #[cfg(test)]
 mod tests {
+    fn with_finding_store(action: impl FnOnce(&super::FindingStore)) {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("appfuzz-findings-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        struct Directory(std::path::PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _directory = Directory(path.clone());
+        action(&super::FindingStore::new(&path, "component"));
+    }
+
+    fn colliding_checks() -> Vec<super::Finding> {
+        let manifest = crate::manifest::Manifest::for_wasm(std::path::Path::new("x.wasm"));
+        let mut run = crate::envelope::Trace { export: "run".into(), ..Default::default() }.to_record();
+        run.totals.fuel = 200_000;
+        [79396, 127950]
+            .into_iter()
+            .map(|limit| crate::check::Property::parse(&["max".into(), "fuel".into(), limit.to_string()]).unwrap().finding(&run, &manifest).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn distinct_checks_with_a_known_short_hash_collision_keep_distinct_ids() {
+        let findings = colliding_checks();
+        assert!(findings.iter().all(|f| f.id.starts_with("fe4dd9629")));
+        assert_ne!(findings[0].id, findings[1].id);
+        assert!(findings[0].matches_id("fe4dd9629"));
+        assert!(!findings[0].matches_id(&findings[1].id));
+    }
+
+    #[test]
+    fn distinct_checks_with_a_known_short_hash_collision_remain_stored() {
+        with_finding_store(|store| {
+            store.add(&colliding_checks()).unwrap();
+            assert_eq!(store.all().unwrap().len(), 2);
+        });
+    }
+
+    #[test]
+    fn concurrent_finding_writers_preserve_every_distinct_problem() {
+        for update in [false, true] {
+            with_finding_store(|store| {
+                let initial: Vec<_> = (0..256)
+                    .map(|n| {
+                        super::Finding::new(
+                            "check_failed",
+                            &format!("initial-{n}"),
+                            super::Severity::Fail,
+                            format!("existing problem {n}"),
+                            serde_json::json!({"evidence":"x".repeat(4096)}),
+                            None,
+                        )
+                    })
+                    .collect();
+                store.add(&initial).unwrap();
+                let barrier = std::sync::Barrier::new(8);
+                std::thread::scope(|scope| {
+                    let writers: Vec<_> = (0..8)
+                        .map(|n| {
+                            let barrier = &barrier;
+                            scope.spawn(move || {
+                                let finding = super::Finding::new(
+                                    "check_failed",
+                                    &format!("concurrent-{n}"),
+                                    super::Severity::Fail,
+                                    format!("problem {n}"),
+                                    serde_json::json!({"n":n}),
+                                    None,
+                                );
+                                barrier.wait();
+                                if update {
+                                    store.update(&finding).unwrap();
+                                } else {
+                                    assert_eq!(store.add(&[finding]).unwrap().len(), 1);
+                                }
+                            })
+                        })
+                        .collect();
+                    for writer in writers {
+                        writer.join().unwrap();
+                    }
+                });
+                assert_eq!(store.all().unwrap().len(), initial.len() + 8, "update={update}");
+            });
+        }
+    }
+
+    #[test]
+    fn rejected_platform_requests_lower_text_findings_too() {
+        let manifest = toml::from_str(
+            "[app]\nwasm='x.wasm'\n[entry]\nexport='entry'\nvalues={''='range:1..31'}\noutput={body='body',body_format='html'}\n[grants]\nhosts=[]\n",
+        )
+        .unwrap();
+        let mut record = crate::envelope::Trace {
+            export: "entry".into(),
+            args: vec![serde_json::json!(0)],
+            result: Some(serde_json::json!({"body":"<img src='https://outside.example/image'>"})),
+            ..Default::default()
+        }
+        .to_record();
+        let findings = super::per_run(&record, &manifest);
+        assert!(!findings.is_empty());
+        assert!(findings.iter().all(|f| f.severity == super::Severity::Info), "{findings:?}");
+        record.spec.args = vec![serde_json::json!(1)];
+        assert!(super::per_run(&record, &manifest).iter().any(|f| f.severity > super::Severity::Info));
+    }
+
+    #[test]
+    fn entry_request_filters_do_not_downgrade_other_exports() {
+        let manifest = toml::from_str("[app]\nwasm='x.wasm'\n[entry]\nexport='entry'\nvalues={''='range:1..31'}\n[limits]\nfuel=1\n").unwrap();
+        let mut record = crate::envelope::Trace { export: "other".into(), args: vec![serde_json::json!(0)], ..Default::default() }.to_record();
+        record.totals.fuel = 2;
+        let findings = super::per_run(&record, &manifest);
+        assert!(findings.iter().any(|f| f.kind == "over_budget" && f.severity == super::Severity::Fail), "{findings:?}");
+        record.spec.export = "entry".into();
+        assert!(super::per_run(&record, &manifest).iter().any(|f| f.kind == "over_budget" && f.severity == super::Severity::Info));
+    }
+
+    #[test]
+    fn integer_budgets_compare_and_report_all_u64_bits() {
+        let mut manifest = crate::manifest::Manifest::for_wasm(std::path::Path::new("x.wasm"));
+        manifest.limits.fuel = u64::MAX - 1;
+        manifest.limits.memory = u64::MAX - 1;
+        manifest.limits.cost_per_request = Some(u64::MAX - 1);
+        let mut record = crate::envelope::Trace::default().to_record();
+        record.totals.fuel = u64::MAX;
+        record.totals.peak_memory = u64::MAX;
+        record.totals.cost = u64::MAX;
+        let findings = super::per_run(&record, &manifest);
+        for limit in ["fuel", "memory", "cost"] {
+            let finding =
+                findings.iter().find(|f| f.kind == "over_budget" && f.detail["limit"] == limit).unwrap_or_else(|| panic!("missing {limit}: {findings:?}"));
+            assert_eq!(finding.detail["used"], u64::MAX);
+            assert_eq!(finding.detail["limit_value"], u64::MAX - 1);
+            assert!(finding.title.contains(&u64::MAX.to_string()));
+        }
+        record.totals.fuel -= 1;
+        record.totals.peak_memory -= 1;
+        record.totals.cost -= 1;
+        assert!(!super::per_run(&record, &manifest).iter().any(|f| f.kind == "over_budget"));
+    }
+
+    #[test]
+    fn latency_limits_do_not_round_away_small_overruns() {
+        let mut manifest = crate::manifest::Manifest::for_wasm(std::path::Path::new("x.wasm"));
+        manifest.limits.max_latency_ms = Some(0.001);
+        let mut record = crate::envelope::Trace::default().to_record();
+        record.totals.virtual_ns = 1001;
+        let findings = super::per_run(&record, &manifest);
+        assert!(findings.iter().any(|f| f.kind == "over_budget" && f.detail["limit"] == "latency_ms"), "{findings:?}");
+        record.totals.virtual_ns = 1000;
+        assert!(!super::per_run(&record, &manifest).iter().any(|f| f.kind == "over_budget"));
+    }
+
     #[test]
     fn crash_titles_leave_out_the_backtrace_hint() {
         let msg = "panicked at src/lib.rs:9:25: index out of bounds: the len is 0 but the index is 0 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace";
