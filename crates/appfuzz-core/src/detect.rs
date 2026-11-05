@@ -71,6 +71,8 @@ impl Finding {
             | "ungranted_call"
             | "write_on_safe_method"
             | "script_in_output"
+            | "weak_csp"
+            | "unpinned_script"
             | "non_local_url"
             | "open_redirect"
             | "outside_envelope" => "policy_violation",

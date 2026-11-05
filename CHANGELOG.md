@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+**Apps that ship JavaScript**
+
+- HTML is read as a browser reads it (the WHATWG parser of Servo,
+  `html5ever`): `<noscript>`, SVG `<style>`, tables, templates and
+  malformed markup end up where a browser puts them. Deeply nested markup
+  falls back to a tag reader, so hostile output can't stall a review.
+- `reflection` and `stored_reflection` find text that breaks out of where
+  the app put it, not only raw `<`: a quote that ends an attribute, a quote
+  that ends a string in a `<script>`, an event handler, a `javascript:` URL
+  or a framework expression (`x-data`, `:class`), and text that runs as
+  code there. HTML entities don't protect a handler, and JS escapes do.
+  `detail.context` says where (`text`, `attribute`, `script`, `handler`,
+  `url`, `json`).
+- Output label `html:scripts`: scripts may run, and the markup still makes
+  no request `html:safe` forbids. Scripts from other hosts need a granted
+  host and an `integrity` hash, else `unpinned_script` (fail; a warn on HTML
+  without a label). Markup with a script needs a Content-Security-Policy
+  that keeps scripts on the app's origin and the granted hosts, else
+  `weak_csp` (fail; `'unsafe-eval'` is a warn). The policy comes from the
+  response header, a meta tag and the new `[entry] csp`; all apply.
+- With output labels the fuzzer also tries text that ends a script string
+  or an attribute: `';alert(1)//`, `"-alert(1)-"`, `\';alert(1)//`,
+  `</script><script>alert(1)</script>`, `${alert(1)}` and
+  `' onmouseover='alert(1)`.
+
 ## 0.6.0
 
 **Forged credentials**

@@ -244,6 +244,15 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         return out;
     }
     let resp = response(r, m);
+    // HTML no output label covers: scripts from elsewhere are a warn.
+    let labelled = m.entry.as_ref().is_some_and(|e| e.result.values().any(|l| *l != crate::markup::OutputLabel::UrlLocal));
+    if resp.html
+        && !labelled
+        && let Some(b) = &resp.body
+    {
+        let path = m.entry.as_ref().and_then(|e| e.output.body.clone()).unwrap_or_else(|| "body".into());
+        out.extend(crate::markup::unpinned_findings(r, m, &path, b, Severity::Warn));
+    }
     if let Some(s) = resp.status
         && !(100..=599).contains(&s)
     {
@@ -549,35 +558,56 @@ fn flow(r: &RunRecord, m: &Manifest, resp: &Response, body: &str) -> Vec<Finding
             }
         }
     }
+    // Attack strings (`';alert(1)//`) whose `alert(1)` runs as code.
+    let mut attack = None;
+    for (i, a) in r.spec.args.iter().enumerate() {
+        each_string(a, format!("@{i}"), &mut |s, p| {
+            if attack.is_none() && s.contains("alert(1)") {
+                attack = Some((p.to_string(), s.to_string()));
+            }
+        });
+    }
+    if let Some((path, text)) = attack.filter(|_| resp.html)
+        && let Some((context, how)) = attack_runs(body)
+    {
+        out.push(Finding::new(
+            "reflection",
+            &format!("{ex}\0{}", strip_index(&path)),
+            Severity::Fail,
+            format!("{ex} puts {} {how}", request_place(m, &r.spec.args, &path, &text)),
+            json!({"field": strip_index(&path), "text": text, "context": context}),
+            run,
+        ));
+    }
     if from_request.is_empty() && from_host.is_empty() {
-        return out;
+        return dedupe(out);
     }
     // Strings an `html` result label marks as trusted markup.
     let trusted = crate::labels::trusted_html(r, m);
+    let mut seen = BTreeSet::new();
     for c in CANARY.find_iter(body) {
-        if trusted.contains(c.as_str()) {
+        let id = c.as_str();
+        if !resp.html || trusted.contains(id) || !seen.insert(id) {
             continue;
         }
-        let raw = body[c.end()..].starts_with("<i>");
-        if !(raw && resp.html) {
-            continue;
-        }
-        if let Some((_, path)) = from_request.iter().find(|(id, _)| id == c.as_str()) {
+        if let Some((_, path)) = from_request.iter().find(|(c, _)| c == id) {
+            let Some((context, how)) = breakout(body, id) else { continue };
             out.push(Finding::new(
                 "reflection",
                 &format!("{ex}\0{}", strip_index(path)),
                 Severity::Fail,
-                format!("{ex} puts {} into its HTML output unescaped", request_place(m, &r.spec.args, path, c.as_str())),
-                json!({"field": strip_index(path), "canary": c.as_str()}),
+                format!("{ex} puts {} {how}", request_place(m, &r.spec.args, path, id)),
+                json!({"field": strip_index(path), "canary": id, "context": context}),
                 run,
             ));
-        } else if let Some((_, f)) = from_host.iter().find(|(id, _)| id == c.as_str()) {
+        } else if let Some((_, f)) = from_host.iter().find(|(c, _)| c == id) {
+            let Some((context, how)) = breakout(body, id) else { continue };
             out.push(Finding::new(
                 "stored_reflection",
                 &format!("{ex}\0{f}"),
                 Severity::Fail,
-                format!("{ex} puts a string {f} returned into its HTML output unescaped"),
-                json!({"func": f, "canary": c.as_str()}),
+                format!("{ex} puts a string {f} returned {how}"),
+                json!({"func": f, "canary": id, "context": context}),
                 run,
             ));
         }
@@ -605,6 +635,106 @@ fn flow(r: &RunRecord, m: &Manifest, resp: &Response, body: &str) -> Vec<Finding
         }
     }
     dedupe(out)
+}
+
+/// Whether the canary `id` breaks out of where the HTML body put it, and
+/// how: (context, what the app does, said after "puts X").
+///
+/// Its `<i>` raw anywhere is markup the app didn't write (in a script, a
+/// `</script>` would end it). In an attribute, a quote of the canary that
+/// starts an attribute name of its own ended the value. In JavaScript (a
+/// script, an event handler, a `javascript:` URL, a framework expression)
+/// a quote of the canary that ends the string, or the canary as code, runs.
+fn breakout(body: &str, id: &str) -> Option<(&'static str, String)> {
+    let doc = crate::html::doc(body);
+    let marked = format!("{id}<i>");
+    if body.contains(&marked) {
+        let script = doc.elements.iter().find(|e| e.name == "script" && e.body.as_ref().is_some_and(|b| b.contains(&marked)));
+        return Some(match script {
+            Some(e) if is_js(e.get("type")) => ("script", "into a script unescaped, where `</script>` in it ends the script".into()),
+            Some(_) => ("json", "into a data block unescaped, where `</script>` in it ends the block".into()),
+            None => ("text", "into its HTML output unescaped".into()),
+        });
+    }
+    for e in &doc.elements {
+        if let Some((k, _)) = e.attrs.iter().find(|(_, v)| v.contains(id))
+            && e.attrs.iter().any(|(n, _)| n.contains(['"', '\'']))
+        {
+            return Some(("attribute", format!("into the HTML attribute {k}, where a quote in it ends the attribute")));
+        }
+    }
+    let tail = format!("<i>'\"{SINK_TAIL}");
+    js_sources(body).iter().filter(|s| s.code.contains(id)).find_map(|s| {
+        crate::js::breakout(&s.code, id, &tail).map(|b| match b {
+            crate::js::Breakout::Quote => (s.context, format!("into a JavaScript string in {}, where a quote in it ends the string", s.place)),
+            crate::js::Breakout::Code => (s.context, format!("into {} as JavaScript code", s.place)),
+        })
+    })
+}
+
+/// Where `alert(1)` of an attack string runs as code in the HTML body:
+/// (context, said after "puts X").
+fn attack_runs(body: &str) -> Option<(&'static str, String)> {
+    const ATTACK: &str = "alert(1)";
+    if !body.contains(ATTACK) {
+        return None;
+    }
+    js_sources(body).iter().find_map(|s| {
+        let at: Vec<usize> = s.code.match_indices(ATTACK).map(|(i, _)| i).collect();
+        crate::js::places(&s.code, &at).contains(&crate::js::Place::Code).then(|| (s.context, format!("into {}, where it runs as JavaScript", s.place)))
+    })
+}
+
+/// JavaScript in an HTML document, as the browser runs it.
+struct JsSource {
+    /// `script`, `handler` or `url`.
+    context: &'static str,
+    /// Where, for people: "a script", "the attribute onclick".
+    place: String,
+    code: String,
+}
+
+/// Script bodies, event handlers and framework expressions (their values
+/// entity-decoded), and `javascript:` URLs (also percent-decoded).
+fn js_sources(body: &str) -> std::rc::Rc<Vec<JsSource>> {
+    thread_local! {
+        static JS: std::cell::RefCell<(String, std::rc::Rc<Vec<JsSource>>)> = std::cell::RefCell::default();
+    }
+    crate::html::memo(&JS, body, |body| {
+        let mut out = Vec::new();
+        for e in &crate::html::doc(body).elements {
+            js_in(e, &mut out);
+        }
+        out
+    })
+}
+
+fn js_in(e: &crate::html::Element, out: &mut Vec<JsSource>) {
+    for (k, v) in &e.attrs {
+        if crate::markup::is_handler(k) || crate::markup::is_expression(k) {
+            out.push(JsSource { context: "handler", place: format!("the attribute {k}"), code: v.clone() });
+            continue;
+        }
+        let n = crate::urls::normalize(v);
+        let lower = n.to_ascii_lowercase();
+        if let Some(code) = lower.strip_prefix("javascript:").or_else(|| lower.strip_prefix("js:")) {
+            let code = crate::js::percent_decode(&n[lower.len() - code.len()..]);
+            out.push(JsSource { context: "url", place: format!("the script URL in {k}"), code });
+        }
+    }
+    if e.name == "script"
+        && is_js(e.get("type"))
+        && let Some(b) = &e.body
+    {
+        out.push(JsSource { context: "script", place: "a script".into(), code: b.clone() });
+    }
+}
+
+/// Whether a `<script type>` runs as JavaScript.
+fn is_js(ty: Option<&str>) -> bool {
+    let t = ty.unwrap_or("").trim().to_ascii_lowercase();
+    let t = t.split(';').next().unwrap_or("").trim();
+    t.is_empty() || t == "module" || t.ends_with("javascript") || t.ends_with("ecmascript") || t.ends_with("jscript") || t.ends_with("livescript")
 }
 
 /// `@0.query.q` → `query.q` (the first argument is the request).
@@ -672,20 +802,26 @@ fn uri_place(uri: &str, at: usize) -> String {
 }
 
 pub(crate) fn canary_paths(v: &Value, path: String, out: &mut BTreeSet<(String, String)>) {
-    match v {
-        Value::String(s) => {
-            for c in CANARY.find_iter(s) {
-                out.insert((c.as_str().to_string(), path.clone()));
-            }
+    each_string(v, path, &mut |s, path| {
+        for c in CANARY.find_iter(s) {
+            out.insert((c.as_str().to_string(), path.to_string()));
         }
+    });
+}
+
+/// Calls `f` with each string in `v` and its path; `[[name, value], …]`
+/// pairs (headers, query) are walked by name.
+fn each_string(v: &Value, path: String, f: &mut impl FnMut(&str, &str)) {
+    match v {
+        Value::String(s) => f(s, &path),
         Value::Array(a) if a.iter().all(|p| p.as_array().is_some_and(|p| p.len() == 2 && p[0].is_string())) && !a.is_empty() => {
             for p in a {
                 let k = p[0].as_str().unwrap_or_default();
-                canary_paths(&p[1], format!("{path}.{k}"), out);
+                each_string(&p[1], format!("{path}.{k}"), f);
             }
         }
-        Value::Array(a) => a.iter().enumerate().for_each(|(i, x)| canary_paths(x, format!("{path}.{i}"), out)),
-        Value::Object(o) => o.iter().for_each(|(k, x)| canary_paths(x, format!("{path}.{k}"), out)),
+        Value::Array(a) => a.iter().enumerate().for_each(|(i, x)| each_string(x, format!("{path}.{i}"), f)),
+        Value::Object(o) => o.iter().for_each(|(k, x)| each_string(x, format!("{path}.{k}"), f)),
         _ => {}
     }
 }
@@ -814,6 +950,51 @@ mod tests {
     #[test]
     fn percentages() {
         assert_eq!(impossible_percentages("used 40 % of 400% and -5%"), vec!["400%".to_string(), "-5%".to_string()]);
+    }
+
+    #[test]
+    fn breakouts_by_context() {
+        let id = "cnry12341";
+        let ctx = |b: &str| breakout(b, id).map(|(c, _)| c);
+        let cases = [
+            (r#"<p>cnry12341<i>'"</p>"#, Some("text")),
+            (r#"<script type="application/json">{"q": "cnry12341<i>'"}</script>"#, Some("json")),
+            (r#"<script>var q = "cnry12341<i>'\"";</script>"#, Some("script")),
+            // Attributes: `<>` escaped, a quote left.
+            (r#"<a title="cnry12341&lt;i&gt;'"">x</a>"#, Some("attribute")),
+            (r#"<a title='cnry12341&lt;i&gt;'"'>x</a>"#, Some("attribute")),
+            (r#"<a title="cnry12341&lt;i&gt;&#39;&quot;">x</a>"#, None),
+            (r#"<a title="cnry12341&lt;i&gt;'&quot;">x</a>"#, None),
+            // Scripts: JS escapes for `<`, a quote left raw.
+            (r#"<script>var q = 'cnry12341\u003ci\u003e'"';</script>"#, Some("script")),
+            (r#"<script>var q = "cnry12341\u003ci\u003e'\"";</script>"#, None),
+            (r#"<script>var q = 'cnry12341&lt;i&gt;&#39;&quot;';</script>"#, None),
+            (r#"<script>var n = cnry12341;</script>"#, Some("script")),
+            (r#"<script type="application/json">{"q": "cnry12341\u003ci>'"}</script>"#, None),
+            // A handler's value is decoded before it runs: entities don't help.
+            (r#"<button onclick="f('cnry12341&lt;i&gt;&#39;&quot;')">x</button>"#, Some("handler")),
+            (r#"<button onclick="f('cnry12341\x3ci\x3e\x27\x22')">x</button>"#, None),
+            (r#"<div x-data="{ q: 'cnry12341&lt;i&gt;&#39;&quot;' }"></div>"#, Some("handler")),
+            (r#"<div x-text="q" title="cnry12341&lt;i&gt;&#39;&quot;"></div>"#, None),
+            // A script URL is percent-decoded first: encodeURIComponent leaves `'`.
+            (r#"<a href="javascript:f('cnry12341%3Ci%3E'%22')">x</a>"#, Some("url")),
+            (r#"<a href="/s?q=cnry12341%3Ci%3E'%22">x</a>"#, None),
+        ];
+        for (body, want) in cases {
+            assert_eq!(ctx(body), want, "{body}");
+        }
+    }
+
+    #[test]
+    fn attacks_that_run() {
+        let ctx = |b: &str| attack_runs(b).map(|(c, _)| c);
+        assert_eq!(ctx(r#"<script>var q = '';alert(1)//';</script>"#), Some("script"));
+        assert_eq!(ctx(r#"<script>var q = '\';alert(1)//';</script>"#), None);
+        assert_eq!(ctx(r#"<script>var q = '\\';alert(1)//';</script>"#), Some("script"));
+        assert_eq!(ctx("<script>var q = `${alert(1)}`;</script>"), Some("script"));
+        assert_eq!(ctx(r#"<a title='' onmouseover='alert(1)'>x</a>"#), Some("handler"));
+        assert_eq!(ctx(r#"<a title="&#39; onmouseover=&#39;alert(1)">x</a>"#), None);
+        assert_eq!(ctx("<p>alert(1)</p>"), None);
     }
 
     #[test]

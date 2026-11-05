@@ -340,18 +340,29 @@ pub fn merge(host: &HostManifest, mut app: Manifest, app_toml: &toml::Table) -> 
             }
             add_map(&mut e.fields, ae.fields, "entry.fields")?;
             add_map(&mut e.input_values, ae.input_values, "entry.input_values")?;
+            // The app can tighten a label, never loosen it. `html:safe`
+            // is the strictest: no scripts and no requests by themselves.
             for (path, l) in ae.result {
-                match e.result.get(&path) {
-                    Some(hl) if *hl == l => {}
-                    Some(crate::markup::OutputLabel::HtmlNoScripts) if l == crate::markup::OutputLabel::HtmlSafe => {
+                use crate::markup::OutputLabel::{HtmlNoScripts, HtmlSafe, HtmlScripts};
+                match (e.result.get(&path), l) {
+                    (Some(hl), l) if *hl == l => {}
+                    (Some(HtmlNoScripts | HtmlScripts), HtmlSafe) => {
                         e.result.insert(path, l);
                     }
-                    Some(hl) => return Err(weaker(format!("entry.result.{path:?}"), l.name().into(), hl.name().into())),
-                    None => {
+                    (Some(HtmlScripts), HtmlNoScripts) => {
+                        e.result.insert(path, HtmlSafe);
+                    }
+                    (Some(hl), l) => return Err(weaker(format!("entry.result.{path:?}"), l.name().into(), hl.name().into())),
+                    (None, l) => {
                         e.result.insert(path, l);
                     }
                 }
             }
+            // Both policies apply, as two headers do in a browser.
+            e.csp = match (e.csp.take(), ae.csp) {
+                (Some(h), Some(a)) => Some(format!("{h}, {a}")),
+                (h, a) => h.or(a),
+            };
             for p in ae.sensitive_paths {
                 if !e.sensitive_paths.contains(&p) {
                     e.sensitive_paths.push(p);
@@ -820,6 +831,21 @@ result = { name = "pii" }
     }
 
     #[test]
+    fn scripts_label_and_policies_combine() {
+        let host = HOST.replace("html:no-scripts\" }", "html:scripts\" }\ncsp = \"default-src 'self'\"");
+        let host = HostManifest::parse(&host, Path::new("")).unwrap();
+        let merged = |extra: &str| {
+            let text = format!("[app]\nwasm = \"a.wasm\"\nplatform = \"shop\"\n[entry]\n{extra}");
+            merge(&host, toml::from_str(&text).unwrap(), &toml::from_str(&text).unwrap()).unwrap().entry.unwrap()
+        };
+        let e = merged("result = { body = \"html:no-scripts\" }\ncsp = \"form-action 'self'\"\n");
+        // No scripts and no requests by themselves: html:safe.
+        assert_eq!(e.result["body"], crate::markup::OutputLabel::HtmlSafe);
+        assert_eq!(e.csp.as_deref(), Some("default-src 'self', form-action 'self'"));
+        assert_eq!(merged("").result["body"], crate::markup::OutputLabel::HtmlScripts);
+    }
+
+    #[test]
     fn app_cannot_weaken() {
         let base = "[app]\nwasm = \"a.wasm\"\nplatform = \"shop\"\n";
         for (extra, needle) in [
@@ -831,6 +857,7 @@ result = { name = "pii" }
             ("[grants]\nwasi = [\"wasi:filesystem\"]\n", "grants.wasi"),
             ("[entry]\nexport = \"other#x\"\n", "entry.export"),
             ("[entry]\nvalues = { today = \"len:0..3\" }\n", "entry.values"),
+            ("[entry]\nresult = { body = \"html:scripts\" }\n", "html:scripts is weaker than platform shop's html:no-scripts"),
             ("[functions.\"shop:web/items#get\"]\ncost = 1\n", "lower than"),
             ("[functions.\"shop:web/items#get\"]\nlatency_ms = 1.0\n", "lower than"),
             ("[functions.\"shop:web/items#get\"]\neffect = \"write\"\n", "effect"),

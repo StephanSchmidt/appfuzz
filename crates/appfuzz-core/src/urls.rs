@@ -42,13 +42,9 @@ pub struct UrlRef {
     pub contains: Vec<String>,
 }
 
-pub(crate) static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<([a-zA-Z][a-zA-Z0-9-]*)\b((?:[^>\x22']|\x22[^\x22]*\x22|'[^']*')*)>").unwrap());
-pub(crate) static ATTR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"([a-zA-Z_:@(\[#*][-a-zA-Z0-9_:.@()\[\]#*]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"#).unwrap());
 static TEXT_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\b(?:https?|ftp|wss?)://[^\s"'<>\\]+"#).unwrap());
 static SCHEME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([a-zA-Z][a-zA-Z0-9+.-]*):").unwrap());
 static DIGITS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[0-9]+").unwrap());
-static BLOCK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<(script|style)\b([^>]*)>(.*?)</(?:script|style)\s*>").unwrap());
 static CSS_URL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)|@import\s+(?:"([^"]*)"|'([^']*)')"#).unwrap());
 static JS_STRING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'|`((?:[^`\\]|\\.)*)`"#).unwrap());
@@ -145,58 +141,8 @@ const PASSIVE_HEADERS: &[&str] = &[
     "content-security-policy",
 ];
 
-/// One element as the browser sees it: attributes in order, entities
-/// decoded, names in lower case.
-pub(crate) struct Element {
-    pub name: String,
-    pub attrs: Vec<(String, String)>,
-    pub raw: String,
-}
-
-impl Element {
-    pub fn get(&self, k: &str) -> Option<&str> {
-        self.attrs.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
-    }
-}
-
 thread_local! {
-    // The last markup parsed on this thread: several checks of one run read
-    // the same body. Keyed by content, so it is never stale.
-    static ELEMENTS: RefCell<(String, Rc<Vec<Element>>)> = RefCell::default();
     static FOUND: RefCell<(String, Rc<Vec<Found>>)> = RefCell::default();
-}
-
-/// Looks up `html` in a one-entry cache, or computes and keeps it.
-fn memo<T>(cache: &'static std::thread::LocalKey<RefCell<(String, Rc<T>)>>, html: &str, f: impl FnOnce(&str) -> T) -> Rc<T> {
-    if let Some(v) = cache.with_borrow(|(k, v)| (k == html).then(|| v.clone())) {
-        return v;
-    }
-    let v = Rc::new(f(html));
-    cache.set((html.to_string(), v.clone()));
-    v
-}
-
-/// The elements of a piece of markup, parsed once per thread and text.
-pub(crate) fn elements(html: &str) -> Rc<Vec<Element>> {
-    memo(&ELEMENTS, html, parse_elements)
-}
-
-fn parse_elements(html: &str) -> Vec<Element> {
-    // Script and style bodies are not markup.
-    let html = BLOCK.replace_all(html, |c: &regex::Captures| format!("<{}{}>", &c[1], &c[2]));
-    TAG.captures_iter(&html)
-        .map(|t| {
-            let mut attrs: Vec<(String, String)> = Vec::new();
-            for a in ATTR.captures_iter(&t[2]) {
-                let k = a[1].to_ascii_lowercase();
-                let v = a.get(2).or(a.get(3)).or(a.get(4)).map(|m| m.as_str()).unwrap_or_default();
-                if !attrs.iter().any(|(n, _)| *n == k) {
-                    attrs.push((k, decode_entities(v)));
-                }
-            }
-            Element { name: t[1].to_ascii_lowercase(), attrs, raw: t[0].chars().take(160).collect() }
-        })
-        .collect()
 }
 
 /// A URL in output, and how it is used.
@@ -294,19 +240,20 @@ fn words(s: &str) -> impl Iterator<Item = &str> {
 /// Whether the element says a request in attribute `k` goes out by itself:
 /// a word like `load` or `every` in that attribute's name, or in another
 /// attribute.
-fn fires_by_itself(el: &Element, k: &str) -> bool {
+fn fires_by_itself(el: &crate::html::Element, k: &str) -> bool {
     let selfish = |s: &str| words(&s.to_ascii_lowercase()).any(|w| SELF_WORDS.contains(&w));
     selfish(k) || el.attrs.iter().filter(|(n, _)| n != k && !PASSIVE.contains(&n.as_str()) && !n.starts_with("aria-")).any(|(n, v)| selfish(n) || selfish(v))
 }
 
 /// Every URL in markup, as a browser and an unknown framework could use it.
 pub fn in_html(html: &str) -> Vec<Found> {
-    memo(&FOUND, html, find_in_html).as_ref().clone()
+    crate::html::memo(&FOUND, html, find_in_html).as_ref().clone()
 }
 
 fn find_in_html(html: &str) -> Vec<Found> {
+    let doc = crate::html::doc(html);
     let mut out = Vec::new();
-    for el in elements(html).iter() {
+    for el in &doc.elements {
         let tag = el.raw.as_str();
         let form_method = |a: &str, default: &str| el.get(a).map(|m| m.to_ascii_uppercase()).unwrap_or(default.into());
         let mut pieces: Vec<&str> = Vec::new();
@@ -370,22 +317,20 @@ fn find_in_html(html: &str) -> Vec<Found> {
                 out.push(Found::new(&joined, "GET", "joined", if fires_by_itself(el, "") { "auto" } else { "unknown" }, tag));
             }
         }
-    }
-    for c in BLOCK.captures_iter(html) {
-        let body = &c[3];
-        if c[1].eq_ignore_ascii_case("style") {
-            css_urls(body, "<style>", &mut out);
-        } else {
-            for t in texts_in(body).into_iter().skip(1) {
-                if url_like(&t) {
-                    out.push(Found::new(&t, "GET", "script", "unknown", "<script>"));
+        match (el.name.as_str(), &el.body) {
+            ("style", Some(css)) => css_urls(css, "<style>", &mut out),
+            ("script", Some(js)) => {
+                for t in texts_in(js).into_iter().skip(1) {
+                    if url_like(&t) {
+                        out.push(Found::new(&t, "GET", "script", "unknown", "<script>"));
+                    }
                 }
             }
+            _ => {}
         }
     }
     // URLs in text between tags.
-    let text = TAG.replace_all(&BLOCK.replace_all(html, " "), " ").into_owned();
-    from_text(&text, "text", &mut out);
+    from_text(&doc.text, "text", &mut out);
     out
 }
 

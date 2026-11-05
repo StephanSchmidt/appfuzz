@@ -1,0 +1,6 @@
+{
+  "app": "scripts-ok",
+  "bug": "data for its scripts escaped for JSON in HTML, a CSP header, its own bundle and a pinned library",
+  "expect": [],
+  "allow": []
+}

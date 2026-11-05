@@ -23,6 +23,7 @@ memchr.workspace = true
 psl.workspace = true
 rayon.workspace = true
 url.workspace = true
+html5ever.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 csv.workspace = true

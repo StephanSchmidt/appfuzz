@@ -141,12 +141,17 @@ pub struct Entry {
     #[serde(default)]
     pub now: Option<String>,
     /// Labels of the export's result by field path: what the platform
-    /// allows there (`html:no-scripts`, `html:safe`, `url:local`).
+    /// allows there (`html:no-scripts`, `html:safe`, `html:scripts`,
+    /// `url:local`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub result: BTreeMap<String, crate::markup::OutputLabel>,
     /// Routes no `html:safe` markup may send a request to (`/admin`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sensitive_paths: Vec<String>,
+    /// The Content-Security-Policy the platform sends with the export's
+    /// HTML, on top of the app's own: under `html:scripts` both apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csp: Option<String>,
     /// The export's output never contains personal data: a value a host
     /// function returned at a `pii` path anywhere in the result is a
     /// `pii_leak` fail. Reading personal data stays allowed.

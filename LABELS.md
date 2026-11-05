@@ -178,11 +178,33 @@ What the platform allows in the export's result, by field path (as in
 |-------|-------|---------|
 | `html:no-scripts` | no script may run from this markup | `script_in_output` (fail): a `<script>`, `<object>`, `<embed>`, an iframe `srcdoc`, an event handler of any framework (a name like `on…`, `@…`, `…on:…`, `(…)`), a `js:` value, or a `javascript:` (or HTML `data:`) URL in any attribute, read with entities decoded; (warn) a value that looks like code (`f(…)`, `=>`) in an attribute of no standard meaning |
 | `html:safe` | `html:no-scripts`, and no request the user didn't ask for | also `unsafe_action` (fail): a meta refresh; a form, a load (`src`, CSS `url()`, a stylesheet) or a URL in an attribute of no standard meaning to another host or to a sensitive route; such a URL on an element that says it fires by itself (a word like `load`, `every`, `init`, `intersect`, `poll` in another attribute or in the attribute's name) |
+| `html:scripts` | scripts may run: from the app's origin or pinned on a granted host, under a Content-Security-Policy that keeps them on the app's origin and the granted hosts; no request the user didn't ask for | `unsafe_action` as for `html:safe`, except what scripts load and fetch (a sensitive route a script or handler names is a warn); `unpinned_script` (fail): a `<script src>`, a module preload or a module import from a host `[grants] hosts` doesn't list, or without an `integrity` hash (in the element, the import map or a `modulepreload` link); `weak_csp` (fail): markup with a script whose policy doesn't limit every fetch directive (`default-src` as the fallback) to `'self'` and granted hosts, leaves `form-action` or `base-uri` unset, or allows `*`, a scheme-only source such as `https:`, `data:` or `blob:` outside images, fonts and media, or `'strict-dynamic'`; (warn) `'unsafe-eval'` |
 | `url:local` | a path on the app's own host | `open_redirect` (fail) when request text makes it point elsewhere (`//host`, `/\host`, a scheme); `non_local_url` (warn) when the app points elsewhere by itself |
 
 `sensitive_paths = ["/admin"]` in `[entry]` lists the routes no `html:safe`
-markup may send a request to, the route and everything below it. Ordinary
-links (`<a href>`) are allowed anywhere: the user clicks them.
+or `html:scripts` markup may send a request to, the route and everything
+below it. Ordinary links (`<a href>`) are allowed anywhere: the user
+clicks them.
+
+Under `html:scripts` the policy comes from the response's
+`content-security-policy` headers, a `<meta http-equiv>` in the markup and
+`[entry] csp`, which the platform adds itself. All of them apply, as in a
+browser: a directive is limited when one of them limits it. Inline scripts
+are allowed, because frameworks need them; request and host text that
+reaches a script, a handler or an attribute is checked on every HTML
+response (`reflection`, `stored_reflection`). Without an HTML label, a
+script from another host that isn't pinned is an `unpinned_script` warn.
+
+```toml
+[entry]
+result = { body = "html:scripts" }
+csp = "default-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'"
+```
+
+A platform's label can only be tightened. `html:safe` is the strictest: an
+app may turn `html:no-scripts` or `html:scripts` into it, and an app's
+`html:no-scripts` on a platform's `html:scripts` gives `html:safe`. Both
+sides' `csp` apply.
 
 appfuzz knows no framework. Standard HTML attributes count by their
 meaning (`href` a link, `action` a form, `src` a load). Every other
@@ -200,7 +222,9 @@ sensitive_paths = ["/admin", "/settings"]
 ```
 
 With output labels the fuzzer also tries `//evil.example/`,
-`javascript:alert(1)` and markup with event handlers in request fields.
+`javascript:alert(1)`, markup with event handlers, and text that ends a
+string or an attribute (`';alert(1)//`, `' onmouseover='alert(1)`,
+`</script><script>alert(1)</script>`, `${alert(1)}`) in request fields.
 
 ## Host argument requirements and guest input domains
 

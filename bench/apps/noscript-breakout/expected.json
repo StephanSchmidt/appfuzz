@@ -1,0 +1,14 @@
+{
+  "app": "noscript-breakout",
+  "bug": "escapes quotes in item names for a title inside <noscript>, but not <",
+  "expect": [
+    {
+      "kind": "stored_reflection",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "script_in_output",
+    "broken_markup"
+  ]
+}

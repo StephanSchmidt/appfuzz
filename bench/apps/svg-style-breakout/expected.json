@@ -1,0 +1,14 @@
+{
+  "app": "svg-style-breakout",
+  "bug": "puts item names into an SVG <style> unescaped, where markup is markup",
+  "expect": [
+    {
+      "kind": "stored_reflection",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "script_in_output",
+    "broken_markup"
+  ]
+}

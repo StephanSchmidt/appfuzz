@@ -102,6 +102,7 @@ pub fn default_manifest(manifest: &mut Manifest, imports: &[Interface], exports:
             now: None,
             result: Default::default(),
             sensitive_paths: vec![],
+            csp: None,
             no_pii: false,
             values: Default::default(),
             input_values: Default::default(),

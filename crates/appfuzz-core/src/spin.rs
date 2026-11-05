@@ -123,6 +123,7 @@ fn from_str(text: &str, dir: &Path, component: Option<&str>) -> Result<Manifest>
             now: None,
             result: Default::default(),
             sensitive_paths: vec![],
+            csp: None,
             no_pii: false,
             values: Default::default(),
             input_values: Default::default(),

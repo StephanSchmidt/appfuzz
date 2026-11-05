@@ -1,0 +1,11 @@
+{
+  "app": "scripts-cdn-unpinned",
+  "bug": "loads a library from a CDN without an integrity hash",
+  "expect": [
+    {
+      "kind": "unpinned_script",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

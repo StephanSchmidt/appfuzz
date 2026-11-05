@@ -48,6 +48,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "attr_single_quote"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -557,6 +564,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "handler_reflect"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -867,6 +881,13 @@ dependencies = [
 
 [[package]]
 name = "nondet"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
+name = "noscript_breakout"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen 0.63.0",
@@ -1213,6 +1234,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "script_string_reflect"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
+name = "scripts_cdn_unpinned"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
+name = "scripts_no_csp"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
+name = "scripts_ok"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
 name = "secret_b64_url"
 version = "0.1.0"
 dependencies = [
@@ -1472,6 +1521,13 @@ dependencies = [
  "unicode-bidi",
  "unicode-normalization",
  "unicode-properties",
+]
+
+[[package]]
+name = "svg_style_breakout"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
 ]
 
 [[package]]

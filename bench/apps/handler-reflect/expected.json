@@ -1,0 +1,11 @@
+{
+  "app": "handler-reflect",
+  "bug": "puts ?q, escaped for HTML, into an onclick handler's string",
+  "expect": [
+    {
+      "kind": "reflection",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

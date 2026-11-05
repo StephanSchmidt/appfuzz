@@ -1,0 +1,11 @@
+{
+  "app": "script-string-reflect",
+  "bug": "escapes ?q for HTML but not for the script string it puts it in",
+  "expect": [
+    {
+      "kind": "reflection",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

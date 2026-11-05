@@ -202,7 +202,10 @@ Output labels say what the platform allows in the response:
 `[entry] result = { body = "html:safe", "headers.location" = "url:local" }`,
 with `sensitive_paths = ["/admin"]`. `html:no-scripts` allows no script,
 `html:safe` also allows no request the user didn't ask for, and `url:local`
-allows only paths on the app's own host.
+allows only paths on the app's own host. `html:scripts` lets scripts run:
+from the app's origin or pinned (`integrity`) on a granted host, under a
+Content-Security-Policy (`[entry] csp`, the response header or a meta tag;
+all apply) that keeps them on the app's origin and `[grants] hosts`.
 
 Host argument requirements come from the platform's function descriptions:
 `param_values = { date = "format:date", quantity = "range:1..6" }` on a
@@ -303,12 +306,13 @@ and `confirm <id>` makes it reproducible.
 | `slow_host_sensitivity` | one slow host function pushes the request over the latency limit |
 | `duplicate_sensitivity`, `order_dependence`, `nondeterminism`, `error_ignored`, `continues_after_error` | the answer changes when it should not, or stays the same when it should change |
 | `invalid_response`, `broken_markup`, `inconsistent_response`, `leaky_error` | bad output: impossible status or headers, a wrong Content-Length, unbalanced HTML, an error page with status 200, internal error text |
-| `reflection`, `stored_reflection`, `input_passthrough` | request or host text reaches HTML unescaped, or reaches a host call unchanged |
+| `reflection`, `stored_reflection`, `input_passthrough` | request or host text reaches HTML unescaped, breaks out of the attribute, script string or event handler it was put in (`detail.context`: `text`, `attribute`, `script`, `handler`, `url`, `json`), or reaches a host call unchanged |
 | `sql_injection`, `path_traversal`, `command_injection`, `ssrf`, `url_path_injection`, `html_injection`, `regex_injection`, `escaped_by_hand` | request or host text reaches a labelled sink (§4) |
 | `pii_leak`, `secret_leak` | a labelled value reaches a place it must not (§4) |
 | `auth_bypass`, `timing_unsafe_compare`, `predictable_token` | HTTP handlers: a request without credentials is turned away, one with forged credentials (made-up token, unsigned JWT, wrong signature) gets in; the token is compared with the secret one character at a time (fuel grows with the correct prefix); a session token stays the same under other random seeds (`probe auth`) |
 | `permissive_cors`, `host_header_injection` | HTTP handlers: another website may read the response with the visitor's cookies; a host the client names ends up in a link, redirect or outbound request (`probe web`) |
 | `script_in_output`, `unsafe_action`, `open_redirect`, `non_local_url` | the response breaks an output label: a script, a request the user didn't ask for, a URL off the app (§4 output labels) |
+| `weak_csp`, `unpinned_script` | `html:scripts`: the Content-Security-Policy lets scripts reach other hosts (or is missing); a script comes from another host without an `integrity` hash or from a host the grants don't list, so the code can change after the review |
 | `foreign_user_access`, `missing_owner_check` | a user id that is not the caller's goes to a host call; another user's record shows in a page (§4 identity) |
 | `write_on_safe_method`, `repeated_write`, `partial_write` | a change on GET, the same change twice, a change that stays when a later one fails (§4 effects) |
 | `ungranted_import`, `ungranted_call`, `unused_grant` | imports versus the manifest's grants |

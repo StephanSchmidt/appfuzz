@@ -691,6 +691,95 @@ app("data-local", "data attributes and an image on its own host, nothing that fi
         html(format!("<p>{n} items</p><img src=\\"/logo.png\\" alt=\\"\\"><div data-more=\\"/items?page=2\\" data-label=\\"More\\"></div>"))
     """), [], entry=SAFE_BODY)
 
+# Scripts allowed: `html:scripts` lets scripts run, from the app's origin or
+# pinned on a granted host, under a Content-Security-Policy. Text from the
+# request or the host must not break out of the string, attribute or
+# element it was put in.
+
+SCRIPTS_CSP = "default-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'"
+SCRIPTS = 'result = { body = "html:scripts" }\nsensitive_paths = ["/admin"]\ncsp = "' + SCRIPTS_CSP + '"\n'
+
+app("script-string-reflect", "escapes ?q for HTML but not for the script string it puts it in",
+    handler("""
+        let q = param(&req.query, "q").unwrap_or("");
+        let h = q.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+        html(format!("<p>Results for {h}</p><script>var q = '{h}'; document.title = q;</script>"))
+    """), [("reflection", "fail")], grants=[], entry=SCRIPTS)
+
+app("handler-reflect", "puts ?q, escaped for HTML, into an onclick handler's string",
+    handler("""
+        let q = param(&req.query, "q").unwrap_or("");
+        html(format!("<button onclick=\\"go('{}')\\">Search again</button><script src=\\"/static/search.js\\"></script>", esc(q)))
+    """), [("reflection", "fail")], grants=[], entry=SCRIPTS)
+
+app("attr-single-quote", "puts ?q into a single-quoted attribute, escaping only <, >, & and the double quote",
+    handler("""
+        let q = param(&req.query, "q").unwrap_or("");
+        let h = q.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+        html(format!("<p title='{h}'>Results</p>"))
+    """), [("reflection", "fail")], grants=[])
+
+app("noscript-breakout", "escapes quotes in item names for a title inside <noscript>, but not <",
+    handler("""
+        let _ = &req;
+        let mut out = String::from("<noscript>");
+        for it in items::all().iter().take(5) {
+            out += &format!("<p title=\\"{}\\">Turn on JavaScript</p>", it.name.replace('"', "&quot;"));
+        }
+        html(out + "</noscript>")
+    """), [("stored_reflection", "fail")], allow=["script_in_output", "broken_markup"], entry=NO_SCRIPTS)
+
+app("svg-style-breakout", "puts item names into an SVG <style> unescaped, where markup is markup",
+    handler("""
+        let _ = &req;
+        let mut out = String::from("<svg><style>");
+        for it in items::all().iter().take(5) {
+            out += &format!(".i-{} {{ fill: red }}", it.name);
+        }
+        html(out + "</style></svg>")
+    """), [("stored_reflection", "fail")], allow=["script_in_output", "broken_markup"], entry=NO_SCRIPTS)
+
+app("scripts-no-csp", "runs a script with no Content-Security-Policy to keep it on its own host",
+    handler("""
+        let _ = &req;
+        let n = items::all().len();
+        html(format!("<p id=\\"n\\">{n} items</p><script src=\\"/static/count.js\\"></script>"))
+    """), [("weak_csp", "fail")], entry='result = { body = "html:scripts" }\n')
+
+app("scripts-cdn-unpinned", "loads a library from a CDN without an integrity hash",
+    handler("""
+        let _ = &req;
+        let n = items::all().len();
+        html(format!("<p>{n} items</p><script src=\\"https://cdn.example.net/chart.js\\"></script>"))
+    """), [("unpinned_script", "fail")], entry=SCRIPTS.replace("default-src 'self';", "default-src 'self'; script-src 'self' cdn.example.net;"), hosts=["cdn.example.net"])
+
+app("scripts-ok", "data for its scripts escaped for JSON in HTML, a CSP header, its own bundle and a pinned library",
+    handler("""
+        // A JavaScript string literal that is safe in a <script> element.
+        fn js(s: &str) -> String {
+            let mut o = String::from("\\"");
+            for c in s.chars() {
+                match c {
+                    '"' | '\\\\' | '\\'' | '<' | '>' | '&' | '\\u{2028}' | '\\u{2029}' => o += &format!("\\\\u{:04x}", c as u32),
+                    c if (c as u32) < 0x20 => o += &format!("\\\\u{:04x}", c as u32),
+                    c => o.push(c),
+                }
+            }
+            o + "\\""
+        }
+        let q = param(&req.query, "q").unwrap_or("");
+        let names: Vec<String> = items::all().iter().take(20).map(|it| js(&it.name)).collect();
+        let body = format!(
+            "<p>Results for {}</p><ul id=\\"list\\"></ul>\\
+             <script>window.app = {{ q: {}, names: [{}] }};</script>\\
+             <script src=\\"https://cdn.example.net/lit.js\\" integrity=\\"sha384-oqVuAfXRKap7fdgcCY5uykM6+R9GqQ8K/uxy9rx7HNQlGYl1kPzQho1wx4JwY8wC\\" crossorigin=\\"anonymous\\"></script>\\
+             <script type=\\"module\\" src=\\"/static/app.js\\"></script>",
+            esc(q), js(q), names.join(",")
+        );
+        let csp = "default-src 'self'; script-src 'self' cdn.example.net; img-src 'self' data:; form-action 'self'; base-uri 'none'";
+        Response { status: 200, body, headers: vec![("content-type".into(), "text/html".into()), ("content-security-policy".into(), csp.into())] }
+    """), [], entry='result = { body = "html:scripts" }\nsensitive_paths = ["/admin"]\n', hosts=["cdn.example.net"])
+
 # --- Destinations -------------------------------------------------------------
 # Targets nobody asked for: written into the app, not taken from the request
 # or the host.

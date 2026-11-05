@@ -1,0 +1,11 @@
+{
+  "app": "attr-single-quote",
+  "bug": "puts ?q into a single-quoted attribute, escaping only <, >, & and the double quote",
+  "expect": [
+    {
+      "kind": "reflection",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

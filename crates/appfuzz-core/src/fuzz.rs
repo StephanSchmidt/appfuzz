@@ -787,13 +787,21 @@ impl Mutator<'_> {
                 self.pick(&ATTACKS).expect("non-empty").to_string()
             }
             _ if self.app.manifest.has_output_labels() && self.rng.random_bool(0.4) => {
-                const ATTACKS: [&str; 6] = [
+                // URLs off the app, markup, and text that ends a string
+                // or an attribute in a script, a handler or a template.
+                const ATTACKS: [&str; 12] = [
                     "//evil.example/",
                     "https://evil.example/",
                     "/\\evil.example",
                     "javascript:alert(1)",
                     "<img src=x onerror=alert(1)>",
                     "\" onmouseover=\"alert(1)",
+                    "' onmouseover='alert(1)",
+                    "';alert(1)//",
+                    "\"-alert(1)-\"",
+                    "\\';alert(1)//",
+                    "</script><script>alert(1)</script>",
+                    "${alert(1)}",
                 ];
                 self.pick(&ATTACKS).expect("non-empty").to_string()
             }

@@ -1,0 +1,11 @@
+{
+  "app": "scripts-no-csp",
+  "bug": "runs a script with no Content-Security-Policy to keep it on its own host",
+  "expect": [
+    {
+      "kind": "weak_csp",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

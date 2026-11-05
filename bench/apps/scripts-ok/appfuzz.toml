@@ -1,0 +1,24 @@
+# appfuzz bench app: scripts-ok (data for its scripts escaped for JSON in HTML, a CSP header, its own bundle and a pinned library).
+[app]
+wasm = "../../target/wasm32-wasip2/release/scripts_ok.wasm"
+name = "scripts-ok"
+
+[entry]
+export = "bench:web/handler#handle"
+request = { method = "GET", path = "/", query = [], form = [], today = "", now = "" }
+fields = { today = "clock.date", now = "clock.time" }
+output = { status = "status", body = "body", headers = "headers", body_format = "html" }
+now = "2026-11-02T10:00:00"
+result = { body = "html:scripts" }
+sensitive_paths = ["/admin"]
+
+[grants]
+imports = ["bench:web/items"]
+wasi = ["wasi:cli", "wasi:clocks", "wasi:io", "wasi:random"]
+hosts = ["cdn.example.net"]
+
+[limits]
+fuel = 200_000_000
+memory = "64MiB"
+cost_per_request = 100
+max_latency_ms = 200
