@@ -430,22 +430,59 @@ fn tail(s: &str, end: usize) -> &str {
     }
 }
 
+/// What follows each canary where the request or a host gave it, as sent
+/// and percent-decoded: the characters it can bring into a sink. A canary
+/// cut short brings none, whatever the app writes after it.
+fn source_tails(r: &RunRecord) -> BTreeMap<String, String> {
+    let mut texts = BTreeSet::new();
+    for a in &r.spec.args {
+        strings(a, &mut texts);
+    }
+    for e in &r.events {
+        if let Some(v) = &e.result {
+            strings(v, &mut texts);
+        }
+    }
+    tails_in(texts.iter().map(String::as_str))
+}
+
+fn tails_in<'a>(texts: impl Iterator<Item = &'a str>) -> BTreeMap<String, String> {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    for s in texts {
+        for c in CANARY.find_iter(s) {
+            let rest = &s[c.end()..];
+            let rest = &rest[..rest.char_indices().nth(200).map(|(i, _)| i).unwrap_or(rest.len())];
+            let t = out.entry(c.as_str().to_string()).or_default();
+            t.push_str(tail(s, c.end()));
+            t.push('\n');
+            t.push_str(tail(&crate::effects::percent_decode(rest), 0));
+            t.push('\n');
+        }
+    }
+    out
+}
+
 fn unescaped(t: &str, pat: &str) -> bool {
     t.match_indices(pat).any(|(i, _)| !t[..i].ends_with('\\'))
 }
 
 /// The finding a canary at `start..end` of `s` makes in a parameter with
-/// this label: (kind, severity, what is intact).
-fn sink_problem(label: Label, s: &str, start: usize, end: usize) -> Option<(&'static str, Severity, &'static str)> {
+/// this label: (kind, severity, what is intact). `sent` is what followed
+/// the canary where it came from ([`source_tails`]): a quote after it in
+/// the sink counts only if the request or host sent one.
+fn sink_problem(label: Label, s: &str, start: usize, end: usize, sent: &str) -> Option<(&'static str, Severity, &'static str)> {
     let t = tail(s, end);
+    let quote = sent.contains('\'');
     match label {
-        Label::Sql if t.contains("''") || t.contains("\\'") => Some(("escaped_by_hand", Severity::Warn, "quotes escaped by hand")),
-        Label::Sql if t.contains('\'') => Some(("sql_injection", Severity::Fail, "a quote")),
-        Label::Path if t.contains("../") => Some(("path_traversal", Severity::Fail, "../")),
-        Label::Shell if t.contains("'\\''") => Some(("escaped_by_hand", Severity::Warn, "quotes escaped by hand")),
-        Label::Shell if unescaped(t, ";") || unescaped(t, "$(") => Some(("command_injection", Severity::Fail, "; and $(")),
-        Label::Html if t.starts_with("<i>") => Some(("html_injection", Severity::Fail, "markup")),
-        Label::Regex if unescaped(t, "(") => Some(("regex_injection", Severity::Warn, "(")),
+        Label::Sql if quote && (t.contains("''") || t.contains("\\'")) => Some(("escaped_by_hand", Severity::Warn, "quotes escaped by hand")),
+        Label::Sql if quote && t.contains('\'') => Some(("sql_injection", Severity::Fail, "a quote")),
+        Label::Path if sent.contains("../") && t.contains("../") => Some(("path_traversal", Severity::Fail, "../")),
+        Label::Shell if quote && t.contains("'\\''") => Some(("escaped_by_hand", Severity::Warn, "quotes escaped by hand")),
+        Label::Shell if (sent.contains(';') && unescaped(t, ";")) || (sent.contains("$(") && unescaped(t, "$(")) => {
+            Some(("command_injection", Severity::Fail, "; and $("))
+        }
+        Label::Html if sent.contains("<i>") && t.starts_with("<i>") => Some(("html_injection", Severity::Fail, "markup")),
+        Label::Regex if sent.contains('(') && unescaped(t, "(") => Some(("regex_injection", Severity::Warn, "(")),
         Label::Url => {
             let auth_end = match s.find("://") {
                 None => 0,
@@ -460,7 +497,7 @@ fn sink_problem(label: Label, s: &str, start: usize, end: usize) -> Option<(&'st
             let path_end = s[auth_end..].find(['?', '#']).map_or(s.len(), |j| auth_end + j);
             if host {
                 Some(("ssrf", Severity::Fail, "the scheme or host"))
-            } else if start < path_end && t.contains("../") {
+            } else if start < path_end && sent.contains("../") && t.contains("../") {
                 Some(("url_path_injection", Severity::Fail, "../"))
             } else {
                 None
@@ -478,6 +515,7 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     if src.is_empty() {
         return out;
     }
+    let tails = source_tails(r);
     let trusted = trusted_html(r, m);
     for e in &r.events {
         for (p, v) in &e.args {
@@ -490,7 +528,8 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                     if label == Label::Html && trusted.contains(c.as_str()) {
                         continue;
                     }
-                    let Some((kind, mut sev, intact)) = sink_problem(label, &s, c.start(), c.end()) else { continue };
+                    let sent = tails.get(c.as_str()).map_or("", String::as_str);
+                    let Some((kind, mut sev, intact)) = sink_problem(label, &s, c.start(), c.end(), sent) else { continue };
                     // The platform refused the request (Spin's
                     // allowed_outbound_hosts): only the allowed hosts are
                     // within reach, and none when nothing is allowed.
@@ -994,30 +1033,42 @@ mod tests {
 
     #[test]
     fn sink_tails() {
+        const FULL: &str = "<i>'\"../;$(x)";
         let c = "cnry12ab7";
         let sql = format!("SELECT * FROM t WHERE n = '{c}<i>'\"../;$(x)' AND x = 'y'");
         let s = sql.find(c).unwrap();
-        assert_eq!(sink_problem(Label::Sql, &sql, s, s + c.len()).unwrap().0, "sql_injection");
+        assert_eq!(sink_problem(Label::Sql, &sql, s, s + c.len(), FULL).unwrap().0, "sql_injection");
         let esc = format!("n = '{c}<i>''\"../;$(x)'");
         let s = esc.find(c).unwrap();
-        assert_eq!(sink_problem(Label::Sql, &esc, s, s + c.len()).unwrap().0, "escaped_by_hand");
+        assert_eq!(sink_problem(Label::Sql, &esc, s, s + c.len(), FULL).unwrap().0, "escaped_by_hand");
         let url = format!("https://api.example/items?q={c}<i>'\"../;$(x)");
         let s = url.find(c).unwrap();
-        assert!(sink_problem(Label::Url, &url, s, s + c.len()).is_none());
+        assert!(sink_problem(Label::Url, &url, s, s + c.len(), FULL).is_none());
         let url = format!("https://{c}<i>'\"../;$(x)/items");
         let s = url.find(c).unwrap();
-        assert_eq!(sink_problem(Label::Url, &url, s, s + c.len()).unwrap().0, "ssrf");
+        assert_eq!(sink_problem(Label::Url, &url, s, s + c.len(), FULL).unwrap().0, "ssrf");
         let url = format!("https://api.example/items/{c}<i>'\"../;$(x)?full=1");
         let s = url.find(c).unwrap();
-        assert_eq!(sink_problem(Label::Url, &url, s, s + c.len()).unwrap().0, "url_path_injection");
+        assert_eq!(sink_problem(Label::Url, &url, s, s + c.len(), FULL).unwrap().0, "url_path_injection");
         let url = format!("https://api.example/items/{c}%3Ci%3E'%22..%2F;$(x)");
         let s = url.find(c).unwrap();
-        assert!(sink_problem(Label::Url, &url, s, s + c.len()).is_none());
+        assert!(sink_problem(Label::Url, &url, s, s + c.len(), FULL).is_none());
         let sh = format!("grep '{c}<i>'\\''\"../;$(x)' f");
         let s = sh.find(c).unwrap();
-        assert_eq!(sink_problem(Label::Shell, &sh, s, s + c.len()).unwrap().0, "escaped_by_hand");
+        assert_eq!(sink_problem(Label::Shell, &sh, s, s + c.len(), FULL).unwrap().0, "escaped_by_hand");
         let re = format!("{c}<i>'\"\\.\\./;\\$\\(x\\)");
-        assert!(sink_problem(Label::Regex, &re, 0, c.len()).is_none());
+        assert!(sink_problem(Label::Regex, &re, 0, c.len(), FULL).is_none());
+        // The request's canary ended there: the quote after it is the app's.
+        let cut = format!("SELECT name FROM items WHERE name = 'https://{c}'");
+        let s = cut.find(c).unwrap();
+        assert!(sink_problem(Label::Sql, &cut, s, s + c.len(), "").is_none());
+        assert!(!tails_in(["https://cnry12ab7"].into_iter())[c].contains('\''));
+        // What the request sent percent-encoded, an app may decode: it counts.
+        let sent = tails_in(["/search?q=cnry12ab7%3Ci%3E%27%22..%2F%3B%24%28x%29&page=2"].into_iter());
+        assert!(["'", "../", ";", "$("].iter().all(|p| sent[c].contains(p)), "{:?}", sent[c]);
+        let decoded = format!("SELECT name FROM items WHERE name = '{c}<i>'\"../;$(x)'");
+        let s = decoded.find(c).unwrap();
+        assert_eq!(sink_problem(Label::Sql, &decoded, s, s + c.len(), &sent[c]).unwrap().0, "sql_injection");
     }
 
     #[test]
@@ -1132,6 +1183,40 @@ mod tests {
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].detail["place"], "the result");
         assert_eq!(f[0].detail["at"], "ok.rows[1].contact");
+    }
+
+    /// A run of `x:y/db#query` with this SQL, for a request with `q`.
+    fn sql_run(q: &str, sql: &str) -> (RunRecord, Manifest) {
+        let mut r = pii_run(json!({ "q": q }), &[], json!(0), "");
+        r.events[0].func = "x:y/db#query".into();
+        r.events[0].result = Some(json!([]));
+        r.events[0].args.insert("sql".into(), json!(sql));
+        let m = toml::from_str(
+            r#"
+            [app]
+            wasm = "a.wasm"
+            [entry]
+            export = "h"
+            [functions."x:y/db#query"]
+            params = { sql = "sql" }
+            "#,
+        )
+        .unwrap();
+        (r, m)
+    }
+
+    #[test]
+    fn sql_injection_names_the_field_and_needs_a_quote_sent() {
+        let canary = "cnry12ab7<i>'\"../;$(x)";
+        let (r, m) = sql_run(canary, &format!("SELECT * FROM t WHERE n = '{canary}'"));
+        let f: Vec<_> = sinks(&r, &m);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].kind, "sql_injection");
+        assert!(f[0].title.contains("the request field q goes into the SQL text"), "{}", f[0].title);
+        // Only the canary arrived (the rest cut off on the way): the quote
+        // after it is the app's own.
+        let (r, m) = sql_run("cnry12ab7", "SELECT * FROM t WHERE n = 'cnry12ab7'");
+        assert!(sinks(&r, &m).is_empty());
     }
 
     #[test]
