@@ -760,39 +760,48 @@ fn nested(app: &App, base: &RunSpec, reports: &[ScaleReport], only: Option<&str>
             }
         }
     }
-    let specs: Vec<Option<RunSpec>> = pairs
-        .iter()
-        .flat_map(|(_, a, b)| [(2, 2), (2, 8), (8, 2), (8, 8)].map(|(x, y)| apply(app, base, a, x).and_then(|s| apply(app, &s, b, y)).ok()))
-        .collect();
+    let specs: Vec<Option<RunSpec>> = pairs.iter().flat_map(|(_, a, b)| nested_specs(app, base, a, b)).collect();
     let recs = par::map(&specs, |s| s.as_ref().map(run));
-    let mut out = Vec::new();
-    let mut findings = Vec::new();
-    for ((f, a, b), rs) in pairs.iter().zip(recs.chunks(4)) {
-        let Some(rs) = rs.iter().map(|r| r.as_ref().filter(|r| r.outcome.kind == OutcomeKind::Ok)).collect::<Option<Vec<_>>>() else { continue };
-        let c: Vec<u32> = rs.iter().map(|r| r.call_counts().into_iter().find(|(g, _)| g == f).map_or(0, |(_, n)| n)).collect();
-        let d = (c[3] as f64 - c[2] as f64 - c[1] as f64 + c[0] as f64) / 36.0;
-        if d < NESTED_MIN {
-            continue;
-        }
-        let n = Nested {
-            func: f.to_string(),
-            outer: (*a).clone(),
-            inner: (*b).clone(),
-            calls: [c[0], c[1], c[2], c[3]],
-            interaction: (d * 100.0).round() / 100.0,
-            run: rs[3].id.clone(),
-        };
-        findings.push(Finding::new(
-            "nested_fan_out",
-            &format!("{}\0{f}\0{a:?}\0{b:?}", base.export),
-            Severity::Warn,
-            format!("{f} is called for each pair of elements: {} × {} (8 × 8 gives {} calls)", a.describe(), b.describe(), c[3]),
-            serde_json::json!({"func": f, "knobs": [a, b], "calls_2x2": c[0], "calls_2x8": c[1], "calls_8x2": c[2], "calls_8x8": c[3], "interaction": n.interaction}),
-            Some(&n.run),
-        ));
-        out.push(n);
+    pairs.iter().zip(recs.chunks(4)).filter_map(|((f, a, b), rs)| nested_finding(&base.export, f, a, b, rs)).unzip()
+}
+
+/// The four runs a nesting is measured on: `a` and `b` at 2 and 8.
+fn nested_specs(app: &App, base: &RunSpec, a: &Knob, b: &Knob) -> [Option<RunSpec>; 4] {
+    [(2, 2), (2, 8), (8, 2), (8, 8)].map(|(x, y)| apply(app, base, a, x).and_then(|s| apply(app, &s, b, y)).ok())
+}
+
+/// The nested fan-out the four runs show, if calls to `f` grow with the
+/// product of `a` and `b`.
+fn nested_finding(export: &str, f: &str, a: &Knob, b: &Knob, rs: &[Option<RunRecord>]) -> Option<(Nested, Finding)> {
+    let rs = rs.iter().map(|r| r.as_ref().filter(|r| r.outcome.kind == OutcomeKind::Ok)).collect::<Option<Vec<_>>>()?;
+    let c: Vec<u32> = rs.iter().map(|r| r.call_counts().into_iter().find(|(g, _)| g == f).map_or(0, |(_, n)| n)).collect();
+    let d = (c[3] as f64 - c[2] as f64 - c[1] as f64 + c[0] as f64) / 36.0;
+    if d < NESTED_MIN {
+        return None;
     }
-    (out, findings)
+    let n = Nested {
+        func: f.to_string(),
+        outer: a.clone(),
+        inner: b.clone(),
+        calls: [c[0], c[1], c[2], c[3]],
+        interaction: (d * 100.0).round() / 100.0,
+        run: rs[3].id.clone(),
+    };
+    let finding = Finding::new(
+        "nested_fan_out",
+        &format!("{export}\0{f}\0{a:?}\0{b:?}"),
+        Severity::Warn,
+        format!("{f} is called for each pair of elements: {} × {} (8 × 8 gives {} calls)", a.describe(), b.describe(), c[3]),
+        serde_json::json!({"func": f, "knobs": [a, b], "calls_2x2": c[0], "calls_2x8": c[1], "calls_8x2": c[2], "calls_8x8": c[3], "interaction": n.interaction}),
+        Some(&n.run),
+    );
+    Some((n, finding))
+}
+
+/// A nested fan-out measured again from `base` (to confirm it).
+pub fn nested_again(app: &App, base: &RunSpec, f: &str, a: &Knob, b: &Knob, run: Runner) -> Option<Finding> {
+    let recs: Vec<Option<RunRecord>> = nested_specs(app, base, a, b).iter().map(|s| s.as_ref().map(run)).collect();
+    nested_finding(&base.export, f, a, b, &recs).map(|(_, f)| f)
 }
 
 /// A mode of the app, found by trying values from the binary: a request

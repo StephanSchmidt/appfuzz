@@ -174,6 +174,44 @@ fn fault_fixture(crash: bool) -> Fixture {
     f
 }
 
+/// An app that calls `db#get` x × y times (each at most 16).
+fn nested_fixture() -> Fixture {
+    let f = Fixture::new(false);
+    let wit = "package test:workflow; interface db { get: func(id: u32) -> u32; } world app { import db; record req { x: u32, y: u32 } export run: func(r: req) -> u32; }";
+    let wat = r#"(module (import "test:workflow/db" "get" (func $get (param i32) (result i32)))
+      (memory (export "memory") 1)
+      (func (export "run") (param $x i32) (param $y i32) (result i32) (local $i i32) (local $n i32)
+        (if (i32.gt_u (local.get $x) (i32.const 16)) (then (local.set $x (i32.const 16))))
+        (if (i32.gt_u (local.get $y) (i32.const 16)) (then (local.set $y (i32.const 16))))
+        (local.set $n (i32.mul (local.get $x) (local.get $y)))
+        (block $done (loop $next
+          (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+          (drop (call $get (local.get $i)))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $next)))
+        (i32.const 0)))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    f.edit("\nrequest = 1\n", "\nrequest = { x = 1, y = 1 }\n");
+    f
+}
+
+#[test]
+fn nested_fan_out_is_confirmed_by_scaling_both_fields() {
+    let f = nested_fixture();
+    let (_, amplify) = f.cli(&["amplify"]);
+    let (_, found) = f.cli(&["findings"]);
+    let nested =
+        found["findings"].as_array().unwrap_or_else(|| panic!("{found}")).iter().find(|x| x["kind"] == "nested_fan_out").unwrap_or_else(|| panic!("{amplify}"));
+    let (code, confirmed) = f.cli(&["confirm", nested["id"].as_str().unwrap()]);
+    assert_eq!(code, 0, "{confirmed}");
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    // The case replays: comparing runs from it shows the finding again.
+    let case = confirmed["case"].as_str().unwrap();
+    let (code, replayed) = f.cli(&["replay", case]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true, "{replayed}");
+}
+
 #[test]
 fn fault_probe_budgets_filter_and_replay_late_crashes_and_ignored_errors() {
     let plan = r#"{"test:workflow/db#save":{"return":{"ok":1}}}"#;

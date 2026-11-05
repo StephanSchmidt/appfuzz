@@ -119,6 +119,9 @@ pub enum Across {
     /// Turn a knob over sizes (`appfuzz scale`).
     /// `context`: the mode it was turned in, which the spec sets.
     Scale { knob: Knob, sizes: Vec<u64>, context: Option<String> },
+    /// Turn two knobs together: calls to `func` for each pair of elements
+    /// (`appfuzz amplify`).
+    Nested { func: String, outer: Knob, inner: Knob },
     /// Run a variant of the run and compare (`appfuzz probe pairs`).
     Pair { change: Change, func: Option<String> },
     /// Forged credentials, a secret's prefixes or other random seeds
@@ -135,6 +138,12 @@ impl Across {
         if let Some(fault) = f.detail.get("fault") {
             return serde_json::from_value(fault.clone()).ok().map(|fault| Across::Fault { fault });
         }
+        if let (Some(func), Some([outer, inner])) =
+            (f.detail.get("func").and_then(Value::as_str), f.detail.get("knobs").and_then(Value::as_array).map(Vec::as_slice))
+        {
+            let (outer, inner) = (serde_json::from_value(outer.clone()).ok()?, serde_json::from_value(inner.clone()).ok()?);
+            return Some(Across::Nested { func: func.to_string(), outer, inner });
+        }
         if let Some(k) = f.detail.get("knob") {
             let knob: Knob = serde_json::from_value(k.clone()).ok()?;
             let sizes = scale::default_sizes(&knob);
@@ -150,7 +159,7 @@ impl Across {
     pub fn start_run<'a>(&self, f: &'a Finding) -> Option<&'a str> {
         match self {
             Across::Pair { .. } | Across::Fault { .. } | Across::Auth { .. } => f.detail.get("base_run").and_then(Value::as_str),
-            Across::Scale { .. } => f.run.as_deref(),
+            Across::Scale { .. } | Across::Nested { .. } => f.run.as_deref(),
         }
     }
 
@@ -181,6 +190,7 @@ impl Across {
                     })
                     .find(|f| f.id == id)
             }
+            Across::Nested { func, outer, inner } => scale::nested_again(app, spec, func, outer, inner, run).filter(|f| f.id == id),
             Across::Pair { change, func } => {
                 let r = run(spec);
                 let vs: Vec<_> = metamorphic::variants(app, &r).into_iter().filter(|v| v.change == *change && v.func == *func).collect();
@@ -195,6 +205,7 @@ impl Across {
         match self {
             Across::Scale { sizes, .. } => sizes.len().max(1) as u32,
             Across::Pair { .. } | Across::Fault { .. } => 2,
+            Across::Nested { .. } => 4,
             Across::Auth { auth } => auth.runs(),
         }
     }
@@ -203,6 +214,7 @@ impl Across {
         match self {
             Across::Fault { fault } => json!({"fault": fault}),
             Across::Scale { knob, sizes, context } => json!({"scale": knob, "sizes": sizes, "context": context}),
+            Across::Nested { func, outer, inner } => json!({"nested": [outer, inner], "func": func}),
             Across::Pair { change, func } => json!({"variant": {"change": change, "func": func}}),
             Across::Auth { auth } => json!({"auth": auth}),
         }
