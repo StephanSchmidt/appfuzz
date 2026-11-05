@@ -15,7 +15,12 @@ fn handle(req: Request) -> anyhow::Result<impl IntoResponse> {
     let csrf: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     let cookie = format!("csrf={csrf}; Path=/; Secure; HttpOnly; SameSite=Strict");
     if token.is_empty() || !same(given.as_bytes(), token.as_bytes()) {
-        return Ok(Response::builder().status(401).header("content-type", "application/json").header("set-cookie", cookie).body("{\"error\":\"admin only\"}").build());
+        return Ok(Response::builder()
+            .status(401)
+            .header("content-type", "application/json")
+            .header("set-cookie", cookie)
+            .body("{\"error\":\"admin only\"}")
+            .build());
     }
     Ok(Response::builder().status(200).header("content-type", "application/json").header("set-cookie", cookie).body("{\"users\":3}").build())
 }

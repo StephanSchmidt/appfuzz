@@ -13,5 +13,6 @@ extend-ignore-re = ['''[A-Za-z0-9+/]{40,}={0,2}''']
 
 [default.extend-words]
 retrun = "retrun" # test: a misspelled plan key must be rejected
+qeury = "qeury"   # docs and test: a misspelt function name is an error
 caf = "caf"       # test: "caf\u{e9}"
 wdth = "wdth"     # CSS font-variation axis

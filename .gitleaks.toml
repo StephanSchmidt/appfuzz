@@ -7,3 +7,11 @@ useDefault = true
 description = "fake keys in unit tests"
 regexTarget = "match"
 regexes = ['''sk_live_0123456789''']
+
+[[allowlists]]
+description = "forged JWTs that probe auth sends (unsigned, wrong signature)"
+regexTarget = "match"
+regexes = [
+  '''eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0\.eyJzdWIiOiIxIiwibmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiYWRtaW4iOnRydWUsImlhdCI6MTc2NzIyNTYwMCwiZXhwIjo0MTAyNDQ0ODAwfQ\.''',
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxIiwibmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiYWRtaW4iOnRydWUsImlhdCI6MTc2NzIyNTYwMCwiZXhwIjo0MTAyNDQ0ODAwfQ\.YWZ6LWZvcmdlZC1zaWduYXR1cmUtMDAwMDAwMDAwMA''',
+]
