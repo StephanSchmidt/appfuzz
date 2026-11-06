@@ -18,7 +18,7 @@
 !/_typos.toml
 !/.gitleaks.toml
 !/crates/
-!/website/
+!/install.sh
 !/demos/
 !/browser/
 /browser/js/dist/

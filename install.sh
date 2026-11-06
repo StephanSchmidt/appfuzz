@@ -9,7 +9,7 @@
 #   APPFUZZ_VERSION=v0.5.0   install this release instead of the latest
 #   APPFUZZ_INSTALL_DIR=dir  install here instead
 #
-# Source: https://github.com/StephanSchmidt/appfuzz/blob/main/website/install.sh
+# Source: https://github.com/StephanSchmidt/appfuzz/blob/main/install.sh
 
 # Everything is in main(), which runs on the last line, so a download cut
 # short never runs half a script.

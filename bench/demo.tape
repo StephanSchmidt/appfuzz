@@ -1,8 +1,9 @@
 # The terminal recording on appfuzz.dev and in the README.
-# Render with bench/record.sh, which serves the demo apps locally.
-Output website/demo.gif
-Output website/demo.webm
-Output website/demo.mp4
+# Render with bench/record.sh, which serves the demo apps locally and
+# writes to its output directory (OUT).
+Output OUT/demo.gif
+Output OUT/demo.webm
+Output OUT/demo.mp4
 
 Set Shell bash
 Set FontSize 15

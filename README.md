@@ -27,7 +27,7 @@ curl -fsSL https://appfuzz.dev/install.sh | sh     # or: brew install stephansch
 appfuzz --human https://appfuzz.dev/demo/chatty.wasm
 ```
 
-![appfuzz reviewing the chatty demo: FAIL, an n+1 query and a cost over budget](website/demo.gif)
+![appfuzz reviewing the chatty demo: FAIL, an n+1 query and a cost over budget](https://appfuzz.dev/demo.gif)
 
 That downloads a small demo app with a bug and reviews it. Four more are on
 [appfuzz.dev/demo](https://appfuzz.dev/demo/): an XSS, two crashes and one
@@ -91,7 +91,7 @@ On Linux (Alpine too) or macOS, x86_64 or arm64:
 curl -fsSL https://appfuzz.dev/install.sh | sh
 ```
 
-The script ([website/install.sh](website/install.sh)) downloads the binary
+The script ([install.sh](install.sh)) downloads the binary
 from the latest [GitHub release](https://github.com/StephanSchmidt/appfuzz/releases),
 checks its SHA-256 and that it runs, and puts it in `~/.local/bin`
 (`/usr/local/bin` as root, for example in a container). Alpine, and Linux
@@ -586,7 +586,7 @@ adds a feature, and the review refuses it.
 | `bench/apps` | 91 small apps, each with one bad pattern (or none) and its expected findings |
 | `bench/lang` | the same app in Zig, TypeScript, JavaScript, Go, C# and Python |
 | `demos/fastly-hello` | Fastly's Rust starter kit, with a `Makefile` to build, serve and deploy it |
-| `website` | appfuzz.dev and its `install.sh` |
+| `install.sh` | the installer behind `curl -fsSL https://appfuzz.dev/install.sh \| sh` |
 
 `cargo test` runs the unit, harness and CLI tests. The bench builds every
 app in `bench/apps` and checks that `review` finds exactly the expected

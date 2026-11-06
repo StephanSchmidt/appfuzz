@@ -6,8 +6,6 @@ extend-exclude = [
     # Vendored minified bundles the clean bench apps serve (React build, htmx).
     "bench/apps/clean-react/src/index.js",
     "bench/apps/clean-htmx/src/htmx.min.js",
-    # Slides use German class names (titel, foto, vollbild).
-    "website/appos/",
 ]
 
 [default]

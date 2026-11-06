@@ -1,7 +1,7 @@
 name: release
 
 # Push a tag like v0.1.0 to build the binaries and publish a GitHub release.
-# website/install.sh downloads appfuzz-<target>.tar.gz and its .sha256 from it.
+# install.sh downloads appfuzz-<target>.tar.gz and its .sha256 from it.
 on:
   push:
     tags: ["v*"]
@@ -18,7 +18,7 @@ jobs:
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
           # Static builds for Alpine and for Linux older than the glibc builds
-          # need; website/install.sh picks them.
+          # need; install.sh picks them.
           - { target: x86_64-unknown-linux-musl, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04-arm }
           - { target: aarch64-apple-darwin, os: macos-15 }
@@ -65,7 +65,7 @@ jobs:
           merge-multiple: true
       # The installer is a release asset too, so a release can be installed
       # without the website.
-      - run: cp website/install.sh dist/
+      - run: cp install.sh dist/
       - env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
