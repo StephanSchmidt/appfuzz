@@ -198,7 +198,8 @@ pub struct StageStat {
 #[derive(Debug, Clone, Serialize)]
 pub struct Maximum {
     pub metric: String,
-    pub value: u64,
+    #[serde(serialize_with = "crate::wide::serialize")]
+    pub value: u128,
     pub run: String,
 }
 
@@ -403,25 +404,25 @@ pub fn features(r: &RunRecord, st: &Statics, app: &App) -> BTreeSet<String> {
 }
 
 /// Resource measures of a run; the corpus keeps a new maximum of any.
-pub fn metrics(r: &RunRecord) -> Vec<(String, u64)> {
-    let mut m: Vec<(String, u64)> = r.call_counts().into_iter().map(|(f, n)| (format!("calls {f}"), n as u64)).collect();
+pub fn metrics(r: &RunRecord) -> Vec<(String, u128)> {
+    let mut m: Vec<(String, u128)> = r.call_counts().into_iter().map(|(f, n)| (format!("calls {f}"), u128::from(n))).collect();
     let arg_bytes: usize = r.events.iter().map(|e| crate::value::json_len(&e.args)).sum();
     let out_bytes = r.result.as_ref().map(crate::value::json_len).unwrap_or(0);
     let depth = r.events.iter().map(|e| e.stack.len()).max().unwrap_or(0);
     m.extend([
-        ("fuel".to_string(), r.totals.fuel),
-        ("peak_memory".into(), r.totals.peak_memory),
-        ("output_bytes".into(), out_bytes as u64),
-        ("host_arg_bytes".into(), arg_bytes as u64),
-        ("virtual_ns".into(), r.totals.virtual_ns),
+        ("fuel".to_string(), u128::from(r.totals.fuel)),
+        ("peak_memory".into(), u128::from(r.totals.peak_memory)),
+        ("output_bytes".into(), out_bytes as u128),
+        ("host_arg_bytes".into(), arg_bytes as u128),
+        ("virtual_ns".into(), u128::from(r.totals.virtual_ns)),
         ("cost".into(), r.totals.cost),
-        ("call_depth".into(), depth as u64),
+        ("call_depth".into(), depth as u128),
     ]);
     m
 }
 
 /// A new maximum must beat the old one by 5 % (and by at least 1).
-fn beats(new: u64, old: u64) -> bool {
+fn beats(new: u128, old: u128) -> bool {
     new > old && new - old >= (old / 20).max(1)
 }
 
@@ -432,7 +433,7 @@ struct State {
     picked: Vec<u32>,
     features: BTreeSet<String>,
     /// metric → (value, run id of the entry holding it).
-    maxima: BTreeMap<String, (u64, String)>,
+    maxima: BTreeMap<String, (u128, String)>,
     stages: BTreeMap<Stage, StageStat>,
     known: BTreeSet<String>,
     new_findings: Vec<Finding>,
@@ -460,7 +461,7 @@ struct Executed {
     r: Arc<RunRecord>,
     findings: Vec<Finding>,
     features: BTreeSet<String>,
-    metrics: Vec<(String, u64)>,
+    metrics: Vec<(String, u128)>,
 }
 
 /// The unlocked half of an evaluation: run, detectors, features.
@@ -621,7 +622,8 @@ impl State {
         if self.corpus.len() <= self.max_corpus {
             return;
         }
-        let holders: BTreeSet<&String> = self.maxima.values().chain(self.comparison_progress.values()).map(|(_, r)| r).chain(self.assert_holders()).collect();
+        let holders: BTreeSet<&String> =
+            self.maxima.values().map(|(_, r)| r).chain(self.comparison_progress.values().map(|(_, r)| r)).chain(self.assert_holders()).collect();
         if let Some(i) = (1..self.corpus.len()).find(|&i| !holders.contains(&self.corpus[i].run)) {
             self.corpus.remove(i);
             self.picked.remove(i);
@@ -655,7 +657,8 @@ impl State {
 
     fn pick_parent(&mut self, rng: &mut StdRng) -> usize {
         let holders: Vec<usize> = {
-            let h: BTreeSet<&String> = self.maxima.values().chain(self.comparison_progress.values()).map(|(_, r)| r).chain(self.assert_holders()).collect();
+            let h: BTreeSet<&String> =
+                self.maxima.values().map(|(_, r)| r).chain(self.comparison_progress.values().map(|(_, r)| r)).chain(self.assert_holders()).collect();
             (0..self.corpus.len()).filter(|i| h.contains(&self.corpus[*i].run)).collect()
         };
         // Run time in ms, bucketed by powers of two: a 4 s input should not

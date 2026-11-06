@@ -641,6 +641,11 @@ fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             add(i, "the guest error".into(), Severity::Fail, json!({}));
         }
     }
+    if let Some(text) = r.rejected_output_text() {
+        for i in find.hits(&text) {
+            add(i, "the rejected output".into(), Severity::Fail, json!({}));
+        }
+    }
     let mut texts = Vec::new();
     for e in &r.events {
         for (p, a) in &e.args {
@@ -1146,6 +1151,8 @@ mod tests {
             totals: Totals::default(),
             events: vec![call],
             guest_error: None,
+            rejected_output: None,
+            memory_limit_hit: false,
             capture_limited: false,
             stdout: stdout.into(),
             stderr: String::new(),

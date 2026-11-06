@@ -261,6 +261,8 @@ mod tests {
             totals: Totals::default(),
             events,
             guest_error: None,
+            rejected_output: None,
+            memory_limit_hit: false,
             capture_limited: false,
             stdout: String::new(),
             stderr: String::new(),

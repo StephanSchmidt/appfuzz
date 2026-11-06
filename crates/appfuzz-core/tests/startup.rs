@@ -78,6 +78,7 @@ fn initial_memory_above_the_run_cap_is_an_app_memory_failure() {
     spec.memory = 0;
     let run = app.run(&spec);
     assert_eq!(run.outcome.kind, OutcomeKind::OutOfMemory, "{:?}", run.outcome);
+    assert!(run.memory_limit_hit);
     assert_eq!(run.totals.peak_memory, 0);
 }
 

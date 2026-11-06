@@ -48,6 +48,90 @@ fn runtime_memory_cap_applies_to_the_sum_of_memories() {
 }
 
 #[test]
+fn a_handled_growth_denial_does_not_relabel_an_unrelated_unreachable() {
+    let app = app(
+        r#"(component
+        (core module $m (memory 1 3)
+            (func $bug unreachable)
+            (func (export "run") (result i32)
+                (if (i32.ne (memory.grow (i32.const 1)) (i32.const -1)) (then unreachable))
+                (call $bug) (i32.const 0)))
+        (core instance $m (instantiate $m))
+        (func (export "run") (result u32) (canon lift (core func $m "run"))))"#,
+        4 * PAGE,
+    );
+    let mut spec = app.spec(app.export("run").unwrap(), vec![], Plan::default(), 1);
+    spec.memory = PAGE;
+    let run = app.run(&spec);
+    assert_eq!(run.outcome.kind, OutcomeKind::Unreachable, "{:?}", run.outcome);
+    assert!(run.memory_limit_hit);
+    let findings = detect::per_run(&run, &app.manifest);
+    let crash = findings.iter().find(|f| f.kind == "crash").unwrap();
+    assert_eq!(crash.detail["outcome"], "unreachable");
+    assert_eq!(crash.detail["memory_limit_hit"], true);
+    assert_eq!(run.totals.peak_memory, PAGE);
+}
+
+#[test]
+fn a_handled_growth_denial_does_not_relabel_a_wasi_exit_error() {
+    let app = app(
+        r#"(component
+        (import "wasi:cli/exit@0.2.12" (instance $exit
+            (type $status (result)) (export "exit" (func (param "status" $status)))))
+        (core func $exit (canon lower (func $exit "exit")))
+        (core module $m (import "host" "exit" (func $exit (param i32))) (memory 1 3)
+            (func (export "run") (result i32)
+                (if (i32.ne (memory.grow (i32.const 1)) (i32.const -1)) (then unreachable))
+                (call $exit (i32.const 1)) (i32.const 0)))
+        (core instance $m (instantiate $m (with "host" (instance (export "exit" (func $exit))))))
+        (func (export "run") (result u32) (canon lift (core func $m "run"))))"#,
+        4 * PAGE,
+    );
+    let mut spec = app.spec(app.export("run").unwrap(), vec![], Plan::default(), 1);
+    spec.memory = PAGE;
+    let run = app.run(&spec);
+    assert_eq!(run.outcome.kind, OutcomeKind::Trap, "{:?}", run.outcome);
+    assert!(run.memory_limit_hit);
+    assert!(run.outcome.message.unwrap().contains("exit"));
+    assert_eq!(run.totals.peak_memory, PAGE);
+}
+
+#[test]
+fn handled_memory_limits_are_evidence_without_making_success_a_failure() {
+    let app = app(
+        r#"(component
+        (core module $m (memory 0 3)
+            (func (export "run") (result i32)
+                (if (i32.ne (memory.grow (i32.const 1)) (i32.const -1)) (then unreachable))
+                (i32.const 7)))
+        (core instance $m (instantiate $m))
+        (func (export "run") (result u32) (canon lift (core func $m "run"))))"#,
+        PAGE,
+    );
+    let mut spec = app.spec(app.export("run").unwrap(), vec![], Plan::default(), 1);
+    spec.memory = 0;
+    let run = app.run(&spec);
+    assert_eq!(run.outcome.kind, OutcomeKind::Ok, "{:?}", run.outcome);
+    assert_eq!(run.result, Some(json!(7)));
+    assert!(run.memory_limit_hit);
+    assert_eq!(run.totals.peak_memory, 0);
+    assert!(!detect::per_run(&run, &app.manifest).iter().any(|f| f.severity == detect::Severity::Fail));
+    let trace: appfuzz_core::envelope::Trace = serde_json::from_value(serde_json::to_value(&run).unwrap()).unwrap();
+    assert!(trace.to_record().memory_limit_hit);
+    assert_eq!(trace.to_record().outcome.kind, OutcomeKind::Ok);
+
+    let ordinary = app.run(&app.spec(app.export("run").unwrap(), vec![], Plan::default(), 1));
+    // The assertion above deliberately traps when growth is allowed. It must
+    // remain an ordinary unreachable, with no memory-cap evidence attached.
+    assert_eq!(ordinary.outcome.kind, OutcomeKind::Unreachable);
+    assert!(!ordinary.memory_limit_hit);
+    let mut serialized = serde_json::to_value(&ordinary).unwrap();
+    assert!(serialized.get("memory_limit_hit").is_none());
+    serialized.as_object_mut().unwrap().remove("memory_limit_hit");
+    assert!(!serde_json::from_value::<appfuzz_core::record::RunRecord>(serialized).unwrap().memory_limit_hit);
+}
+
+#[test]
 fn failed_growth_past_the_memory_maximum_does_not_inflate_peak_usage() {
     let app = app(
         r#"(component
@@ -62,6 +146,7 @@ fn failed_growth_past_the_memory_maximum_does_not_inflate_peak_usage() {
     assert_eq!(run.result, Some(json!(1)));
     assert_eq!(run.totals.peak_memory, PAGE);
     assert!(!detect::per_run(&run, &app.manifest).iter().any(|f| f.kind == "over_budget"));
+    assert!(!run.memory_limit_hit, "the module's declared maximum is separate from the run's memory cap");
 }
 
 #[test]

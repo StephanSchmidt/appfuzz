@@ -51,6 +51,7 @@ fn plugin_input_cannot_exceed_the_run_memory_cap() {
     spec.memory = KERNEL_MEMORY;
     let run = app.run(&spec);
     assert_eq!(run.outcome.kind, OutcomeKind::OutOfMemory, "{:?}", run.outcome);
+    assert!(run.memory_limit_hit);
     assert_eq!(run.totals.peak_memory, KERNEL_MEMORY);
 }
 

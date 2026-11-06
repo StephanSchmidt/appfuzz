@@ -8,11 +8,12 @@
 //!   blocks (wasmtime's channel blocks the guest when nobody drains it, and a
 //!   drain task would make runs depend on thread timing).
 //! - `outgoing-handler.handle` only records the request. The simulated host
-//!   call happens when the guest first looks at the response
-//!   (`future-incoming-response.subscribe` or `.get`), because SDKs (wstd,
-//!   Spin) write the request body after `handle`. A request the guest never
-//!   waits for is sent when the handler returns. Either way the order of host
-//!   calls follows the guest, so runs stay deterministic.
+//!   call is prepared when the guest probes or waits for its response, because
+//!   SDKs (wstd, Spin) write the request body after `handle`. Subscriptions
+//!   only register readiness. Nonblocking probes leave open bodies writable.
+//!   Polling charges only the remaining host time when it blocks. A request
+//!   the guest never observes is recorded when the handler returns, without
+//!   making the guest wait. Host call order remains deterministic.
 //! - `response-outparam.set`: notes which body is the response's.
 //! - `outgoing-request.set-authority`: also takes a host with a canary in it.
 
@@ -59,6 +60,7 @@ pub(super) struct Http {
     responses: BTreeMap<u32, Buffer>,
     /// Requests sent but not yet answered, by their future's resource.
     pending: BTreeMap<u32, Pending>,
+    waiting: BTreeMap<u32, Arc<super::p2::Deadline>>,
     sent: u64,
     /// What the handler set as its response, and that response's body.
     response: Arc<Mutex<Option<Response>>>,
@@ -77,6 +79,7 @@ impl Default for Http {
             requests: BTreeMap::new(),
             responses: BTreeMap::new(),
             pending: BTreeMap::new(),
+            waiting: BTreeMap::new(),
             sent: 0,
             response: Arc::default(),
             response_body: None,
@@ -89,12 +92,15 @@ struct Pending {
     seq: u64,
     /// Virtual time when the guest sent it.
     sent_ns: u64,
+    sent_at: u128,
+    ready: Arc<super::p2::Deadline>,
     /// How long the guest lets it take: connect plus first-byte timeout.
     deadline_ns: Option<u64>,
     method: String,
     url: String,
     headers: Vec<(String, String)>,
     body: Option<(HyperOutgoingBody, Buffer)>,
+    end: Option<End>,
 }
 
 struct Hooks;
@@ -265,14 +271,24 @@ pub(super) fn link(linker: &mut Linker<Host>) -> Result<()> {
         },
     )?;
     types.func_wrap("[method]future-incoming-response.subscribe", |mut store: StoreContextMut<'_, Host>, (id,): (Resource<HostFutureIncomingResponse>,)| {
-        answer(&mut store, id.rep())?;
-        let mut view = store.data_mut().http();
-        Ok((wt::HostFutureIncomingResponse::subscribe(&mut view, id)?,))
+        let host = store.data_mut();
+        host.table.get(&id)?;
+        let ready = host.http.waiting.get(&id.rep()).cloned().ok_or_else(|| wasmtime::format_err!("missing HTTP response deadline"))?;
+        Ok((host.timers.subscribe_response(&mut host.table, &id, ready)?,))
     })?;
     types.func_wrap("[method]future-incoming-response.get", |mut store: StoreContextMut<'_, Host>, (id,): (Resource<HostFutureIncomingResponse>,)| {
-        answer(&mut store, id.rep())?;
+        answer(&mut store, id.rep(), false)?;
+        if store.data().http.waiting.get(&id.rep()).is_some_and(|ready| ready.remaining() != 0) {
+            return Ok((None,));
+        }
         let mut view = store.data_mut().http();
         Ok((wt::HostFutureIncomingResponse::get(&mut view, id)?,))
+    })?;
+    types.func_wrap("[resource-drop]future-incoming-response", |mut store: StoreContextMut<'_, Host>, (id,): (Resource<HostFutureIncomingResponse>,)| {
+        let rep = id.rep();
+        wt::HostFutureIncomingResponse::drop(&mut store.data_mut().http(), id)?;
+        store.data_mut().http.waiting.remove(&rep);
+        Ok(())
     })?;
 
     let mut out = linker.instance(&format!("wasi:http/outgoing-handler@{VERSION}"))?;
@@ -305,6 +321,8 @@ fn send(
     let rep = id.rep();
     Host::sync_guest_time(store);
     let sent_ns = store.data().clock.with(|c| c.elapsed_ns());
+    let sent_at = store.data().timers.now(&store.data().clock);
+    let ready = store.data().timers.response(&store.data().clock);
     let host = store.data_mut();
     let req = host.table.delete(id)?;
     let buffer = host.http.requests.remove(&rep);
@@ -337,11 +355,14 @@ fn send(
     let pending = Pending {
         seq: host.http.sent,
         sent_ns,
+        sent_at,
+        ready: ready.clone(),
         deadline_ns,
         method,
         url: format!("{scheme}://{authority}{path}"),
         headers,
         body: req.body.map(|b| (b, buffer.unwrap_or_default())),
+        end: None,
     };
     let placeholder = Err(wasmtime_wasi_http::Error::InternalError(Some("not answered yet".into())));
     let future = host.table.push(HostFutureIncomingResponse::Ready(placeholder))?;
@@ -350,11 +371,26 @@ fn send(
         resolve(store, None, old)?;
     }
     store.data_mut().http.pending.insert(future.rep(), pending);
+    store.data_mut().http.waiting.insert(future.rep(), ready);
     Ok(Ok(future))
 }
 
 /// Answers a pending request before the guest looks at its response.
-fn answer(store: &mut StoreContextMut<'_, Host>, rep: u32) -> wasmtime::Result<()> {
+pub(super) fn answer(store: &mut StoreContextMut<'_, Host>, rep: u32, blocking: bool) -> wasmtime::Result<()> {
+    store.data().table.get(&Resource::<HostFutureIncomingResponse>::new_borrow(rep))?;
+    if let Some(p) = store.data_mut().http.pending.get_mut(&rep)
+        && !blocking
+        && p.end.is_none()
+        && let Some((body, _)) = p.body.as_mut()
+    {
+        // A nonblocking probe cannot freeze a body the guest is still writing.
+        // Preserve the channel's terminal state when probing consumes it.
+        let end = end_of(body);
+        if end == End::Open {
+            return Ok(());
+        }
+        p.end = Some(end);
+    }
     if let Some(p) = store.data_mut().http.pending.remove(&rep) {
         resolve(store, Some(rep), p)?;
     }
@@ -376,12 +412,13 @@ fn resolve(store: &mut StoreContextMut<'_, Host>, future: Option<u32>, p: Pendin
     let (body, end) = match p.body {
         None => (vec![], End::Finished),
         Some((mut hyper, buf)) => {
-            let end = end_of(&mut hyper);
+            let end = p.end.unwrap_or_else(|| end_of(&mut hyper));
             (contents(&buf), end)
         }
     };
     let result = if end == End::Aborted {
         // The guest gave up on the body: the request never completes.
+        p.ready.set(p.sent_at);
         Err(wasmtime_wasi_http::Error::HttpProtocolError)
     } else {
         let ty = store.data().platform.funcs.get(CLIENT_KEY).map(|f| f.ty.clone()).ok_or_else(|| wasmtime::format_err!("{CLIENT_KEY} is not linked"))?;
@@ -392,6 +429,8 @@ fn resolve(store: &mut StoreContextMut<'_, Host>, future: Option<u32>, p: Pendin
         store.data_mut().call_started_ns = Some(p.sent_ns);
         store.data_mut().call_deadline_ns = p.deadline_ns;
         intercept(store.as_context_mut(), CLIENT_KEY, &params, &mut results).map_err(wasmtime::Error::from_anyhow)?;
+        let latency = store.data().events.last().map_or(0, |event| event.latency_ns);
+        p.ready.set(p.sent_at + u128::from(latency));
         match incoming(&val_to_json(&results[0])) {
             Ok(r) => r,
             Err(e) => {

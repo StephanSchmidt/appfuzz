@@ -42,6 +42,7 @@ pub mod value_contract;
 pub mod wasi;
 pub mod wasi_http;
 pub mod web;
+pub mod wide;
 pub mod wit;
 pub mod witx_abi;
 

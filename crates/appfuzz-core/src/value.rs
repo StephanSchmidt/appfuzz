@@ -215,7 +215,7 @@ fn single_case(v: &Value) -> Result<(String, Option<&Value>)> {
 fn expected(what: &str, got: &Value) -> anyhow::Error {
     let mut s = got.to_string();
     if s.len() > 80 {
-        s.truncate(80);
+        s.truncate(s.floor_char_boundary(80));
         s.push('…');
     }
     anyhow!("expected {what}, got {s}")

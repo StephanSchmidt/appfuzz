@@ -232,8 +232,8 @@ impl Host {
         if limits.max_latency_ms.is_some_and(|limit| self.clock.with(|clock| crate::detect::ms(clock.elapsed_ns())) > limit) {
             return Some("latency");
         }
-        let cost = self.events.iter().fold(0u64, |sum, event| sum.saturating_add(event.cost));
-        limits.cost_per_request.filter(|limit| cost > *limit).map(|_| "host cost")
+        let cost: u128 = self.events.iter().map(|event| u128::from(event.cost)).sum();
+        limits.cost_per_request.filter(|limit| cost > u128::from(*limit)).map(|_| "host cost")
     }
 
     fn check_trace_capacity(&self) -> Result<()> {
@@ -704,6 +704,8 @@ impl App {
             totals: Totals::default(),
             events: vec![],
             guest_error: None,
+            rejected_output: None,
+            memory_limit_hit: false,
             capture_limited: false,
             stdout: String::new(),
             stderr: String::new(),
@@ -896,6 +898,12 @@ impl App {
                     Err(message) => {
                         record.guest_error =
                             k.error_bytes().ok().flatten().filter(|bytes| !bytes.is_empty()).map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+                        if status == 0 && record.guest_error.is_none() {
+                            // A completed return that fails decoding is still
+                            // guest output. Move its bytes into the evidence;
+                            // never scan arbitrary engine/host diagnostics.
+                            record.rejected_output = store.data_mut().kernel.as_mut().unwrap().output.take();
+                        }
                         record.outcome = Outcome { kind: OutcomeKind::Trap, message: Some(message), stack: vec![] };
                     }
                 }
@@ -928,6 +936,7 @@ impl App {
 
         let data = store.data_mut();
         let c = clock.with(|c| c.clone());
+        record.memory_limit_hit = data.limiter.budget.hit();
         record.totals = Totals {
             fuel: used,
             peak_memory: data.limiter.budget.peak(),
@@ -936,7 +945,7 @@ impl App {
             host_ns: c.host_ns,
             sleep_ns: c.sleep_ns,
             host_calls: data.events.len() as u32,
-            cost: data.events.iter().fold(0u64, |total, e| total.saturating_add(e.cost)),
+            cost: data.events.iter().map(|e| u128::from(e.cost)).sum(),
             clock_reads: c.wall_reads.saturating_add(c.monotonic_reads),
             random_bytes: *drawn.lock().unwrap_or_else(|e| e.into_inner()),
             wall_us: 0,
@@ -972,7 +981,7 @@ fn link_component(engine: &Engine, component: &Component, imports: &[Interface],
     if uses_http {
         http::link(&mut linker)?;
     }
-    if imports.iter().any(|i| i.name.starts_with("wasi:clocks/monotonic-clock@")) {
+    if uses_http || imports.iter().any(|i| i.name.starts_with("wasi:clocks/monotonic-clock@")) {
         p2::link(&mut linker)?;
     }
     let resources: BTreeMap<String, Vec<String>> = component
@@ -1178,7 +1187,11 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     let t_ns = data.clock.with(|c| {
         let now = c.elapsed_ns();
         let t = started.map_or(now, |s| s.min(now));
-        c.host_ns = c.host_ns.saturating_add(t.saturating_add(latency_ns).saturating_sub(now));
+        // HTTP requests are prepared without waiting. Their pollables charge
+        // the remaining host time only when the guest blocks on a response.
+        if started.is_none() {
+            c.host_ns = c.host_ns.saturating_add(latency_ns);
+        }
         t
     });
 
@@ -1543,6 +1556,24 @@ fn recursive(stack: &[Frame]) -> bool {
     stack.iter().any(|f| stack.iter().filter(|g| g.func == f.func && g.module == f.module).count() * 2 >= stack.len())
 }
 
+fn allocation_failure(err: &wasmtime::Error, host: &Host) -> bool {
+    if err.is::<wasmtime::OutOfMemory>() || err.is::<wasmtime::GcHeapOutOfMemory<()>>() || err.is::<crate::extism::AllocationFailure>() {
+        return true;
+    }
+    // Wasmtime 50 reports a denied initial memory as an untyped error. Match
+    // that specific engine diagnostic only when our cap was hit and the error
+    // has no guest backtrace, rather than blaming every later error on a denial.
+    host.limiter.budget.hit()
+        && err.downcast_ref::<WasmBacktrace>().is_none()
+        && err.chain().any(|cause| {
+            cause
+                .to_string()
+                .strip_prefix("memory minimum size of ")
+                .and_then(|s| s.strip_suffix(" pages exceeds memory limits"))
+                .is_some_and(|pages| pages.parse::<u64>().is_ok())
+        })
+}
+
 fn classify(err: &wasmtime::Error, host: &mut Host, fuel: u64) -> Outcome {
     let bt = err.downcast_ref::<WasmBacktrace>();
     let stack = bt.map(|bt| record_frames(bt.frames(), host)).unwrap_or_default();
@@ -1572,11 +1603,10 @@ fn classify(err: &wasmtime::Error, host: &mut Host, fuel: u64) -> Outcome {
         Some(Trap::OutOfFuel) => OutcomeKind::OutOfFuel,
         Some(Trap::Interrupt) => OutcomeKind::Timeout,
         Some(Trap::StackOverflow) => OutcomeKind::StackOverflow,
-        Some(Trap::UnreachableCodeReached) if host.limiter.budget.hit() => OutcomeKind::OutOfMemory,
         Some(Trap::UnreachableCodeReached) => OutcomeKind::Unreachable,
         Some(Trap::MemoryOutOfBounds) => OutcomeKind::MemoryOutOfBounds,
         Some(_) => OutcomeKind::Trap,
-        None if host.limiter.budget.hit() => OutcomeKind::OutOfMemory,
+        None if allocation_failure(err, host) => OutcomeKind::OutOfMemory,
         None => OutcomeKind::Trap,
     };
     // A shadow stack in linear memory (Rust, C) runs out before the

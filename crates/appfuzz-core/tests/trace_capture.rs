@@ -58,7 +58,7 @@ fn numbers() -> Plan {
 
 fn accounting(run: &RunRecord) {
     assert_eq!(run.totals.host_calls as usize, run.events.len());
-    assert_eq!(run.totals.cost, run.events.len() as u64 * 2);
+    assert_eq!(run.totals.cost, run.events.len() as u128 * 2);
     assert_eq!(run.totals.host_ns, run.events.len() as u64 * 3_000_000);
     assert!(run.events.iter().enumerate().all(|(i, event)| event.n as usize == i + 1 && event.call as usize == i + 1));
 }
@@ -200,7 +200,7 @@ fn reaching_a_budget_exactly_is_not_a_proven_violation() {
     let record = run(&app, CALLS + 1, numbers());
     assert_eq!(record.outcome.kind, OutcomeKind::Error);
     assert!(record.capture_limited);
-    assert_eq!(record.totals.cost, (CALLS * 2) as u64);
+    assert_eq!(record.totals.cost, (CALLS * 2) as u128);
     assert!(!detect::per_run(&record, &app.manifest).iter().any(|f| f.kind == "over_budget"));
 }
 

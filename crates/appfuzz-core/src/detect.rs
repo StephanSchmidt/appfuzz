@@ -185,7 +185,7 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                 &format!("{ex}\0{kind:?}\0{}", crash_site(panic.as_deref(), o, &msg)),
                 Severity::Fail,
                 format!("{ex} crashes: {}", first_line(&msg)),
-                json!({"outcome": kind, "message": msg, "after_host_calls": r.totals.host_calls,
+                json!({"outcome": kind, "message": msg, "memory_limit_hit": r.memory_limit_hit, "after_host_calls": r.totals.host_calls,
                        "last_host_call": r.events.last().map(|e| json!({"n": e.n, "func": e.func, "result": e.result}))}),
                 run,
             ));
@@ -193,12 +193,24 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     let l = &m.limits;
     let t = &r.totals;
-    for (what, used, limit) in [("fuel", t.fuel, Some(l.fuel)), ("memory", t.peak_memory, Some(l.memory)), ("cost", t.cost, l.cost_per_request)] {
+    for (what, used, limit) in [("fuel", t.fuel, Some(l.fuel)), ("memory", t.peak_memory, Some(l.memory))] {
         if let Some(limit) = limit
             && used > limit
         {
             out.push(over_budget(r, what, used, limit));
         }
+    }
+    if let Some(limit) = l.cost_per_request
+        && t.cost > u128::from(limit)
+    {
+        out.push(Finding::new(
+            "over_budget",
+            &format!("{ex}\0cost"),
+            Severity::Fail,
+            format!("{ex} uses {} cost, the limit is {limit}", t.cost),
+            json!({"limit":"cost", "used":crate::wide::json(t.cost), "limit_value":limit, "host_calls":r.totals.host_calls}),
+            run,
+        ));
     }
     if let Some(limit) = l.max_latency_ms
         && ms(t.virtual_ns) > limit
@@ -864,7 +876,7 @@ mod tests {
         let mut record = crate::envelope::Trace::default().to_record();
         record.totals.fuel = u64::MAX;
         record.totals.peak_memory = u64::MAX;
-        record.totals.cost = u64::MAX;
+        record.totals.cost = u128::from(u64::MAX);
         let findings = super::per_run(&record, &manifest);
         for limit in ["fuel", "memory", "cost"] {
             let finding =

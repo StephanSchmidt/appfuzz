@@ -71,6 +71,9 @@ value.
 Zero is an observed budget too: using a resource no reviewed run used is
 outside the envelope. Each budget is checked independently, including when
 the trace reports zero fuel.
+Integer budgets compare against the margin without rounding through floating
+point. Cost budgets may exceed `u64::MAX`; such values use decimal strings in
+JSON, while smaller budgets remain numbers.
 
 A new call site is a warn, not a fail: requests the fuzzer never made can
 reach ordinary code. A new destination named by the app itself is a fail:
@@ -115,6 +118,13 @@ detectors, including leak, encoded-flow and reviewer-directed-text checks. The
 optional `outcome` preserves execution status and diagnostics when reading a
 stored run as a trace. Without an explicit outcome, nonempty guest error text
 indicates a failed request.
+The optional `rejected_output` byte list preserves a completed guest return
+that failed output decoding. Run detectors inspect its raw text and decoded
+JSON strings, including keys. Trace conversion preserves the original bytes;
+without an explicit outcome, this field indicates a failed request.
+The optional `memory_limit_hit` flag preserves a denial by the run's memory
+cap. A guest may handle it successfully, so the flag alone does not imply a
+failed or incomplete request.
 `capture_limited = true` marks a prefix retained after a reviewer resource guard
 stopped the run. Trace conversion preserves this marker and the original error;
 it cannot represent a complete successful execution. Such traces cannot pass

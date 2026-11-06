@@ -197,6 +197,59 @@ fn overflowing_extism_log_capture_cannot_pass_review_or_create_an_envelope() {
 }
 
 #[test]
+fn rejected_extism_output_leaks_confirm_replay_and_regress() {
+    let f = Fixture::new(false);
+    std::fs::write(
+        f.dir.join("plugin.wit"),
+        "package extism:host; interface user { credential:func()->string; } world plugin { import user; export run:func()->u32; }",
+    )
+    .unwrap();
+    std::fs::write(f.dir.join("platform.toml"), "[platform]\nname='rejected'\nabi='extism'\nwit='plugin.wit'\n").unwrap();
+    std::fs::write(
+        &f.manifest,
+        "[app]\nwasm='app.wasm'\nplatform='platform.toml'\n[entry]\nexport='run'\n[functions.\"extism:host/user#credential\"]\nresult='secret'\n",
+    )
+    .unwrap();
+    let wasm = wat::parse_str(
+        r#"(module
+        (import "extism:host/user" "credential" (func $credential (result i64)))
+        (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+        (import "extism:host/env" "length" (func $length (param i64) (result i64)))
+        (import "extism:host/env" "load_u8" (func $read (param i64) (result i32)))
+        (import "extism:host/env" "store_u8" (func $write (param i64 i32)))
+        (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+        (func (export "run") (result i32) (local $source i64) (local $block i64) (local $i i64)
+            (local.set $source (call $credential))
+            (local.set $block (call $alloc (i64.add (call $length (local.get $source)) (i64.const 2))))
+            (call $write (local.get $block) (i32.const 34))
+            (loop $bytes
+                (call $write (i64.add (local.get $block) (i64.add (local.get $i) (i64.const 1)))
+                    (call $read (i64.add (local.get $source) (local.get $i))))
+                (local.set $i (i64.add (local.get $i) (i64.const 1)))
+                (br_if $bytes (i64.lt_u (local.get $i) (call $length (local.get $source)))))
+            (call $write (i64.add (local.get $block) (i64.add (local.get $i) (i64.const 1))) (i32.const 34))
+            (call $output (local.get $block) (call $length (local.get $block))) (i32.const 0)))"#,
+    )
+    .unwrap();
+    std::fs::write(f.dir.join("app.wasm"), wasm).unwrap();
+    let (_, run) = f.cli(&["run"]);
+    let finding = run["findings"].as_array().unwrap().iter().find(|v| v["kind"] == "secret_leak").unwrap_or_else(|| panic!("{run}"));
+    let (_, stored) = f.cli(&["show", run["run"].as_str().unwrap()]);
+    let rejected: Vec<u8> = serde_json::from_value(stored["rejected_output"].clone()).unwrap();
+    assert!(String::from_utf8(rejected).unwrap().starts_with("\"sk_"));
+    let (_, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "10"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let (code, replayed) = f.cli(&["replay", case]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true);
+    std::fs::write(f.dir.join("app.wasm"), wat::parse_str("(module (func (export \"run\") (result i32) (i32.const 0)))").unwrap()).unwrap();
+    let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], false);
+}
+
+#[test]
 fn trace_capture_limits_are_incomplete_in_run_scale_fuzz_and_review() {
     let f = Fixture::new(false);
     let wit = "package test:workflow; interface db { get:func(id:u32)->u32; } world app { import db; export run:func(n:u32)->u32; }";
@@ -470,16 +523,67 @@ fn huge_host_budgets_are_reported_without_crashing_the_cli() {
     std::fs::write(f.dir.join("app.wasm"), bytes).unwrap();
     let (code, run) = f.cli(&["run", "--plan", r#"{"test:workflow/db#get":{"return":1,"cost":18446744073709551615,"latency_ms":1e30}}"#]);
     assert_eq!(code, 0, "{run}");
-    assert_eq!(run["totals"]["cost"], u64::MAX);
+    assert_eq!(run["totals"]["cost"], (2 * u128::from(u64::MAX)).to_string());
     assert!(run["totals"]["virtual_ms"].as_f64().unwrap() > 1e12);
     let (_, raw) = f.cli(&["show", "last"]);
     assert_eq!(raw["totals"]["virtual_ns"], u64::MAX);
     let (code, calls) = f.cli(&["show", "last", "--view", "calls"]);
     assert_eq!(code, 0, "{calls}");
-    assert_eq!(calls["functions"]["test:workflow/db#get"]["cost"], u64::MAX);
+    assert_eq!(calls["functions"]["test:workflow/db#get"]["cost"], (2 * u128::from(u64::MAX)).to_string());
     assert!(calls["functions"]["test:workflow/db#get"]["latency_ms"].as_f64().unwrap() > 1e12);
     let (code, explained) = f.cli(&["show", "last", "--view", "explanation"]);
     assert_eq!(code, 0, "{explained}");
+    let high = run["run"].as_str().unwrap();
+    let (_, low_run) = f.cli(&["run", "--plan", r#"{"test:workflow/db#get":{"return":1,"cost":1}}"#]);
+    let low = low_run["run"].as_str().unwrap();
+    let (code, difference) = f.cli(&["diff", high, low]);
+    assert_eq!(code, 0, "{difference}");
+    assert_eq!(difference["totals"]["cost"]["a"], (2 * u128::from(u64::MAX)).to_string());
+    assert_eq!(difference["totals"]["cost"]["b"], 2);
+    assert_eq!(difference["totals"]["cost"]["delta"], format!("-{}", 2 * u128::from(u64::MAX) - 2));
+}
+
+#[test]
+fn cost_overruns_above_u64_confirm_replay_and_regress() {
+    let f = Fixture::new(false);
+    let manifest = std::fs::read_to_string(&f.manifest).unwrap().replace("cost_per_request = 100", &format!("cost_per_request = {}", i64::MAX));
+    std::fs::write(&f.manifest, manifest).unwrap();
+    let wit = "package test:workflow; interface db {get:func(id:u32)->u32;} world app {import db;export run:func(n:u32)->u32;}";
+    std::fs::write(
+        f.dir.join("app.wasm"),
+        component(
+            wit,
+            r#"(module (import "test:workflow/db" "get" (func $get (param i32) (result i32)))
+            (func (export "run") (param i32) (result i32) (drop (call $get (local.get 0))) (call $get (local.get 0))))"#,
+        ),
+    )
+    .unwrap();
+    let plan = r#"{"test:workflow/db#get":{"return":1,"cost":18446744073709551615,"latency_ms":0}}"#;
+    let (code, run) = f.cli(&["run", "--plan", plan]);
+    assert_eq!(code, 0, "{run}");
+    let finding = run["findings"].as_array().unwrap().iter().find(|v| v["kind"] == "over_budget").unwrap_or_else(|| panic!("{run}"));
+    let overrun = run["over_limits"].as_array().unwrap().iter().find(|v| v["limit"] == "cost_per_request").unwrap();
+    assert_eq!(overrun["used"], (2 * u128::from(u64::MAX)).to_string());
+    let (_, checked) = f.cli(&["check", "max", "cost", &u64::MAX.to_string(), "--runs", "1", "--time", "1ms", "--max-runs", "10"]);
+    assert_eq!(checked["holds"], false, "{checked}");
+    let (_, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "10"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let (code, replayed) = f.cli(&["replay", case]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true);
+    std::fs::write(
+        f.dir.join("app.wasm"),
+        component(
+            wit,
+            r#"(module (import "test:workflow/db" "get" (func $get (param i32) (result i32)))
+            (func (export "run") (param i32) (result i32) (local.get 0)))"#,
+        ),
+    )
+    .unwrap();
+    let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], false);
 }
 
 #[test]
@@ -850,6 +954,32 @@ fn failed_and_unexercised_properties_do_not_exit_successfully() {
     let (code, v) = f.cli(&["check", "value_range", "$", "0", "4294967295", "--runs", "10"]);
     assert_eq!(code, 0, "{v}");
     assert!(v["matches"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn forbidden_text_in_guest_logs_cannot_pass_a_stored_run_check() {
+    for fd in [1, 2] {
+        let f = Fixture::new(false);
+        std::fs::write(f.dir.join("plugin.wit"), "package test:logs; world plugin { export run:func()->string; }").unwrap();
+        std::fs::write(f.dir.join("platform.toml"), "[platform]\nname='logs'\nabi='extism'\nwit='plugin.wit'\n").unwrap();
+        std::fs::write(&f.manifest, "[app]\nwasm='app.wasm'\nplatform='platform.toml'\n[entry]\nexport='run'\n").unwrap();
+        let bytes = wat::parse_str(format!(
+            r#"(module
+            (import "wasi_snapshot_preview1" "fd_write" (func $write (param i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1) (data (i32.const 64) "panicked")
+            (func (export "run") (result i32)
+                (i32.store (i32.const 0) (i32.const 64)) (i32.store (i32.const 4) (i32.const 8))
+                (drop (call $write (i32.const {fd}) (i32.const 0) (i32.const 1) (i32.const 16))) (i32.const 0)))"#
+        ))
+        .unwrap();
+        std::fs::write(f.dir.join("app.wasm"), bytes).unwrap();
+        assert_eq!(f.cli(&["run"]).0, 0);
+        let (_, stored) = f.cli(&["show", "last"]);
+        assert_eq!(stored[if fd == 1 { "stdout" } else { "stderr" }], "panicked");
+        let (code, checked) = f.cli(&["check", "not_contains", "panicked", "--runs", "1", "--time", "1ms", "--max-runs", "10"]);
+        assert_eq!(code, 2, "{checked}");
+        assert_eq!(checked["holds"], false);
+    }
 }
 
 #[test]

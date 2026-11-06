@@ -283,7 +283,7 @@ impl Abi {
     /// The bytes the plugin wrote to WIT-shaped JSON (as `json_to_val` reads it).
     pub fn decode(&self, bytes: &[u8], s: &Shape) -> Result<Value> {
         if let Shape::Str = s {
-            return Ok(Value::String(String::from_utf8_lossy(bytes).into_owned()));
+            return Ok(Value::String(std::str::from_utf8(bytes)?.to_owned()));
         }
         let v: Value =
             if bytes.iter().all(u8::is_ascii_whitespace) { Value::Null } else { serde_json::from_slice(bytes).map_err(|e| anyhow!("not JSON: {e}"))? };
@@ -466,6 +466,16 @@ pub fn args_shape(params: &[(String, Shape)]) -> Option<Shape> {
 pub const KERNEL_BYTES: &[u8] = include_bytes!("../assets/extism/kernel.wasm");
 const LOG_CAPACITY: usize = 1 << 20;
 
+#[derive(Debug)]
+pub(crate) struct AllocationFailure(pub usize);
+
+impl std::fmt::Display for AllocationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the Extism kernel ran out of memory ({} bytes asked)", self.0)
+    }
+}
+impl std::error::Error for AllocationFailure {}
+
 #[derive(Debug, Default)]
 pub struct Kernel {
     pub runtime: Option<Runtime>,
@@ -559,7 +569,7 @@ impl Runtime {
         }
         let at = self.call::<_, _, i64>(&mut store, "alloc", bytes.len() as i64)? as u64;
         if at == 0 {
-            bail!("the Extism kernel ran out of memory ({} bytes asked)", bytes.len());
+            return Err(AllocationFailure(bytes.len()).into());
         }
         self.memory.write(&mut store, usize::try_from(at)?, bytes)?;
         Ok(at)

@@ -74,8 +74,12 @@ impl Property {
                 let re = Regex::new(re)?;
                 Arc::new(move |r, m| {
                     let text = response(r, m).body.or_else(|| r.result.as_ref().map(Value::to_string)).unwrap_or_default();
+                    let rejected = r.rejected_output_text();
                     re.find(&text)
+                        .or_else(|| re.find(&r.stdout))
+                        .or_else(|| re.find(&r.stderr))
                         .or_else(|| r.guest_error.as_deref().and_then(|error| re.find(error)))
+                        .or_else(|| rejected.as_deref().and_then(|text| re.find(text)))
                         .map(|x| (format!("the output contains {:?}", x.as_str()), json!({"match": x.as_str()})))
                 })
             }
@@ -400,7 +404,7 @@ mod tests {
         let m = Manifest::for_wasm(std::path::Path::new("x.wasm"));
         let mut record = crate::envelope::Trace::default().to_record();
         record.totals.fuel = u64::MAX;
-        record.totals.cost = u64::MAX;
+        record.totals.cost = u128::from(u64::MAX);
         record.totals.peak_memory = u64::MAX;
         record.totals.clock_reads = u64::MAX;
         record.totals.virtual_ns = u64::MAX;

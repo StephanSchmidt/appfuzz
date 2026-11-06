@@ -181,6 +181,9 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     if let Some(text) = &r.guest_error {
         places.push(("the guest error".into(), text.clone(), None, false));
     }
+    if let Some(text) = r.rejected_output_text() {
+        places.push(("the rejected output".into(), text.into_owned(), None, false));
+    }
     for (h, v) in &resp.headers {
         places.push((format!("the response header {h}"), v.clone(), None, false));
     }

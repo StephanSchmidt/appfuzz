@@ -561,9 +561,9 @@ fn summary(app: &App, r: &RunRecord) -> Value {
         over.push(json!({"limit": "memory", "used": t.peak_memory, "limit_value": l.memory}));
     }
     if let Some(c) = l.cost_per_request
-        && t.cost > c
+        && t.cost > u128::from(c)
     {
-        over.push(json!({"limit": "cost_per_request", "used": t.cost, "limit_value": c}));
+        over.push(json!({"limit": "cost_per_request", "used": appfuzz_core::wide::json(t.cost), "limit_value": c}));
     }
     if let Some(m) = l.max_latency_ms
         && ms(t.virtual_ns) > m
@@ -587,7 +587,7 @@ fn summary(app: &App, r: &RunRecord) -> Value {
             "host_ms": ms(t.host_ns),
             "sleep_ms": ms(t.sleep_ns),
             "host_calls": t.host_calls,
-            "cost": t.cost,
+            "cost": appfuzz_core::wide::json(t.cost),
             "clock_reads": t.clock_reads,
             "random_bytes": t.random_bytes,
         },
@@ -643,7 +643,7 @@ fn scale_table(rep: &scale::ScaleReport) -> Value {
         rep.points
             .iter()
             .map(|p| {
-                let mut o = json!({"n": p.n, "outcome": p.outcome, "host_calls": p.host_calls, "cost": p.cost, "virtual_ms": p.virtual_ms, "fuel": p.fuel, "run": p.run});
+                let mut o = json!({"n": p.n, "outcome": p.outcome, "host_calls": p.host_calls, "cost": appfuzz_core::wide::json(p.cost), "virtual_ms": p.virtual_ms, "fuel": p.fuel, "run": p.run});
                 for m in &metrics {
                     if let Some(f) = m.strip_prefix("calls ") {
                         o[*m] = json!(p.calls.get(f).copied().unwrap_or(0));
@@ -710,7 +710,7 @@ fn by_function(r: &RunRecord, only: Option<&str>) -> Value {
             json!({
                 "calls": n,
                 "distinct_args": distinct.len(),
-                "cost": calls.iter().fold(0u64, |total, e| total.saturating_add(e.cost)),
+                "cost": appfuzz_core::wide::json(calls.iter().map(|e| u128::from(e.cost)).sum()),
                 "latency_ms": ms(calls.iter().fold(0u64, |total, e| total.saturating_add(e.latency_ns))),
                 "args": args,
             }),

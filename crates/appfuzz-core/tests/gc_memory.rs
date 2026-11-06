@@ -40,6 +40,7 @@ fn gc_heap_growth_respects_an_explicit_run_cap() {
     spec.memory = 32 * 1024;
     let run = app.run(&spec);
     assert_eq!(run.outcome.kind, OutcomeKind::OutOfMemory, "{:?}", run.outcome);
+    assert!(run.memory_limit_hit);
     assert!(run.totals.peak_memory <= spec.memory);
 }
 

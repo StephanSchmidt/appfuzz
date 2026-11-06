@@ -76,6 +76,23 @@ impl Decimal {
         if self.negative { order.reverse() } else { order }
     }
 
+    /// Multiply a finite decimal by an integer without rounding its threshold.
+    pub(crate) fn scaled_by(&self, factor: u128) -> Option<Self> {
+        let factor = factor.to_string();
+        let mut digits = vec![0u32; self.digits.len() + factor.len()];
+        for (i, a) in self.digits.bytes().rev().enumerate() {
+            for (j, b) in factor.bytes().rev().enumerate() {
+                digits[i + j] += u32::from(a - b'0') * u32::from(b - b'0');
+            }
+        }
+        for i in 0..digits.len() - 1 {
+            digits[i + 1] += digits[i] / 10;
+            digits[i] %= 10;
+        }
+        let coefficient: String = digits.into_iter().rev().map(|n| char::from(b'0' + n as u8)).collect();
+        Self::parse(&format!("{}{coefficient}e{}", if self.negative { "-" } else { "" }, self.exponent))
+    }
+
     pub(crate) fn rounded_integer(&self, up: bool) -> Option<i128> {
         if let Some(integer) = self.integer {
             return Some(integer);
@@ -678,5 +695,21 @@ mod tests {
         assert!(!domain(&["format:int"]).holds(Some(&json!("--1"))));
         assert!(!domain(&["enum:EUR,USD"]).holds(Some(&json!("GBP"))));
         assert!(domain(&["required", "format:int", "range:1..6"]).holds(Some(&json!("6"))));
+    }
+}
+#[test]
+fn decimal_integer_products_preserve_fractional_and_wide_thresholds() {
+    for coefficient in -30i128..=30 {
+        for exponent in 0..=5 {
+            let value = Decimal::parse(&format!("{coefficient}e-{exponent}")).unwrap();
+            for factor in 0..=50u128 {
+                let expected = Decimal::parse(&format!("{}e-{exponent}", coefficient * factor as i128)).unwrap();
+                assert_eq!(value.scaled_by(factor).unwrap().cmp(&expected), Ordering::Equal);
+            }
+        }
+    }
+    for (margin, expected) in [("2", "680564733841876926926749214863536422910"), ("0.5", "170141183460469231731687303715884105727.5")] {
+        let product = Decimal::parse(margin).unwrap().scaled_by(u128::MAX).unwrap();
+        assert_eq!(product.cmp(&Decimal::parse(expected).unwrap()), Ordering::Equal);
     }
 }

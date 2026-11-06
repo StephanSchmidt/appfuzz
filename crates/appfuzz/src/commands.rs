@@ -507,7 +507,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 return Err(e);
             }
             corpus.save(&cli.state)?;
-            let maxima: Vec<Value> = rep.maxima.iter().map(|m| json!({"metric": m.metric, "max": m.value, "run": m.run})).collect();
+            let maxima: Vec<Value> = rep.maxima.iter().map(|m| json!({"metric": m.metric, "max": appfuzz_core::wide::json(m.value), "run": m.run})).collect();
             Ok(json!({
                 "runs": rep.runs, "discovery_runs": rep.discovery_runs, "keys": rep.keys, "modes": rep.modes,
                 "elapsed_ms": rep.elapsed_ms, "stopped": rep.stopped,

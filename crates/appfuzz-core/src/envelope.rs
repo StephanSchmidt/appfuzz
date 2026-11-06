@@ -76,7 +76,8 @@ pub struct OutputEnvelope {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Budget {
     pub fuel: u64,
-    pub cost: u64,
+    #[serde(with = "crate::wide")]
+    pub cost: u128,
     pub virtual_ms: f64,
     pub memory: u64,
     pub host_calls: u32,
@@ -102,6 +103,10 @@ pub struct Trace {
     pub stderr: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_output: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory_limit_hit: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub capture_limited: bool,
     pub totals: Option<Totals>,
@@ -128,6 +133,9 @@ impl Trace {
         totals.host_calls = totals.host_calls.max(self.events.len() as u32);
         let mut outcome = self.outcome.clone().unwrap_or_else(|| match self.guest_error.as_ref().filter(|error| !error.is_empty()) {
             Some(error) => Outcome { kind: OutcomeKind::Trap, message: Some(format!("the guest reported an error: {error}")), stack: vec![] },
+            None if self.rejected_output.is_some() => {
+                Outcome { kind: OutcomeKind::Trap, message: Some("the guest's output was rejected".into()), stack: vec![] }
+            }
             None => Outcome { kind: OutcomeKind::Ok, message: None, stack: vec![] },
         });
         if self.capture_limited {
@@ -175,6 +183,8 @@ impl Trace {
             stdout: self.stdout.clone(),
             stderr: self.stderr.clone(),
             guest_error: self.guest_error.clone(),
+            rejected_output: self.rejected_output.clone(),
+            memory_limit_hit: self.memory_limit_hit,
             capture_limited: self.capture_limited,
         }
     }
@@ -371,21 +381,33 @@ impl Envelope {
     pub fn check_budget(&self, t: &Totals) -> Vec<Violation> {
         let b = &self.budget;
         let mut out = Vec::new();
-        let mut over = |what: &str, used: f64, max: f64| {
-            if used > max * self.margin {
+        let mut over = |what: &str, used: u128, max: u128| {
+            let exceeds = crate::value_contract::Decimal::parse(&self.margin.to_string()).and_then(|margin| margin.scaled_by(max)).map_or_else(
+                || used as f64 > max as f64 * self.margin,
+                |bound| crate::value_contract::Decimal::parse(&used.to_string()).expect("integer decimal").cmp(&bound).is_gt(),
+            );
+            if exceeds {
                 out.push(Violation::warn(
                     "budget",
                     what,
                     format!("uses {used} {what}; reviewed runs used at most {max}"),
-                    json!({"budget": what, "used": used, "max": max}),
+                    json!({"budget": what, "used": crate::wide::json(used), "max": crate::wide::json(max)}),
                 ));
             }
         };
-        over("fuel", t.fuel as f64, b.fuel as f64);
-        over("cost", t.cost as f64, b.cost as f64);
-        over("virtual_ms", t.virtual_ns as f64 / 1_000_000.0, b.virtual_ms);
-        over("memory", t.peak_memory as f64, b.memory as f64);
-        over("host_calls", t.host_calls as f64, b.host_calls as f64);
+        over("fuel", u128::from(t.fuel), u128::from(b.fuel));
+        over("cost", t.cost, b.cost);
+        over("memory", u128::from(t.peak_memory), u128::from(b.memory));
+        over("host_calls", u128::from(t.host_calls), u128::from(b.host_calls));
+        let virtual_ms = t.virtual_ns as f64 / 1_000_000.0;
+        if virtual_ms > b.virtual_ms * self.margin {
+            out.push(Violation::warn(
+                "budget",
+                "virtual_ms",
+                format!("uses {virtual_ms} virtual_ms; reviewed runs used at most {}", b.virtual_ms),
+                json!({"budget":"virtual_ms", "used":virtual_ms, "max":b.virtual_ms}),
+            ));
+        }
         out
     }
 

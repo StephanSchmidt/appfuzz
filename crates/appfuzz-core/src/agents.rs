@@ -326,6 +326,9 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     if let Some(text) = &r.guest_error {
         scan(text, false, &inputs, ex, "the guest error", run, &mut out);
     }
+    if let Some(text) = r.rejected_output_text() {
+        scan(&text, false, &inputs, ex, "the rejected output", run, &mut out);
+    }
     for e in &r.events {
         for (p, a) in &e.args {
             let mut ss = Vec::new();

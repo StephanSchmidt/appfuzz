@@ -204,7 +204,7 @@ fn huge_host_latency_and_cost_remain_over_budget_without_overflow() {
     assert_eq!(record.outcome.kind, OutcomeKind::Ok, "{:?}", record.outcome);
     assert_eq!(record.result, Some(json!(10)));
     assert_eq!(record.totals.virtual_ns, u64::MAX);
-    assert_eq!(record.totals.cost, u64::MAX);
+    assert_eq!(record.totals.cost, 10 * u128::from(u64::MAX));
     assert_eq!(record.events.len(), 10);
     let findings = appfuzz_core::detect::per_run(&record, &app.manifest);
     assert!(findings.iter().any(|f| f.kind == "over_budget"), "{findings:?}");

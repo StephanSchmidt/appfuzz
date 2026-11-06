@@ -321,9 +321,17 @@ pub fn diff_runs(app: &App, a: &RunRecord, b: &RunRecord) -> Value {
     diff(&sa, &sb, String::new(), &mut input);
     let (ta, tb) = (&a.totals, &b.totals);
     let delta = |x: f64, y: f64| json!({"a": num(x), "b": num(y), "delta": num(((y - x) * 100.0).round() / 100.0)});
+    let cost_delta = if tb.cost >= ta.cost {
+        appfuzz_core::wide::json(tb.cost - ta.cost)
+    } else if ta.cost - tb.cost <= 1u128 << 63 {
+        json!((-((ta.cost - tb.cost) as i128)) as i64)
+    } else {
+        json!(format!("-{}", ta.cost - tb.cost))
+    };
     let totals = json!({
         "fuel": delta(ta.fuel as f64, tb.fuel as f64), "host_calls": delta(ta.host_calls as f64, tb.host_calls as f64),
-        "virtual_ms": delta(ms(ta.virtual_ns), ms(tb.virtual_ns)), "cost": delta(ta.cost as f64, tb.cost as f64),
+        "virtual_ms": delta(ms(ta.virtual_ns), ms(tb.virtual_ns)),
+        "cost": {"a":appfuzz_core::wide::json(ta.cost), "b":appfuzz_core::wide::json(tb.cost), "delta":cost_delta},
         "peak_memory": delta(ta.peak_memory as f64, tb.peak_memory as f64),
     });
     let (ca, cb): (BTreeMap<String, u32>, BTreeMap<String, u32>) = (a.call_counts().into_iter().collect(), b.call_counts().into_iter().collect());

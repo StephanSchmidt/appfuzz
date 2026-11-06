@@ -68,7 +68,8 @@ pub struct Point {
     /// fast handler the rounding alone can look like superlinear growth.
     #[serde(skip)]
     pub virtual_ns: u64,
-    pub cost: u64,
+    #[serde(serialize_with = "crate::wide::serialize")]
+    pub cost: u128,
     pub output_bytes: u64,
     pub host_arg_bytes: u64,
 }

@@ -22,6 +22,7 @@ fn app(memory_pages: u32, body: &str) -> App {
       (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
       (import "extism:host/env" "free" (func $free (param i64)))
       (import "extism:host/env" "output_set" (func $output (param i64 i64)))
+      (import "extism:host/env" "var_get" (func $var-get (param i64) (result i64)))
       (memory {memory_pages})
       (func (export "run") (result i32) {body} (i32.const 0)))"#
     );
@@ -53,13 +54,25 @@ fn wasm_allocation_respects_memory_already_used_by_the_kernel() {
 }
 
 #[test]
-fn kernel_memory_failures_are_classified_as_out_of_memory() {
+fn guest_traps_after_kernel_allocation_failure_keep_their_actual_cause() {
     let app = app(0, "(if (i64.eqz (call $alloc (i64.const 65536))) (then unreachable))");
     let mut spec = app.spec(app.export("run").unwrap(), vec![], Plan::default(), 1);
     spec.memory = KERNEL;
     let run = app.run(&spec);
-    assert_eq!(run.outcome.kind, OutcomeKind::OutOfMemory, "{:?}", run.outcome);
+    assert_eq!(run.outcome.kind, OutcomeKind::Unreachable, "{:?}", run.outcome);
+    assert!(run.memory_limit_hit);
     assert_eq!(run.totals.peak_memory, KERNEL);
+}
+
+#[test]
+fn a_kernel_error_after_a_handled_allocation_denial_is_not_out_of_memory() {
+    let app = app(0, "(if (i64.ne (call $alloc (i64.const 65536)) (i64.const 0)) (then unreachable)) (drop (call $var-get (i64.const 1)))");
+    let mut spec = app.spec(app.export("run").unwrap(), vec![], Plan::default(), 1);
+    spec.memory = KERNEL;
+    let run = app.run(&spec);
+    assert_eq!(run.outcome.kind, OutcomeKind::Trap, "{:?}", run.outcome);
+    assert!(run.memory_limit_hit);
+    assert!(run.outcome.message.unwrap().contains("not a block"));
 }
 
 #[test]

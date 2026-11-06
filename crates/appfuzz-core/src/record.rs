@@ -142,7 +142,9 @@ pub struct Totals {
     pub host_ns: u64,
     pub sleep_ns: u64,
     pub host_calls: u32,
-    pub cost: u64,
+    /// Exact sum of u64 host charges; unusually large totals use decimal JSON strings.
+    #[serde(with = "crate::wide")]
+    pub cost: u128,
     pub clock_reads: u64,
     pub random_bytes: u64,
     /// Real time the run took, µs (not deterministic).
@@ -165,6 +167,14 @@ pub struct RunRecord {
     /// host-plan diagnostics in outcome.message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_error: Option<String>,
+    /// Bytes returned by the guest but rejected by its declared output type.
+    /// Keep these separate from engine and host-plan diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_output: Option<Vec<u8>>,
+    /// At least one allocation was denied by the run's memory cap. The guest
+    /// may handle a denial; this alone does not identify a later trap's cause.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory_limit_hit: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stdout: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -172,6 +182,19 @@ pub struct RunRecord {
 }
 
 impl RunRecord {
+    /// A text view for detectors; the original bytes remain lossless in the record.
+    pub(crate) fn rejected_output_text(&self) -> Option<std::borrow::Cow<'_, str>> {
+        let bytes = self.rejected_output.as_deref()?;
+        let text = String::from_utf8_lossy(bytes);
+        let Ok(value) = serde_json::from_slice::<Value>(bytes) else { return Some(text) };
+        // A rejected typed value may still be valid JSON. Its decoded keys and
+        // string values can appear in diagnostics; wire escapes must not hide
+        // those values from leak, encoded-flow or reviewer-text checks.
+        let mut text = text.into_owned();
+        append_json_text(&value, &mut text);
+        Some(std::borrow::Cow::Owned(text))
+    }
+
     /// Calls per host function, in first-call order.
     pub fn call_counts(&self) -> Vec<(String, u32)> {
         let mut out: Vec<(String, u32)> = Vec::new();
@@ -182,6 +205,24 @@ impl RunRecord {
             }
         }
         out
+    }
+}
+
+fn append_json_text(value: &Value, text: &mut String) {
+    match value {
+        Value::String(s) => {
+            text.push('\n');
+            text.push_str(s);
+        }
+        Value::Array(values) => values.iter().for_each(|v| append_json_text(v, text)),
+        Value::Object(values) => {
+            for (key, value) in values {
+                text.push('\n');
+                text.push_str(key);
+                append_json_text(value, text);
+            }
+        }
+        _ => {}
     }
 }
 

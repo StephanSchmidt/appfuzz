@@ -166,6 +166,13 @@ The peak is the largest combined usage at one instant, rather than the sum of
 independent peaks. Freed kernel blocks can be reused, but retained linear-memory
 pages remain counted. Failed growth does not increase `peak_memory`;
 allocator failures roll back the attempted increase. Successful allocations remain counted when a later growth fails.
+`memory_limit_hit` records that the run's memory cap denied an allocation,
+including a denial the guest handled successfully. It does not change an
+unrelated trap into an out-of-memory failure. `out_of_memory` requires a direct
+allocation failure (including denied initial memory); a guest `unreachable`
+after an allocator returned failure stays `unreachable`, with the denial
+recorded separately. A module's own declared memory maximum is separate from
+the run's cap.
 
 Instance pooling is an optimization: a component that exceeds a pool's shape
 limits is retried with on-demand allocation. An explicit run cap is not clipped
@@ -241,6 +248,11 @@ Run records retain explicit guest failure text as `guest_error`, separately from
 engine and host-plan diagnostics. Leak, encoded-flow and reviewer-directed-text
 checks inspect this text, as does `check not_contains`. Host-plan diagnostics
 alone do not count as guest output.
+When a completed Extism return fails output decoding, `rejected_output` retains
+its original bytes as a byte list. The same checks inspect these bytes and any
+decoded JSON string values or keys, so malformed output and JSON escapes cannot
+hide a leak or reviewer-directed text. Output superseded by a guest error or
+left behind before a trap is not a completed rejected return.
 
 ## Host value generation
 
@@ -509,7 +521,10 @@ correct. appfuzz never promotes observed behavior into an acceptance rule.
 Exactly one of `property`, `expect`, `relation` and `assert` is required
 ([asserts](#asserting-outputs-against-inputs)). A property is an
 argument array accepted by `check`, including `value_range`, `max_calls`,
-`no_crash`, `not_contains`, and resource `max` checks.
+`no_crash`, `not_contains`, and resource `max` checks. `not_contains` checks
+the response, captured stdout and stderr, explicit guest errors, and rejected
+output. It checks each stream separately and excludes engine and host-plan
+diagnostics.
 
 `expect` compares every selected value with the supplied JSON value. JSON field
 selectors retain types (`200` differs from `"200"`); HTML selectors return text.
@@ -762,6 +777,14 @@ use individual stateless traces, and do not enforce sequence invariants.
 
 ## Command output
 
+Each host call's cost and the production cost limit are `u64` units. Run totals
+sum those charges exactly in `u128`, including when the sum exceeds `u64::MAX`.
+Cost totals, envelope budgets, scaling points and search maxima use JSON numbers
+through `u64::MAX` and decimal strings above it; ordinary reports keep their
+existing number shape. Readers accept both forms without floating-point
+conversion. Resource `max cost` checks and integer envelope margins compare exact
+values. The Rust API exposes total costs and search maxima as `u128`.
+
 Commands print lossless JSON with suggested `next` commands. Exported artifacts
 (`plan template` and the raw `show` record) omit navigation metadata so another
 command can read them unchanged. The old `--full` flag remains a compatibility
@@ -915,12 +938,19 @@ later, a constant otherwise. The run with the whole secret is checked too.
 Outbound requests are the host function
 `wasi:http/outgoing-handler#handle(method: string, url: string, headers,
 body: string) -> result<response, string>`, where `response` is
-`{status, headers, body}`. The call happens when the guest first waits for
-the response, so a body written after `handle` is part of `body`. Requests
-nobody waited for are sent after the handler returns.
+`{status, headers, body}`. The call is prepared when the guest probes or waits
+for the response, so a body written after `handle` is part of `body`.
+Subscriptions only register readiness; `get` returns `none` while pending,
+and readiness checks do not advance time. Nonblocking probes leave an open
+request body pending and writable; a blocking wait evaluates the bytes written
+so far. Requests nobody observed are recorded after the handler returns,
+without waiting for their responses.
 
 A request is in flight from `handle` on: it is ready at the virtual time
 it was sent plus its latency, and the guest waits only for what is left.
+HTTP responses and clock timers participate in the same poll: the earliest
+selected deadline wins unless another selected resource is already ready.
+Only time spent blocking for a response is charged to `host_ns`.
 Requests sent together overlap, so four 60 ms requests awaited together
 take 60 ms; awaited one by one, each after the previous answer, they take
 240. A `first-byte-timeout` in the request options (plus the
@@ -1044,7 +1074,10 @@ Decoding the plugin's JSON is lenient, like `#[serde(default)]`: keys match
 regardless of case and separators, missing fields take their empty value,
 `null` is an empty list (Go's nil slice), and a `string` accepts any JSON as
 its text. A top-level `string` argument or output crosses as its bytes, not
-JSON, like the PDK's `String`. An export whose WIT result is `result<T, E>`
+JSON, like the PDK's `String`; these bytes must be valid UTF-8. Malformed
+string arguments fail before reaching a host function, and malformed string
+output fails instead of replacing invalid bytes. Binary values use explicit
+byte lists. An export whose WIT result is `result<T, E>`
 answers `ok` when its status is 0, and `err` with its `error_set` text
 otherwise. Kernel logs show up in `stderr`, and `http_request` traps because
 it isn't simulated yet.
