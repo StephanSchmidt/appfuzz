@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "linkedom": "0.18.15",
+    "parse5": "8.1.0",
     "tldts": "7.4.19"
   },
   "devDependencies": {

@@ -5,6 +5,7 @@
 // is recorded.
 import * as L from 'linkedom';
 import { CookieJar } from './cookies.js';
+import { parseHTML } from './document.js';
 
 const G = globalThis;
 const CAP = 200;
@@ -1099,7 +1100,10 @@ function installWindow(doc) {
     }
   }
   L.Element.prototype.insertAdjacentHTML = parsing(L.Element.prototype.insertAdjacentHTML, parent, 'insertAdjacentHTML', 1);
-  L.DOMParser.prototype.parseFromString = parsing(L.DOMParser.prototype.parseFromString, (t, r) => r);
+  const parseDocument = L.DOMParser.prototype.parseFromString;
+  L.DOMParser.prototype.parseFromString = parsing(function (markup, mime, ...rest) {
+    return mime === 'text/html' ? parseHTML(markup, false) : parseDocument.call(this, markup, mime, ...rest);
+  }, (t, r) => r);
   const T = L.HTMLTemplateElement.prototype;
   const setInner = Object.getOwnPropertyDescriptor(L.Element.prototype, 'innerHTML').set;
   define(T, 'innerHTML', {
@@ -1107,6 +1111,10 @@ function installWindow(doc) {
     set(v) { setInner.call(this, v); },
   });
   doc.evaluate = (expr, node) => new XPathExpression(expr).evaluate(node);
+
+  // A fragment has descendant text and the same replace-with-text setter
+  // as an element; linkedom otherwise inherits Node's null/no-op stubs.
+  Object.defineProperty(L.DocumentFragment.prototype, 'textContent', Object.getOwnPropertyDescriptor(L.Element.prototype, 'textContent'));
 
   // linkedom puts stubs on Node.prototype and the real accessors on its
   // subclasses. Code that takes an accessor from Node.prototype and calls
@@ -1474,7 +1482,7 @@ G.__af = {
       for (let i = 1; S.cookies.has(name); i++) name = base + '_' + i;
       S.cookies.seed(name, s.probe_cookie.value, S.url.href);
     }
-    const doc = new L.DOMParser().parseFromString(s.html || '', 'text/html');
+    const doc = parseHTML(s.html || '', true);
     installWindow(doc);
     templates(doc);
     return pageScripts();

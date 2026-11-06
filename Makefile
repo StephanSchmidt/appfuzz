@@ -36,11 +36,14 @@ browser:
 	cargo build --release --manifest-path browser/Cargo.toml --target wasm32-wasip2 -p appfuzz-browser
 	cp $(BROWSER_WASM) $(BROWSER_ASSETS)/browser.wasm
 	{ echo "The browser guest: QuickJS (quickjs-ng, MIT, via rquickjs, MIT), a DOM"; \
-	  echo "shim on linkedom (ISC), cookies with tldts (MIT, Public Suffix List),"; \
+	  echo "shim on linkedom (ISC), HTML tree building with parse5 (MIT),"; \
+	  echo "cookies with tldts (MIT, Public Suffix List),"; \
 	  echo "and the page driver, built by make browser."; \
 	  echo "Source: browser/ (guest/, js/, wit/)."; \
 	  echo "rquickjs: $$(grep -A1 '^name = "rquickjs-core"' browser/Cargo.lock | sed -n 's/version = //p' | tr -d '"')"; \
 	  echo "linkedom: $$(node -p 'require("./browser/js/node_modules/linkedom/package.json").version')"; \
+	  echo "parse5: $$(node -p 'require("./browser/js/node_modules/parse5/package.json").version')"; \
+	  echo "parse5 entities: $$(node -p 'require("./browser/js/node_modules/parse5/node_modules/entities/package.json").version')"; \
 	  echo "tldts: $$(node -p 'require("./browser/js/node_modules/tldts/package.json").version')"; \
 	  echo "tldts-core: $$(node -p 'require("./browser/js/node_modules/tldts-core/package.json").version')"; \
 	  echo "rustc: $$(rustc --version)"; \
@@ -49,3 +52,6 @@ browser:
 	{ echo "tldts"; cat browser/js/node_modules/tldts/LICENSE; \
 	  echo; echo "tldts-core"; cat browser/js/node_modules/tldts-core/LICENSE; \
 	} > $(BROWSER_ASSETS)/LICENSES.tldts.txt
+	{ echo "parse5"; cat browser/js/node_modules/parse5/LICENSE; \
+	  echo; echo "parse5 entities"; cat browser/js/node_modules/parse5/node_modules/entities/LICENSE; \
+	} > $(BROWSER_ASSETS)/LICENSES.parse5.txt

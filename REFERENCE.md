@@ -961,6 +961,12 @@ with that saved time. Fetch and XHR responses and beacon cookie updates arrive
 after their measured server latency; blocking script loads advance the page
 clock before the next script runs.
 
+HTML documents use HTML tree-building rules before scripts run: omitted
+document elements, table sections, raw text, inert `noscript` and template
+contents, and HTML inside SVG integration points retain their browser meaning.
+`DOMParser` uses those rules for `text/html` with scripting disabled; XML keeps
+its XML parser and root.
+
 **Requests.** A request to the app's own origin is a run of the app,
 with the same host plan. A request for data from another host gets text
 that names the host, so code built from it shows as `remote_code`. The
