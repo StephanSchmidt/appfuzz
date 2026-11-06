@@ -629,7 +629,7 @@ function receive(r) {
   }
   return r;
 }
-function networkAnswer(status, body, rawHeaders, url, acceptCookies, delayed) {
+function networkAnswer(status, body, rawHeaders, url, acceptCookies, delayed, latency = S.latency) {
   const headers = Object.create(null);
   const setCookies = [];
   for (const [name, value] of Array.isArray(rawHeaders) ? rawHeaders : Object.entries(rawHeaders || {})) {
@@ -637,7 +637,7 @@ function networkAnswer(status, body, rawHeaders, url, acceptCookies, delayed) {
     if (key === 'set-cookie') setCookies.push(String(value));
     else if (key !== 'set-cookie2') headers[key] = headers[key] == null ? String(value) : headers[key] + ', ' + value;
   }
-  const r = { status, body, headers, url, acceptCookies, setCookies, received: false };
+  const r = { status, body, headers, url, acceptCookies, setCookies, received: false, latency };
   return delayed ? r : receive(r);
 }
 function respond(method, url, body, headers, kind, credentials = 'same-origin', delayed = false) {
@@ -659,9 +659,9 @@ function respond(method, url, body, headers, kind, credentials = 'same-origin', 
     // Sent now, delivered after the latency: the answer is the host's.
     const target = own ? path : u.href.split('#')[0];
     const pairs = Object.entries(headers || {}).map(([k, v]) => [String(k), String(v)]);
-    const [status, rh, text, failed] = h.fetch(kind, method, own, target, pairs, body == null ? null : String(body), !!S.gesture);
-    if (failed != null) return { status: 0, error: failed, body: '', headers: {}, url: u.href };
-    return networkAnswer(status, text, rh, u.href, include, delayed);
+    const [status, rh, text, failed, latency] = h.fetch(kind, method, own, target, pairs, body == null ? null : String(body), [!!S.gesture, S.now]);
+    if (failed != null) return { status: 0, error: failed, body: '', headers: {}, url: u.href, latency: latency ?? S.latency };
+    return networkAnswer(status, text, rh, u.href, include, delayed, latency ?? S.latency);
   }
   const plain = own ? u.pathname : u.origin + u.pathname;
   const r = S.responses[method + ' ' + path] || S.responses[method + ' ' + plain] || S.responses[path] || S.responses[plain]
@@ -683,7 +683,7 @@ G.fetch = function fetch(input, init = {}) {
       if (r.error != null) return reject(new TypeError('Failed to fetch'));
       receive(r);
       resolve(new Response(r.body, { status: r.status, headers: r.headers, url: r.url }));
-    }, S.latency, [], false, 'fetch', false);
+    }, r.latency, [], false, 'fetch', false);
   });
 };
 
@@ -726,7 +726,7 @@ class XMLHttpRequest extends L.EventTarget {
       this.readyState = 4; this._fire('readystatechange');
       this._fire('load');
       this._fire('loadend');
-    }, S.latency, [], false, 'xhr', false);
+    }, r.latency, [], false, 'xhr', false);
   }
   _fire(type) {
     const ev = new ProgressEvent(type);
@@ -1026,7 +1026,7 @@ function installWindow(doc) {
     hardwareConcurrency: 4, maxTouchPoints: 0, webdriver: false, pdfViewerEnabled: false,
     sendBeacon(url, data) {
       const r = respond('POST', url, bodyText(data), {}, 'beacon', 'include', true);
-      if (r.acceptCookies && r.setCookies.length) addTimer(() => receive(r), S.latency, [], false, 'beacon-response', false);
+      if (r.acceptCookies && r.setCookies.length) addTimer(() => receive(r), r.latency, [], false, 'beacon-response', false);
       return true;
     },
     clipboard: {
@@ -1387,8 +1387,12 @@ function source(s, n) {
 function file(url) {
   const u = new URL(url);
   const own = u.origin === S.origin;
-  const r = respond('GET', u.href, null, {}, 'script');
-  if (host()) return r.error == null && r.status >= 200 && r.status < 300 ? r.body : null;
+  const r = respond('GET', u.href, null, {}, 'script', 'same-origin', true);
+  if (host()) {
+    S.now += r.latency;
+    receive(r);
+    return r.error == null && r.status >= 200 && r.status < 300 ? r.body : null;
+  }
   const body = own ? S.files[u.pathname] : S.files[u.href];
   return body == null ? null : body;
 }

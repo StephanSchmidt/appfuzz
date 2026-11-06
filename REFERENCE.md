@@ -953,7 +953,13 @@ own paths, and modules. Then 1 s passes. Next, everything a visitor can
 use is clicked, typed into or submitted, one at a time, with 0.5 s after
 each. Then 30 s pass with nobody using the page, then 30 days, with timers
 firing at most once a day, so a redirect set for next week still happens.
-Time is virtual: the 30 days cost no waiting.
+Time is virtual: the 30 days cost no waiting. The initial page's server time
+passes before scripts start. Requests made by scripts start at the browser's
+current UTC second, including time advanced by timers, and refresh all request
+fields declared with clock roles. Each request can still be replayed alone
+with that saved time. Fetch and XHR responses and beacon cookie updates arrive
+after their measured server latency; blocking script loads advance the page
+clock before the next script runs.
 
 **Requests.** A request to the app's own origin is a run of the app,
 with the same host plan. A request for data from another host gets text

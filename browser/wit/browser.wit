@@ -10,8 +10,9 @@ interface net {
 
     /// A request to the page's own origin (fetch, XHR, beacon, script,
     /// style, a form): the app under test answers it. `kind` says what made
-    /// it; `gesture` whether a user action did.
-    fetch-own: func(kind: string, method: string, path: string, headers: list<tuple<string, string>>, body: option<string>, gesture: bool) -> result<response, string>;
+    /// it; `gesture` whether a user action did. `now-ms` is the page's
+    /// current Unix time in milliseconds, including scheduled timer time.
+    fetch-own: func(kind: string, method: string, path: string, headers: list<tuple<string, string>>, body: option<string>, gesture: bool, now-ms: s64) -> result<response, string>;
 
     /// A request to another origin.
     fetch-other: func(kind: string, method: string, url: string, headers: list<tuple<string, string>>, body: option<string>, gesture: bool) -> result<response, string>;

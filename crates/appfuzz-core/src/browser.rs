@@ -144,6 +144,11 @@ impl Browser {
         let url = format!("{}#{}", page_url(&req), fragment);
         let request_cookies: Vec<String> = pairs(req.get("headers")).into_iter().filter(|(k, _)| k.eq_ignore_ascii_case("cookie")).map(|(_, v)| v).collect();
         let set_cookies: Vec<&str> = resp.headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie")).map(|(_, v)| v.as_str()).collect();
+        let start = crate::wasi::parse_datetime(&page.spec.now).ok_or_else(|| anyhow!("bad page time {:?}", page.spec.now))?;
+        let start_ms = start as f64 * 1000.0 + page.totals.virtual_ns.ms();
+        if !start_ms.is_finite() || start_ms.abs() > 8.64e15 {
+            anyhow::bail!("page response time is outside the browser's supported date range");
+        }
         // Keep response attributes intact for the browser's cookie jar.
         // The readable probe cookie gets an unused name so real credentials
         // named af_session are preserved.
@@ -151,13 +156,13 @@ impl Browser {
             "url": url, "html": resp.body.unwrap_or_default(),
             "request_cookies": request_cookies, "set_cookies": set_cookies,
             "probe_cookie": {"name": COOKIE, "value": secret_cookie(page.spec.seed)},
-            "page_run": page.id,
+            "page_run": page.id, "now": start_ms.floor(),
         });
         let export = self.app.default_export()?.clone();
         let mut spec = self.app.spec(&export, vec![Value::String(input.to_string())], Plan::default(), page.spec.seed);
         spec.now.clone_from(&page.spec.now);
 
-        let (tx, rx) = mpsc::channel::<(Value, mpsc::Sender<Routed>)>();
+        let (tx, rx) = mpsc::channel::<(Value, i64, mpsc::Sender<Routed>)>();
         let base = req.clone();
         let router: Router = Arc::new(move |key: &str, args: &[(String, Value)]| {
             let arg = |n: &str| args.iter().find(|(k, _)| k == n).map(|(_, v)| v);
@@ -172,21 +177,27 @@ impl Browser {
             let headers = pairs(arg("headers"));
             let body = arg("body").and_then(crate::value::some).and_then(Value::as_str);
             let request = request_for(&base, method, path, &headers, body)?;
+            let now_ms = arg("now-ms")?.as_i64()?;
             let (back, answer) = mpsc::channel();
-            tx.send((request, back)).ok()?;
+            tx.send((request, now_ms, back)).ok()?;
             answer.recv().ok()
         });
         let (browser, nested) = std::thread::scope(|s| {
             let spec = &spec;
             let worker = s.spawn(move || self.app.run_routed(spec, router));
             let mut nested: Vec<RunRecord> = Vec::new();
-            for (request, back) in rx {
+            for (request, now_ms, back) in rx {
                 let routed = if nested.len() >= MAX_FETCHES {
                     Routed { value: json!({"err": "appfuzz: too many requests in one page session"}), latency_ms: 0.0, source: "browser: request limit".into() }
                 } else {
                     let mut s = page.spec.clone();
+                    let (date, _, time) = crate::wasi::format_datetime(now_ms.div_euclid(1000));
+                    s.now = format!("{date}T{time}");
                     if let Some(first) = s.args.first_mut() {
                         *first = request;
+                        if let Some(entry) = &m.entry {
+                            crate::harness::set_clock_fields(first, &entry.fields, &s.now);
+                        }
                     }
                     // Each request is a run of its own, as the fuzzer's are:
                     // repeatable and confirmable alone. (Writes one request

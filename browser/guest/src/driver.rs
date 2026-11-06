@@ -91,6 +91,7 @@ mod bridge {
 
     /// Header pairs as JS arrays: rquickjs converts tuples through `List`.
     type Headers = Vec<List<(String, String)>>;
+    type FetchAnswer = List<(u16, Headers, String, Option<String>, Option<f64>)>;
 
     pub fn install(ctx: &Ctx<'_>) -> Result<()> {
         let host = Object::new(ctx.clone())?;
@@ -107,7 +108,7 @@ mod bridge {
     }
 
     /// A request: `target` is a path on the page's origin when `own`, else
-    /// a URL. The answer is `[status, headers, body, error]`.
+    /// a URL. The answer is `[status, headers, body, error, latency_ms]`.
     fn fetch(
         kind: String,
         method: String,
@@ -115,21 +116,22 @@ mod bridge {
         target: String,
         headers: Headers,
         body: Option<String>,
-        gesture: bool,
-    ) -> List<(u16, Headers, String, Option<String>)> {
+        List((gesture, now_ms)): List<(bool, f64)>,
+    ) -> FetchAnswer {
         let headers: Vec<(String, String)> = headers.into_iter().map(|List(h)| h).collect();
         let before = host_ms();
         let answer = if own {
-            net::fetch_own(&kind, &method, &target, &headers, body.as_deref(), gesture)
+            net::fetch_own(&kind, &method, &target, &headers, body.as_deref(), gesture, now_ms.floor() as i64)
         } else {
             net::fetch_other(&kind, &method, &target, &headers, body.as_deref(), gesture)
         };
-        if let Some((after, before)) = host_ms().zip(before) {
-            WAITED_MS.with(|w| w.set(w.get() + after - before));
+        let latency = host_ms().zip(before).map(|(after, before)| (after - before).max(0.0));
+        if let Some(latency) = latency {
+            WAITED_MS.with(|w| w.set(w.get() + latency));
         }
         match answer {
-            Ok(r) => List((r.status, r.headers.into_iter().map(List).collect(), r.body, None)),
-            Err(e) => List((0, Vec::new(), String::new(), Some(e))),
+            Ok(r) => List((r.status, r.headers.into_iter().map(List).collect(), r.body, None, latency)),
+            Err(e) => List((0, Vec::new(), String::new(), Some(e), latency)),
         }
     }
 

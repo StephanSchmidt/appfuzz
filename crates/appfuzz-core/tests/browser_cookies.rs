@@ -108,6 +108,33 @@ fn script_cookie_writes_cannot_replace_httponly_cookies_and_expire_in_virtual_ti
 }
 
 #[test]
+fn fetch_and_xhr_deliver_each_response_after_its_measured_host_latency() {
+    for script in [
+        "const start=Date.now();for(const path of ['/slow','/fast'])fetch(path).then(()=>fetch('/after'+path+'?elapsed='+(Date.now()-start)));",
+        "const start=Date.now();for(const path of ['/slow','/fast']){const x=new XMLHttpRequest();x.open('GET',path);x.onload=()=>fetch('/after'+path+'?elapsed='+(Date.now()-start));x.send();}",
+    ] {
+        let answer = json!({"ok":{"status":200,"headers":[],"body":"ok"}});
+        let plan = json!({FETCH_OWN:{"rules":[
+            {"when":{"path":"/slow"},"return":answer,"latency_ms":2500},
+            {"when":{"path":"/fast"},"return":answer,"latency_ms":50}
+        ],"default":{"return":answer,"latency_ms":0}}});
+        let (r, _) = visit_planned(script, json!({}), json!({}), plan);
+        for (path, latency) in [("/slow", 2500.0), ("/fast", 50.0)] {
+            let prefix = format!("/after{path}?elapsed=");
+            let elapsed: f64 = r
+                .events
+                .iter()
+                .filter(|e| e.func == FETCH_OWN)
+                .find_map(|e| e.args["path"].as_str()?.strip_prefix(&prefix)?.parse().ok())
+                .unwrap_or_else(|| panic!("missing {prefix}: {:?}", r.events));
+            assert!((elapsed - latency).abs() < 1.0, "{path} was delivered after {elapsed}ms instead of {latency}ms");
+        }
+        let sends: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN && matches!(e.args["path"].as_str(), Some("/slow" | "/fast"))).collect();
+        assert_eq!(sends[0].args["now-ms"], sends[1].args["now-ms"], "parallel requests start together");
+    }
+}
+
+#[test]
 fn fetch_response_cookies_are_stored_but_set_cookie_is_not_script_readable() {
     let (r, report) = visit_planned(
         r#"
@@ -122,6 +149,31 @@ fn fetch_response_cookies_are_stored_but_set_cookie_is_not_script_readable() {
     );
     assert!(report["text"].as_str().unwrap().starts_with("null"), "{report}");
     assert_eq!(cookie(request(&r, "/after")), Some("sid=real-session"));
+}
+
+#[test]
+fn a_blocking_script_load_advances_the_page_clock_before_the_next_script() {
+    let answer = json!({"ok":{"status":200,"headers":[],"body":""}});
+    let plan = json!({FETCH_OWN:{"rules":[{"when":{"path":"/blocking.js"},
+        "return":{"ok":{"status":200,"headers":[],"body":"globalThis.loaded=true;"}},"latency_ms":2500}],
+        "default":{"return":answer,"latency_ms":0}}});
+    let html = "<!doctype html><script>const start=Date.now();</script><script src='/blocking.js'></script><script>if(loaded)fetch('/after?elapsed='+(Date.now()-start));</script>";
+    let (r, _) = visit_planned("", json!({}), json!({"html":html}), plan);
+    let elapsed: f64 =
+        r.events.iter().filter(|e| e.func == FETCH_OWN).find_map(|e| e.args["path"].as_str()?.strip_prefix("/after?elapsed=")?.parse().ok()).unwrap();
+    assert!((elapsed - 2500.0).abs() < 1.0, "the script loaded in {elapsed}ms");
+}
+
+#[test]
+fn beacon_response_cookies_wait_for_the_measured_response_time() {
+    let answer = json!({"ok":{"status":200,"headers":[],"body":""}});
+    let plan = json!({FETCH_OWN:{"rules":[{"when":{"path":"/login"},
+        "return":{"ok":{"status":200,"headers":[["set-cookie","sid=after-response; Path=/"]],"body":""}},"latency_ms":2500}],
+        "default":{"return":answer,"latency_ms":0}}});
+    let (r, _) =
+        visit_planned("navigator.sendBeacon('/login');setTimeout(()=>fetch('/before'),100);setTimeout(()=>fetch('/after'),3000);", json!({}), json!({}), plan);
+    assert_eq!(cookie(request(&r, "/before")), None);
+    assert_eq!(cookie(request(&r, "/after")), Some("sid=after-response"));
 }
 #[test]
 fn xhr_response_cookies_update_the_jar_without_exposing_set_cookie() {
