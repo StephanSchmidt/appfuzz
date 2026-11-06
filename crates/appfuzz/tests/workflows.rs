@@ -1653,6 +1653,87 @@ query = { dataset = "items", select = "id", page = { offset = "offset", limit = 
     assert_eq!((code, &v["reproduced"]), (0, &json!(false)), "{v}");
 }
 
+/// `run` adds up deal amounts: of every deal, or (`mine`) of the caller's,
+/// user 1, the first user deals belong to.
+fn deals_fixture(f: &Fixture, mine: bool) {
+    let wit = "package test:workflow; interface db { all: func() -> list<u32>; mine: func(owner:u32) -> list<u32>; } world app { import db; export run: func(mode:u32) -> u32; }";
+    let wat = r#"(module
+      (import "test:workflow/db" "all" (func $all (param i32)))
+      (import "test:workflow/db" "mine" (func $mine (param i32 i32)))
+      (memory (export "memory") 4)
+      (global $heap (mut i32) (i32.const 1024))
+      (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32)
+        (local $p i32) (local.set $p (global.get $heap))
+        (global.set $heap (i32.add (global.get $heap) (local.get 3))) (local.get $p))
+      (func (export "run") (param $mode i32) (result i32)
+        (local $i i32) (local $sum i32) (local $p i32) (local $n i32)
+        (if (i32.const MINE) (then (call $mine (i32.const 1) (i32.const 32))) (else (call $all (i32.const 32))))
+        (local.set $p (i32.load (i32.const 32)))
+        (local.set $n (i32.load (i32.const 36)))
+        (block $done (loop $next
+          (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+          (local.set $sum (i32.add (local.get $sum) (i32.load (i32.add (local.get $p) (i32.shl (local.get $i) (i32.const 2))))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $next)))
+        (local.get $sum)))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, &wat.replace("MINE", if mine { "1" } else { "0" }))).unwrap();
+}
+
+#[test]
+fn an_answer_that_changes_with_other_users_records_is_a_tenant_leak() {
+    let f = Fixture::new(false);
+    let manifest = r#"
+[app]
+wasm = "app.wasm"
+[entry]
+export = "run"
+request = 0
+[datasets.users]
+rows = 2
+key = "id"
+template = { id = 1 }
+[datasets.deals]
+rows = 6
+key = "id"
+template = { id = 1, owner = 1, amount = 10 }
+references = { owner = "users" }
+owner = "owner"
+choices = { amount = [10, 20, 40] }
+[functions."test:workflow/db#all"]
+query = { dataset = "deals", select = "amount" }
+[functions."test:workflow/db#mine"]
+query = { dataset = "deals", filter = { owner = "owner" }, select = "amount" }
+"#;
+    std::fs::write(&f.manifest, manifest).unwrap();
+    let leaks = |f: &Fixture| {
+        let (_, r) = f.cli(&["run"]);
+        let (_, out) = f.cli(&["probe", "pairs", r["run"].as_str().unwrap()]);
+        out["findings"].as_array().unwrap().iter().filter(|x| x["kind"] == "tenant_leak").cloned().collect::<Vec<_>>()
+    };
+    deals_fixture(&f, false);
+    let found = leaks(&f);
+    let [finding] = found.as_slice() else { panic!("{found:?}") };
+    assert_eq!(finding["severity"], "fail", "{finding}");
+    assert!(finding["title"].as_str().unwrap().starts_with("the answer of run for 1 changes when only other users' deals change"), "{finding}");
+    let (code, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "60"]);
+    assert_eq!((code, &confirmed["confirmed"]), (0, &json!(true)), "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(case).unwrap()).unwrap();
+    // Fewer deals than the manifest's 6 still show the leak.
+    assert!(saved["spec"]["plan"]["_defaults"]["dataset_rows"]["deals"].as_u64().is_some_and(|n| n < 6), "{saved}");
+    let (code, v) = f.cli(&["replay", case]);
+    assert_eq!((code, &v["reproduced"]), (0, &json!(true)), "{v}");
+    // The caller's own deals only: other users' deals change nothing.
+    deals_fixture(&f, true);
+    assert!(leaks(&f).is_empty());
+    let (code, v) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!((code, &v["reproduced"]), (0, &json!(false)), "{v}");
+    // Amounts everyone may see: adding them all up is no leak.
+    deals_fixture(&f, false);
+    f.edit("owner = \"owner\"\nchoices", "owner = \"owner\"\npublic = [\"amount\"]\nchoices");
+    assert!(leaks(&f).is_empty());
+}
+
 #[test]
 fn plans_edit_the_world_and_paged_queries_answer_a_page_at_a_time() {
     let f = Fixture::new(false);

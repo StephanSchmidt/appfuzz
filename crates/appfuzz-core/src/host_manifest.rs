@@ -480,6 +480,9 @@ fn merge_fn(at: &str, hf: &mut FunctionSpec, af: FunctionSpec) -> Result<()> {
     if af.idempotent && !hf.idempotent {
         bail!("{at}.idempotent = true: the platform does not say the call may be repeated");
     }
+    if af.shared && !hf.shared {
+        bail!("{at}.shared = true: the platform does not say the change is every user's");
+    }
     match (&hf.batch_of, af.batch_of) {
         (Some(h), Some(a)) if norm(h) != norm(&a) => bail!("{at}.batch_of = {a:?}: the platform says {h:?}"),
         (None, Some(a)) => hf.batch_of = Some(a),
@@ -620,6 +623,7 @@ fn func_doc(host: &HostManifest, types: &Types, f: &FuncInfo, caps: &[String]) -
     put("sdk", json!(spec.sdk));
     put("effect", json!(spec.effect.map(|e| e.name())));
     put("idempotent", json!(spec.idempotent.then_some(true)));
+    put("shared", json!(spec.shared.then_some(true)));
     put("cost", json!(spec.cost));
     put("latency_ms", json!(spec.latency_ms));
     put("values", serde_json::to_value(&spec.values).unwrap_or(Value::Null));

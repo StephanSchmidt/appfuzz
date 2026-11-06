@@ -24,10 +24,14 @@ pub const ROLE: &str = "identity";
 /// the plan's `_defaults.identity`, else the first user records belong to
 /// (dataset `owner`), else an id derived from the seed.
 pub fn caller(spec: &RunSpec, m: &Manifest, world: &crate::dataset::World) -> String {
+    known_caller(spec, m, world).unwrap_or_else(|| (1000 + spec.seed % 9000).to_string())
+}
+
+/// The caller, where the request, the plan or the data says who it is.
+pub fn known_caller(spec: &RunSpec, m: &Manifest, world: &crate::dataset::World) -> Option<String> {
     request_identity(spec, m)
         .or_else(|| spec.plan.0.get("_defaults").and_then(|d| d.identity.clone()))
         .or_else(|| crate::dataset::tenants(&m.datasets, world).first().map(id_text))
-        .unwrap_or_else(|| (1000 + spec.seed % 9000).to_string())
 }
 
 fn request_identity(spec: &RunSpec, m: &Manifest) -> Option<String> {

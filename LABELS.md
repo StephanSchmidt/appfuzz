@@ -116,6 +116,31 @@ result = { owner = "owner" }
 result = { owner = "owner" }
 ```
 
+Where the platform models its records (REFERENCE.md, coherent host datasets),
+a dataset says who owns each record and what anyone may see:
+
+```toml
+[datasets.deals]
+key = "id"
+template = { id = 1, owner = "user_1", title = "Deal", amount = 100 }
+references = { owner = "users" }
+owner = "owner"
+public = ["title"]
+```
+
+| Finding | When |
+|---------|------|
+| `tenant_leak` (fail) | the same request, with only other users' records changed, gets another answer or makes a change with other arguments |
+| `tenant_leak` (warn) | only the status or headers change: they show that other users' records exist |
+
+Other users' records keep their keys, owners and references; their other
+fields that are not `public` take other values the platform can produce.
+Without `public`, every other one after the first is also gone and one more
+is added. Records the caller's own records reference stay as they are.
+`shared = true` on a function whose effect is a change says its calls may
+depend on everyone's records (a shared counter, a team-wide log): their
+arguments don't count.
+
 ## Effects: `effect = "<effect>"`
 
 What a call does to the world.

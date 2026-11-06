@@ -13,6 +13,8 @@
 //!   `slow_host_sensitivity`
 //! - shorter pages, where the platform may return them (the same world) →
 //!   another answer: `broken_pagination`
+//! - other users' records changed (datasets with an `owner`) → another
+//!   answer or other changes: `tenant_leak`
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -42,6 +44,7 @@ pub enum Change {
     Fault,
     Slow,
     Pages,
+    Tenant,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,6 +87,9 @@ pub fn variants(app: &App, r: &RunRecord) -> Vec<Variant> {
         defaults.dataset_seed = Some(defaults.dataset_seed.unwrap_or(r.spec.seed));
         s.plan.0.entry(func.clone()).or_default().page_size = Some(size);
         out.push(Variant { change: Change::Pages, func: Some(func), call: None, spec: s });
+    }
+    if let Some(spec) = crate::tenants::variant(app, r) {
+        out.push(Variant { change: Change::Tenant, func: None, call: None, spec });
     }
     let Some(mut base) = pinned(r) else { return out };
     // A different guest RNG seed must keep host datasets fixed, just as
@@ -297,6 +303,13 @@ pub fn compare(app: &App, base: &RunRecord, v: &Variant, vr: &RunRecord) -> Vec<
                 ));
             }
         }
+        Change::Tenant => {
+            let edits = v.spec.plan.0.get("_defaults").map(|d| d.dataset_edits.as_slice()).unwrap_or_default();
+            let before = base.spec.plan.0.get("_defaults").map_or(0, |d| d.dataset_edits.len());
+            let mut datasets: Vec<&str> = edits.iter().skip(before).map(|e| e.dataset()).collect();
+            datasets.dedup();
+            out.extend(crate::tenants::compare(m, base, vr, detail(json!({"datasets": datasets}))));
+        }
         Change::Pages if !same => {
             let size = v.spec.plan.0.get(&func).and_then(|p| p.page_size).unwrap_or(0);
             out.push(crate::pages::shorter_finding(m, base, vr, &func, size, detail(json!({}))));
@@ -315,7 +328,7 @@ pub fn expected(v: &Variant, f: &Finding) -> bool {
 }
 
 /// Words in one body and not in the other (at most 10 each).
-fn word_diff(a: &str, b: &str) -> (Vec<String>, Vec<String>) {
+pub(crate) fn word_diff(a: &str, b: &str) -> (Vec<String>, Vec<String>) {
     let (wa, wb) = (word_bag(a), word_bag(b));
     let minus = |x: &[String], y: &[String]| {
         let mut y = y.to_vec();

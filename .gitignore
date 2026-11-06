@@ -30,6 +30,7 @@
 !/bench/prelude.rs
 !/bench/prelude-labelled.rs
 !/bench/prelude-data.rs
+!/bench/prelude-tenant.rs
 !/bench/scripts.rs
 !/bench/apps.py
 !/bench/demo.sh

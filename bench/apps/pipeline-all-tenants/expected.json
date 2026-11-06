@@ -1,0 +1,11 @@
+{
+  "app": "pipeline-all-tenants",
+  "bug": "shows the signed-in user a pipeline total that adds up every user's deals",
+  "expect": [
+    {
+      "kind": "tenant_leak",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

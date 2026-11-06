@@ -14,6 +14,15 @@
 - A create mutation can answer with the new key or record: `"$key"` and
   `"$row"` in its `response`.
 
+**Tenant isolation**
+
+- New finding `tenant_leak`: the answer, or the arguments of a change,
+  differ when only other users' records differ. A pair check rotates the
+  private fields of records whose dataset `owner` is someone else (and,
+  without `public` fields, drops half and adds one). Status or headers
+  alone are a warn. `shared = true` on a changing function exempts its
+  arguments.
+
 **Pagination**
 
 - New finding `broken_pagination` (fail): rows between two pages the app

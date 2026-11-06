@@ -545,6 +545,17 @@ records. The caller of a run is the request field with the `identity` role, else
 the plan's `_defaults.identity`, else the first user records belong to: the first
 key of the dataset the owner field references, or its first choice.
 
+Pair checks (`probe pairs`, fuzzing) then run the same request in the same world
+with only other users' records changed, as plan edits: `rotate` of their
+private fields (not the key, the owner, references or `public` fields) and,
+for a dataset without `public` fields, `drop` of every other one after the
+first and `add` of one owned by another user. Records the caller's records
+reference are left alone. Another body or result, or other arguments to a call whose effect is a
+change (unless the function says `shared = true`), is a `tenant_leak` fail;
+another status or headers only, a warn. Without a known caller (an identity
+field, `_defaults.identity` or an owner) there is no such pair. Confirmation
+shrinks the collections to the fewest records that still show the leak.
+
 ### Edited worlds
 
 A plan can change the generated world before the run, in order:

@@ -1059,6 +1059,78 @@ app("export-follows-pages", "exports customers page by page until the platform s
         html(out + "</ul>")
     """), [], grants=[CUSTOMERS], extra=DATA)
 
+# --- Records of other users -----------------------------------------------
+# Deals and slots belong to users; anyone may see when a slot is booked.
+
+USERS_, DEALS, SLOTS = "bench:web/users", "bench:web/deals", "bench:web/slots"
+
+TENANTS = """
+[datasets.users]
+rows = 3
+key = "id"
+template = { id = "user", name = "User" }
+
+[datasets.deals]
+rows = 9
+key = "id"
+template = { id = 1, owner = "user_1", title = "Deal", amount = 100 }
+references = { owner = "users" }
+owner = "owner"
+choices = { title = ["Renewal", "Upsell", "Pilot"], amount = [1015, 925, 4000, 60] }
+
+[datasets.slots]
+rows = 6
+key = "id"
+template = { id = 1, owner = "user_1", time = "09:00", note = "Note" }
+references = { owner = "users" }
+owner = "owner"
+public = ["time"]
+choices = { time = ["09:00", "10:30", "14:00"], note = ["Call me first", "Bring the contract"] }
+
+[functions."bench:web/users#current"]
+result = { id = "identity" }
+
+[functions."bench:web/deals#all"]
+query = { dataset = "deals" }
+
+[functions."bench:web/deals#for-owner"]
+query = { dataset = "deals", filter = { owner = "owner" } }
+
+[functions."bench:web/slots#all"]
+query = { dataset = "slots" }
+"""
+
+
+def tenant(body):
+    return handler(body, prelude="prelude-tenant.rs")
+
+
+app("pipeline-all-tenants", "shows the signed-in user a pipeline total that adds up every user's deals",
+    tenant("""
+        let _ = &req;
+        let me = users::current();
+        let total: u32 = deals::all().iter().map(|d| d.amount).sum();
+        html(format!("<p>Pipeline for {}: €{total}</p>", esc(&me.name)))
+    """), [("tenant_leak", "fail")], grants=[USERS_, DEALS], extra=TENANTS)
+
+app("pipeline-own-tenant", "shows the signed-in user the total of their own deals",
+    tenant("""
+        let _ = &req;
+        let me = users::current();
+        let total: u32 = deals::for_owner(&me.id).iter().map(|d| d.amount).sum();
+        html(format!("<p>Pipeline for {}: €{total}</p>", esc(&me.name)))
+    """), [], grants=[USERS_, DEALS], extra=TENANTS)
+
+app("slots-public", "lists the booked times of every user's slots, which anyone may see",
+    tenant("""
+        let _ = &req;
+        let mut out = String::from("<p>Booked:</p><ul>");
+        for s in slots::all() {
+            out += &format!("<li>{}</li>", esc(&s.time));
+        }
+        html(out + "</ul>")
+    """), [], grants=[SLOTS], extra=TENANTS)
+
 MANIFEST = """\
 # appfuzz bench app: {name} ({what}).
 [app]

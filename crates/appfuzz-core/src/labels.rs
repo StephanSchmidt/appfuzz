@@ -117,6 +117,9 @@ pub fn check_positions(m: &Manifest) -> Result<()> {
         if f.idempotent && !f.effect.is_some_and(crate::manifest::Effect::changes) {
             bail!("[functions.\"{k}\"] idempotent = true needs effect = \"write\", \"delete\" or \"external\"");
         }
+        if f.shared && !f.effect.is_some_and(crate::manifest::Effect::changes) {
+            bail!("[functions.\"{k}\"] shared = true needs effect = \"write\", \"delete\" or \"external\"");
+        }
         if let Some(b) = &f.batch_of
             && strip_key(b) == strip_key(k)
         {

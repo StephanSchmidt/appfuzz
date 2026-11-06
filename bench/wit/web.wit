@@ -79,6 +79,18 @@ interface customers {
     after: func(cursor: option<string>, limit: u32) -> result<customer-page, string>;
 }
 
+// Sales deals and booked slots: records that belong to a user.
+interface deals {
+    record deal { id: u64, owner: string, title: string, amount: u32 }
+    all: func() -> list<deal>;
+    for-owner: func(owner: string) -> list<deal>;
+}
+
+interface slots {
+    record slot { id: u64, owner: string, time: string, note: string }
+    all: func() -> list<slot>;
+}
+
 interface handler {
     use types.{request, response};
     handle: func(req: request) -> response;
@@ -113,5 +125,13 @@ world labelled-app {
 // The apps that read modeled collections.
 world data-app {
     import customers;
+    export handler;
+}
+
+// The apps whose records belong to users.
+world tenant-app {
+    import users;
+    import deals;
+    import slots;
     export handler;
 }

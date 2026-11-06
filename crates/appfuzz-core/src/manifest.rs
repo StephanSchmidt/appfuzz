@@ -315,6 +315,10 @@ pub struct FunctionSpec {
     /// The same call twice is harmless (a write that sets, not adds).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub idempotent: bool,
+    /// The change is everyone's (a shared counter, a team-wide log): its
+    /// arguments may depend on other users' records.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
     /// This function does at once what `<fn>` does for one: calling `<fn>`
     /// in a loop is then an n+1 fail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -436,7 +440,7 @@ impl Manifest {
             }
         }
         let mut h = blake3::Hasher::new();
-        h.update(b"appfuzz-execution-v48");
+        h.update(b"appfuzz-execution-v49");
         h.update(crate::extism::KERNEL_BYTES);
         h.update(browser);
         h.update(env!("CARGO_PKG_VERSION").as_bytes());
@@ -715,6 +719,10 @@ mod tests {
         assert!(crate::labels::check_positions(&v2).is_err());
         let bad = "[app]\nwasm = \"a\"\n[functions.\"x#f\"]\nidempotent = true\n";
         assert!(crate::labels::check_positions(&toml::from_str(bad).unwrap()).is_err());
+        let bad = "[app]\nwasm = \"a\"\n[functions.\"x#f\"]\nshared = true\n";
+        assert!(crate::labels::check_positions(&toml::from_str(bad).unwrap()).is_err());
+        let good = "[app]\nwasm = \"a\"\n[functions.\"x#f\"]\neffect = \"write\"\nshared = true\n";
+        crate::labels::check_positions(&toml::from_str(good).unwrap()).unwrap();
         assert!(toml::from_str::<Manifest>("[app]\nwasm = \"a\"\n[entry]\nexport = \"h\"\nvalues = { a = \"range:x..\" }\n").is_err());
     }
 }

@@ -1,0 +1,6 @@
+{
+  "app": "slots-public",
+  "bug": "lists the booked times of every user's slots, which anyone may see",
+  "expect": [],
+  "allow": []
+}

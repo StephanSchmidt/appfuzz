@@ -271,6 +271,7 @@ parameter or path it doesn't have, is an error.
 | "the page's JavaScript is the problem: DOM XSS, `eval`, a beacon with the cookie, a redirect next week, a miner" | `probe scripts` |
 | "it lets in any token", "it never checks the JWT's signature", "the token compare leaks timing", "session ids are guessable" | `probe auth` |
 | "it can't handle odd host values" | `probe values --fn X` |
+| "one user sees what another user has" | dataset `owner` and `public`, then `probe pairs <run>` |
 | "it misses rows when a page comes back short" | `probe pairs <run>` (pages of 1 and one less than asked, where `page.short = true`) |
 | "it breaks when a later host call fails, or retries forever" | `probe faults last --runs 256`, optionally `--fn X` |
 | "why do these two runs differ?" | `diff <a> <b>`, then `provenance <b> --call <n>` |
@@ -326,6 +327,7 @@ and `confirm <id>` makes it reproducible.
 | `weak_csp`, `unpinned_script` | `html:scripts`: the Content-Security-Policy lets scripts reach other hosts (or is missing); a script comes from another host without an `integrity` hash or from a host the grants don't list, so the code can change after the review |
 | `code_injection`, `remote_code`, `script_error` | `html:scripts`, with the page's scripts run (`probe scripts`): request or host text becomes code (`eval`, `new Function`, a timer given a string, a handler); the scripts run code they fetched from another host; the scripts throw (fail when every visitor gets the error on load) |
 | `foreign_user_access`, `missing_owner_check` | a user id that is not the caller's goes to a host call; another user's record shows in a page (§4 identity) |
+| `tenant_leak` | the answer, or a change the app makes, differs when only other users' records differ (datasets with `owner`; fields in `public` anyone may see) |
 | `write_on_safe_method`, `repeated_write`, `partial_write` | a change on GET, the same change twice, a change that stays when a later one fails (§4 effects) |
 | `ungranted_import`, `ungranted_call`, `unused_grant` | imports versus the manifest's grants |
 | `check_failed`, `acceptance_failed`, `sequence_check_failed` | a property from `check`, a saved `[acceptance]` check or a sequence invariant broke |

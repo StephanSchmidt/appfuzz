@@ -39,6 +39,7 @@ pub mod shrink;
 pub mod spin;
 pub mod statics;
 pub mod store;
+pub mod tenants;
 pub mod urls;
 pub mod value;
 pub mod value_contract;

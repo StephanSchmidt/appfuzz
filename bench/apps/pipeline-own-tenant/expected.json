@@ -1,0 +1,6 @@
+{
+  "app": "pipeline-own-tenant",
+  "bug": "shows the signed-in user the total of their own deals",
+  "expect": [],
+  "allow": []
+}
