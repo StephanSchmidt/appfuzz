@@ -100,7 +100,7 @@ impl CoreApp {
             }
             if let Some(b) = manifest.function(key).and_then(|f| f.handle.clone()) {
                 let names = info.param_names();
-                for p in [&b.handle, &b.key, &b.value, &b.body].into_iter().flatten() {
+                for p in [&b.handle, &b.key, &b.value, &b.body, &b.streaming].into_iter().flatten() {
                     if !names.contains(p) {
                         bail!("{key}: handle binding names parameter {p:?}; it has {}", names.join(", "));
                     }

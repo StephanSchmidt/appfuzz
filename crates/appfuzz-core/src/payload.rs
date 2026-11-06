@@ -189,7 +189,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     for e in &r.events {
         let effect = matches!(m.effect_of(&e.func), Some(Effect::Write | Effect::External));
-        for (p, a) in &e.args {
+        for (p, a) in e.text_args().iter() {
             let mut ss = Vec::new();
             strings(a, &mut ss);
             places.push((format!("the parameter {p} of {}", e.func), ss.join("\n"), m.param_label(&e.func, p), effect));
@@ -232,7 +232,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         if !matches!(m.effect_of(&e.func), Some(Effect::Write | Effect::External)) {
             continue;
         }
-        for (p, a) in &e.args {
+        for (p, a) in e.text_args().iter() {
             let mut ss = Vec::new();
             strings(a, &mut ss);
             for s in ss {

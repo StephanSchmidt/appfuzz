@@ -99,6 +99,7 @@ pub struct Trace {
     /// The export's arguments (the request), WIT-shaped JSON.
     pub args: Vec<Value>,
     pub events: Vec<TraceCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::value::present_json_value")]
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_exit_code: Option<i32>,
@@ -124,6 +125,7 @@ pub struct Trace {
 pub struct TraceCall {
     pub func: String,
     pub args: Map<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::value::present_json_value")]
     pub result: Option<Value>,
     #[serde(default)]
     pub stack: Vec<Frame>,

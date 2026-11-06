@@ -27,7 +27,7 @@ use crate::detect::{Finding, Severity};
 use crate::harness::field;
 use crate::html::doc;
 use crate::manifest::Manifest;
-use crate::record::{OutcomeKind, RunRecord};
+use crate::record::RunRecord;
 use crate::urls::{classify, in_html, normalize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,9 +300,6 @@ pub fn is_local(u: &str) -> bool {
 pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let Some(entry) = m.entry.as_ref().filter(|e| !e.result.is_empty()) else { return Vec::new() };
     let Some(result) = &r.result else { return Vec::new() };
-    if r.outcome.kind != OutcomeKind::Ok {
-        return Vec::new();
-    }
     let ex = &r.spec.export;
     let run = Some(r.id.as_str());
     let req = request_texts(r);
@@ -447,7 +444,7 @@ fn request_texts(r: &RunRecord) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{Outcome, RunSpec, Totals};
+    use crate::record::{Outcome, OutcomeKind, RunSpec, Totals};
 
     fn whats(v: Vec<Hit>) -> Vec<String> {
         v.into_iter().map(|h| h.what).collect()

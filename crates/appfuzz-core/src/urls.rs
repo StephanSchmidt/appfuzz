@@ -430,7 +430,7 @@ fn extract_from(r: &RunRecord, m: &Manifest, full: bool) -> Vec<UrlRef> {
     }
     for e in r.events.iter().filter(|_| full) {
         let mut strings = Vec::new();
-        for v in e.args.values() {
+        for v in e.text_args().values() {
             collect_strings(v, &mut strings);
         }
         for s in strings {

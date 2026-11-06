@@ -279,7 +279,7 @@ property, and shrinks that run to a counterexample. "holds" means no run
 broke it: that is evidence, not proof.
 
 Save recurring requirements under `[acceptance]` (`version = 1`) and
-`[acceptance.checks.NAME]`. Each needs `origin = "marketing" | "platform"` and
+`[acceptance.checks.NAME]`. Each needs `origin = "app" | "platform"` and
 exactly one of `property = ["value_range", ".usage", "0", "100"]`,
 `let = { total = "out.json.total", items = "host.items#all.result" }` with
 `assert = "total == sum(items.map(i, i.price))"` (CEL over the `let` names; a
@@ -383,8 +383,9 @@ refuses findings it cannot reproduce.
 
 ## Workflow contract
 
-Marketing owns intended behavior and acceptance examples. Engineering owns the
-platform contract. The objective is to replace routine engineering review for
+The team that owns an app (marketing, sales, accounting, support, anyone outside
+engineering) owns its intended behavior and acceptance examples. Engineering owns
+the platform contract. The objective is to replace routine engineering review for
 apps constrained by that contract.
 
 Prefer `run --trace` and `show <run> --view explanation|calls|timeline|logs|stack|provenance|fuel`.

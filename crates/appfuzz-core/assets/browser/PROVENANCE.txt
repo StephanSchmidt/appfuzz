@@ -1,7 +1,10 @@
 The browser guest: QuickJS (quickjs-ng, MIT, via rquickjs, MIT), a DOM
-shim on linkedom (ISC) and the page driver, built by make browser.
+shim on linkedom (ISC), cookies with tldts (MIT, Public Suffix List),
+and the page driver, built by make browser.
 Source: browser/ (guest/, js/, wit/).
 rquickjs: 0.14.0
 linkedom: 0.18.15
+tldts: 7.4.19
+tldts-core: 7.4.20
 rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
-SHA-256: 66e167297f2a7dddd8320870be10545f1d1775fc0398fe826537eaeadb302272
+SHA-256: d11727bb5d5deb4945bb1f9c060588151f92a0cca8a263e0375b75401214a0b0

@@ -37,7 +37,7 @@ pub struct Query {
     #[serde(default)]
     pub wrap: Option<String>,
     /// Complete WIT-shaped response for an empty single-record lookup.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::value::present_json_value")]
     pub missing: Option<Value>,
 }
 pub type World = BTreeMap<String, Vec<Value>>;

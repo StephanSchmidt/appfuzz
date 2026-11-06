@@ -157,6 +157,19 @@ The `structured` stage runs automatically. Its evaluations and kept inputs appea
 under `stages.structured` in fuzz reports. Findings use the existing detectors and
 ordinary `confirm`/`replay`.
 
+## Explicit null values
+
+An absent result and a completed return of JSON `null` are different. Stored
+runs and traces retain explicit null export and host results; absent results
+omit the field. This keeps void and empty-option returns deterministic through
+storage, confirmation and replay. Replay differences also report fields added
+or removed even when their value is null.
+
+A host plan's `"return": null` is an explicit response, including in rules,
+call-number overrides and defaults. Omitting `return` allows the next plan
+layer or generation to decide. A dataset query's explicit `missing: null`
+similarly overrides its usual wrapping for an empty lookup.
+
 ## WASI commands and exit status
 
 A selected `wasi:cli/run#run` export with no parameters and a single
@@ -404,7 +417,7 @@ input_values = { "form.date" = ["required", "format:date"], "form.seats" = ["req
 [acceptance]
 version = 1
 [acceptance.checks.reject-invalid-date]
-origin = "marketing"
+origin = "app"
 input_class = "invalid"
 input_fields = ["form.date"]
 when = { method = "POST", path = "/book" }
@@ -517,12 +530,12 @@ description = "Usage stays within its promised range"
 property = ["value_range", ".usage", "0", "100"]
 
 [acceptance.checks.example]
-origin = "marketing"
+origin = "app"
 request = { method = "GET", path = "/", query = [], form = [], today = "2026-11-02", now = "08:00:00" }
 expect = { selector = "$.status", equals = 200 }
 
 [acceptance.checks.availability]
-origin = "marketing"
+origin = "app"
 description = "Adding an available room cannot reduce availability"
 relation = { selector = ".available", comparison = "non_decreasing", dataset = "rooms", add = 1 }
 ```
@@ -535,9 +548,10 @@ appfuzz replay path/to/acceptance-case.json
 appfuzz replay path/to/acceptance-case.json --against-current
 ```
 
-`origin` is required: `marketing` for intended app behavior, `platform` for a
-platform invariant. It is provenance, not an assertion that the requirement is
-correct. appfuzz never promotes observed behavior into an acceptance rule.
+`origin` is required: `app` for intended app behavior, owned by whichever team
+owns the app, `platform` for a platform invariant. `marketing`, the former
+spelling of `app`, still reads. It is provenance, not an assertion that the
+requirement is correct. appfuzz never promotes observed behavior into an acceptance rule.
 Exactly one of `property`, `expect`, `relation` and `assert` is required
 ([asserts](#asserting-outputs-against-inputs)). A property is an
 argument array accepted by `check`, including `value_range`, `max_calls`,
@@ -611,13 +625,13 @@ with `let`, then write one expression over those names:
 
 ```toml
 [acceptance.checks.total]
-origin = "marketing"
+origin = "app"
 description = "The total is the sum of the line items"
 let = { total = "out.json.total", prices = "host.items#all.result" }
 assert = "total == sum(prices.map(i, i.price))"
 
 [acceptance.checks.listing]
-origin = "marketing"
+origin = "app"
 let = { rows = "select .row", items = "host.items#all.result", days = "request.query.days" }
 assume = "days >= 1"
 assert = { every_item = "size(rows) == size(items)", no_more = "size(rows) <= 50" }
@@ -824,7 +838,8 @@ page's JavaScript, in a browser built into appfuzz. Nothing else needs to
 be installed. `review` runs `probe scripts` after the fuzz phase.
 
 **Which pages.** The manifest's request, and up to 8 pages the fuzz phase
-found: requests with fuzzed text whose response has a script. Each page is
+found: requests with fuzzed text whose response has a script, inline event
+handler or script URL. Responses sent before a later guest crash count too. Each page is
 opened three times: with the host data as given, with markup in every
 text a host function returns (stored text the scripts may put into the
 page), and with every host list empty (a new user, an empty shop). The
@@ -843,6 +858,25 @@ with the same host plan. A request for data from another host gets text
 that names the host, so code built from it shows as `remote_code`. The
 page has a session cookie that scripts can read and that holds a secret,
 so sending it away is a `secret_leak`.
+Responses already sent by those app requests remain available to scripts even
+if the app later traps. Browser calls recorded before a hang or crash are
+still checked for findings.
+
+**Cookies.** Visits retain the page request's Cookie pairs and process the
+page's Set-Cookie headers without losing attributes. Subsequent fetch, XHR,
+script and beacon requests use the cookie jar. HttpOnly cookies authenticate
+requests but stay out of `document.cookie`; Set-Cookie response headers stay
+out of fetch and XHR results. Credential modes, domains (including public and
+private suffix boundaries), paths, Secure, SameSite and virtual-time expiry
+control delivery. Cookie headers supplied by scripts cannot override the jar.
+Cookies from asynchronous responses take effect when those responses arrive.
+The readable probe cookie uses an unused name, preserving real credentials.
+Incoming Cookie pairs lack attribute metadata; they are initially modeled as
+readable, host-only cookies at `/`, then response attributes update them.
+
+The effective contract includes the bundled browser's bytes. Rebuilding that
+runtime invalidates earlier review and envelope identities even when the
+reviewed app and manifest are unchanged.
 
 **CPU.** Until its actions are done, a page may use 60 ms of CPU, as a
 browser counts it; an ordinary React app uses under 10 ms. While nobody
@@ -856,8 +890,11 @@ uses the page, it may keep the CPU busy up to 10 % of the time;
 scripts used that the browser doesn't model. `scripts_not_loaded` are
 scripts from other hosts. `actions_not_all_tried` are pages whose scripts
 used up their CPU before every action. `not_followed_30_days` are pages
-whose CPU ran out before 30 days passed. An empty `unsupported` means
-every visit ran to the end.
+whose CPU ran out before 30 days passed. The visit's `outcome` says whether
+it finished or exhausted its budget. Engine, plan and capture errors, or a
+missing session report, set `status` to `incomplete`, list `errors` and exit 3;
+`review` is incomplete too. Such failures during case replay are execution
+errors, not evidence that the original finding is absent.
 
 A finding from a visit points at the app's run that served the page.
 `confirm` and `replay` reproduce it with the page's scripts.
@@ -988,8 +1025,19 @@ handle: func(request: record { method: string, uri: string,
   a `Host` header is added when missing. Header names or values the HTTP
   types reject are dropped.
 - A handler that returns without `response-outparam.set` is a crash. A
-  response set to an error code is status 500. An aborted response body is a
-  crash. Bodies are capped at 64 MiB.
+  response set to an error code is status 500. An aborted response body, or
+  returning without finishing a body, is a crash. Bodies are capped at 64 MiB.
+- A response already sent remains in `result` when the handler later traps,
+  runs out of fuel, or fails while draining pending requests. Fastly responses
+  sent before a later failure are retained too. The outcome still records the
+  failure, and output checks still inspect the sent response. Ownership checks
+  also inspect error pages. A suspected foreign field is changed in a follow-up
+  run: if the host actually supplies that changed field with ownership intact
+  and the response stays identical, matching static page text is not reported
+  as a leaked record.
+- For an aborted or unfinished body, `result.body` retains the bytes already
+  written and `result.body_complete` is `false`. This is partial client output,
+  not a successful completion. Completed responses omit `body_complete`.
 - A response body that is not UTF-8 is recorded as a list of bytes (an
   image, a download). It is `invalid_response` (warn) only when the
   `content-type` is text or missing. Trailers appear as `trailers` in the
@@ -998,8 +1046,16 @@ handle: func(request: record { method: string, uri: string,
   `invalid_response` (fail): the platform cuts the response short or fails
   it, and a proxy may read the rest as the next response. HEAD requests and
   1xx, 204 and 304 responses are exempt.
-- Request bodies, and bodies of outbound requests and their answers, are
-  text.
+- Incoming request bodies and simulated host responses are text. An outgoing
+  request body is recorded as text when it is valid UTF-8, otherwise as a JSON
+  byte array. Plan rules and argument checks see these actual wire values;
+  `bytes:a..b` counts the bytes in either form. Text detectors also inspect a
+  decoded view of binary outgoing bodies, so binary framing cannot hide secret
+  flow, labelled sinks or reviewer-directed text. The original byte array stays
+  in the trace and is used for equality and replay.
+- Binary body capture checks the remaining trace capacity before allocating
+  JSON byte values. Exceeding that reviewer guard is explicitly incomplete
+  evidence, never a truncated body reported as a complete run.
 
 `probe web` (part of `review`) sends the request as another website
 would and as a request naming another host would:
@@ -1142,12 +1198,24 @@ and lengths into the module's memory. Besides the types, a witx platform names:
   function's `handle = { op = …, kind = … }` binds it to that state. For
   Fastly, the client request is the state of the handles
   `body_downstream_get` returns; `send_downstream`'s response and body are
-  the run's result.
+  the run's result. `respond` may name its `streaming` flag parameter and set
+  `consume = true` to consume the response and its non-streaming body. Streaming
+  writes and appends remain part of the sent body until `close` finishes it;
+  `abandon` ends it unsuccessfully. The bundled Fastly bindings declare these
+  behaviors. Stream front writes use the binding's `stream_error` status.
 - `bad_handle` and `absent`: the error cases for an invalid handle and a
   missing value.
 - per function: `description`, `param_docs`, `result_doc`, `sdk`, and
   `fails = false` for calls the SDK treats as infallible (appfuzz then
   injects no failure).
+
+A sent Fastly streaming response captures all bytes written before the run ends.
+An abandoned or unfinished stream retains its sent prefix with
+`body_complete = false` and fails the run; an earlier guest trap retains its
+original classification. Body bytes that are not UTF-8 use JSON byte arrays.
+Trailers are recorded when the body completes. Closed or consumed handles stay
+invalid, and generated handles remain distinct after an externally supplied
+large handle id.
 
 The bundled Fastly platform
 ([platform.toml](crates/appfuzz-core/platforms/fastly/platform.toml)) uses

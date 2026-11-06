@@ -133,13 +133,13 @@ pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     out
 }
 
-/// `per_run`, then one more run when the output shows a host error text
-/// (a text the page shows anyway is not a leak), or for a `partial_write`
-/// (an app that passes a changed error text on tells the user).
+/// `per_run`, with additional runs to distinguish static text from host error
+/// or foreign-record text, and to check whether a partial write was reported.
 pub fn per_run_checked(app: &crate::harness::App, r: &RunRecord) -> Vec<Finding> {
     let mut out = per_run(r, &app.manifest);
     crate::output::drop_echoes(app, r, &mut out);
     crate::effects::drop_told(app, r, &mut out);
+    crate::identity::drop_static(app, r, &mut out);
     out
 }
 

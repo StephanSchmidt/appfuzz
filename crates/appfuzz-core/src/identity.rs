@@ -15,7 +15,7 @@ use serde_json::{Map, Value, json};
 use crate::detect::{Finding, Severity};
 use crate::labels::{Label, id_text, ids_at};
 use crate::manifest::Manifest;
-use crate::record::{OutcomeKind, RunRecord, RunSpec};
+use crate::record::{RunRecord, RunSpec};
 
 /// The request field role that carries the caller's id.
 pub const ROLE: &str = "identity";
@@ -55,7 +55,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         leaves(a, String::new(), &mut req_leaves);
     }
     for e in &r.events {
-        for (p, a) in &e.args {
+        for (p, a) in e.text_args().iter() {
             if m.param_label(&e.func, p) != Some(Label::UserId) {
                 continue;
             }
@@ -91,10 +91,10 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         }
     }
 
-    // Someone else's record in a page that says all is well.
+    // Someone else's record already shown to the client.
     let resp = crate::output::response(r, m);
     let body = resp.body.as_deref().unwrap_or_default();
-    if r.outcome.kind != OutcomeKind::Ok || resp.status.is_some_and(|s| s >= 400) || body.is_empty() {
+    if body.is_empty() {
         return out;
     }
     // Texts that may show for another reason: in the caller's own
@@ -160,6 +160,65 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     out
 }
 
+/// A generated field can coincide with static page text ("order" in a 404).
+/// Drop that candidate only when the exact changed host result is observed,
+/// ownership stays fixed, and the client sees the identical response again.
+pub fn drop_static(app: &crate::harness::App, r: &RunRecord, findings: &mut Vec<Finding>) {
+    if r.result.is_none() {
+        return;
+    }
+    findings.retain(|finding| {
+        if finding.kind != "missing_owner_check" {
+            return true;
+        }
+        let Some(n) = finding.detail["n"].as_u64() else { return true };
+        let Some(shown) = finding.detail["shown"].as_str() else { return true };
+        let Some(event) = r.events.iter().find(|e| u64::from(e.n) == n) else { return true };
+        let Some(result) = &event.result else { return true };
+        let protected: BTreeSet<String> = app
+            .manifest
+            .call_result_labels(&event.func, &event.args)
+            .into_iter()
+            .filter(|(_, label)| matches!(label, Label::Owner | Label::Identity))
+            .flat_map(|(path, _)| ids_at(result, &path))
+            .collect();
+        if protected.contains(shown) {
+            return true;
+        }
+        let mut changed = result.clone();
+        if !replace_text(&mut changed, shown, "appfuzz_private_value_7f29") {
+            return true;
+        }
+        let mut spec = r.spec.clone();
+        if !spec.plan.0.contains_key(&event.func)
+            && let Some(effective) = spec.plan.get(&event.func).cloned()
+        {
+            spec.plan.0.insert(event.func.clone(), effective);
+        }
+        let response = spec.plan.0.entry(event.func.clone()).or_default().on_call.entry(event.call.to_string()).or_default();
+        response.ret = Some(changed.clone());
+        response.generate = None;
+        response.trap = None;
+        response.commit_then_trap = None;
+        let variant = app.run(&spec);
+        let observed =
+            variant.events.iter().any(|e| e.func == event.func && e.call == event.call && e.args == event.args && e.result.as_ref() == Some(&changed));
+        !(observed && variant.outcome.kind == r.outcome.kind && variant.result == r.result)
+    });
+}
+
+fn replace_text(value: &mut Value, from: &str, to: &str) -> bool {
+    match value {
+        Value::String(s) if s == from && s != to => {
+            *s = to.into();
+            true
+        }
+        Value::Array(a) => a.iter_mut().fold(false, |changed, v| replace_text(v, from, to) | changed),
+        Value::Object(o) => o.values_mut().fold(false, |changed, v| replace_text(v, from, to) | changed),
+        _ => false,
+    }
+}
+
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
 }
@@ -201,6 +260,7 @@ fn records<'a>(v: &'a Value, segs: &[&str], out: &mut Vec<&'a Map<String, Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::OutcomeKind;
     use crate::record::{HostCall, Outcome, Totals};
 
     fn manifest() -> Manifest {

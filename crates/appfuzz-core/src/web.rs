@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::detect::{Finding, Severity};
 use crate::manifest::Manifest;
-use crate::record::{OutcomeKind, RunRecord};
+use crate::record::RunRecord;
 
 /// The host `probe web` claims to be.
 pub const ATTACKER_HOST: &str = "attacker.example";
@@ -81,9 +81,6 @@ fn claimed_hosts(uri: &str, h: &[(String, String)]) -> Vec<(String, &'static str
 pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let Some(req) = r.spec.args.first() else { return Vec::new() };
     let (Some(uri), Some(_)) = (req.get("uri").and_then(Value::as_str), req.get("headers").and_then(Value::as_array)) else { return Vec::new() };
-    if r.outcome.kind != OutcomeKind::Ok {
-        return Vec::new();
-    }
     let ex = &r.spec.export;
     let run = Some(r.id.as_str());
     let rh = pairs(req.get("headers"));
@@ -134,7 +131,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         };
         let mut place = None;
         for e in &r.events {
-            for v in e.args.values() {
+            for v in e.text_args().values() {
                 if v.as_str().is_some_and(in_url) {
                     place = Some((format!("the URL of {}", e.func), Severity::Fail));
                 }

@@ -363,14 +363,14 @@ it against thousands of inputs:
 version = 1
 
 [acceptance.checks.home]
-origin = "marketing"
+origin = "app"
 request = { method = "GET", path = "/", query = [], form = [], today = "2026-11-02", now = "08:00:00" }  # the fields of this app's request type
 expect = { selector = "$.status", equals = 200 }
 ```
 
-`origin` says who owns the requirement: `marketing` for what the feature
-must do, `platform` for a platform rule. Run them on their own with
-`appfuzz acceptance run`.
+`origin` says who owns the requirement: `app` for what the feature must
+do, whichever team asked for it, `platform` for a platform rule. Run
+them on their own with `appfuzz acceptance run`.
 
 ### Asserting outputs against inputs
 
@@ -379,7 +379,7 @@ backend returned:
 
 ```toml
 [acceptance.checks.total]
-origin = "marketing"
+origin = "app"
 description = "The total is the sum of the line items"
 let = { total = "out.json.total", prices = "host.items#all.result" }
 assert = "total == sum(prices.map(i, i.price))"
@@ -542,8 +542,8 @@ architecture for web apps that people outside engineering build with
 agents. The site is a shell run by the platform team, and every feature is
 an app: a WebAssembly component the shell runs in a sandbox. It works like a
 phone: the sandbox limits what an app can reach, its manifest grants
-permissions, and a review decides what goes live. Marketing writes down what
-a feature must do; engineering owns the platform contract and its budgets;
+permissions, and a review decides what goes live. The team that wants a
+feature writes down what it must do; engineering owns the platform contract and its budgets;
 appfuzz checks every app against both, so no engineer has to approve each
 one.
 

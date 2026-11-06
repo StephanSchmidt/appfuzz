@@ -40,6 +40,15 @@ pub struct Binding {
     /// `respond`: the parameter with the body handle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// `respond`: a nonzero parameter keeps the body writable after sending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming: Option<String>,
+    /// `respond`: sending consumes the response and, unless streaming, its body.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub consume: bool,
+    /// The platform error for unsupported stream reads or front writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +75,8 @@ pub enum Op {
     /// Moves the bytes of the second handle to the end of the first.
     Append,
     Close,
+    /// Closes a body unsuccessfully, preserving an incomplete sent prefix.
+    Abandon,
     /// The client request (the run's request argument) as a new request
     /// handle and body handle.
     Downstream,
@@ -107,6 +118,14 @@ pub struct Handles {
     entries: BTreeMap<u32, Entry>,
     /// The response sent by `respond`.
     pub response: Option<Value>,
+    stream: Option<SentStream>,
+    next: u32,
+}
+
+#[derive(Debug)]
+struct SentStream {
+    body: u32,
+    complete: bool,
 }
 
 /// A text from a WIT value: a string, or bytes as UTF-8.
@@ -139,8 +158,43 @@ impl Handles {
         self.entries.get(&id).is_some_and(|e| e.open)
     }
 
-    fn next_id(&self) -> u32 {
-        self.entries.keys().next_back().map_or(1, |k| k + 1)
+    fn is_streaming(&self, id: Option<u32>) -> bool {
+        self.stream.as_ref().is_some_and(|s| Some(s.body) == id && self.valid(s.body))
+    }
+
+    /// Capture a sent stream after all guest writes, including a failed run.
+    /// The response header snapshot remains the one sent at `respond`.
+    pub fn take_response(&mut self) -> (Option<Value>, bool) {
+        let mut out = self.response.take();
+        let mut incomplete = false;
+        if let Some(stream) = self.stream.take()
+            && let Some(response) = &mut out
+        {
+            let body = self.entries.get(&stream.body).expect("sent body remains in the table");
+            response["body"] = body_value(&body.bytes[body.offset..]);
+            if stream.complete {
+                if let Some(trailers) = body.state.get("trailers") {
+                    response["trailers"] = trailers.clone();
+                }
+            } else {
+                response["body_complete"] = json!(false);
+                incomplete = true;
+            }
+        }
+        (out, incomplete)
+    }
+
+    fn next_id(&mut self) -> u32 {
+        let largest = self.entries.keys().next_back().copied().unwrap_or(0);
+        if largest != u32::MAX {
+            self.next = largest;
+        }
+        loop {
+            self.next = self.next.wrapping_add(1).max(1);
+            if !self.entries.contains_key(&self.next) {
+                return self.next;
+            }
+        }
     }
 
     /// A new handle of `kind` with its initial state.
@@ -206,6 +260,11 @@ impl Handles {
                 Ok(vec![])
             }
             Op::MapGet | Op::MapValues => {
+                if self.is_streaming(target)
+                    && let Some(error) = &b.stream_error
+                {
+                    return Err(error.clone());
+                }
                 let e = entry(&mut self.entries, target, ctx.bad)?;
                 let key = key.unwrap_or_default();
                 let found: Vec<Value> =
@@ -216,6 +275,11 @@ impl Handles {
                 found.into_iter().next().map(|v| vec![v]).ok_or_else(|| ctx.absent.to_string())
             }
             Op::MapKeys => {
+                if self.is_streaming(target)
+                    && let Some(error) = &b.stream_error
+                {
+                    return Err(error.clone());
+                }
                 let e = entry(&mut self.entries, target, ctx.bad)?;
                 let mut keys: Vec<String> = Vec::new();
                 for (k, _) in pairs(&e.state[field]) {
@@ -243,6 +307,9 @@ impl Handles {
                 Ok(vec![])
             }
             Op::Read => {
+                if self.is_streaming(target) {
+                    return Err(ctx.bad.to_string());
+                }
                 let e = entry(&mut self.entries, target, ctx.bad)?;
                 let n = ctx.read_limit.unwrap_or(usize::MAX).min(e.bytes.len().saturating_sub(e.offset));
                 let chunk = e.bytes[e.offset..e.offset + n].to_vec();
@@ -250,13 +317,16 @@ impl Handles {
                 Ok(vec![json!(chunk)])
             }
             Op::Write => {
+                let front = arg("end").is_some_and(|v| v == "front");
+                if front && self.is_streaming(target) {
+                    return Err(b.stream_error.as_deref().unwrap_or(ctx.bad).to_string());
+                }
                 let e = entry(&mut self.entries, target, ctx.bad)?;
                 let data = match &value {
                     Some(Value::Array(a)) => bytes(a),
                     Some(v) => text(v).into_bytes(),
                     None => Vec::new(),
                 };
-                let front = arg("end").is_some_and(|v| v == "front");
                 let n = data.len();
                 if front {
                     e.bytes.splice(e.offset..e.offset, data);
@@ -267,6 +337,9 @@ impl Handles {
             }
             Op::Append => {
                 let (dest, src) = (handles.first().and_then(|i| id_at(*i)), handles.get(1).and_then(|i| id_at(*i)));
+                if self.is_streaming(src) {
+                    return Err(ctx.bad.to_string());
+                }
                 let moved = {
                     let s = entry(&mut self.entries, src, ctx.bad)?;
                     s.open = false;
@@ -275,8 +348,13 @@ impl Handles {
                 entry(&mut self.entries, dest, ctx.bad)?.bytes.extend(moved);
                 Ok(vec![])
             }
-            Op::Close => {
+            Op::Close | Op::Abandon => {
                 entry(&mut self.entries, target, ctx.bad)?.open = false;
+                if let Some(stream) = &mut self.stream
+                    && Some(stream.body) == target
+                {
+                    stream.complete = b.op == Op::Close;
+                }
                 Ok(vec![])
             }
             Op::Downstream => {
@@ -293,20 +371,43 @@ impl Handles {
                 Ok(vec![json!(rid), json!(bid)])
             }
             Op::Respond => {
-                let body_id = b.body.as_deref().and_then(arg).or_else(|| handles.get(1).and_then(|i| args.get(*i)).map(|(_, v)| v)).and_then(Value::as_u64);
-                let body = {
-                    let e = entry(&mut self.entries, body_id.map(|x| x as u32), ctx.bad)?;
-                    String::from_utf8_lossy(&e.bytes[e.offset..]).into_owned()
+                let state = {
+                    let response = entry(&mut self.entries, target, ctx.bad)?;
+                    let state = response.state.clone();
+                    if b.consume {
+                        response.open = false;
+                    }
+                    state
                 };
-                let e = entry(&mut self.entries, target, ctx.bad)?;
-                let out = json!({ "status": e.state.get("status").cloned().unwrap_or(json!(200)), "headers": e.state.get("headers").cloned().unwrap_or(json!([])), "body": body });
-                if self.response.is_none() {
-                    self.response = Some(out);
-                    Ok(vec![])
-                } else {
-                    // A client gets one response.
-                    Err(ctx.bad.to_string())
+                let body_id = b
+                    .body
+                    .as_deref()
+                    .and_then(arg)
+                    .or_else(|| handles.get(1).and_then(|i| args.get(*i)).map(|(_, v)| v))
+                    .and_then(Value::as_u64)
+                    .and_then(|id| u32::try_from(id).ok());
+                if self.is_streaming(body_id) {
+                    return Err(ctx.bad.to_string());
                 }
+                let streaming = b.streaming.as_deref().and_then(arg).and_then(Value::as_u64).is_some_and(|flag| flag != 0);
+                let (body, trailers) = {
+                    let e = entry(&mut self.entries, body_id, ctx.bad)?;
+                    if b.consume && !streaming {
+                        e.open = false;
+                    }
+                    (body_value(&e.bytes[e.offset..]), e.state.get("trailers").cloned())
+                };
+                if self.response.is_some() {
+                    return Err(ctx.bad.to_string());
+                }
+                let mut out = json!({ "status": state.get("status").cloned().unwrap_or(json!(200)), "headers": state.get("headers").cloned().unwrap_or(json!([])), "body": body });
+                if streaming {
+                    self.stream = Some(SentStream { body: body_id.expect("validated body"), complete: false });
+                } else if let Some(trailers) = trailers {
+                    out["trailers"] = trailers;
+                }
+                self.response = Some(out);
+                Ok(vec![])
             }
         }
     }
@@ -314,6 +415,13 @@ impl Handles {
     /// The kind of a handle, for records.
     pub fn kind(&self, id: u32) -> Option<&str> {
         self.entries.get(&id).map(|e| e.kind.as_str())
+    }
+}
+
+fn body_value(bytes: &[u8]) -> Value {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => json!(text),
+        Err(_) => json!(bytes),
     }
 }
 
@@ -337,7 +445,36 @@ mod tests {
     }
 
     fn bind(op: Op) -> Binding {
-        Binding { op, field: None, handle: None, key: None, value: None, kind: None, body_kind: None, body: None }
+        Binding {
+            op,
+            field: None,
+            handle: None,
+            key: None,
+            value: None,
+            kind: None,
+            body_kind: None,
+            body: None,
+            streaming: None,
+            consume: false,
+            stream_error: None,
+        }
+    }
+
+    #[test]
+    fn adopting_the_largest_handle_does_not_alias_future_handles() {
+        let mut h = Handles::default();
+        let kinds = BTreeMap::new();
+        let first = h.create("body", &kinds);
+        let mut answer = json!({"ok":u32::MAX});
+        h.adopt(&mut answer, &[(None, "body".into())], false, &kinds);
+        let a = h.create("body", &kinds);
+        let b = h.create("body", &kinds);
+        assert_ne!(a, b);
+        assert_ne!(a, first);
+        assert_ne!(b, first);
+        assert_ne!(a, u32::MAX);
+        assert_ne!(b, u32::MAX);
+        assert!(h.valid(first));
     }
 
     #[test]

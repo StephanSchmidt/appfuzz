@@ -208,7 +208,9 @@ impl Across {
                 if !crate::browser::has_scripts(&page, &app.manifest) {
                     return Ok(None);
                 }
-                crate::browser::evaluate(app, &page, run)?.1.into_iter().find(|f| f.matches_id(id))
+                let (session, found) = crate::browser::evaluate(app, &page, run)?;
+                session.ensure_executed()?;
+                found.into_iter().find(|f| f.matches_id(id))
             }
         })
     }

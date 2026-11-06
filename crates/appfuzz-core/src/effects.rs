@@ -91,7 +91,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     // says all went well.
     let resp = crate::output::response(r, m);
     let status = resp.status;
-    if r.outcome.kind == OutcomeKind::Ok && status.is_some_and(|s| s < 400) {
+    if status.is_some_and(|s| s < 400) {
         let changes: Vec<&crate::record::HostCall> = r.events.iter().filter(|e| m.effect_of(&e.func).is_some_and(|x| x.changes())).collect();
         if let Some(fail) =
             changes.iter().find(|e| is_err(e) && !changes.iter().any(|later| later.n > e.n && later.func == e.func && later.args == e.args && !is_err(later)))

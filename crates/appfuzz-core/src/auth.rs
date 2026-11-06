@@ -97,7 +97,7 @@ pub fn path(req: &Value) -> String {
 }
 
 fn status(r: &RunRecord, m: &Manifest) -> Option<i64> {
-    (r.outcome.kind == OutcomeKind::Ok).then(|| crate::output::response(r, m).status).flatten()
+    crate::output::response(r, m).status
 }
 
 /// The status of a request turned away for lacking credentials: 401, 403,
@@ -148,7 +148,7 @@ pub fn check(anon: &RunRecord, runs: &[(&Forged, &RunRecord)], m: &Manifest) -> 
         .iter()
         .filter_map(|(f, r)| {
             let s = status(r, m).filter(|s| (200..300).contains(s))?;
-            let to_host = r.events.iter().any(|e| e.args.values().any(|v| f.traces.iter().any(|t| has_text(v, t))));
+            let to_host = r.events.iter().any(|e| e.text_args().values().any(|v| f.traces.iter().any(|t| has_text(v, t))));
             (!to_host).then_some((*f, *r, s))
         })
         .collect();
@@ -252,9 +252,6 @@ static TOKEN_NAME: std::sync::LazyLock<regex::Regex> =
 /// tokens (three dot-separated parts), not text the request or a host
 /// call brought.
 pub fn tokens(r: &RunRecord, m: &Manifest) -> Vec<(String, String)> {
-    if r.outcome.kind != OutcomeKind::Ok {
-        return Vec::new();
-    }
     let resp = crate::output::response(r, m);
     let mut out = Vec::new();
     for (k, v) in &resp.headers {

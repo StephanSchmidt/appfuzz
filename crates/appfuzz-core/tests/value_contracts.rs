@@ -225,7 +225,7 @@ fn host_minimum_list_lengths_are_kept_even_for_empty_generated_lists() {
 fn absent_optional_inputs_do_not_hide_other_invalid_fields() {
     let wit = "package test:values; world app { record request { form:list<tuple<string,string>> } export run:func(req:request)->u32; }";
     let wat = r#"(module (memory (export "memory") 8) (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 4096)) (func (export "run") (param i32 i32) (result i32) (i32.const 400)))"#;
-    let m:Manifest=toml::from_str("[app]\nwasm='x'\n[entry]\nexport='run'\ninput_values={'form.date'='format:date','form.note'='len:..80'}\n[acceptance]\nversion=1\n[acceptance.checks.reject]\norigin='marketing'\ninput_class='invalid'\nexpect={selector='$',equals=400}\n").unwrap();
+    let m:Manifest=toml::from_str("[app]\nwasm='x'\n[entry]\nexport='run'\ninput_values={'form.date'='format:date','form.note'='len:..80'}\n[acceptance]\nversion=1\n[acceptance.checks.reject]\norigin='app'\ninput_class='invalid'\nexpect={selector='$',equals=400}\n").unwrap();
     let a = App::from_bytes(m, component(wit, wat)).unwrap();
     let check = &a.manifest.acceptance.as_ref().unwrap().checks["reject"];
     let mut spec = a.spec(a.export("run").unwrap(), vec![json!({"form":[["date","0.0.0000"]]})], Plan::default(), 1);

@@ -871,10 +871,7 @@ impl App {
                         let request = spec.args.first().cloned().unwrap_or(Value::Null);
                         // The response JSON is the result as it is: the carrier
                         // type has no place for binary bodies or trailers.
-                        http::call_handler(&mut store, func, &request)?.map(|response| {
-                            store.data_mut().http.result = Some(response);
-                            vec![]
-                        })
+                        http::call_handler(&mut store, func, &request)?.map(|()| vec![])
                     } else {
                         let mut results = vec![Val::Bool(false); export.ty.results().len()];
                         func.call(&mut store, &args, &mut results).map(|()| results)
@@ -945,9 +942,7 @@ impl App {
         clock.with(|c| c.guest_ns = guest_ns);
 
         match call {
-            // A plain module's result is the response it sent, if any.
-            Ok(_) if matches!(self.pre, Pre::Core { .. }) => record.result = store.data_mut().handles.response.take(),
-            Ok(_) if crate::wasi_http::is_handler(&export) => record.result = store.data_mut().http.result.take(),
+            Ok(_) if matches!(self.pre, Pre::Core { .. }) || crate::wasi_http::is_handler(&export) => {}
             Ok(status) if let Pre::Extism { abi, .. } = &self.pre => {
                 let status = match status.first() {
                     Some(Val::S32(s)) => *s,
@@ -995,6 +990,18 @@ impl App {
             }
         }
 
+        // An HTTP response already sent to the client remains output even if
+        // guest execution or draining pending host calls subsequently fails.
+        if matches!(self.pre, Pre::Core { .. }) {
+            let (response, incomplete) = store.data_mut().handles.take_response();
+            record.result = response;
+            if incomplete && record.outcome.kind == OutcomeKind::Ok {
+                record.outcome =
+                    Outcome { kind: OutcomeKind::Trap, message: Some("the app ended with an incomplete streaming response body".into()), stack: vec![] };
+            }
+        } else if crate::wasi_http::is_handler(&export) {
+            record.result = store.data_mut().http.result.take();
+        }
         let data = store.data_mut();
         let c = clock.with(|c| c.clone());
         record.memory_limit_hit = data.limiter.budget.hit();
@@ -1126,7 +1133,16 @@ fn plan_value_error(data: &mut Host, mut event: HostCall, message: String) -> an
     anyhow!("plan error: {message}")
 }
 
-fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], results: &mut [Val]) -> Result<()> {
+fn intercept(store: StoreContextMut<'_, Host>, key: &str, params: &[Val], results: &mut [Val]) -> Result<()> {
+    store.data().check_trace_capacity()?;
+    let info = store.data().platform.funcs.get(key).ok_or_else(|| anyhow!("unknown host function {key}"))?;
+    let args = info.param_names().into_iter().zip(params.iter().map(val_to_json)).collect();
+    intercept_values(store, key, args, results)
+}
+
+/// Native adapters already have decoded arguments. Keep their wire values
+/// intact rather than forcing binary payloads through the textual carrier.
+fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(String, Value)>, results: &mut [Val]) -> Result<()> {
     store.data().check_trace_capacity()?;
     let fuel_before = Host::sync_guest_time(&store);
     let stack = frames(&mut store);
@@ -1140,8 +1156,6 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
         *n += 1;
         *n
     };
-    let names = info.param_names();
-    let args: Vec<(String, Value)> = names.iter().cloned().zip(params.iter().map(val_to_json)).collect();
     // Labels that depend on the arguments (a secret variable, a public one).
     let by_args: Option<Vec<_>> = platform.label_rules.get(key).map(|(own, rules)| {
         crate::plan::result_labels_for(own.as_ref(), rules, &args)
@@ -1220,14 +1234,14 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     {
         let inputs = h.inputs.get(key).map(Vec::as_slice).unwrap_or_default();
         let unknown = inputs.iter().any(|&i| args.get(i).and_then(|(_, v)| v.as_u64()).is_some_and(|id| !data.handles.valid(id as u32)));
-        let answer = if unknown {
-            Some(serde_json::json!({ "err": h.bad }))
-        } else if let Some(b) = h.bindings.get(key) {
+        let answer = if let Some(b) = h.bindings.get(key) {
             let ctx = crate::handles::Ctx { kinds: &h.kinds, request: data.request.as_ref(), read_limit: data.read_limit, bad: &h.bad, absent: &h.absent };
             Some(match data.handles.apply(b, &args, inputs, &ctx) {
                 Ok(parts) => core::shape(parts, result_types.first(), h.outs.get(key).copied().unwrap_or(0)),
                 Err(e) => serde_json::json!({ "err": e }),
             })
+        } else if unknown {
+            Some(serde_json::json!({ "err": h.bad }))
         } else {
             None
         };

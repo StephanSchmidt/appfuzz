@@ -4,6 +4,7 @@
 // that leaves the page (requests, navigations, cookies, code it builds)
 // is recorded.
 import * as L from 'linkedom';
+import { CookieJar } from './cookies.js';
 
 const G = globalThis;
 const CAP = 200;
@@ -11,7 +12,7 @@ const CAP = 200;
 const S = {
   start: 0, now: 0, seq: 0, timers: new Map(), nesting: 0, horizon: 0,
   gesture: false, trusted: false, ended: null, steps: 0, latency: 5, throttle: 0,
-  url: null, origin: '', files: {}, responses: {}, cookies: new Map(),
+  url: null, origin: '', files: {}, responses: {}, cookies: new CookieJar(() => S.now),
   errors: [], console: [], requests: [], navigations: [], code: [],
   cookieWrites: [], storage: [], dialogs: [], history: [], unmodelled: new Set(),
   listened: new Map(), cands: [], scripts: [], created: [], started: new WeakSet(),
@@ -578,7 +579,8 @@ class Request {
     this.headers = new Headers(init.headers || (src && src.headers));
     this._body = bodyText(init.body ?? (src && src._body));
     this.signal = init.signal || (src && src.signal) || null;
-    this.credentials = init.credentials || 'same-origin';
+    this.credentials = String(init.credentials ?? (src && src.credentials) ?? 'same-origin');
+    if (!['omit', 'same-origin', 'include'].includes(this.credentials)) throw new TypeError('Invalid credentials mode');
     this.mode = init.mode || 'cors';
     this.cache = init.cache || 'default';
     this.redirect = init.redirect || 'follow';
@@ -617,9 +619,36 @@ class Response {
 }
 Object.assign(G, { Headers, Request, Response });
 
-function respond(method, url, body, headers, kind) {
+// Cookie storage is private to the user agent: Set-Cookie never becomes
+// a readable response header. Delayed fetch/XHR answers apply it when
+// their response is delivered, before script callbacks see that response.
+function receive(r) {
+  if (!r.received) {
+    r.received = true;
+    if (r.acceptCookies && r.status >= 200) for (const value of r.setCookies) S.cookies.set(value, r.url, true);
+  }
+  return r;
+}
+function networkAnswer(status, body, rawHeaders, url, acceptCookies, delayed) {
+  const headers = Object.create(null);
+  const setCookies = [];
+  for (const [name, value] of Array.isArray(rawHeaders) ? rawHeaders : Object.entries(rawHeaders || {})) {
+    const key = String(name).toLowerCase();
+    if (key === 'set-cookie') setCookies.push(String(value));
+    else if (key !== 'set-cookie2') headers[key] = headers[key] == null ? String(value) : headers[key] + ', ' + value;
+  }
+  const r = { status, body, headers, url, acceptCookies, setCookies, received: false };
+  return delayed ? r : receive(r);
+}
+function respond(method, url, body, headers, kind, credentials = 'same-origin', delayed = false) {
   const u = new URL(String(url), S.url.href);
   const own = u.origin === S.origin;
+  const include = credentials === 'include' || (credentials === 'same-origin' && own);
+  headers = Object.fromEntries(Object.entries(headers || {}).filter(([k]) => !['cookie', 'cookie2'].includes(k.toLowerCase())));
+  if (include) {
+    const cookie = S.cookies.header(u.href, true, S.url.href);
+    if (cookie) headers.cookie = cookie;
+  }
   push(S.requests, {
     kind, method, url: u.href, own, body: body == null ? null : clip(body, 2000),
     headers: headers || {}, gesture: S.gesture, at: S.now - S.start,
@@ -632,13 +661,13 @@ function respond(method, url, body, headers, kind) {
     const pairs = Object.entries(headers || {}).map(([k, v]) => [String(k), String(v)]);
     const [status, rh, text, failed] = h.fetch(kind, method, own, target, pairs, body == null ? null : String(body), !!S.gesture);
     if (failed != null) return { status: 0, error: failed, body: '', headers: {}, url: u.href };
-    return { status, body: text, headers: Object.fromEntries(rh), url: u.href };
+    return networkAnswer(status, text, rh, u.href, include, delayed);
   }
   const plain = own ? u.pathname : u.origin + u.pathname;
   const r = S.responses[method + ' ' + path] || S.responses[method + ' ' + plain] || S.responses[path] || S.responses[plain]
     || (method === 'GET' && own && S.files[u.pathname] != null ? { status: 200, body: S.files[u.pathname] } : null)
     || { status: 404, body: '' };
-  return { status: r.status ?? 200, body: typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? ''), headers: r.headers || {}, url: u.href };
+  return networkAnswer(r.status ?? 200, typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? ''), r.headers, u.href, include, delayed);
 }
 
 G.fetch = function fetch(input, init = {}) {
@@ -648,10 +677,11 @@ G.fetch = function fetch(input, init = {}) {
   req.headers.forEach((v, k) => { hs[k] = v; });
   return new Promise((resolve, reject) => {
     if (req.signal && req.signal.aborted) return reject(req.signal.reason);
-    const r = respond(req.method, req.url, req._body, hs, 'fetch');
+    const r = respond(req.method, req.url, req._body, hs, 'fetch', req.credentials, true);
     addTimer(() => {
       if (req.signal && req.signal.aborted) return reject(req.signal.reason);
       if (r.error != null) return reject(new TypeError('Failed to fetch'));
+      receive(r);
       resolve(new Response(r.body, { status: r.status, headers: r.headers, url: r.url }));
     }, S.latency, [], false, 'fetch', false);
   });
@@ -673,7 +703,7 @@ class XMLHttpRequest extends L.EventTarget {
   getAllResponseHeaders() { return Object.entries(this._rh).map(([k, v]) => k + ': ' + v + '\r\n').join(''); }
   abort() { this._aborted = true; this.readyState = 0; this._fire('abort'); }
   send(body) {
-    const r = respond(this._m, this._u, bodyText(body), this._h, 'xhr');
+    const r = respond(this._m, this._u, bodyText(body), this._h, 'xhr', this.withCredentials ? 'include' : 'same-origin', true);
     this._fire('loadstart');
     addTimer(() => {
       if (this._aborted) return;
@@ -683,6 +713,7 @@ class XMLHttpRequest extends L.EventTarget {
         this._fire('loadend');
         return;
       }
+      receive(r);
       this.status = r.status;
       this.statusText = r.status === 200 ? 'OK' : '';
       this._rh = Object.fromEntries(Object.entries(r.headers).map(([k, v]) => [k.toLowerCase(), String(v)]));
@@ -812,25 +843,8 @@ function makeStorage(kind) {
 }
 
 function setCookie(text) {
-  const parts = String(text).split(';');
-  const [nv, ...attrs] = parts;
-  const i = nv.indexOf('=');
-  const name = (i < 0 ? '' : nv.slice(0, i)).trim();
-  const value = (i < 0 ? nv : nv.slice(i + 1)).trim();
-  let gone = false;
-  const flags = {};
-  for (const a of attrs) {
-    const [k, v = ''] = a.split('=');
-    const key = k.trim().toLowerCase();
-    flags[key] = v.trim();
-    if (key === 'max-age' && Number(v) <= 0) gone = true;
-    if (key === 'expires' && RealDate.parse(v) <= S.now) gone = true;
-  }
-  const old = S.cookies.get(name);
-  if (old && old.httpOnly) return;
-  push(S.cookieWrites, { name: clip(name, 100), value: clip(value, 200), flags, gesture: S.gesture });
-  if (gone) S.cookies.delete(name);
-  else S.cookies.set(name, { value, httpOnly: false });
+  const written = S.cookies.set(String(text), S.url.href);
+  if (written) push(S.cookieWrites, { name: clip(written.name, 100), value: clip(written.value, 200), flags: written.flags, gesture: S.gesture });
 }
 
 function navigate(target, how, extra = {}) {
@@ -1010,7 +1024,11 @@ function installWindow(doc) {
     appName: 'Netscape', appVersion: '5.0', product: 'Gecko', vendor: 'Google Inc.', platform: 'Linux x86_64',
     language: 'en-US', languages: ['en-US', 'en'], onLine: true, cookieEnabled: true, doNotTrack: null,
     hardwareConcurrency: 4, maxTouchPoints: 0, webdriver: false, pdfViewerEnabled: false,
-    sendBeacon(url, data) { respond('POST', url, bodyText(data), {}, 'beacon'); return true; },
+    sendBeacon(url, data) {
+      const r = respond('POST', url, bodyText(data), {}, 'beacon', 'include', true);
+      if (r.acceptCookies && r.setCookies.length) addTimer(() => receive(r), S.latency, [], false, 'beacon-response', false);
+      return true;
+    },
     clipboard: {
       writeText(t) { push(S.dialogs, { kind: 'clipboard', message: clip(t), gesture: S.gesture }); return Promise.resolve(); },
       readText() { unmodelled('clipboard.read'); return Promise.resolve(''); },
@@ -1032,7 +1050,7 @@ function installWindow(doc) {
   define(doc, 'readyState', { get: () => S.readyState });
   define(doc, 'location', { get: () => location, set: (v) => navigate(v, 'document.location') });
   define(doc, 'cookie', {
-    get: () => [...S.cookies].filter(([, c]) => !c.httpOnly).map(([k, c]) => (k ? k + '=' : '') + c.value).join('; '),
+    get: () => S.cookies.header(S.url.href, false),
     set: (v) => setCookie(v),
   });
   define(doc, 'activeElement', { get: () => (S.active && S.active.isConnected ? S.active : doc.body) });
@@ -1443,8 +1461,14 @@ G.__af = {
     S.files = s.files || {};
     S.responses = s.responses || {};
     S.latency = s.latency_ms ?? 5;
-    for (const [k, v] of Object.entries(s.cookies || {})) {
-      S.cookies.set(k, typeof v === 'object' ? { value: String(v.value), httpOnly: !!v.httpOnly } : { value: String(v), httpOnly: false });
+    for (const [k, v] of Object.entries(s.cookies || {})) S.cookies.seed(k, v, S.url.href);
+    for (const cookie of s.request_cookies || []) S.cookies.request(cookie, S.url.href);
+    for (const cookie of s.set_cookies || []) S.cookies.set(cookie, S.url.href, true);
+    if (s.probe_cookie) {
+      const base = String(s.probe_cookie.name);
+      let name = base;
+      for (let i = 1; S.cookies.has(name); i++) name = base + '_' + i;
+      S.cookies.seed(name, s.probe_cookie.value, S.url.href);
     }
     const doc = new L.DOMParser().parseFromString(s.html || '', 'text/html');
     installWindow(doc);

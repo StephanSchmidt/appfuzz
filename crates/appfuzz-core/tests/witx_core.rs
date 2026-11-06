@@ -185,3 +185,22 @@ fn fastly_request_in_response_out() {
     let findings = appfuzz_core::output::check(&r, &app.manifest);
     assert!(findings.iter().any(|f| f.kind == "invalid_response"), "{findings:?}");
 }
+
+#[test]
+fn a_fastly_response_sent_before_a_trap_remains_client_output() {
+    for send in [true, false] {
+        let wat = FASTLY_WAT.replace("\n  )\n)\n", "\n    unreachable\n  )\n)\n");
+        let wat = if send { wat } else { wat.replace("(i32.eqz (i32.load (i32.const 24)))", "(i32.const 0)") };
+        let app = fastly_app(&wat);
+        let export = app.export("entry#handle").unwrap();
+        let request = serde_json::json!({"method":"GET","uri":"https://app.example/","headers":[],"body":""});
+        let record = app.run(&app.spec(export, vec![request], Plan::default(), 1));
+        assert_eq!(record.outcome.kind, OutcomeKind::Unreachable, "{:?}", record.outcome);
+        if send {
+            assert_eq!(record.result.as_ref().unwrap()["status"], 201);
+            assert_eq!(record.result.as_ref().unwrap()["body"], "https://app.example/");
+        } else {
+            assert_eq!(record.result, None);
+        }
+    }
+}

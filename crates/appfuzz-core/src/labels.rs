@@ -28,7 +28,7 @@ use crate::wit::Interface;
 /// The version of the label vocabulary (`LABELS.md`) this appfuzz implements.
 pub const VOCABULARY: &str = "1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Label {
     Sql,
@@ -355,11 +355,15 @@ pub fn mark(v: &mut Value, labels: &[(String, Label)], seed: u64, identity: &str
 }
 
 /// A traced value: personal data or a secret a host function returned.
-struct Traced {
-    value: String,
-    label: Label,
-    func: String,
-    path: String,
+#[derive(Clone)]
+pub(crate) struct Traced {
+    pub value: String,
+    pub label: Label,
+    pub func: String,
+    pub path: String,
+    /// Browser-owned credentials may return to that browser. Logs and
+    /// undeclared host parameters still cannot receive them.
+    pub response_owner: Option<String>,
 }
 
 /// Canaries in strings an `html` result label marks as trusted markup.
@@ -520,7 +524,7 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let tails = source_tails(r);
     let trusted = trusted_html(r, m);
     for e in &r.events {
-        for (p, v) in &e.args {
+        for (p, v) in e.text_args().iter() {
             let Some(label) = m.param_label(&e.func, p).filter(|l| l.is_sink()) else { continue };
             let mut texts = BTreeSet::new();
             strings(v, &mut texts);
@@ -584,7 +588,7 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
 
 static URL_ATTR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\b(?:href|src|action|formaction)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*))"#).unwrap());
 
-fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
+pub(crate) fn sensitive(r: &RunRecord, m: &Manifest) -> Vec<Traced> {
     let mut traced: Vec<Traced> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for e in &r.events {
@@ -592,17 +596,18 @@ fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         for (p, l) in m.call_result_labels(&e.func, &e.args) {
             if matches!(l, Label::Pii | Label::Secret) {
                 for s in values_at(v, &p) {
-                    if s.chars().count() >= 4 && seen.insert(s.clone()) {
-                        traced.push(Traced { value: s, label: l, func: e.func.clone(), path: p.clone() });
+                    if s.chars().count() >= 4 && seen.insert((s.clone(), l)) {
+                        traced.push(Traced { value: s, label: l, func: e.func.clone(), path: p.clone(), response_owner: None });
                     }
                 }
             }
         }
     }
-    drop(seen);
-    if traced.is_empty() {
-        return Vec::new();
-    }
+    traced
+}
+
+fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
+    let mut traced = sensitive(r, m);
     // A value the request itself carries is an echo, not a leak (`reflection` covers request text).
     let mut req = Vec::new();
     for a in &r.spec.args {
@@ -612,7 +617,17 @@ fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     if traced.is_empty() {
         return Vec::new();
     }
-    let find = Finder::new(&traced);
+    leaks_from(r, m, &traced)
+}
+
+/// Values learned before this request retain their sensitivity even when
+/// they arrive in request fields. The ordinary request-echo exemption is
+/// only for values without an established private origin.
+pub(crate) fn leaks_from(r: &RunRecord, m: &Manifest, traced: &[Traced]) -> Vec<Finding> {
+    if traced.is_empty() {
+        return Vec::new();
+    }
+    let find = Finder::new(traced);
     let ex = &r.spec.export;
     let run = Some(r.id.as_str());
     let entry = m.entry.as_ref().filter(|e| crate::harness::fn_key_eq(&e.export, ex));
@@ -622,8 +637,8 @@ fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let error_page = resp.status.is_some_and(|s| s >= 400);
 
     // One group per source (function, path) and place: a page with the emails of 37 people is one finding.
-    let mut first: std::collections::HashMap<(&str, &str), usize> = std::collections::HashMap::new();
-    let src: Vec<usize> = (0..traced.len()).map(|i| *first.entry((traced[i].func.as_str(), traced[i].path.as_str())).or_insert(i)).collect();
+    let mut first: std::collections::HashMap<(&str, &str, Label), usize> = std::collections::HashMap::new();
+    let src: Vec<usize> = (0..traced.len()).map(|i| *first.entry((traced[i].func.as_str(), traced[i].path.as_str(), traced[i].label)).or_insert(i)).collect();
     let mut groups: BTreeMap<(usize, String), Group> = BTreeMap::new();
     let mut add = |i: usize, place: String, sev: Severity, extra: Value| {
         let g = groups.entry((src[i], place)).or_insert_with(|| Group { severity: sev, values: Vec::new(), extra });
@@ -643,12 +658,15 @@ fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     if let Some(text) = r.rejected_output_text() {
         for i in find.hits(&text) {
-            add(i, "the rejected output".into(), Severity::Fail, json!({}));
+            if traced[i].response_owner.is_none() {
+                add(i, "the rejected output".into(), Severity::Fail, json!({}));
+            }
         }
     }
-    let mut texts = Vec::new();
     for e in &r.events {
-        for (p, a) in &e.args {
+        let arguments = e.text_args();
+        let mut texts = Vec::new();
+        for (p, a) in arguments.iter() {
             texts.clear();
             str_leaves(a, &mut texts);
             let label = m.param_label(&e.func, p);
@@ -661,6 +679,17 @@ fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     for (h, hv) in &resp.headers {
         for i in find.hits(hv) {
+            if let Some(owner) = &traced[i].response_owner {
+                // A response to its owner is allowed; an HTTP redirect
+                // carrying the credential to another origin is not.
+                let redirects = h.eq_ignore_ascii_case("location") && resp.status.is_some_and(|s| (300..400).contains(&s));
+                let leaves = url::Url::parse(owner)
+                    .ok()
+                    .is_some_and(|owner| owner.join(hv).ok().is_some_and(|to| matches!(to.scheme(), "http" | "https") && to.origin() != owner.origin()));
+                if !redirects || !leaves {
+                    continue;
+                }
+            }
             let sev = if traced[i].label == Label::Secret || no_pii { Severity::Fail } else { Severity::Warn };
             add(i, format!("the response header {h}"), sev, json!({}));
         }
@@ -670,6 +699,9 @@ fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         let in_urls: BTreeSet<usize> =
             URL_ATTR.captures_iter(body).filter_map(|c| c.get(1).or(c.get(2)).or(c.get(3)).map(|x| x.as_str())).flat_map(|u| find.hits(u)).collect();
         for i in body_hits {
+            if traced[i].response_owner.is_some() {
+                continue;
+            }
             if traced[i].label == Label::Secret {
                 add(i, "the response body".into(), Severity::Fail, json!({}));
             } else if error_page {
@@ -692,7 +724,7 @@ fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         let mut path = String::new();
         result_strings(result, &mut path, &skip, &mut |at, s| {
             for i in find.hits(s) {
-                if traced[i].label == Label::Secret || no_pii {
+                if traced[i].response_owner.is_none() && (traced[i].label == Label::Secret || no_pii) {
                     let extra = if no_pii && traced[i].label == Label::Pii { json!({"at": at, "no_pii": true}) } else { json!({"at": at}) };
                     add(i, "the result".into(), Severity::Fail, extra);
                 }

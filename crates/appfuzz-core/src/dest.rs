@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::detect::{Finding, Severity};
 use crate::labels::Label;
 use crate::manifest::{Effect, Manifest};
-use crate::record::{OutcomeKind, RunRecord};
+use crate::record::RunRecord;
 use crate::urls::{self, classify, normalize, url_like};
 
 /// Distinct destinations from the app's own code before a run counts as probing.
@@ -289,7 +289,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         ));
     };
 
-    if r.outcome.kind == OutcomeKind::Ok {
+    if r.result.is_some() {
         for u in urls::extract_output(r, m) {
             if !matches!(u.trigger.as_str(), "load" | "form" | "auto" | "unknown" | "redirect" | "refresh") {
                 continue;
@@ -310,7 +310,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     for e in &r.events {
         let fetch = m.effect_of(&e.func) == Some(Effect::External);
-        for (p, v) in &e.args {
+        for (p, v) in e.text_args().iter() {
             let labelled = m.param_label(&e.func, p) == Some(Label::Url);
             let mut ss = Vec::new();
             strings(v, &mut ss);

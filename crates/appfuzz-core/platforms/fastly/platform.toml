@@ -150,7 +150,7 @@ fails = false
 description = "Sends the response to the client. An instance answers once."
 param_docs = { h = "The response.", b = "The response body.", streaming = "1 to keep writing the body after sending." }
 sdk = "Response::send_to_client()"
-handle = { op = "respond", handle = "h", body = "b" }
+handle = { op = "respond", handle = "h", body = "b", streaming = "streaming", consume = true }
 fails = false
 
 [functions."fastly_http_body#new"]
@@ -170,7 +170,7 @@ fails = false
 description = "Writes bytes to the front or back of a body."
 param_docs = { h = "The body.", buf = "The bytes to write.", end = "Where to write: back or front." }
 sdk = "Body::write_bytes(bytes)"
-handle = { op = "write", value = "buf" }
+handle = { op = "write", value = "buf", stream_error = "unsupported" }
 fails = false
 
 [functions."fastly_http_body#append"]
@@ -228,7 +228,7 @@ handle = { op = "close" }
 fails = false
 
 [functions."fastly_http_body#abandon"]
-handle = { op = "close" }
+handle = { op = "abandon" }
 fails = false
 
 [functions."fastly_http_req#version_get"]
@@ -302,4 +302,5 @@ fails = false
 fails = false
 
 [functions."fastly_http_body#trailer_append"]
+handle = { op = "map_append", field = "trailers", key = "name", value = "value" }
 fails = false

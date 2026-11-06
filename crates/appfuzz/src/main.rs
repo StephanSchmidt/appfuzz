@@ -222,7 +222,7 @@ fn main() {
             out["exit_code"].as_i64().unwrap_or(3) as i32
         }
         // `--fn` that names no function: nothing was checked.
-        "probe values" => out["exit_code"].as_i64().unwrap_or(0) as i32,
+        "probe values" | "probe scripts" => out["exit_code"].as_i64().unwrap_or(0) as i32,
         "run" | "call" if matches!(out["outcome"]["kind"].as_str(), Some("error" | "plan_error")) => 3,
         "run" if out["asserts"].as_object().is_some_and(|a| a.values().any(|v| v["status"] == "broken")) => 2,
         _ => 0,
@@ -860,7 +860,15 @@ fn diff(a: &Value, b: &Value, path: String, out: &mut Vec<Value>) {
         (Value::Object(x), Value::Object(y)) => {
             for k in x.keys().chain(y.keys().filter(|k| !x.contains_key(*k))) {
                 let p = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
-                diff(x.get(k).unwrap_or(&Value::Null), y.get(k).unwrap_or(&Value::Null), p, out);
+                if out.len() >= 20 {
+                    break;
+                }
+                match (x.get(k), y.get(k)) {
+                    (Some(before), Some(after)) => diff(before, after, p, out),
+                    (before, after) => {
+                        out.push(json!({"path":p,"before":before,"after":after,"before_present":before.is_some(),"after_present":after.is_some()}))
+                    }
+                }
             }
         }
         (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
@@ -894,6 +902,24 @@ fn parse_duration(s: &str) -> Result<std::time::Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_diff_distinguishes_missing_fields_from_explicit_null() {
+        for (before, after) in [(json!({}), json!({"result":null})), (json!({"result":null}), json!({}))] {
+            let mut differences = Vec::new();
+            diff(&before, &after, String::new(), &mut differences);
+            assert_eq!(differences.len(), 1);
+            assert_eq!(differences[0]["path"], "result");
+            assert_eq!(differences[0]["before_present"], before.get("result").is_some());
+            assert_eq!(differences[0]["after_present"], after.get("result").is_some());
+        }
+        let mut differences = Vec::new();
+        diff(&json!({"result":null}), &json!({"result":null}), String::new(), &mut differences);
+        assert!(differences.is_empty());
+        let many = Value::Object((0..50).map(|i| (i.to_string(), Value::Null)).collect());
+        diff(&many, &json!({}), String::new(), &mut differences);
+        assert_eq!(differences.len(), 20);
+    }
 
     #[test]
     fn every_command_has_a_doc_and_every_doc_a_command() {

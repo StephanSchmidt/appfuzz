@@ -330,7 +330,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         scan(&text, false, &inputs, ex, "the rejected output", run, &mut out);
     }
     for e in &r.events {
-        for (p, a) in &e.args {
+        for (p, a) in e.text_args().iter() {
             let mut ss = Vec::new();
             strings(a, &mut ss);
             scan(&ss.join("\n"), false, &inputs, ex, &format!("the parameter {p} of {}", e.func), run, &mut out);

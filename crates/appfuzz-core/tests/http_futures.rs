@@ -399,3 +399,81 @@ fn deferred_host_traps_keep_all_issued_requests_and_the_first_failure() {
     assert_eq!(record.events[0].trap.as_deref(), Some("first failure"));
     assert_eq!(record.events[1].trap.as_deref(), Some("second failure"));
 }
+
+fn request_body(value: u32) -> String {
+    format!(
+        r#"(local.set $a (call $new))
+        (call $body (local.get $a) (i32.const 1024)) (local.set $body (i32.load (i32.const 1028)))
+        (call $write-body (local.get $body) (i32.const 1024)) (local.set $stream (i32.load (i32.const 1028)))
+        (local.set $a (call $dispatch (local.get $a) (i32.const 0) (i32.const 0)))
+        (i32.store (i32.const 32) (i32.const {value}))
+        (call $write-stream (local.get $stream) (i32.const 32) (i32.const 4) (i32.const 2048))
+        (call $drop-stream (local.get $stream))
+        (call $finish (local.get $body) (i32.const 0) (i32.const 0) (i32.const 2048))"#
+    )
+}
+#[test]
+fn outgoing_binary_http_body_bytes_survive_the_trace() {
+    let r = run(&format!("{} (i64.const 0)", request_body(0x0080feff)));
+    assert_eq!(r.outcome.kind, OutcomeKind::Ok, "{:?}", r.outcome);
+    assert_eq!(r.events[0].args["body"], json!([255, 254, 128, 0]));
+    let trace: appfuzz_core::envelope::Trace = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
+    assert_eq!(trace.to_record().events[0].args["body"], json!([255, 254, 128, 0]));
+}
+#[test]
+fn host_rules_match_the_actual_binary_http_request_body() {
+    let app = app(&format!("{} (i64.const 0)", request_body(0x0080feff)));
+    let plan=Plan::parse(&json!({CLIENT_KEY:{"rules":[{"when":{"body":[255,254,128,0]},"return":{"ok":{"status":201,"headers":[],"body":"binary matched"}}}],"default":{"return":{"ok":{"status":200,"headers":[],"body":"other"}}}}}).to_string()).unwrap();
+    let r = run_app(&app, plan, 0.0);
+    assert_eq!(r.outcome.kind, OutcomeKind::Ok, "{:?}", r.outcome);
+    assert_eq!(r.events[0].result.as_ref().unwrap()["ok"]["status"], 201);
+}
+#[test]
+fn distinct_binary_http_requests_do_not_become_redundant_calls() {
+    let app = app(&format!("{} {} (i64.const 0)", request_body(0x0080feff), request_body(0x0080fefe)));
+    let plan = Plan::parse(&json!({CLIENT_KEY:{"return":{"ok":{"status":200,"headers":[],"body":"ok"}}}}).to_string()).unwrap();
+    let r = run_app(&app, plan, 0.0);
+    assert_eq!(r.outcome.kind, OutcomeKind::Ok, "{:?}", r.outcome);
+    assert_ne!(r.events[0].args["body"], r.events[1].args["body"]);
+    assert!(!appfuzz_core::detect::per_run(&r, &app.manifest).iter().any(|f| f.kind == "redundant_calls"));
+}
+
+#[test]
+fn outgoing_binary_http_body_byte_contracts_use_the_actual_byte_count() {
+    let original = app(&format!("{} (i64.const 0)", request_body(0x0080feff)));
+    for (bound, valid) in [("bytes:4..4", true), ("bytes:0..3", false), ("bytes:5..8", false)] {
+        let mut manifest = original.manifest.clone();
+        manifest.functions.get_mut(CLIENT_KEY).unwrap().param_values.insert("body".into(), serde_json::from_value(json!(bound)).unwrap());
+        let app = App::from_bytes(manifest, original.bytes.clone()).unwrap();
+        let plan = Plan::parse(&json!({CLIENT_KEY:{"return":{"ok":{"status":200,"headers":[],"body":"ok"}}}}).to_string()).unwrap();
+        let r = run_app(&app, plan, 0.0);
+        assert_eq!(r.outcome.kind, OutcomeKind::Ok, "{:?}", r.outcome);
+        let found = appfuzz_core::detect::per_run(&r, &app.manifest);
+        assert_eq!(!found.iter().any(|f| f.kind == "invalid_host_argument"), valid, "{bound}: {found:?}");
+        if !valid {
+            assert_eq!(r.events[0].value_checks.as_ref().unwrap().violations[0].bytes, Some(4));
+        }
+    }
+}
+
+#[test]
+fn oversized_binary_http_capture_stops_before_building_a_large_json_array() {
+    let app = app(r#"(local.set $a (call $new))
+        (call $body (local.get $a) (i32.const 1024)) (local.set $body (i32.load (i32.const 1028)))
+        (call $write-body (local.get $body) (i32.const 1024)) (local.set $stream (i32.load (i32.const 1028)))
+        (local.set $a (call $dispatch (local.get $a) (i32.const 0) (i32.const 0)))
+        (i32.store8 (i32.const 4096) (i32.const 255))
+        (local.set $p (i32.const 512))
+        (loop $write
+            (call $write-stream (local.get $stream) (i32.const 4096) (i32.const 4096) (i32.const 2048))
+            (local.set $p (i32.sub (local.get $p) (i32.const 1)))
+            (br_if $write (local.get $p)))
+        (call $drop-stream (local.get $stream))
+        (call $finish (local.get $body) (i32.const 0) (i32.const 0) (i32.const 2048))
+        (i64.const 0)"#);
+    let plan = Plan::parse(&json!({CLIENT_KEY:{"return":{"ok":{"status":200,"headers":[],"body":"ok"}}}}).to_string()).unwrap();
+    let r = run_app(&app, plan, 0.0);
+    assert_eq!(r.outcome.kind, OutcomeKind::Error, "{:?}", r.outcome);
+    assert!(r.capture_limited);
+    assert!(r.outcome.message.as_deref().unwrap().contains("trace capture"));
+}

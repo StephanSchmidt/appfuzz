@@ -322,13 +322,15 @@ impl Domain {
                 let text = v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
                 Decimal::parse(&text).is_some_and(|n| a.as_ref().is_none_or(|a| n.cmp(a).is_ge()) && b.as_ref().is_none_or(|b| n.cmp(b).is_le()))
             }
-            Rule::Bytes(a, b) => v.as_str().is_some_and(|s| a.is_none_or(|a| s.len() >= a) && b.is_none_or(|b| s.len() <= b)),
+            Rule::Bytes(a, b) => byte_len(v).is_some_and(|n| a.is_none_or(|a| n >= a) && b.is_none_or(|b| n <= b)),
             Rule::Uuid => v.as_str().is_some_and(crate::constraints::uuid_ok),
             Rule::Existing(Constraint::Format(crate::constraints::Format::Date)) => v.as_str().is_some_and(date_ok),
             Rule::Existing(Constraint::Format(crate::constraints::Format::Time)) => v.as_str().is_some_and(time_ok),
             Rule::Existing(Constraint::Format(crate::constraints::Format::DateTime)) => {
                 v.as_str().is_some_and(|s| (s.len() == 16 || s.len() == 19) && s.as_bytes()[10] == b'T' && date_ok(&s[..10]) && time_ok(&s[11..]))
             }
+            Rule::Existing(c @ Constraint::Format(_)) => v.is_string() && c.holds(v),
+            Rule::Existing(c @ Constraint::Enum(_)) => (v.is_string() || v.is_number()) && c.holds(v),
             Rule::Existing(c) => c.holds(v),
             Rule::Required => unreachable!(),
         }
@@ -359,7 +361,7 @@ impl Domain {
                 }
             }
             Rule::Bytes(low, _) => {
-                if value.and_then(Value::as_str).is_some_and(|s| low.is_some_and(|lo| s.len() < lo)) {
+                if value.and_then(byte_len).is_some_and(|n| low.is_some_and(|lo| n < lo)) {
                     "below_minimum"
                 } else {
                     "above_maximum"
@@ -385,6 +387,14 @@ impl Domain {
             }
             _ => matches!(ty, Type::String),
         })
+    }
+}
+
+fn byte_len(value: &Value) -> Option<usize> {
+    match value {
+        Value::String(s) => Some(s.len()),
+        Value::Array(bytes) if bytes.iter().all(|v| v.as_u64().is_some_and(|n| n <= u8::MAX.into())) => Some(bytes.len()),
+        _ => None,
     }
 }
 
@@ -472,7 +482,7 @@ impl Node {
                             constraint: text.clone(),
                             reason: Domain::reason(rule, value).into(),
                             value: summary(value),
-                            bytes: value.and_then(Value::as_str).map(str::len),
+                            bytes: value.and_then(|v| if matches!(rule, Rule::Bytes(..)) { byte_len(v) } else { v.as_str().map(str::len) }),
                         });
                         if out.violations.len() >= 16 {
                             out.truncated = true;

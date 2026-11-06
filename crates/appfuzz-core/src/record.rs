@@ -113,7 +113,7 @@ pub struct HostCall {
     /// calls or functions without explicit parameter value declarations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_checks: Option<crate::value_contract::Evidence>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::value::present_json_value")]
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trap: Option<String>,
@@ -130,6 +130,24 @@ pub struct HostCall {
     /// Guest frames that made the call, innermost first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stack: Vec<Frame>,
+}
+
+impl HostCall {
+    /// Textual inspection of native HTTP body bytes. Rules, equality, storage
+    /// and value-domain checks use `args`; this view is only for text detectors.
+    pub(crate) fn text_args(&self) -> std::borrow::Cow<'_, Map<String, Value>> {
+        let is_http = self.func.split_once('#').is_some_and(|(interface, name)| crate::wasi_http::is_client(interface) && name == "handle");
+        let Some(array) = self.args.get("body").filter(|_| is_http).and_then(Value::as_array) else {
+            return std::borrow::Cow::Borrowed(&self.args);
+        };
+        let Some(bytes) = array.iter().map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok())).collect::<Option<Vec<_>>>() else {
+            return std::borrow::Cow::Borrowed(&self.args);
+        };
+        let mut text = Some(Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+        std::borrow::Cow::Owned(
+            self.args.iter().map(|(key, value)| (key.clone(), if key == "body" { text.take().expect("one body key") } else { value.clone() })).collect(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -157,7 +175,7 @@ pub struct RunRecord {
     pub id: String,
     pub spec: RunSpec,
     pub outcome: Outcome,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::value::present_json_value")]
     pub result: Option<Value>,
     /// Terminal status of a selected standard wasi:cli/run command. A normal
     /// result maps to 0/1; an explicit exit preserves its original status code.

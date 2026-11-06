@@ -307,45 +307,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             }
             Ok(out)
         }
-        Cmd::Probe { cmd: ProbeCmd::Scripts { export, spec } } => {
-            let app = load()?;
-            let base = build_spec(app, export.as_deref(), spec)?;
-            // Pages the fuzzer found: requests with canaries whose response
-            // has scripts, one per page.
-            let mut bases = vec![base.clone()];
-            let mut stored: Vec<RunRecord> = store
-                .all()?
-                .into_iter()
-                .filter(|r| r.spec.component == app.hash && r.spec.contract == app.contract && r.spec.export == base.export && r.id.starts_with('r'))
-                .filter(|r| r.spec.args.first().is_some_and(|a| a.to_string().contains("cnry")) && appfuzz_core::browser::has_scripts(r, &app.manifest))
-                .collect();
-            stored.sort_by(|a, b| a.id.cmp(&b.id));
-            let mut pages = std::collections::BTreeSet::new();
-            for r in stored {
-                if let Some(req) = r.spec.args.first()
-                    && pages.len() < 8
-                    && pages.insert(appfuzz_core::browser::page_url(req))
-                {
-                    bases.push(r.spec);
-                }
-            }
-            let recorder = Recorder::new(app, &store);
-            let runner = |s: &RunSpec| recorder.cached(s);
-            let (probes, sessions, found) = appfuzz_core::browser::probe(app, &bases, &runner)?;
-            recorder.check()?;
-            for s in &sessions {
-                store.save(&s.browser)?;
-            }
-            let mut out = json!({
-                "pages": probes,
-                "unsupported": appfuzz_core::browser::unsupported(&sessions),
-                "findings": record_findings(&cli, app, found)?,
-            });
-            if probes.is_empty() {
-                out["note"] = json!("doesn't apply: no response of these requests is HTML with a script");
-            }
-            Ok(out)
-        }
+        Cmd::Probe { cmd: ProbeCmd::Scripts { export, spec } } => probe_scripts(&cli, load()?, &store, export.as_deref(), spec),
         Cmd::Probe { cmd: ProbeCmd::Auth { export, spec } } => {
             let app = load()?;
             let base = build_spec(app, export.as_deref(), spec)?;
@@ -626,6 +588,50 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
 }
 
 /// The platform a `platform` command means: `--platform`, else the manifest's.
+/// Run script visits, save their evidence and report incomplete analysis.
+fn probe_scripts(cli: &Cli, app: &App, store: &RunStore, export: Option<&str>, spec: &SpecArgs) -> Result<Value> {
+    let base = build_spec(app, export, spec)?;
+    // Pages the fuzzer found: requests with canaries whose response
+    // has scripts, one per page.
+    let mut bases = vec![base.clone()];
+    let mut stored: Vec<RunRecord> = store
+        .all()?
+        .into_iter()
+        .filter(|r| r.spec.component == app.hash && r.spec.contract == app.contract && r.spec.export == base.export && r.id.starts_with('r'))
+        .filter(|r| r.spec.args.first().is_some_and(|a| a.to_string().contains("cnry")) && appfuzz_core::browser::has_scripts(r, &app.manifest))
+        .collect();
+    stored.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut pages = std::collections::BTreeSet::new();
+    for r in stored {
+        if let Some(req) = r.spec.args.first()
+            && pages.len() < 8
+            && pages.insert(appfuzz_core::browser::page_url(req))
+        {
+            bases.push(r.spec);
+        }
+    }
+    let recorder = Recorder::new(app, store);
+    let runner = |s: &RunSpec| recorder.cached(s);
+    let (probes, sessions, found) = appfuzz_core::browser::probe(app, &bases, &runner)?;
+    recorder.check()?;
+    for s in &sessions {
+        store.save(&s.browser)?;
+    }
+    let errors: Vec<String> = sessions.iter().filter_map(|s| s.ensure_executed().err().map(|e| e.to_string())).collect();
+    let mut out = json!({
+        "status": if errors.is_empty() { "complete" } else { "incomplete" },
+        "exit_code": if errors.is_empty() { 0 } else { 3 },
+        "errors": errors,
+        "pages": probes,
+        "unsupported": appfuzz_core::browser::unsupported(&sessions),
+        "findings": record_findings(cli, app, found)?,
+    });
+    if probes.is_empty() {
+        out["note"] = json!("doesn't apply: no response of these requests is HTML with a script");
+    }
+    Ok(out)
+}
+
 fn growth_summary(g: &scale::Growth) -> Value {
     let mut value = json!({"metric":g.metric,"law":g.law.text,"class":g.law.class});
     if let Some(n) = g.breaks_at {

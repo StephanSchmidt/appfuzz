@@ -237,13 +237,17 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut out = Vec::new();
     let ex = &r.spec.export;
     let run = Some(r.id.as_str());
+    let resp = response(r, m);
+    if resp.body.is_none() {
+        // Request-to-host flow does not depend on the export producing a body.
+        out.extend(flow(r, m, &resp, ""));
+    }
     // A plain module answers by sending a response; ending without one
     // leaves the client waiting.
     if r.outcome.kind == crate::record::OutcomeKind::Ok && r.result.is_none() && m.host.as_ref().is_some_and(|h| h.platform.start.is_some()) {
         out.push(Finding::new("invalid_response", &format!("{ex}\0none"), Severity::Fail, format!("{ex} ends without sending a response"), json!({}), run));
         return out;
     }
-    let resp = response(r, m);
     // HTML no output label covers: scripts from elsewhere are a warn.
     let labelled = m.entry.as_ref().is_some_and(|e| e.result.values().any(|l| *l != crate::markup::OutputLabel::UrlLocal));
     if resp.html
@@ -616,7 +620,7 @@ fn flow(r: &RunRecord, m: &Manifest, resp: &Response, body: &str) -> Vec<Finding
     let roles: Vec<&String> = m.entry.as_ref().map(|e| e.fields.keys().collect()).unwrap_or_default();
     for e in &r.events {
         let mut s = BTreeSet::new();
-        strings(&Value::Object(e.args.clone()), &mut s);
+        strings(&Value::Object(e.text_args().into_owned()), &mut s);
         for t in s {
             for c in CANARY.find_iter(&t) {
                 if let Some((_, path)) = from_request.iter().find(|(id, _)| id == c.as_str())

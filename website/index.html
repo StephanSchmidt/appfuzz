@@ -597,7 +597,7 @@ html(format!(<span class="str">"&lt;p&gt;Results for {q}&lt;/p&gt;"</span>))</co
     <h2>Say what a right answer is.</h2>
     <p class="lead">appfuzz knows a crash when it sees one. It can't know that every item belongs on the page, or that the total must match the line items. Whoever asked for the app knows. Write it down once, in the manifest, and appfuzz spends the whole search trying to break it.</p>
 <pre class="code"><code>[acceptance.checks.every_item]
-origin = <span class="str">"marketing"</span>
+origin = <span class="str">"app"</span>
 let.rows = <span class="str">"select li"</span>
 let.items = <span class="str">"host.items#all.result"</span>
 assert = <span class="str">"size(rows) == size(items)"</span></code></pre>

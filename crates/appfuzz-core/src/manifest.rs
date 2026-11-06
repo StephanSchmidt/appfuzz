@@ -420,6 +420,10 @@ impl Manifest {
     /// Bump the execution schema when simulation/detector semantics change.
     /// Acceptance checks are requirements, not contract: editing one keeps runs and corpora.
     pub fn fingerprint(&self) -> String {
+        self.fingerprint_with_browser(crate::browser::GUEST)
+    }
+
+    fn fingerprint_with_browser(&self, browser: &[u8]) -> String {
         let mut v = serde_json::to_value(self).expect("manifest serializes");
         v["app"]["wasm"] = Value::Null;
         v["acceptance"] = Value::Null;
@@ -432,8 +436,9 @@ impl Manifest {
             }
         }
         let mut h = blake3::Hasher::new();
-        h.update(b"appfuzz-execution-v37");
+        h.update(b"appfuzz-execution-v44");
         h.update(crate::extism::KERNEL_BYTES);
+        h.update(browser);
         h.update(env!("CARGO_PKG_VERSION").as_bytes());
         h.update(include_bytes!("../../../Cargo.lock"));
         h.update(&serde_json::to_vec(&v).expect("manifest serializes"));
@@ -603,6 +608,14 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contract_identity_tracks_the_embedded_browser_build() {
+        let manifest = Manifest::for_wasm(std::path::Path::new("app.wasm"));
+        let original = manifest.fingerprint();
+        assert_eq!(original, manifest.fingerprint_with_browser(crate::browser::GUEST));
+        assert_ne!(original, manifest.fingerprint_with_browser(b"a different browser build"));
+    }
 
     #[test]
     fn sizes() {

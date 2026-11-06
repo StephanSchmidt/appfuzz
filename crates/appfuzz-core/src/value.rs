@@ -17,6 +17,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use wasmtime::component::{Type, Val};
 
+/// For fields where a missing value and an explicit JSON null are distinct.
+/// `default` on the field handles absence; this runs only for a present field.
+pub(crate) fn present_json_value<'de, D>(deserializer: D) -> std::result::Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
+}
+
 /// The length of `v` as compact JSON, without building the text.
 pub fn json_len<T: Serialize + ?Sized>(v: &T) -> usize {
     struct Count(usize);

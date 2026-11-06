@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock, mpsc};
 
 use anyhow::{Result, anyhow};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::detect::{Finding, Severity};
 use crate::harness::{App, Routed, Router};
@@ -65,6 +65,28 @@ pub struct Session {
     pub report: Value,
     /// The canary in the page URL's fragment.
     pub fragment: String,
+}
+
+impl Session {
+    /// Whether the visit can be judged. A measured fuel/time failure is
+    /// a finding; an engine, plan or capture error leaves the analysis
+    /// incomplete, as does a missing report from an otherwise ok guest.
+    pub fn ensure_executed(&self) -> Result<()> {
+        let b = &self.browser;
+        let budget = matches!(b.outcome.kind, OutcomeKind::OutOfFuel | OutcomeKind::Timeout | OutcomeKind::BudgetExceeded);
+        if b.capture_limited || (b.outcome.kind != OutcomeKind::Ok && !budget) {
+            anyhow::bail!("browser visit {}: {}", b.id, b.outcome.message.as_deref().unwrap_or("the page session could not execute"));
+        }
+        if !budget && (!self.report["url"].is_string() || !self.report["errors"].is_array() || self.report.get("fatal").is_some()) {
+            anyhow::bail!("browser visit {}: no complete session report ({})", b.id, self.report.get("fatal").unwrap_or(&Value::Null));
+        }
+        for r in &self.nested {
+            if r.capture_limited || matches!(r.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) {
+                anyhow::bail!("browser visit {}, app request {}: {}", b.id, r.id, r.outcome.message.as_deref().unwrap_or("the request could not execute"));
+            }
+        }
+        Ok(())
+    }
 }
 
 // ns_per_fuel: QuickJS interprets the scripts a browser compiles. A
@@ -120,20 +142,17 @@ impl Browser {
         let req = page.spec.args.first().cloned().unwrap_or(Value::Null);
         let fragment = crate::output::canary(page.spec.seed.wrapping_mul(7919).wrapping_add(4242) % 1_000_000 + 900_000);
         let url = format!("{}#{}", page_url(&req), fragment);
-        let mut cookies = Map::new();
-        for (k, v) in &resp.headers {
-            if k.eq_ignore_ascii_case("set-cookie")
-                && let Some((name, rest)) = v.split_once('=')
-            {
-                let value = rest.split(';').next().unwrap_or_default();
-                let http_only = rest.to_ascii_lowercase().split(';').any(|a| a.trim() == "httponly");
-                cookies.insert(name.trim().to_string(), json!({"value": value, "httpOnly": http_only}));
-            }
-        }
-        cookies.insert(COOKIE.into(), json!(secret_cookie(page.spec.seed)));
-        // The page run's id names the app, its build and the request: the
-        // answers the router gives follow from it.
-        let input = json!({"url": url, "html": resp.body.unwrap_or_default(), "cookies": cookies, "page_run": page.id});
+        let request_cookies: Vec<String> = pairs(req.get("headers")).into_iter().filter(|(k, _)| k.eq_ignore_ascii_case("cookie")).map(|(_, v)| v).collect();
+        let set_cookies: Vec<&str> = resp.headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie")).map(|(_, v)| v.as_str()).collect();
+        // Keep response attributes intact for the browser's cookie jar.
+        // The readable probe cookie gets an unused name so real credentials
+        // named af_session are preserved.
+        let input = json!({
+            "url": url, "html": resp.body.unwrap_or_default(),
+            "request_cookies": request_cookies, "set_cookies": set_cookies,
+            "probe_cookie": {"name": COOKIE, "value": secret_cookie(page.spec.seed)},
+            "page_run": page.id,
+        });
         let export = self.app.default_export()?.clone();
         let mut spec = self.app.spec(&export, vec![Value::String(input.to_string())], Plan::default(), page.spec.seed);
         spec.now.clone_from(&page.spec.now);
@@ -238,6 +257,9 @@ pub fn probe(target: &App, bases: &[crate::record::RunSpec], run: Runner) -> Res
     let specs: Vec<(&'static str, crate::record::RunSpec)> = bases.iter().flat_map(variants).collect();
     let results = crate::par::map(&specs, |(what, spec)| {
         let page = run(spec);
+        if page.capture_limited || matches!(page.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) {
+            anyhow::bail!("page request {}: {}", page.id, page.outcome.message.as_deref().unwrap_or("the request could not execute"));
+        }
         if !has_scripts(&page, m) {
             return Ok(None);
         }
@@ -262,14 +284,12 @@ pub fn probe(target: &App, bases: &[crate::record::RunSpec], run: Runner) -> Res
     Ok((probes, sessions, findings))
 }
 
-/// Whether a run served a page with scripts to run: an ok run whose
-/// response is HTML with a script in it.
+/// Whether a run served HTML that can run scripts, including inline
+/// handlers and script URLs. A response already sent still reaches the
+/// visitor when the guest subsequently fails.
 pub fn has_scripts(r: &RunRecord, m: &Manifest) -> bool {
-    if r.outcome.kind != OutcomeKind::Ok {
-        return false;
-    }
     let resp = crate::output::response(r, m);
-    resp.html && resp.body.as_deref().is_some_and(|b| b.to_ascii_lowercase().contains("<script"))
+    resp.html && resp.body.as_deref().is_some_and(|b| !crate::markup::scripts(b).is_empty())
 }
 
 /// The answer from another origin. A script, module or style needs the
@@ -381,12 +401,12 @@ pub fn request_for(base: &Value, method: &str, target: &str, headers: &[(String,
     Some(v)
 }
 
-/// The browser's answer from the app's run: its response, or a server
-/// error when the run failed.
+/// The browser's answer from the app's run: the response it sent, or a
+/// server error when it failed without sending a response.
 fn answer(r: &RunRecord, m: &Manifest) -> Routed {
     let source = format!("app run {}", r.id);
     let latency_ms = r.totals.virtual_ns.ms();
-    if r.outcome.kind != OutcomeKind::Ok {
+    if r.result.is_none() && r.outcome.kind != OutcomeKind::Ok {
         return Routed { value: json!({"ok": {"status": 500, "headers": [], "body": ""}}), latency_ms, source };
     }
     let resp = crate::output::response(r, m);
@@ -474,23 +494,90 @@ impl Sources {
     }
 }
 
+struct TracedValue {
+    value: String,
+    label: Label,
+    place: String,
+    /// Stable finding identity, independent of how the source is described.
+    key: String,
+}
+
 /// Traced personal data and secrets: values at `pii` and `secret` result
 /// paths of the app's runs, and the session cookie.
-fn traced(page: &RunRecord, s: &Session, m: &Manifest) -> Vec<(String, Label, String)> {
-    let mut out = vec![(secret_cookie(page.spec.seed), Label::Secret, format!("the session cookie {COOKIE}"))];
-    let mut seen: BTreeSet<String> = out.iter().map(|t| t.0.clone()).collect();
+fn traced(page: &RunRecord, s: &Session, m: &Manifest) -> Vec<TracedValue> {
+    let mut out = vec![TracedValue {
+        value: secret_cookie(page.spec.seed),
+        label: Label::Secret,
+        place: "the browser's readable session cookie".into(),
+        key: format!("the session cookie {COOKIE}"),
+    }];
+    let mut seen: BTreeSet<(String, Label)> = out.iter().map(|t| (t.value.clone(), t.label)).collect();
     for r in std::iter::once(page).chain(&s.nested) {
         for e in &r.events {
             let Some(v) = &e.result else { continue };
             for (p, l) in m.call_result_labels(&e.func, &e.args) {
                 if matches!(l, Label::Pii | Label::Secret) {
                     for x in crate::labels::values_at(v, &p) {
-                        if x.chars().count() >= 4 && seen.insert(x.clone()) {
+                        if x.chars().count() >= 4 && seen.insert((x.clone(), l)) {
                             let at = if p.is_empty() { e.func.clone() } else { format!("{} ({p})", e.func) };
-                            out.push((x, l, at));
+                            out.push(TracedValue { value: x, label: l, key: at.clone(), place: at });
                         }
                     }
                 }
+            }
+        }
+    }
+    out
+}
+
+/// Carries sensitive values through the browser's sequence of server
+/// requests. A value becomes known only after its source request; locally
+/// labelled leaks keep their existing single-run finding and recipe.
+fn server_flows(page: &RunRecord, session: &Session, m: &Manifest) -> Vec<Finding> {
+    const COOKIE_SOURCE: &str = "browser:cookie";
+    let mut known = vec![crate::labels::Traced {
+        value: secret_cookie(page.spec.seed),
+        label: Label::Secret,
+        func: COOKIE_SOURCE.into(),
+        path: String::new(),
+        response_owner: Some(ORIGIN.into()),
+    }];
+    known.extend(crate::labels::sensitive(page, m));
+    let origin_key = |v: &crate::labels::Traced| (v.value.clone(), v.label, v.func.clone(), v.path.clone());
+    let mut origins: BTreeMap<_, String> = known.iter().map(|v| (origin_key(v), page.id.clone())).collect();
+    let mut seen: BTreeSet<_> = known.iter().map(|v| (v.value.clone(), v.label, v.response_owner.clone())).collect();
+    let mut out = Vec::new();
+    for r in &session.nested {
+        let local: BTreeSet<String> = crate::labels::check(r, m).into_iter().map(|f| f.id).collect();
+        for mut f in crate::labels::leaks_from(r, m, &known) {
+            if local.contains(&f.id) {
+                continue;
+            }
+            let cookie = f.detail["func"].as_str() == Some(COOKIE_SOURCE);
+            if let Some(value) = f.detail["value"].as_str()
+                && let Some(origin) = origins.get(&(
+                    value.to_string(),
+                    if f.kind == "secret_leak" { Label::Secret } else { Label::Pii },
+                    f.detail["func"].as_str().unwrap_or_default().to_string(),
+                    f.detail["path"].as_str().unwrap_or_default().to_string(),
+                ))
+            {
+                f.detail["source_run"] = json!(origin);
+            }
+            if cookie {
+                f.title = format!("the browser's readable session cookie ends up in {}", f.detail["place"].as_str().unwrap_or("the server"));
+                f.detail.as_object_mut().unwrap().remove("func");
+                f.detail["source"] = json!("the browser's readable session cookie");
+            }
+            f.title.push_str(" in a request made by the page's scripts");
+            f.detail["browser_run"] = json!(session.browser.id);
+            f.detail["nested_run"] = json!(r.id);
+            out.push(Finding::new(&f.kind, &format!("{}\0browser\0server\0{}", page.spec.export, f.id), f.severity, f.title, f.detail, Some(&page.id)));
+        }
+        for value in crate::labels::sensitive(r, m) {
+            if seen.insert((value.value.clone(), value.label, value.response_owner.clone())) {
+                origins.insert(origin_key(&value), r.id.clone());
+                known.push(value);
             }
         }
     }
@@ -528,11 +615,12 @@ pub fn check(page: &RunRecord, s: &Session, m: &Manifest) -> Vec<Finding> {
                 detail(json!({"outcome": b.outcome.kind, "fuel": b.totals.fuel})),
                 run,
             ));
-            return out;
         }
-        _ => return out,
+        _ => {}
     }
 
+    // Requests, markup and code recorded before a hang or crash remain
+    // evidence, even when the guest couldn't finish its session report.
     let src = Sources::new(page, s, m);
     let traced = traced(page, s, m);
     let grants_listed = m.grants.lists_hosts();
@@ -767,6 +855,7 @@ pub fn check(page: &RunRecord, s: &Session, m: &Manifest) -> Vec<Finding> {
         ));
     }
 
+    out.extend(server_flows(page, s, m));
     let mut seen = BTreeSet::new();
     out.retain(|f| seen.insert(f.id.clone()));
     out
@@ -811,28 +900,19 @@ pub fn unsupported(sessions: &[Session]) -> Value {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn leaks(
-    e: &HostCall,
-    traced: &[(String, Label, String)],
-    to: &str,
-    path: &str,
-    ex: &str,
-    run: Option<&str>,
-    detail: &dyn Fn(Value) -> Value,
-    out: &mut Vec<Finding>,
-) {
+fn leaks(e: &HostCall, traced: &[TracedValue], to: &str, path: &str, ex: &str, run: Option<&str>, detail: &dyn Fn(Value) -> Value, out: &mut Vec<Finding>) {
     let mut texts = BTreeSet::new();
     for v in e.args.values() {
         crate::output::strings(v, &mut texts);
     }
-    for (value, label, at) in traced {
+    for TracedValue { value, label, place: at, key } in traced {
         if !texts.iter().any(|t| t.contains(value.as_str())) {
             continue;
         }
         let (kind, what) = if *label == Label::Secret { ("secret_leak", "a secret") } else { ("pii_leak", "personal data") };
         out.push(Finding::new(
             kind,
-            &format!("{ex}\0browser\0{at}\0{to}"),
+            &format!("{ex}\0browser\0{key}\0{to}"),
             Severity::Fail,
             format!("the page's scripts send {what} ({at}) to {to} (page {path})"),
             detail(json!({"value": value, "from": at, "host": to, "call": e.func, "n": e.n})),

@@ -35,8 +35,8 @@ use wasmtime_wasi_http::p2::body::{HostOutgoingBody, HyperOutgoingBody, StreamCo
 use wasmtime_wasi_http::p2::types::{HostFutureIncomingResponse, HostIncomingRequest, HostOutgoingRequest, HostOutgoingResponse, HostResponseOutparam};
 use wasmtime_wasi_http::{RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView};
 
-use super::{Host, intercept};
-use crate::value::{json_to_val, val_to_json};
+use super::{Host, intercept_values};
+use crate::value::val_to_json;
 use crate::wasi_http::CLIENT_KEY;
 
 /// The wasi:http version wasmtime-wasi-http 50 provides. Shadowing under it
@@ -460,12 +460,25 @@ fn resolve(store: &mut StoreContextMut<'_, Host>, future: Option<u32>, p: Pendin
     } else {
         let ty = store.data().platform.funcs.get(CLIENT_KEY).map(|f| f.ty.clone()).ok_or_else(|| wasmtime::format_err!("{CLIENT_KEY} is not linked"))?;
         let headers: Vec<Value> = p.headers.iter().map(|(k, v)| json!([k, v])).collect();
-        let args = [json!(p.method), json!(p.url), Value::Array(headers), json!(String::from_utf8_lossy(&body))];
-        let params = ty.params().zip(args.iter()).map(|((_, t), v)| json_to_val(v, &t)).collect::<Result<Vec<_>>>().map_err(wasmtime::Error::from_anyhow)?;
+        let body = match String::from_utf8(body) {
+            Ok(text) => json!(text),
+            Err(error) => {
+                let bytes = error.into_bytes();
+                // JSON values are wider than bytes. Stop with explicitly
+                // incomplete evidence before materializing an oversized array.
+                let footprint = bytes.len().saturating_mul(std::mem::size_of::<Value>());
+                if footprint > super::TRACE_BYTE_CAPACITY.saturating_sub(store.data().trace_bytes) {
+                    return Err(super::TraceCaptureLimit::Bytes.into());
+                }
+                json!(bytes)
+            }
+        };
+        let args = [json!(p.method), json!(p.url), Value::Array(headers), body];
+        let params = ty.params().zip(args).map(|((name, _), value)| (name.to_string(), value)).collect();
         let mut results = vec![Val::Bool(false)];
         store.data_mut().call_started_ns = Some(p.sent_ns.clone());
         store.data_mut().call_deadline_ns = p.deadline_ns.clone();
-        intercept(store.as_context_mut(), CLIENT_KEY, &params, &mut results).map_err(wasmtime::Error::from_anyhow)?;
+        intercept_values(store.as_context_mut(), CLIENT_KEY, params, &mut results).map_err(wasmtime::Error::from_anyhow)?;
         let latency = store.data().events.last().map_or_else(Natural::default, |event| event.latency_ns.clone());
         p.ready.set(p.sent_at + latency);
         match incoming(&val_to_json(&results[0])) {
@@ -585,9 +598,9 @@ fn deliver_uri(text: &str) -> Option<http::Uri> {
 }
 
 /// Calls `wasi:http/incoming-handler#handle` with the request record and
-/// returns the response record. The outer error is appfuzz's (a request
+/// captures any response sent. The outer error is appfuzz's (a request
 /// the platform would not deliver), the inner one the guest's.
-pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value) -> Result<std::result::Result<Value, wasmtime::Error>> {
+pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value) -> Result<std::result::Result<(), wasmtime::Error>> {
     let text = |k: &str| request.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
     let method = text("method");
     let method = http::Method::from_bytes(method.as_bytes()).map_err(|_| anyhow!("the platform does not deliver method {method:?}"))?;
@@ -620,21 +633,27 @@ pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value)
         (req, out)
     };
     let typed = func.typed::<(Resource<HostIncomingRequest>, Resource<HostResponseOutparam>), ()>(&*store).map_err(anyhow::Error::from)?;
-    if let Err(error) = typed.call(&mut *store, (req, out)) {
-        return Ok(Err(error));
-    }
+    let called = typed.call(&mut *store, (req, out));
+    // Setting the outparam sends the response before handle finishes. A later
+    // trap cannot undo its headers or any bytes already written to its body.
+    let captured = capture_response(store);
+    Ok(called.and(captured))
+}
+
+fn capture_response(store: &mut Store<Host>) -> wasmtime::Result<()> {
     let taken = store.data().http.response.lock().unwrap_or_else(|e| e.into_inner()).take();
     let response = match taken {
-        None => return Ok(Err(wasmtime::format_err!("the handler returned without setting a response (response-outparam.set)"))),
+        None => return Err(wasmtime::format_err!("the handler returned without setting a response (response-outparam.set)")),
         // The guest reports an error: the client gets a 500 with no body.
-        Some(Err(_)) => return Ok(Ok(json!({ "status": 500, "headers": [], "body": "" }))),
+        Some(Err(_)) => {
+            store.data_mut().http.result = Some(json!({ "status": 500, "headers": [], "body": "" }));
+            return Ok(());
+        }
         Some(Ok(r)) => r,
     };
     let (parts, mut body) = response.into_parts();
     let end = end_of(&mut body);
-    if end == End::Aborted {
-        return Ok(Err(wasmtime::format_err!("the handler aborted its response body")));
-    }
+    let incomplete = matches!(end, End::Aborted | End::Open);
     let bytes = store.data().http.response_body.as_ref().map(contents).unwrap_or_default();
     let pairs = |h: &http::HeaderMap| -> Vec<Value> { h.iter().map(|(k, v)| json!([k.as_str(), String::from_utf8_lossy(v.as_bytes())])).collect() };
     // Text as text; other bytes as a list of bytes, so the record stays lossless.
@@ -646,7 +665,15 @@ pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value)
     if let End::Trailers(t) = &end {
         out["trailers"] = json!(pairs(t));
     }
-    Ok(Ok(out))
+    if incomplete {
+        out["body_complete"] = json!(false);
+    }
+    store.data_mut().http.result = Some(out);
+    match end {
+        End::Aborted => Err(wasmtime::format_err!("the handler aborted its response body")),
+        End::Open => Err(wasmtime::format_err!("the handler returned without finishing its response body")),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]

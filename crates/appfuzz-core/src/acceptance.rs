@@ -19,10 +19,13 @@ pub struct Suite {
     pub version: u32,
     pub checks: BTreeMap<String, Check>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Who owns a requirement: the app's owners, whichever team that is, or the platform.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Origin {
-    Marketing,
+    /// Intended app behavior. `marketing`, the former spelling, still reads.
+    #[serde(alias = "marketing")]
+    App,
     Platform,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

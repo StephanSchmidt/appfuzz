@@ -36,10 +36,16 @@ browser:
 	cargo build --release --manifest-path browser/Cargo.toml --target wasm32-wasip2 -p appfuzz-browser
 	cp $(BROWSER_WASM) $(BROWSER_ASSETS)/browser.wasm
 	{ echo "The browser guest: QuickJS (quickjs-ng, MIT, via rquickjs, MIT), a DOM"; \
-	  echo "shim on linkedom (ISC) and the page driver, built by make browser."; \
+	  echo "shim on linkedom (ISC), cookies with tldts (MIT, Public Suffix List),"; \
+	  echo "and the page driver, built by make browser."; \
 	  echo "Source: browser/ (guest/, js/, wit/)."; \
 	  echo "rquickjs: $$(grep -A1 '^name = "rquickjs-core"' browser/Cargo.lock | sed -n 's/version = //p' | tr -d '"')"; \
 	  echo "linkedom: $$(node -p 'require("./browser/js/node_modules/linkedom/package.json").version')"; \
+	  echo "tldts: $$(node -p 'require("./browser/js/node_modules/tldts/package.json").version')"; \
+	  echo "tldts-core: $$(node -p 'require("./browser/js/node_modules/tldts-core/package.json").version')"; \
 	  echo "rustc: $$(rustc --version)"; \
 	  echo "SHA-256: $$(sha256sum $(BROWSER_ASSETS)/browser.wasm | cut -d' ' -f1)"; \
 	} > $(BROWSER_ASSETS)/PROVENANCE.txt
+	{ echo "tldts"; cat browser/js/node_modules/tldts/LICENSE; \
+	  echo; echo "tldts-core"; cat browser/js/node_modules/tldts-core/LICENSE; \
+	} > $(BROWSER_ASSETS)/LICENSES.tldts.txt

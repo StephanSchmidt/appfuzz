@@ -34,7 +34,7 @@ pub struct Plan(pub BTreeMap<String, FnPlan>);
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Response {
-    #[serde(rename = "return", default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "return", default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::value::present_json_value")]
     pub ret: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate: Option<GenOpts>,
