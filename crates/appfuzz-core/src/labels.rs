@@ -367,6 +367,15 @@ pub(crate) struct Traced {
     /// Browser-owned credentials may return to that browser. Logs and
     /// undeclared host parameters still cannot receive them.
     pub response_owner: Option<String>,
+    /// A literal response echo may return to the caller, unless `no_pii`
+    /// explicitly forbids it. This never permits logs or host parameters.
+    pub request_echo: bool,
+}
+
+impl Traced {
+    fn permits_response_echo(&self, no_pii: bool) -> bool {
+        self.request_echo && !(no_pii && self.label == Label::Pii)
+    }
 }
 
 /// Canaries in strings an `html` result label marks as trusted markup.
@@ -387,7 +396,7 @@ pub fn trusted_html(r: &RunRecord, m: &Manifest) -> BTreeSet<String> {
 
 /// Sink and leak findings of one run.
 pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
-    let labelled = m.functions.values().any(|f| !f.params.is_empty() || f.result.is_some());
+    let labelled = m.functions.values().any(|f| !f.params.is_empty() || f.result.is_some() || f.rules.iter().any(|r| r.result.is_some()));
     if !labelled {
         return Vec::new();
     }
@@ -600,7 +609,7 @@ pub(crate) fn sensitive(r: &RunRecord, m: &Manifest) -> Vec<Traced> {
             if matches!(l, Label::Pii | Label::Secret) {
                 for s in values_at(v, &p) {
                     if s.chars().count() >= 4 && seen.insert((s.clone(), l)) {
-                        traced.push(Traced { value: s, label: l, func: e.func.clone(), path: p.clone(), response_owner: None });
+                        traced.push(Traced { value: s, label: l, func: e.func.clone(), path: p.clone(), response_owner: None, request_echo: false });
                     }
                 }
             }
@@ -611,12 +620,15 @@ pub(crate) fn sensitive(r: &RunRecord, m: &Manifest) -> Vec<Traced> {
 
 fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut traced = sensitive(r, m);
-    // A value the request itself carries is an echo, not a leak (`reflection` covers request text).
+    // A caller may receive literal request echoes. Their private host
+    // origin still matters in logs, host parameters and `no_pii` output.
     let mut req = Vec::new();
     for a in &r.spec.args {
         str_leaves(a, &mut req);
     }
-    traced.retain(|t| !req.iter().any(|s| s.contains(t.value.as_str())));
+    for t in &mut traced {
+        t.request_echo = req.iter().any(|s| s.contains(t.value.as_str()));
+    }
     if traced.is_empty() {
         return Vec::new();
     }
@@ -624,8 +636,7 @@ fn leaks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
 }
 
 /// Values learned before this request retain their sensitivity even when
-/// they arrive in request fields. The ordinary request-echo exemption is
-/// only for values without an established private origin.
+/// they arrive in request fields; only `leaks` marks local response echoes.
 pub(crate) fn leaks_from(r: &RunRecord, m: &Manifest, traced: &[Traced]) -> Vec<Finding> {
     if traced.is_empty() {
         return Vec::new();
@@ -661,7 +672,7 @@ pub(crate) fn leaks_from(r: &RunRecord, m: &Manifest, traced: &[Traced]) -> Vec<
     }
     if let Some(text) = r.rejected_output_text() {
         for i in find.hits(&text) {
-            if traced[i].response_owner.is_none() {
+            if traced[i].response_owner.is_none() && !traced[i].permits_response_echo(no_pii) {
                 add(i, "the rejected output".into(), Severity::Fail, json!({}));
             }
         }
@@ -682,12 +693,15 @@ pub(crate) fn leaks_from(r: &RunRecord, m: &Manifest, traced: &[Traced]) -> Vec<
     }
     for (h, hv) in &resp.headers {
         for i in find.hits(h) {
-            if traced[i].response_owner.is_none() {
+            if traced[i].response_owner.is_none() && !traced[i].permits_response_echo(no_pii) {
                 let sev = if traced[i].label == Label::Secret || no_pii { Severity::Fail } else { Severity::Warn };
                 add(i, "a response header name".into(), sev, json!({"header": h}));
             }
         }
         for i in find.hits(hv) {
+            if traced[i].permits_response_echo(no_pii) {
+                continue;
+            }
             if let Some(owner) = &traced[i].response_owner {
                 // A response to its owner is allowed; an HTTP redirect
                 // carrying the credential to another origin is not.
@@ -704,7 +718,7 @@ pub(crate) fn leaks_from(r: &RunRecord, m: &Manifest, traced: &[Traced]) -> Vec<
         let in_urls: BTreeSet<usize> =
             URL_ATTR.captures_iter(body).filter_map(|c| c.get(1).or(c.get(2)).or(c.get(3)).map(|x| x.as_str())).flat_map(|u| find.hits(u)).collect();
         for i in body_hits {
-            if traced[i].response_owner.is_some() {
+            if traced[i].response_owner.is_some() || traced[i].permits_response_echo(no_pii) {
                 continue;
             }
             if traced[i].label == Label::Secret {
@@ -722,7 +736,7 @@ pub(crate) fn leaks_from(r: &RunRecord, m: &Manifest, traced: &[Traced]) -> Vec<
     // fields reached through named pair lists.
     result_texts(r, m, &mut |at, text| {
         for i in find.hits(text) {
-            if traced[i].response_owner.is_none() && (traced[i].label == Label::Secret || no_pii) {
+            if traced[i].response_owner.is_none() && !traced[i].permits_response_echo(no_pii) && (traced[i].label == Label::Secret || no_pii) {
                 let extra = if no_pii && traced[i].label == Label::Pii { json!({"at": at, "no_pii": true}) } else { json!({"at": at}) };
                 add(i, "the result".into(), Severity::Fail, extra);
             }
@@ -1242,14 +1256,19 @@ mod tests {
     }
 
     #[test]
-    fn echoed_request_values_are_not_leaks() {
+    fn echoed_request_values_still_fail_in_logs_and_no_pii_output() {
         let r = pii_run(
             json!({"query": [["email", "p1@mail.example"]]}),
             &["p1@mail.example"],
             json!({"status": 200, "body": "p1@mail.example"}),
             "p1@mail.example",
         );
-        assert!(leaks(&r, &pii_manifest(true, true)).is_empty());
+        let ordinary = leaks(&r, &pii_manifest(false, true));
+        assert_eq!(ordinary.len(), 1);
+        assert_eq!(ordinary[0].detail["place"], "the log (stdout)");
+        let strict = leaks(&r, &pii_manifest(true, true));
+        assert_eq!(strict.len(), 2);
+        assert!(strict.iter().any(|f| f.detail["place"] == "the response body"));
     }
 
     #[test]

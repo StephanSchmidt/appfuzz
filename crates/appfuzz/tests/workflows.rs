@@ -482,6 +482,48 @@ fn invalid_response_mappings_keep_privacy_findings_confirmable_and_replayable() 
     }
 }
 
+#[test]
+fn request_echo_and_conditional_secret_leaks_confirm_replay_and_regress() {
+    for source_label in ["result='secret'", "rules=[{when={},result='secret'}]"] {
+        let f = Fixture::new(false);
+        std::fs::write(
+            &f.manifest,
+            format!(
+                "[app]\nwasm='app.wasm'\n[entry]\nexport='run'\nrequest='sk_private_output_0123456789'\noutput={{body='body',body_format='text'}}\n[functions.\"test:payload/config#key\"]\n{source_label}\n[functions.\"test:payload/report#send\"]\neffect='external'\n"
+            ),
+        )
+        .unwrap();
+        let source = include_str!("../../appfuzz-core/tests/fixtures/request_echo.wat");
+        std::fs::write(f.dir.join("app.wasm"), wat::parse_str(source).unwrap()).unwrap();
+        let plan = r#"{"test:payload/config#key":{"return":"sk_private_output_0123456789"}}"#;
+        let (_, run) = f.cli(&["run", "--plan", plan]);
+        let finding = run["findings"].as_array().unwrap().iter().find(|f| f["kind"] == "secret_leak").unwrap_or_else(|| panic!("{run}"));
+        assert_eq!(finding["severity"], "fail", "{finding}");
+        let (_, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "32"]);
+        assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+        let case = confirmed["case"].as_str().unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(case).unwrap()).unwrap();
+        assert_eq!(saved["finding"]["detail"]["place"], "the parameter value of test:payload/report#send", "{saved}");
+        let (code, replayed) = f.cli(&["replay", case]);
+        assert_eq!(code, 0, "{replayed}");
+        assert_eq!(replayed["reproduced"], true, "{replayed}");
+        // Still read the secret, but keep it out of the external call and
+        // the response. Regression replay must execute the changed guest.
+        let fixed = source
+            .replace("(call $send (i32.load (i32.const 1024)) (i32.load (i32.const 1028)))", "(call $send (i32.const 128) (i32.const 2))")
+            .replace("(i32.store (i32.const 8) (i32.load (i32.const 1024)))", "(i32.store (i32.const 8) (i32.const 128))")
+            .replace("(i32.store (i32.const 12) (i32.load (i32.const 1028)))", "(i32.store (i32.const 12) (i32.const 2))");
+        std::fs::write(f.dir.join("app.wasm"), wat::parse_str(fixed).unwrap()).unwrap();
+        let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
+        assert_eq!(code, 0, "{replayed}");
+        assert_eq!(replayed["reproduced"], false, "{replayed}");
+        let (_, run) = f.cli(&["run", "--plan", plan]);
+        assert_eq!(run["outcome"]["kind"], "ok", "{run}");
+        assert_eq!(run["calls_per_function"]["test:payload/config#key"], 1, "{run}");
+        assert!(run["findings"].as_array().unwrap().iter().all(|f| f["kind"] != "secret_leak"), "{run}");
+    }
+}
+
 /// `probe scripts` runs the page's own script: the link's #fragment put
 /// into innerHTML is DOM XSS. The finding confirms and replays like any
 /// other; the same page with textContent shows nothing.

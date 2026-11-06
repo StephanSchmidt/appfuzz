@@ -566,6 +566,7 @@ fn server_flows(page: &RunRecord, session: &Session, m: &Manifest) -> Vec<Findin
         func: COOKIE_SOURCE.into(),
         path: String::new(),
         response_owner: Some(ORIGIN.into()),
+        request_echo: false,
     }];
     known.extend(crate::labels::sensitive(page, m));
     let origin_key = |v: &crate::labels::Traced| (v.value.clone(), v.label, v.func.clone(), v.path.clone());

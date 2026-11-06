@@ -66,9 +66,13 @@ numbers. Generated identities are the run's caller, and about half the
 generated owners are the caller too. An app that checks ownership shows
 the record in some runs and refuses it in others.
 
-A value the request itself carries is not a leak: the user typed it.
-`reflection` covers request text. Values shorter than four characters are
-not traced. One finding covers all values from the same function and path
+A literal value the request itself carries may be echoed in the response:
+the user typed it. `reflection` covers request text. A labelled host value
+that also appears in the request still must not reach logs, guest errors
+or host parameters without the matching label. `no_pii` also forbids
+personal data in the output when the request carries it.
+Values shorter than four characters are not traced. One finding covers
+all values from the same function and path
 in the same place; `detail.count` says how many (the emails of 37 people
 in one page are one finding with `count: 37`).
 

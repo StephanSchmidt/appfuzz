@@ -1,0 +1,31 @@
+(component
+ (import "test:payload/report" (instance $report (export "send" (func (param "value" string)))))
+ (import "test:payload/config" (instance $config (export "key" (func (result string)))))
+ (core module $memory-module
+  (memory (export "memory") 1)
+  (func (export "realloc") (param i32 i32 i32 i32) (result i32) (i32.const 4096)))
+ (core instance $mem (instantiate $memory-module))
+ (alias core export $mem "memory" (core memory $memory))
+ (alias core export $mem "realloc" (core func $realloc))
+ (core func $key (canon lower (func $config "key") (memory $memory) (realloc $realloc)))
+ (core func $send (canon lower (func $report "send") (memory $memory)))
+ (core module $guest
+  (import "env" "memory" (memory 1))
+  (import "env" "key" (func $key (param i32)))
+  (import "env" "send" (func $send (param i32 i32)))
+  (data (i32.const 128) "ok")
+  ;; Ignore the request; send the host's secret to another function.
+  (func (export "run") (param i32 i32) (result i32)
+   (call $key (i32.const 1024))
+   (call $send (i32.load (i32.const 1024)) (i32.load (i32.const 1028)))
+   (i32.store (i32.const 0) (i32.const 128))
+   (i32.store (i32.const 4) (i32.const 2))
+   (i32.store (i32.const 8) (i32.load (i32.const 1024)))
+   (i32.store (i32.const 12) (i32.load (i32.const 1028)))
+   (i32.const 0)))
+ (core instance $guest (instantiate $guest (with "env" (instance
+  (export "memory" (memory $memory)) (export "key" (func $key)) (export "send" (func $send))))))
+ (type $out (record (field "body" string) (field "metadata" string)))
+ (export $public-out "response" (type $out))
+ (func (export "run") (param "input" string) (result $public-out)
+  (canon lift (core func $guest "run") (memory $memory) (realloc $realloc))))
