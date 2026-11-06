@@ -7,14 +7,14 @@
 //! `constant_payload`: a long, random-looking string from the binary goes
 //! to a write or external call. Neither the request nor the host gave it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
 use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::detect::{Finding, Severity};
-use crate::labels::{Label, values_at};
+use crate::labels::{Label, Traced};
 use crate::manifest::{Effect, Manifest};
 use crate::record::RunRecord;
 
@@ -116,35 +116,32 @@ struct Source {
     value: String,
     label: Option<Label>,
     from: String,
+    func: Option<String>,
+    path: String,
+    response_owner: Option<String>,
+}
+
+impl From<Traced> for Source {
+    fn from(t: Traced) -> Self {
+        let from = if t.path.is_empty() { t.func.clone() } else { format!("{} {}", t.func, t.path) };
+        Self { value: t.value, label: Some(t.label), from, func: Some(t.func), path: t.path, response_owner: t.response_owner }
+    }
 }
 
 /// Labelled values always; other request and host values only when
 /// `unlabelled` (a write or external call could carry them).
 fn sources(r: &RunRecord, m: &Manifest, unlabelled: bool) -> Vec<Source> {
-    let mut out: Vec<Source> = Vec::new();
-    let mut seen = BTreeSet::new();
-    for e in &r.events {
-        let Some(v) = &e.result else { continue };
-        for (p, l) in m.call_result_labels(&e.func, &e.args) {
-            if matches!(l, Label::Pii | Label::Secret) {
-                for s in values_at(v, &p) {
-                    if s.chars().count() >= ENCODED_MIN && seen.insert(s.clone()) {
-                        let from = if p.is_empty() { e.func.clone() } else { format!("{} {p}", e.func) };
-                        out.push(Source { value: s, label: Some(l), from });
-                    }
-                }
-            }
-        }
-    }
+    let mut out: Vec<Source> = crate::labels::sensitive(r, m).into_iter().filter(|t| t.value.chars().count() >= ENCODED_MIN).map(Source::from).collect();
     if !unlabelled {
         return out;
     }
+    let mut seen: BTreeSet<String> = out.iter().map(|s| s.value.clone()).collect();
     let mut add = |v: &Value, from: &str| {
         let mut ss = Vec::new();
         strings(v, &mut ss);
         for s in ss {
             if s.chars().count() >= ENCODED_MIN && seen.insert(s.clone()) {
-                out.push(Source { value: s, label: None, from: from.to_string() });
+                out.push(Source { value: s, label: None, from: from.to_string(), func: None, path: String::new(), response_owner: None });
             }
         }
     };
@@ -164,49 +161,101 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     // Most runs have neither labelled values nor writes: nothing to look for.
     let effects = r.events.iter().any(|e| matches!(m.effect_of(&e.func), Some(Effect::Write | Effect::External)));
     let srcs = sources(r, m, effects);
+    if srcs.is_empty() && !effects {
+        return Vec::new();
+    }
+    let mut out = encoded(r, m, &srcs);
+    out.extend(constants(r, m, &srcs));
+    out
+}
+
+/// Encoded values retain their declared sensitivity across browser requests.
+pub(crate) fn encoded_from(r: &RunRecord, m: &Manifest, traced: &[Traced]) -> Vec<Finding> {
+    let sources: Vec<Source> = traced.iter().filter(|t| t.value.chars().count() >= ENCODED_MIN).cloned().map(Source::from).collect();
+    encoded(r, m, &sources)
+}
+
+enum Destination {
+    Other,
+    Response,
+    Header(String),
+    Result(String),
+}
+
+struct Place {
+    name: String,
+    text: String,
+    label: Option<Label>,
+    effect: bool,
+    destination: Destination,
+}
+
+impl Place {
+    fn new(name: &str, text: String) -> Self {
+        Self { name: name.into(), text, label: None, effect: false, destination: Destination::Other }
+    }
+}
+
+fn encoded(r: &RunRecord, m: &Manifest, srcs: &[Source]) -> Vec<Finding> {
     if srcs.is_empty() {
         return Vec::new();
     }
     let ex = &r.spec.export;
     let run = Some(r.id.as_str());
-    let mut out = Vec::new();
+    let mut out: BTreeMap<String, Finding> = BTreeMap::new();
     let resp = crate::output::response(r, m);
     let no_pii = m.entry.as_ref().is_some_and(|e| e.no_pii && crate::harness::fn_key_eq(&e.export, ex));
-    // Places: (name, text, label of the parameter, a write or external call).
-    let mut places: Vec<(String, String, Option<Label>, bool)> = vec![
-        ("the log (stdout)".into(), r.stdout.clone(), None, false),
-        ("the log (stderr)".into(), r.stderr.clone(), None, false),
-        ("the response body".into(), resp.body.clone().unwrap_or_default(), None, false),
+    let error_page = resp.status.is_some_and(|status| status >= 400);
+    let mut places = vec![
+        Place::new("the log (stdout)", r.stdout.clone()),
+        Place::new("the log (stderr)", r.stderr.clone()),
+        Place { destination: Destination::Response, ..Place::new("the response body", resp.body.clone().unwrap_or_default()) },
     ];
     if let Some(text) = &r.guest_error {
-        places.push(("the guest error".into(), text.clone(), None, false));
+        places.push(Place::new("the guest error", text.clone()));
     }
     if let Some(text) = r.rejected_output_text() {
-        places.push(("the rejected output".into(), text.into_owned(), None, false));
+        places.push(Place { destination: Destination::Response, ..Place::new("the rejected output", text.into_owned()) });
     }
     for (h, v) in &resp.headers {
-        places.push((format!("the response header {h}"), v.clone(), None, false));
+        places.push(Place { destination: Destination::Response, ..Place::new("a response header name", h.clone()) });
+        places.push(Place { destination: Destination::Header(h.clone()), ..Place::new(&format!("the response header {h}"), v.clone()) });
     }
+    crate::labels::result_texts(r, m, &mut |at, text| {
+        places.push(Place { destination: Destination::Result(at.into()), ..Place::new("the result", text.into()) });
+    });
     for e in &r.events {
         let effect = matches!(m.effect_of(&e.func), Some(Effect::Write | Effect::External));
         for (p, a) in e.text_args().iter() {
             let mut ss = Vec::new();
             strings(a, &mut ss);
-            places.push((format!("the parameter {p} of {}", e.func), ss.join("\n"), m.param_label(&e.func, p), effect));
+            places.push(Place { label: m.param_label(&e.func, p), effect, ..Place::new(&format!("the parameter {p} of {}", e.func), ss.join("\n")) });
         }
     }
 
-    for s in &srcs {
+    for s in srcs {
         let encs = encodings(&s.value, s.label.is_some());
-        for (place, text, plabel, effect) in &places {
-            if text.len() < ENCODED_MIN || text.contains(&s.value) || (s.label.is_some() && *plabel == s.label) {
+        for place in &places {
+            let text = &place.text;
+            if text.len() < ENCODED_MIN || text.contains(&s.value) || (s.label.is_some() && place.label == s.label) {
                 continue;
+            }
+            if let Some(owner) = &s.response_owner {
+                let allowed = match &place.destination {
+                    Destination::Other => false,
+                    Destination::Response | Destination::Result(_) => true,
+                    Destination::Header(h) => !crate::labels::redirects_away(resp.status, h, text, owner),
+                };
+                if allowed {
+                    continue;
+                }
             }
             let sev = match s.label {
                 Some(Label::Secret) => Severity::Fail,
-                Some(_) if place == "the response body" && !no_pii => Severity::Warn,
+                Some(_) if matches!(&place.destination, Destination::Result(_)) && !no_pii => continue,
+                Some(_) if place.name == "the response body" && !no_pii && !error_page => Severity::Warn,
                 Some(_) => Severity::Fail,
-                None if *effect => Severity::Warn,
+                None if place.effect => Severity::Warn,
                 None => continue,
             };
             let Some((enc, needle)) = encs.iter().find(|(_, n)| text.contains(n.as_str())) else { continue };
@@ -215,18 +264,41 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                 Some(_) => "the personal data",
                 None => "a value",
             };
-            out.push(Finding::new(
+            let mut detail =
+                json!({"from": s.from, "label": s.label.map(|l| l.name()), "value": s.value, "encoding": enc, "encoded": needle, "place": place.name});
+            if let Destination::Result(at) = &place.destination {
+                detail["at"] = json!(at);
+            }
+            if let Some(func) = &s.func {
+                detail["func"] = json!(func);
+                detail["path"] = json!(s.path);
+            }
+            let place = &place.name;
+            let finding = Finding::new(
                 "encoded_flow",
                 &format!("{ex}\0{}\0{place}", s.from),
                 sev,
                 format!("{what} from {} ends up {enc} in {place}", s.from),
-                json!({"from": s.from, "label": s.label.map(|l| l.name()), "value": s.value, "encoding": enc, "encoded": needle, "place": place}),
+                detail,
                 run,
-            ));
+            );
+            // Keep the persisted source/place identity, but never let a
+            // weaker label hide a secret observed at that same source.
+            let prior = out.entry(finding.id.clone()).or_insert_with(|| finding.clone());
+            if (finding.severity, finding.detail["label"] == "secret") > (prior.severity, prior.detail["label"] == "secret") {
+                *prior = finding;
+            }
         }
     }
 
-    // Blobs from the binary in writes and external calls.
+    out.into_values().collect()
+}
+
+// Blobs from the binary in writes and external calls.
+fn constants(r: &RunRecord, m: &Manifest, srcs: &[Source]) -> Vec<Finding> {
+    let ex = &r.spec.export;
+    let run = Some(r.id.as_str());
+    let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for e in &r.events {
         if !matches!(m.effect_of(&e.func), Some(Effect::Write | Effect::External)) {

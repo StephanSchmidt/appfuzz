@@ -681,15 +681,17 @@ pub(crate) fn leaks_from(r: &RunRecord, m: &Manifest, traced: &[Traced]) -> Vec<
         }
     }
     for (h, hv) in &resp.headers {
+        for i in find.hits(h) {
+            if traced[i].response_owner.is_none() {
+                let sev = if traced[i].label == Label::Secret || no_pii { Severity::Fail } else { Severity::Warn };
+                add(i, "a response header name".into(), sev, json!({"header": h}));
+            }
+        }
         for i in find.hits(hv) {
             if let Some(owner) = &traced[i].response_owner {
                 // A response to its owner is allowed; an HTTP redirect
                 // carrying the credential to another origin is not.
-                let redirects = h.eq_ignore_ascii_case("location") && resp.status.is_some_and(|s| (300..400).contains(&s));
-                let leaves = url::Url::parse(owner)
-                    .ok()
-                    .is_some_and(|owner| owner.join(hv).ok().is_some_and(|to| matches!(to.scheme(), "http" | "https") && to.origin() != owner.origin()));
-                if !redirects || !leaves {
+                if !redirects_away(resp.status, h, hv, owner) {
                     continue;
                 }
             }
@@ -716,24 +718,16 @@ pub(crate) fn leaks_from(r: &RunRecord, m: &Manifest, traced: &[Traced]) -> Vec<
             }
         }
     }
-    // The rest of the result: everything but the mapped body and headers, which are checked above.
-    if let Some(result) = &r.result {
-        let o = entry.map(|e| &e.output);
-        let skip: Vec<&str> = match o.and_then(|o| o.body.as_deref()) {
-            Some(b) => std::iter::once(b).chain(o.and_then(|o| o.headers.as_deref())).collect(),
-            None if result.is_string() => vec![""],
-            None => o.and_then(|o| o.headers.as_deref()).into_iter().collect(),
-        };
-        let mut path = String::new();
-        result_strings(result, &mut path, &skip, &mut |at, s| {
-            for i in find.hits(s) {
-                if traced[i].response_owner.is_none() && (traced[i].label == Label::Secret || no_pii) {
-                    let extra = if no_pii && traced[i].label == Label::Pii { json!({"at": at, "no_pii": true}) } else { json!({"at": at}) };
-                    add(i, "the result".into(), Severity::Fail, extra);
-                }
+    // The rest of the result excludes the actual mapped nodes, including
+    // fields reached through named pair lists.
+    result_texts(r, m, &mut |at, text| {
+        for i in find.hits(text) {
+            if traced[i].response_owner.is_none() && (traced[i].label == Label::Secret || no_pii) {
+                let extra = if no_pii && traced[i].label == Label::Pii { json!({"at": at, "no_pii": true}) } else { json!({"at": at}) };
+                add(i, "the result".into(), Severity::Fail, extra);
             }
-        });
-    }
+        }
+    });
 
     let mut out = Vec::new();
     for ((src, place), mut g) in groups {
@@ -760,6 +754,15 @@ pub(crate) fn leaks_from(r: &RunRecord, m: &Manifest, traced: &[Traced]) -> Vec<
         out.push(Finding::new(kind, &format!("{ex}\0{}\0{}\0{place}", t.func, t.path), g.severity, title, d, run));
     }
     out
+}
+
+/// A response header that sends its browser-owned credential elsewhere.
+pub(crate) fn redirects_away(status: Option<i64>, header: &str, value: &str, owner: &str) -> bool {
+    header.eq_ignore_ascii_case("location")
+        && matches!(status, Some(301 | 302 | 303 | 307 | 308))
+        && url::Url::parse(owner)
+            .ok()
+            .is_some_and(|owner| owner.join(value).ok().is_some_and(|to| matches!(to.scheme(), "http" | "https") && to.origin() != owner.origin()))
 }
 
 /// The values of one leak finding: where they come from, how bad.
@@ -843,10 +846,31 @@ fn str_leaves<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
     }
 }
 
-/// Every string in the export's result with its path (`ok.items[3].email`),
-/// except below the paths in `skip` (`""` skips everything).
-fn result_strings(v: &Value, path: &mut String, skip: &[&str], f: &mut dyn FnMut(&str, &str)) {
-    if skip.contains(&path.as_str()) {
+/// Strings not consumed as a response body or header name/value. Keep
+/// malformed entries and extra fields; equal values are distinct nodes.
+pub(crate) fn result_texts(r: &RunRecord, m: &Manifest, f: &mut dyn FnMut(&str, &str)) {
+    let Some(result) = &r.result else { return };
+    let output = m.entry.as_ref().filter(|e| crate::harness::fn_key_eq(&e.export, &r.spec.export)).map(|e| &e.output);
+    let mut skip = BTreeSet::new();
+    let body = match output.and_then(|o| o.body.as_deref()) {
+        Some(path) => crate::harness::field(result, path),
+        None => Some(result),
+    };
+    if let Some(body) = body.filter(|v| crate::output::is_body(v)) {
+        skip.insert(std::ptr::from_ref(body));
+    }
+    if let Some(headers) = output.and_then(|o| o.headers.as_deref()).and_then(|p| crate::harness::field(result, p)).and_then(Value::as_array) {
+        for (name, value) in headers.iter().filter_map(crate::output::header_parts) {
+            skip.insert(std::ptr::from_ref(name));
+            skip.insert(std::ptr::from_ref(value));
+        }
+    }
+    result_strings(result, &mut String::new(), &skip, f);
+}
+
+/// Every remaining string, with its path (`ok.items[3].email`).
+fn result_strings(v: &Value, path: &mut String, skip: &BTreeSet<*const Value>, f: &mut dyn FnMut(&str, &str)) {
+    if skip.contains(&std::ptr::from_ref(v)) {
         return;
     }
     let len = path.len();

@@ -28,6 +28,22 @@ pub struct Response {
     pub html: bool,
 }
 
+/// Body shapes the response reader consumes: text or a list of bytes.
+pub(crate) fn is_body(v: &Value) -> bool {
+    v.is_string() || v.as_array().is_some_and(|a| a.iter().all(|x| x.as_u64().is_some_and(|n| n < 256)))
+}
+
+/// The actual string nodes a header entry consumes. Other fields remain
+/// ordinary export output, including an unused `key` beside `name`.
+pub(crate) fn header_parts(v: &Value) -> Option<(&Value, &Value)> {
+    let (name, value) = match v {
+        Value::Array(parts) if parts.len() == 2 => (&parts[0], &parts[1]),
+        Value::Object(o) => (o.get("name").or_else(|| o.get("key"))?, o.get("value")?),
+        _ => return None,
+    };
+    (name.is_string() && value.is_string()).then_some((name, value))
+}
+
 /// Reads status, body and headers from a run's result. Without an
 /// `[entry.output]` mapping a string result counts as the body.
 pub fn response(r: &RunRecord, m: &Manifest) -> Response {
@@ -42,13 +58,14 @@ pub fn response(r: &RunRecord, m: &Manifest) -> Response {
     let body = match o.and_then(|o| o.body.as_deref()) {
         Some(p) => field(result, p),
         None => Some(result),
-    };
+    }
+    .filter(|v| is_body(v));
     match body {
         Some(Value::String(s)) => {
             out.body = Some(s.clone());
             out.body_len = Some(s.len());
         }
-        Some(Value::Array(a)) if a.iter().all(|x| x.as_u64().is_some_and(|n| n < 256)) => {
+        Some(Value::Array(a)) => {
             let bytes: Vec<u8> = a.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect();
             out.body_len = Some(bytes.len());
             match String::from_utf8(bytes) {
@@ -63,15 +80,7 @@ pub fn response(r: &RunRecord, m: &Manifest) -> Response {
     }
     if let Some(Value::Array(hs)) = o.and_then(|o| o.headers.as_deref()).and_then(|p| field(result, p)) {
         for h in hs {
-            let pair = match h {
-                Value::Array(p) if p.len() == 2 => p[0].as_str().zip(p[1].as_str()).map(|(a, b)| (a.to_string(), b.to_string())),
-                Value::Object(o) => {
-                    let n = o.get("name").or(o.get("key")).and_then(Value::as_str);
-                    let v = o.get("value").and_then(Value::as_str);
-                    n.zip(v).map(|(a, b)| (a.to_string(), b.to_string()))
-                }
-                _ => None,
-            };
+            let pair = header_parts(h).and_then(|(n, v)| n.as_str().zip(v.as_str())).map(|(n, v)| (n.to_string(), v.to_string()));
             out.headers.extend(pair);
         }
     }

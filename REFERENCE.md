@@ -960,9 +960,27 @@ with the same host plan. A request for data from another host gets text
 that names the host, so code built from it shows as `remote_code`. The
 page has a session cookie that scripts can read and that holds a secret,
 so sending it away is a `secret_leak`.
+Encoded private values sent in requests or navigation to another origin are
+`encoded_flow` findings too. Values returned by an app request become sources
+for subsequent browser calls, so a later response cannot taint an earlier call.
 Responses already sent by those app requests remain available to scripts even
 if the app later traps. Browser calls recorded before a hang or crash are
 still checked for findings.
+
+Sensitive host values and the probe cookie retain their origin through later
+requests made by the page. Logging them or passing them to an undeclared host
+parameter is checked even when the value arrives in the request, including
+encoded forms (`encoded_flow`). Returning the probe cookie to its own browser
+is allowed; redirecting it to another origin is not.
+Other returned fields remain subject to secret and `no_pii` checks, including
+encoded values; mapping a body or headers does not hide extra output fields.
+Only consumed text/byte bodies and parsed header names/values are excluded from
+that fallback scan. Malformed mapped values and unused header fields stay visible;
+private data in a header name is checked as well as its value.
+Request bodies retain their text when routed back to the app; platform request
+shapes with a `form` field receive decoded form pairs.
+Form recognition compares the MIME essence without case or parameters, following
+[MIME parsing](https://mimesniff.spec.whatwg.org/#parse-a-mime-type).
 
 **Cookies.** Visits retain the page request's Cookie pairs and process the
 page's Set-Cookie headers without losing attributes. Subsequent fetch, XHR,

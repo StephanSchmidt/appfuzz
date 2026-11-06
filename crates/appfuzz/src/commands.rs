@@ -699,8 +699,15 @@ fn explain(cli: &Cli, app: &App, store: &RunStore, r: &RunRecord) -> Result<Valu
 /// The app a stored run ran: the reviewed app, or the browser for a page
 /// visit of `probe scripts`.
 fn app_of<'a>(app: &'a App, r: &RunRecord) -> Result<&'a App> {
-    if r.spec.export == appfuzz_core::browser::SESSION {
-        return Ok(&appfuzz_core::browser::Browser::shared()?.app);
+    if r.spec.export != appfuzz_core::browser::SESSION || (r.spec.component == app.hash && r.spec.contract == app.contract) {
+        return Ok(app);
+    }
+    let browser = &appfuzz_core::browser::Browser::shared()?.app;
+    // Export names belong to the app. Browser visits must match the browser
+    // artifact; when those bytes are also the target, distinguish its contract.
+    // An unrecognized archived target contract keeps the selected app's policy.
+    if r.spec.component == browser.hash && (r.spec.component != app.hash || r.spec.contract == browser.contract) {
+        return Ok(browser);
     }
     Ok(app)
 }
