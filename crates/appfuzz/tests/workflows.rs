@@ -1441,6 +1441,16 @@ fn sequence_crud_faults_bindings_and_bad_requests() {
     assert_eq!(code, 0, "{report}");
     assert_eq!(report["states"][1]["tables"]["bookings"][0]["slot"], 9);
     assert_eq!(report["states"][2]["tables"]["bookings"], json!([]));
+    // Each record says what its write changed and how much the reads returned.
+    let events = |step: usize| report["records"][step]["events"].as_array().unwrap().clone();
+    assert_eq!(events(0)[0]["result_items"], 0, "{report}");
+    assert_eq!(events(0)[1]["commit"], json!({"rows":[{"dataset":"bookings","key":1,"after":{"id":1,"slot":7}}]}), "{report}");
+    assert_eq!(events(0)[2]["result_items"], 1);
+    assert!(events(0)[2]["result_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(events(1)[1]["commit"]["rows"][0]["before"]["slot"], 7);
+    assert_eq!(events(1)[1]["commit"]["rows"][0]["after"]["slot"], 9);
+    assert_eq!(events(2)[1]["commit"]["rows"][0]["after"], Value::Null);
+    assert_eq!(report["records"][0]["totals"]["host_result_items"], 1);
     let path = scenario_file(
         &f,
         json!({"steps":[{"args":[0,7],"plan":{"test:workflow/db#create":{"commit_then_trap":"response lost"}}},{"args":[0,7]}],"checks":[{"kind":"unique","dataset":"bookings","fields":["slot"]}]}),
@@ -1448,6 +1458,7 @@ fn sequence_crud_faults_bindings_and_bad_requests() {
     let (code, report) = f.cli(&["sequence", "run", &path]);
     assert_eq!(code, 2, "{report}");
     assert_eq!(report["records"][0]["outcome"]["kind"], "host_trap");
+    assert_eq!(report["records"][0]["events"][1]["commit"]["lost"], true, "{report}");
     assert_eq!(report["states"][0]["tables"]["bookings"].as_array().unwrap().len(), 1);
     assert_eq!(report["states"][1]["tables"]["bookings"].as_array().unwrap().len(), 2);
     let path = scenario_file(&f, json!({"steps":[{"args":[0,7]},{"args":[2,0],"args_from":{"/1":"/0/result"}}]}));
@@ -1472,6 +1483,27 @@ fn retry_after_precommit_failure_is_not_an_idempotency_violation() {
     assert_eq!(report["states"][1]["tables"]["bookings"].as_array().unwrap().len(), 1);
     let path = scenario_file(&f, json!({"steps":[{"args":[0,7]},{"args":[0,7]}],"checks":[{"kind":"idempotent","dataset":"bookings"}]}));
     assert_eq!(f.cli(&["sequence", "run", &path]).0, 2);
+}
+
+#[test]
+fn changes_without_a_dataset_model_are_recorded_as_commits() {
+    let f = Fixture::new(false);
+    let text = std::fs::read_to_string(&f.manifest).unwrap();
+    std::fs::write(&f.manifest, format!("{text}[functions.\"test:workflow/db#get\"]\neffect = \"external\"\n")).unwrap();
+    assert_eq!(f.cli(&["run"]).0, 0);
+    let (_, raw) = f.cli(&["show", "last"]);
+    assert_eq!(raw["events"][0]["commit"], json!({"rows": []}), "{raw}");
+    assert!(raw["events"][0]["result_bytes"].as_u64().unwrap() > 0, "{raw}");
+    // A call that failed changed nothing.
+    f.cli(&["run", "--plan", r#"{"test:workflow/db#get": {"trap": "down"}}"#]);
+    let (_, raw) = f.cli(&["show", "last"]);
+    assert_eq!(raw["events"][0]["trap"], "down", "{raw}");
+    assert_eq!(raw["events"][0]["commit"], Value::Null, "{raw}");
+    // Reads are not commits.
+    std::fs::write(&f.manifest, format!("{text}[functions.\"test:workflow/db#get\"]\neffect = \"read\"\n")).unwrap();
+    assert_eq!(f.cli(&["run"]).0, 0);
+    let (_, raw) = f.cli(&["show", "last"]);
+    assert_eq!(raw["events"][0]["commit"], Value::Null, "{raw}");
 }
 
 #[test]

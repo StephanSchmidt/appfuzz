@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+**What host calls did**
+
+- Run records say how much each host call returned: `result_items` (list
+  length) and `result_bytes` (the whole answer, before long strings are cut),
+  with sums in `totals`.
+- A call with a `write`, `delete` or `external` effect that took effect
+  records a `commit`. With a mutation binding it lists the rows it created,
+  changed or deleted, with their contents before and after. `lost` marks
+  a change that stayed while the app saw a failure.
+- A create mutation can answer with the new key or record: `"$key"` and
+  `"$row"` in its `response`.
+
 **Apps that ship JavaScript**
 
 - HTML is read as a browser reads it (the WHATWG parser of Servo,

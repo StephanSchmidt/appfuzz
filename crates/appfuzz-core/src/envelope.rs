@@ -187,6 +187,7 @@ impl Trace {
                     fuel_before: 0,
                     t_ns: Natural::default(),
                     stack: e.stack.clone(),
+                    ..Default::default()
                 })
                 .collect(),
             stdout: self.stdout.clone(),

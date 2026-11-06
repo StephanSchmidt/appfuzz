@@ -739,8 +739,22 @@ update changes all matching rows; delete removes matching rows. Keys are never
 reused within a sequence. Dangling references and deletion of referenced parents
 are rejected atomically. `reject` sets the complete WIT-shaped failure response
 (default: `{ err = "dataset constraint violation" }`). Success and rejection
-responses must match the function's WIT result type. Mutation bindings override
+responses must match the function's WIT result type. A create can answer with
+what it made: in its `response`, the string `"$key"` stands for the new key and
+`"$row"` for the new record, so `response = { ok = "$key" }` returns the id.
+Updates, deletes and rejections can't use them. Mutation bindings override
 scripted successes; manifest rules and explicit service failures take precedence.
+
+Each host call in a run record says what it did. `result_items` counts the list
+it returned (also inside `ok` or an option) and `result_bytes` is the size of the
+whole answer as compact JSON, both measured before the record shortens long
+strings; `totals.host_result_items` and `totals.host_result_bytes` add them up.
+A call whose function has a `write`, `delete` or `external` effect and that took
+effect has a `commit`: `rows` lists each record a mutation binding created
+(`after` only), changed (`before` and `after`) or deleted (`before` only), and
+is empty for calls without a binding. A call that failed has none.
+`commit.lost` marks a change that stayed although the app never saw success
+(`commit_then_trap`).
 
 Create `scenario.json`, using WIT-shaped export arguments:
 

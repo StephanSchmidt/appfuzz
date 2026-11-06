@@ -436,7 +436,7 @@ impl Manifest {
             }
         }
         let mut h = blake3::Hasher::new();
-        h.update(b"appfuzz-execution-v44");
+        h.update(b"appfuzz-execution-v45");
         h.update(crate::extism::KERNEL_BYTES);
         h.update(browser);
         h.update(env!("CARGO_PKG_VERSION").as_bytes());

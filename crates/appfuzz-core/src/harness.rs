@@ -25,8 +25,8 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::manifest::{Manifest, fn_key};
 use crate::plan::{Decision, Plan};
-use crate::record::{Frame, HostCall, Outcome, OutcomeKind, RunRecord, RunSpec, Totals, module_id};
-use crate::value::{Generator, json_to_val, val_to_json, val_to_json_with};
+use crate::record::{Commit, Frame, HostCall, Outcome, OutcomeKind, RowChange, RunRecord, RunSpec, Totals, module_id};
+use crate::value::{Generator, json_to_val, val_to_json};
 use crate::wasi::{CountingRng, MonotonicClock, VirtualClock, WallClock, format_datetime, parse_datetime};
 use crate::wit::{self, FuncInfo, ImportKind, Interface};
 
@@ -117,6 +117,8 @@ struct Platform {
     handles: Option<core::HandleSpec>,
     /// Functions the platform says never fail: injected failures are not delivered.
     infallible: BTreeSet<String>,
+    /// Functions whose effect changes something (write, delete, external).
+    changing: BTreeSet<String>,
 }
 
 /// How a run instantiates the app.
@@ -442,6 +444,7 @@ impl App {
             datasets: manifest.datasets.clone(),
             handles: None,
             infallible: BTreeSet::new(),
+            changing: BTreeSet::new(),
         };
         crate::labels::check_names(&written, &imports)?;
         crate::labels::check_wit(&manifest, &imports)?;
@@ -495,6 +498,9 @@ impl App {
                 if manifest.function(&f.key).and_then(|s| s.fails) == Some(false) {
                     platform.infallible.insert(f.key.clone());
                 }
+                if manifest.effect_of(&f.key).is_some_and(crate::manifest::Effect::changes) {
+                    platform.changing.insert(f.key.clone());
+                }
                 if let Some(spec) = manifest.function(&f.key).filter(|s| !s.param_values.is_empty()) {
                     let params = f.ty.params().map(|(n, t)| (n.to_string(), t)).collect::<Vec<_>>();
                     let checks = crate::value_contract::HostChecks::compile(&params, &spec.param_values).with_context(|| format!("{} param_values", f.key))?;
@@ -509,7 +515,7 @@ impl App {
                     if results.len() != 1 {
                         bail!("{}: mutation requires one WIT result", f.key);
                     }
-                    json_to_val(&m.response, &results[0]).context("mutation success response does not match WIT")?;
+                    json_to_val(&m.sample_response(&manifest.datasets)?, &results[0]).context("mutation success response does not match WIT")?;
                     json_to_val(&m.reject, &results[0]).context("mutation rejection response does not match WIT")?;
                     platform.mutations.insert(f.key.clone(), m.clone());
                 }
@@ -1016,6 +1022,8 @@ impl App {
             cost: data.events.iter().map(|e| u128::from(e.cost)).sum(),
             clock_reads: c.wall_reads.saturating_add(c.monotonic_reads),
             random_bytes: *drawn.lock().unwrap_or_else(|e| e.into_inner()),
+            host_result_items: data.events.iter().filter_map(|e| e.result_items).map(u64::from).sum(),
+            host_result_bytes: data.events.iter().map(|e| e.result_bytes).sum(),
             wall_us: 0,
         };
         record.events = std::mem::take(&mut data.events);
@@ -1219,8 +1227,8 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
         && let Some(mutation) = platform.mutations.get(key)
     {
         let current = data.world.lock().unwrap_or_else(|e| e.into_inner());
-        let (next, response) = mutation.prepare(&platform.datasets, &current, &args)?;
-        pending_state = Some(next);
+        let (next, response, rows) = mutation.prepare(&platform.datasets, &current, &args)?;
+        pending_state = Some((next, rows));
         resolved.decision = Decision::Return(response);
         resolved.source = format!("dataset mutation {}", mutation.dataset);
     }
@@ -1284,6 +1292,9 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
         args: args.into_iter().map(|(k, v)| (k, compact(v))).collect::<Map<_, _>>(),
         value_checks,
         result: None,
+        result_items: None,
+        result_bytes: 0,
+        commit: None,
         trap: None,
         source: resolved.source.clone(),
         granted: platform.granted.get(key).copied().unwrap_or(true),
@@ -1331,8 +1342,20 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
             };
             match vals {
                 Ok(vals) => {
-                    if let Some(next) = pending_state {
+                    let delivered = commit_trap.is_none() && succeeded(&v, result_types.len());
+                    let rows = pending_state.map(|(next, rows)| {
                         *data.world.lock().unwrap_or_else(|e| e.into_inner()) = next;
+                        rows
+                    });
+                    // A changing call committed when it answered success, or when
+                    // its modeled change stayed although the guest never saw success.
+                    if platform.changing.contains(key) && (delivered || rows.as_ref().is_some_and(|r| !r.is_empty())) {
+                        let rows = rows
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|r| RowChange { before: r.before.map(compact), after: r.after.map(compact), ..r })
+                            .collect();
+                        event.commit = Some(Commit { rows, lost: !delivered });
                     }
                     if let Some(msg) = commit_trap {
                         event.trap = Some(msg.clone());
@@ -1340,6 +1363,7 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
                         data.record_event(event);
                         return Err(SimulatedHostTrap(format!("host response lost after commit: {msg}")).into());
                     }
+                    measure(&mut event, &v);
                     event.result = Some(compact(v));
                     for (r, v) in results.iter_mut().zip(vals) {
                         *r = v;
@@ -1375,11 +1399,16 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
                 }
                 *v = json_to_val(&j, t)?;
             }
-            event.result = Some(match vals.as_slice() {
+            let answer = match vals.as_slice() {
                 [] => Value::Null,
-                [one] => val_to_json_with(one, &recorded),
-                many => Value::Array(many.iter().map(|v| val_to_json_with(v, &recorded)).collect()),
-            });
+                [one] => val_to_json(one),
+                many => Value::Array(many.iter().map(val_to_json).collect()),
+            };
+            measure(&mut event, &answer);
+            if platform.changing.contains(key) && succeeded(&answer, result_types.len()) {
+                event.commit = Some(Commit { rows: vec![], lost: false });
+            }
+            event.result = Some(compact(answer));
             for (r, v) in results.iter_mut().zip(vals) {
                 *r = v;
             }
@@ -1398,6 +1427,7 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
         data.handles.adopt(&mut j, outs, generated, &h.kinds);
         if let Ok(v) = json_to_val(&j, t) {
             *r = v;
+            measure(&mut event, &j);
             event.result = Some(compact(j));
         }
     }
@@ -1559,9 +1589,15 @@ fn cut(s: &str) -> String {
     format!("{}…[{n} bytes #{:08x}]", &s[..end], hash32(s.as_bytes()))
 }
 
-/// A string of a host-call value as recorded.
-fn recorded(s: &str) -> Value {
-    Value::String(if s.len() > MAX_RECORDED_STRING { cut(s) } else { s.to_string() })
+/// Size of a complete host answer, before the trace shortens it.
+/// Whether a host answer reports success: no `err`, and no `none` where a value was due.
+fn succeeded(answer: &Value, results: usize) -> bool {
+    results == 0 || !(answer.is_null() || answer.as_object().is_some_and(|o| o.len() == 1 && o.contains_key("err")))
+}
+
+fn measure(event: &mut HostCall, answer: &Value) {
+    event.result_items = crate::detect::list_in(answer).map(|items| u32::try_from(items.len()).unwrap_or(u32::MAX));
+    event.result_bytes = crate::value::json_len(answer) as u64;
 }
 
 fn compact(mut v: Value) -> Value {
@@ -1767,5 +1803,20 @@ mod tests {
         set_clock_fields(&mut req, &fields, "2026-03-04T05:06:07");
         assert_eq!(req["query"][0][1], json!("2026-03-04"));
         assert_eq!(field(&req, "query.q"), Some(&json!("y")));
+    }
+
+    #[test]
+    fn answers_are_measured_before_the_trace_shortens_them() {
+        let long = "x".repeat(MAX_RECORDED_STRING * 4);
+        let answer = json!({"ok": [long.clone(), "b"]});
+        let mut event = HostCall::default();
+        measure(&mut event, &answer);
+        assert_eq!(event.result_items, Some(2));
+        assert_eq!(event.result_bytes, crate::value::json_len(&answer) as u64);
+        assert!(crate::value::json_len(&compact(answer)) < long.len());
+        measure(&mut event, &json!(7));
+        assert_eq!(event.result_items, None);
+        assert!(succeeded(&json!({"ok": null}), 1) && succeeded(&Value::Null, 0));
+        assert!(!succeeded(&json!({"err": "full"}), 1) && !succeeded(&Value::Null, 1));
     }
 }

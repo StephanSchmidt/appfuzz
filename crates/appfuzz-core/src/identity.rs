@@ -298,6 +298,7 @@ mod tests {
             fuel_before: 0,
             t_ns: 0u64.into(),
             stack: vec![],
+            ..Default::default()
         }
     }
 

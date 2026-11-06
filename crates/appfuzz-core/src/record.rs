@@ -99,7 +99,7 @@ pub struct Frame {
     pub offset: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostCall {
     /// 1-based position among all host calls of the run.
     pub n: u32,
@@ -115,6 +115,17 @@ pub struct HostCall {
     pub value_checks: Option<crate::value_contract::Evidence>,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::value::present_json_value")]
     pub result: Option<Value>,
+    /// Items in the returned list (or the list inside `ok`/`some`), counted
+    /// on the complete answer before the trace shortens it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_items: Option<u32>,
+    /// Size of the complete answer as compact JSON, before long strings are cut.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub result_bytes: u64,
+    /// Set when a call with a changing effect (write, delete, external)
+    /// took effect: the rows a modeled mutation changed, none for others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<Commit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trap: Option<String>,
     /// Which part of the plan decided (`rule 0`, `generated`, …).
@@ -130,6 +141,30 @@ pub struct HostCall {
     /// Guest frames that made the call, innermost first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stack: Vec<Frame>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// What a modeled mutation did to the shared world.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Commit {
+    pub rows: Vec<RowChange>,
+    /// The change stayed, but the guest never got the success response.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lost: bool,
+}
+
+/// One record a mutation created (`before` absent), changed or deleted (`after` absent).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RowChange {
+    pub dataset: String,
+    pub key: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Value>,
 }
 
 impl HostCall {
@@ -166,6 +201,12 @@ pub struct Totals {
     pub cost: u128,
     pub clock_reads: u64,
     pub random_bytes: u64,
+    /// List items all host calls returned.
+    #[serde(default)]
+    pub host_result_items: u64,
+    /// Bytes all host calls returned, as compact JSON.
+    #[serde(default)]
+    pub host_result_bytes: u64,
     /// Real time the run took, µs (not deterministic).
     pub wall_us: u64,
 }
