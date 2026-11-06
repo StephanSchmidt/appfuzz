@@ -43,6 +43,32 @@ pub fn json_len<T: Serialize + ?Sized>(v: &T) -> usize {
     c.0
 }
 
+/// A total order on JSON values, as a database sorts a column: null, then
+/// booleans, numbers by value, strings by bytes, then lists and records.
+pub fn cmp_json(a: &Value, b: &Value) -> std::cmp::Ordering {
+    fn rank(v: &Value) -> u8 {
+        match v {
+            Value::Null => 0,
+            Value::Bool(_) => 1,
+            Value::Number(_) => 2,
+            Value::String(_) => 3,
+            Value::Array(_) => 4,
+            Value::Object(_) => 5,
+        }
+    }
+    let exact = |n: &serde_json::Number| n.as_i64().map(i128::from).or_else(|| n.as_u64().map(i128::from));
+    match (a, b) {
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Number(x), Value::Number(y)) => match (exact(x), exact(y)) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            _ => x.as_f64().unwrap_or(f64::NAN).total_cmp(&y.as_f64().unwrap_or(f64::NAN)),
+        },
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Array(_), Value::Array(_)) | (Value::Object(_), Value::Object(_)) => a.to_string().cmp(&b.to_string()),
+        _ => rank(a).cmp(&rank(b)),
+    }
+}
+
 pub fn val_to_json(v: &Val) -> Value {
     val_to_json_with(v, &|s| json!(s))
 }

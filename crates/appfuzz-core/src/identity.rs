@@ -21,9 +21,13 @@ use crate::record::{RunRecord, RunSpec};
 pub const ROLE: &str = "identity";
 
 /// The caller of a run: the request field with the `identity` role, else
-/// an id derived from the seed.
-pub fn caller(spec: &RunSpec, m: &Manifest) -> String {
-    request_identity(spec, m).unwrap_or_else(|| (1000 + spec.seed % 9000).to_string())
+/// the plan's `_defaults.identity`, else the first user records belong to
+/// (dataset `owner`), else an id derived from the seed.
+pub fn caller(spec: &RunSpec, m: &Manifest, world: &crate::dataset::World) -> String {
+    request_identity(spec, m)
+        .or_else(|| spec.plan.0.get("_defaults").and_then(|d| d.identity.clone()))
+        .or_else(|| crate::dataset::tenants(&m.datasets, world).first().map(id_text))
+        .unwrap_or_else(|| (1000 + spec.seed % 9000).to_string())
 }
 
 fn request_identity(spec: &RunSpec, m: &Manifest) -> Option<String> {
@@ -356,5 +360,24 @@ mod tests {
         crate::labels::mark(&mut v, &[("owner".into(), Label::Owner)], 3, "1000");
         let owners: BTreeSet<String> = ids_at(&v, "owner").into_iter().collect();
         assert_eq!(owners, BTreeSet::from(["1000".to_string(), "1001".to_string()]));
+    }
+
+    #[test]
+    fn the_caller_comes_from_the_request_then_the_plan_then_the_data() {
+        let mut m = manifest();
+        let mut spec = run(json!([]), "", vec![]).spec;
+        assert_eq!(caller(&spec, &m, &Default::default()), "1000");
+        m.datasets = serde_json::from_value(json!({
+            "users": {"rows": 2, "key": "id", "template": {"id": "user"}},
+            "deals": {"rows": 3, "key": "id", "template": {"id": 1, "owner": ""}, "references": {"owner": "users"}, "owner": "owner"}
+        }))
+        .unwrap();
+        let world = crate::dataset::build(&m.datasets, &Default::default(), 0).unwrap();
+        assert_eq!(caller(&spec, &m, &world), "user_1");
+        spec.plan.0.entry("_defaults".into()).or_default().identity = Some("user_2".into());
+        assert_eq!(caller(&spec, &m, &world), "user_2");
+        m.entry.as_mut().unwrap().fields.insert("query.who".into(), ROLE.into());
+        spec.args = vec![json!({"method": "GET", "query": [["who", "u9"]]})];
+        assert_eq!(caller(&spec, &m, &world), "u9");
     }
 }

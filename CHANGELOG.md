@@ -14,6 +14,19 @@
 - A create mutation can answer with the new key or record: `"$key"` and
   `"$row"` in its `response`.
 
+**Pages, owners and edited worlds**
+
+- Dataset queries can sort (`order`) and return a page at a time:
+  `page = { limit, offset | cursor, items, next, max, short, invalid }`.
+  Cursors are opaque, and a made-up one gets the platform's `invalid`
+  answer. Where pages may be short, a plan sets `page_size`.
+- Datasets can say who owns a record (`owner`) and which fields anyone may
+  see (`public`). The caller is the request's identity field, else the
+  plan's `_defaults.identity`, else the first user records belong to.
+- Plans can edit the generated world before a run:
+  `_defaults.dataset_edits` with `drop`, `rotate` and `add`. Added records
+  get keys above 1,000,000; confirmation shrinks edits like other plan parts.
+
 **Apps that ship JavaScript**
 
 - HTML is read as a browser reads it (the WHATWG parser of Servo,

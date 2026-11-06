@@ -17,6 +17,12 @@ pub struct Dataset {
     /// Field -> dataset whose primary key it references.
     #[serde(default)]
     pub references: BTreeMap<String, String>,
+    /// The field that names the user a record belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Fields anyone may see, also in other users' records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public: Vec<String>,
 }
 fn default_rows() -> usize {
     4
@@ -39,6 +45,49 @@ pub struct Query {
     /// Complete WIT-shaped response for an empty single-record lookup.
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::value::present_json_value")]
     pub missing: Option<Value>,
+    /// Record fields the rows are sorted by; ties keep the collection's order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
+    /// The platform returns the rows a page at a time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<Page>,
+}
+
+/// How a paged query reads its window from the host call and answers it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Page {
+    /// Host parameter (path) with the number of rows asked for; `max` without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<String>,
+    /// Host parameter with the position of the first row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<String>,
+    /// Host parameter with a cursor the previous page handed out; empty or
+    /// none for the first page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Result field holding the rows; without it the result is the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<String>,
+    /// Result field saying where the next page starts (a cursor, or an
+    /// offset); none on the last page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+    /// The most rows one page returns, whatever was asked.
+    pub max: usize,
+    /// The platform may return fewer rows than asked while more remain.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub short: bool,
+    /// The complete response to a cursor the platform never handed out
+    /// (default `{ err = "invalid cursor" }`).
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::value::present_json_value")]
+    pub invalid: Option<Value>,
+}
+impl Page {
+    pub fn invalid(&self) -> Value {
+        self.invalid.clone().unwrap_or_else(|| json!({"err": "invalid cursor"}))
+    }
 }
 pub type World = BTreeMap<String, Vec<Value>>;
 
@@ -61,9 +110,166 @@ pub fn validate(defs: &BTreeMap<String, Dataset>) -> Result<()> {
                 bail!("dataset {name}: invalid reference {field} -> {target}");
             }
         }
+        if d.owner.as_ref().is_some_and(|f| *f == d.key || !d.template.contains_key(f)) {
+            bail!("dataset {name}: owner must name a record field other than the key");
+        }
+        if !d.public.is_empty() && d.owner.is_none() {
+            bail!("dataset {name}: public fields need an owner field");
+        }
+        if let Some(f) = d.public.iter().find(|f| !d.template.contains_key(*f)) {
+            bail!("dataset {name}: public names the unknown field {f}");
+        }
     }
     build(defs, &BTreeMap::new(), 0)?;
     Ok(())
+}
+
+/// The users records belong to: the keys of the dataset the first owner
+/// field references, else that field's choices or template value.
+pub fn tenants(defs: &BTreeMap<String, Dataset>, world: &World) -> Vec<Value> {
+    defs.values()
+        .find_map(|d| {
+            let owner = d.owner.as_ref()?;
+            Some(match (d.references.get(owner), d.choices.get(owner)) {
+                (Some(target), _) => world.get(target).into_iter().flatten().map(|p| p[&defs[target].key].clone()).collect(),
+                (None, Some(choices)) => choices.clone(),
+                (None, None) => vec![d.template[owner].clone()],
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Whether every reference names an existing record.
+pub fn intact(defs: &BTreeMap<String, Dataset>, tables: &World) -> bool {
+    defs.iter().all(|(name, d)| {
+        d.references.iter().all(|(field, target)| {
+            let keys = keys_of(defs, tables, target);
+            tables.get(name).is_none_or(|rows| rows.iter().all(|r| r.get(field).is_some_and(|v| keys.contains(&v.to_string()))))
+        })
+    })
+}
+fn keys_of(defs: &BTreeMap<String, Dataset>, tables: &World, name: &str) -> BTreeSet<String> {
+    tables.get(name).into_iter().flatten().filter_map(|r| r.get(&defs[name].key)).map(Value::to_string).collect()
+}
+
+/// Keys of records an edit adds start above this, so records a request
+/// creates get the same keys with and without the edit.
+pub const ADDED_KEYS: u64 = 1_000_000;
+
+/// A change to the generated world before a run, to rows and values the
+/// platform could hold. Held in the run's plan, so a run with edits
+/// replays, caches and shrinks like any other.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Edit {
+    /// Remove these records and the records that reference them.
+    Drop { dataset: String, keys: Vec<Value> },
+    /// Give these fields of these records another value: the next of the
+    /// field's choices, the next parent for a reference, else the value of
+    /// the next listed record.
+    Rotate { dataset: String, keys: Vec<Value>, fields: Vec<String> },
+    /// Add records made like generated ones, with `set` fields fixed.
+    Add {
+        dataset: String,
+        rows: usize,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        set: Map<String, Value>,
+    },
+}
+impl Edit {
+    pub fn dataset(&self) -> &str {
+        match self {
+            Edit::Drop { dataset, .. } | Edit::Rotate { dataset, .. } | Edit::Add { dataset, .. } => dataset,
+        }
+    }
+}
+
+/// Apply edits in order. A key no record has changes nothing, and so does
+/// an edit that would leave a reference without its record.
+pub fn apply(defs: &BTreeMap<String, Dataset>, state: &mut State, edits: &[Edit], seed: u64) -> Result<()> {
+    let mut added: BTreeMap<&str, u64> = BTreeMap::new();
+    for edit in edits {
+        let name = edit.dataset();
+        let d = defs.get(name).with_context(|| format!("dataset edit names the unknown dataset {name}"))?;
+        let fields: Vec<&String> = match edit {
+            Edit::Rotate { fields, .. } => fields.iter().collect(),
+            Edit::Add { set, .. } => set.keys().collect(),
+            Edit::Drop { .. } => vec![],
+        };
+        if let Some(f) = fields.iter().find(|f| ***f == d.key || !d.template.contains_key(**f)) {
+            bail!("dataset edit on {name}: {f} is not a record field it may change");
+        }
+        let before = state.tables.clone();
+        let rows = state.tables.get_mut(name).context("missing dataset")?;
+        match edit {
+            Edit::Drop { keys, .. } => {
+                rows.retain(|r| !keys.contains(&r[&d.key]));
+                cascade(defs, &mut state.tables);
+            }
+            Edit::Rotate { keys, fields, .. } => {
+                let at: Vec<usize> = rows.iter().enumerate().filter(|(_, r)| keys.contains(&r[&d.key])).map(|(i, _)| i).collect();
+                for f in fields {
+                    let parents = d.references.get(f).map(|t| before[t].iter().map(|p| p[&defs[t].key].clone()).collect::<Vec<_>>());
+                    let options = d.choices.get(f).cloned().or(parents);
+                    let old: Vec<Value> = at.iter().map(|&i| rows[i][f.as_str()].clone()).collect();
+                    for (j, &i) in at.iter().enumerate() {
+                        rows[i][f.as_str()] = match &options {
+                            Some(o) if o.len() > 1 => o[o.iter().position(|v| *v == old[j]).map_or(0, |p| (p + 1) % o.len())].clone(),
+                            Some(_) => old[j].clone(),
+                            None => old[(j + 1) % old.len()].clone(),
+                        };
+                    }
+                }
+            }
+            Edit::Add { rows: n, set, .. } => {
+                if rows.len().saturating_add(*n) > MAX_ROWS {
+                    bail!("dataset edit on {name}: more than {MAX_ROWS} rows");
+                }
+                if d.references.values().any(|t| before[t].is_empty()) {
+                    continue;
+                }
+                let count = added.entry(name).or_default();
+                for _ in 0..*n {
+                    *count += 1;
+                    let k = ADDED_KEYS + *count;
+                    let mut row = d.template.clone();
+                    row.insert(d.key.clone(), if let Some(prefix) = d.template[&d.key].as_str() { json!(format!("{prefix}_{k}")) } else { json!(k) });
+                    for (field, values) in &d.choices {
+                        row.insert(field.clone(), values[index(seed, name, field, k as usize, values.len())].clone());
+                    }
+                    for (field, target) in &d.references {
+                        let parent = &before[target];
+                        row.insert(field.clone(), parent[index(seed, name, field, k as usize, parent.len())][&defs[target].key].clone());
+                    }
+                    row.extend(set.clone());
+                    rows.push(Value::Object(row));
+                }
+            }
+        }
+        if !intact(defs, &state.tables) {
+            state.tables = before;
+        }
+    }
+    Ok(())
+}
+
+/// Remove records whose reference lost its record, until none is left.
+fn cascade(defs: &BTreeMap<String, Dataset>, tables: &mut World) {
+    loop {
+        let mut changed = false;
+        for (name, d) in defs {
+            for (field, target) in &d.references {
+                let keys = keys_of(defs, tables, target);
+                let Some(rows) = tables.get_mut(name) else { continue };
+                let n = rows.len();
+                rows.retain(|r| r.get(field).is_some_and(|v| keys.contains(&v.to_string())));
+                changed |= rows.len() != n;
+            }
+        }
+        if !changed {
+            return;
+        }
+    }
 }
 
 pub fn build(defs: &BTreeMap<String, Dataset>, sizes: &BTreeMap<String, usize>, seed: u64) -> Result<World> {
@@ -106,6 +312,20 @@ pub fn build(defs: &BTreeMap<String, Dataset>, sizes: &BTreeMap<String, usize>, 
     }
     Ok(world)
 }
+/// An opaque cursor for the page starting at `start`: a guest can't make one
+/// up or step it forward, only pass on what the platform handed out.
+pub fn encode_cursor(dataset: &str, start: usize) -> String {
+    let check = blake3::hash(format!("cursor:{dataset}:{start}").as_bytes());
+    format!("{}{start:x}", &check.to_hex()[..8])
+}
+pub fn decode_cursor(dataset: &str, token: &str) -> Option<usize> {
+    let start = usize::from_str_radix(token.get(8..)?, 16).ok()?;
+    (encode_cursor(dataset, start) == token).then_some(start)
+}
+fn page_arg<'a>(args: &'a [(String, Value)], path: &str) -> Option<&'a Value> {
+    let (root, rest) = path.split_once('.').unwrap_or((path, ""));
+    crate::harness::field(&args.iter().find(|(k, _)| k == root)?.1, rest).filter(|v| !v.is_null())
+}
 fn index(seed: u64, dataset: &str, field: &str, row: usize, len: usize) -> usize {
     let hash = blake3::hash(format!("{seed}:{dataset}:{field}:{row}").as_bytes());
     (u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap()) % len as u64) as usize
@@ -125,21 +345,89 @@ impl Query {
         if self.wrap.as_ref().is_some_and(|w| w != "ok") {
             bail!("query wrap must be 'ok'");
         }
+        if self.order.iter().any(|f| !d.template.contains_key(f)) {
+            bail!("query orders by an unknown record field");
+        }
+        if let Some(p) = &self.page {
+            if self.one {
+                bail!("a paged query returns a list, so it cannot have one = true");
+            }
+            if p.max == 0 || p.max > MAX_ROWS {
+                bail!("query page.max must be between 1 and {MAX_ROWS}");
+            }
+            if p.offset.is_some() && p.cursor.is_some() {
+                bail!("query page takes an offset or a cursor, not both");
+            }
+            if p.next.is_some() && p.items.is_none() {
+                bail!("query page.next needs page.items: the rows and the next page share a record");
+            }
+            if p.cursor.is_some() && p.next.is_none() {
+                bail!("query page.cursor needs page.next, which hands out the cursors");
+            }
+            if p.invalid.is_some() && p.cursor.is_none() {
+                bail!("query page.invalid answers a made-up cursor, so it needs page.cursor");
+            }
+        }
         Ok(())
     }
-    pub fn resolve(&self, world: &World, args: &[(String, Value)]) -> Result<Value> {
+    /// Host parameters a query reads, as `(role, path)`.
+    pub fn parameters(&self) -> Vec<(&str, &str)> {
+        let page = self.page.iter().flat_map(|p| [("page.limit", &p.limit), ("page.offset", &p.offset), ("page.cursor", &p.cursor)]);
+        self.filter.values().map(|p| ("filter", p.as_str())).chain(page.filter_map(|(role, p)| Some((role, p.as_deref()?)))).collect()
+    }
+    /// The query's answer. `page_size` caps a page below what was asked,
+    /// where the platform says pages may be short.
+    pub fn resolve(&self, world: &World, args: &[(String, Value)], page_size: Option<usize>) -> Result<Value> {
         for param in self.filter.values() {
             if !args.iter().any(|(k, _)| k == param) {
                 bail!("dataset query: unknown parameter {param}");
             }
         }
-        let rows: Vec<_> = world
+        let mut rows: Vec<&Value> = world
             .get(&self.dataset)
             .context("unknown dataset")?
             .iter()
             .filter(|r| self.filter.iter().all(|(field, param)| args.iter().find(|(k, _)| k == param).is_some_and(|(_, v)| r.get(field) == Some(v))))
-            .map(|r| self.select.as_ref().map_or_else(|| r.clone(), |f| r[f].clone()))
             .collect();
+        if !self.order.is_empty() {
+            rows.sort_by(|a, b| self.order.iter().map(|f| crate::value::cmp_json(&a[f], &b[f])).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        let select = |r: &&Value| self.select.as_ref().map_or_else(|| (*r).clone(), |f| r[f].clone());
+        if let Some(page) = &self.page {
+            let arg = |path: &Option<String>| path.as_deref().and_then(|p| page_arg(args, p));
+            let start = match (arg(&page.offset), arg(&page.cursor).and_then(Value::as_str).filter(|c| !c.is_empty())) {
+                (Some(offset), _) => offset.as_u64().map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX)),
+                (None, Some(token)) => match decode_cursor(&self.dataset, token) {
+                    Some(start) => start,
+                    None => return Ok(page.invalid()),
+                },
+                (None, None) => 0,
+            };
+            let asked = arg(&page.limit).and_then(Value::as_u64).map_or(page.max, |n| usize::try_from(n).unwrap_or(usize::MAX).min(page.max));
+            let size = page_size.map_or(asked, |s| s.min(asked));
+            let start = start.min(rows.len());
+            let end = start.saturating_add(size).min(rows.len());
+            let items = Value::Array(rows[start..end].iter().map(select).collect());
+            let value = match &page.items {
+                None => items,
+                Some(field) => {
+                    let mut record = Map::from_iter([(field.clone(), items)]);
+                    if let Some(next) = &page.next {
+                        let at = if end == rows.len() {
+                            Value::Null
+                        } else if page.cursor.is_some() {
+                            json!(encode_cursor(&self.dataset, end))
+                        } else {
+                            json!(end)
+                        };
+                        record.insert(next.clone(), at);
+                    }
+                    Value::Object(record)
+                }
+            };
+            return Ok(if let Some(w) = &self.wrap { json!({w: value}) } else { value });
+        }
+        let rows: Vec<Value> = rows.iter().map(select).collect();
         let value = if self.one {
             if rows.is_empty()
                 && let Some(missing) = &self.missing
@@ -187,12 +475,12 @@ mod tests {
     fn queries_filter_and_return_the_same_records() {
         let w = build(&definitions(), &BTreeMap::new(), 7).unwrap();
         let q: Query = serde_json::from_value(json!({"dataset":"orders", "filter":{"owner":"user"},"wrap":"ok"})).unwrap();
-        let result = q.resolve(&w, &[("user".into(), json!("user_1"))]).unwrap();
+        let result = q.resolve(&w, &[("user".into(), json!("user_1"))], None).unwrap();
         assert!(result["ok"].as_array().unwrap().iter().all(|r| r["owner"] == "user_1"));
-        assert!(q.resolve(&w, &[]).is_err());
+        assert!(q.resolve(&w, &[], None).is_err());
         let q: Query = serde_json::from_value(json!({"dataset":"orders","filter":{"id":"id"}, "one":true,"missing":{"err":"missing"},"wrap":"ok"})).unwrap();
-        assert_eq!(q.resolve(&w, &[("id".into(), json!(1))]).unwrap(), json!({"ok":w["orders"][0]}));
-        assert_eq!(q.resolve(&w, &[("id".into(), json!(999))]).unwrap(), json!({"err":"missing"}));
+        assert_eq!(q.resolve(&w, &[("id".into(), json!(1))], None).unwrap(), json!({"ok":w["orders"][0]}));
+        assert_eq!(q.resolve(&w, &[("id".into(), json!(999))], None).unwrap(), json!({"err":"missing"}));
     }
     #[test]
     fn invalid_models_and_unbounded_sizes_are_rejected() {
@@ -323,12 +611,8 @@ impl Mutation {
             }
         }
         // Deleting a referenced parent is restricted; writes cannot create dangling references.
-        for (name, definition) in defs {
-            for (field, target) in &definition.references {
-                if next.tables[name].iter().any(|r| !next.tables[target].iter().any(|p| p.get(&defs[target].key) == r.get(field))) {
-                    return Ok((state.clone(), self.reject.clone(), vec![]));
-                }
-            }
+        if !intact(defs, &next.tables) {
+            return Ok((state.clone(), self.reject.clone(), vec![]));
         }
         Ok((next, response, changes))
     }
@@ -430,5 +714,143 @@ mod mutation_tests {
         let keyed_reject: Mutation =
             serde_json::from_value(json!({"dataset":"orders","operation":"create","response":{"ok":true},"reject":{"err":"$key"}})).unwrap();
         assert!(keyed_reject.validate(&defs).is_err());
+    }
+}
+
+#[cfg(test)]
+mod world_tests {
+    use super::*;
+    fn defs() -> BTreeMap<String, Dataset> {
+        serde_json::from_value(json!({
+            "users": {"rows": 2, "key": "id", "template": {"id": "user", "name": "A"}},
+            "customers": {"rows": 11, "key": "id", "template": {"id": 1, "owner": "", "name": "C", "balance": 0},
+                "references": {"owner": "users"}, "owner": "owner", "public": ["name"],
+                "choices": {"name": ["Ada", "Bo", "Cy"], "balance": [10, 20, 30]}},
+            "orders": {"rows": 6, "key": "id", "template": {"id": 1, "customer": 1}, "references": {"customer": "customers"}}
+        }))
+        .unwrap()
+    }
+    fn query(page: Value) -> Query {
+        serde_json::from_value(json!({"dataset": "customers", "order": ["name"], "select": "id", "page": page, "wrap": "ok"})).unwrap()
+    }
+
+    #[test]
+    fn offset_pages_cover_the_ordered_rows_once() {
+        let defs = defs();
+        validate(&defs).unwrap();
+        let world = build(&defs, &BTreeMap::new(), 3).unwrap();
+        let q = query(json!({"limit": "limit", "offset": "offset", "items": "items", "next": "next", "max": 4}));
+        q.validate(&defs).unwrap();
+        let mut seen = Vec::new();
+        let mut offset = json!(0);
+        while !offset.is_null() {
+            let page = q.resolve(&world, &[("limit".into(), json!(10)), ("offset".into(), offset.clone())], None).unwrap();
+            let items = page["ok"]["items"].as_array().unwrap();
+            assert!(items.len() <= 4, "max caps what was asked");
+            seen.extend(items.iter().cloned());
+            offset = page["ok"]["next"].clone();
+        }
+        let mut by_name: Vec<&Value> = world["customers"].iter().collect();
+        by_name.sort_by(|a, b| crate::value::cmp_json(&a["name"], &b["name"]));
+        assert_eq!(seen, by_name.iter().map(|r| r["id"].clone()).collect::<Vec<_>>(), "ordered by name, ties by creation");
+        // Short pages, where the platform allows them.
+        let page = q.resolve(&world, &[("limit".into(), json!(3)), ("offset".into(), json!(0))], Some(2)).unwrap();
+        assert_eq!(page["ok"]["items"].as_array().unwrap().len(), 2);
+        assert_eq!(page["ok"]["next"], 2);
+    }
+
+    #[test]
+    fn cursors_are_handed_out_and_made_up_ones_are_refused() {
+        let defs = defs();
+        let world = build(&defs, &BTreeMap::new(), 3).unwrap();
+        let q = query(json!({"cursor": "after", "items": "items", "next": "next", "max": 5, "invalid": {"err": "bad cursor"}}));
+        q.validate(&defs).unwrap();
+        let first = q.resolve(&world, &[("after".into(), Value::Null)], None).unwrap();
+        let token = first["ok"]["next"].as_str().unwrap().to_string();
+        assert_eq!(decode_cursor("customers", &token), Some(5));
+        let second = q.resolve(&world, &[("after".into(), json!(token))], None).unwrap();
+        assert_eq!(second["ok"]["items"].as_array().unwrap().len(), 5);
+        let last = q.resolve(&world, &[("after".into(), second["ok"]["next"].clone())], None).unwrap();
+        assert_eq!((last["ok"]["items"].as_array().unwrap().len(), &last["ok"]["next"]), (1, &Value::Null));
+        for forged in ["5", "00000000a", &encode_cursor("orders", 5)] {
+            assert_eq!(q.resolve(&world, &[("after".into(), json!(forged))], None).unwrap(), json!({"err": "bad cursor"}), "{forged}");
+        }
+    }
+
+    #[test]
+    fn invalid_pages_and_owners_are_refused() {
+        let defs = defs();
+        for page in [
+            json!({"max": 0}),
+            json!({"max": 2, "offset": "o", "cursor": "c", "items": "items", "next": "next"}),
+            json!({"max": 2, "next": "next"}),
+            json!({"max": 2, "cursor": "c", "items": "items"}),
+            json!({"max": 2, "invalid": {"err": "x"}}),
+        ] {
+            assert!(query(page.clone()).validate(&defs).is_err(), "{page}");
+        }
+        let mut one = query(json!({"max": 2}));
+        one.one = true;
+        assert!(one.validate(&defs).is_err());
+        let mut bad = defs.clone();
+        bad.get_mut("customers").unwrap().owner = Some("id".into());
+        assert!(validate(&bad).is_err());
+        let mut bad = defs.clone();
+        bad.get_mut("orders").unwrap().public = vec!["customer".into()];
+        assert!(validate(&bad).is_err(), "public without an owner");
+    }
+
+    #[test]
+    fn edits_drop_rotate_and_add_only_what_the_platform_could_hold() {
+        let defs = defs();
+        let fresh = State::new(build(&defs, &BTreeMap::new(), 3).unwrap());
+        let edit = |edits: Value| {
+            let mut state = fresh.clone();
+            apply(&defs, &mut state, &serde_json::from_value::<Vec<Edit>>(edits).unwrap(), 3).map(|()| state)
+        };
+        // Dropping a customer drops its orders too; the key counters stay.
+        let first = fresh.tables["orders"][0]["customer"].clone();
+        let dropped = edit(json!([{"drop": {"dataset": "customers", "keys": [first, 999]}}])).unwrap();
+        assert_eq!(dropped.tables["customers"].len(), 10);
+        assert!(dropped.tables["orders"].iter().all(|o| o["customer"] != first));
+        assert!(intact(&defs, &dropped.tables));
+        assert_eq!(dropped.next, fresh.next);
+        // Rotating takes the next choice, the next parent, or the next row's value.
+        let rotated = edit(json!([{"rotate": {"dataset": "customers", "keys": [1, 2], "fields": ["balance", "owner"]}}])).unwrap();
+        for i in 0..2 {
+            let (was, now) = (&fresh.tables["customers"][i], &rotated.tables["customers"][i]);
+            assert_ne!(was["balance"], now["balance"]);
+            assert_ne!(was["owner"], now["owner"]);
+            assert_eq!(was["name"], now["name"]);
+        }
+        let plain = edit(json!([{"rotate": {"dataset": "orders", "keys": [1, 2], "fields": ["customer"]}}])).unwrap();
+        assert!(intact(&defs, &plain.tables));
+        // Added rows take reserved keys, so a request's own records keep theirs.
+        let added =
+            edit(json!([{"add": {"dataset": "customers", "rows": 2, "set": {"owner": "user_2"}}}, {"add": {"dataset": "customers", "rows": 1}}])).unwrap();
+        let keys: Vec<_> = added.tables["customers"][11..].iter().map(|r| r["id"].clone()).collect();
+        assert_eq!(keys, [json!(ADDED_KEYS + 1), json!(ADDED_KEYS + 2), json!(ADDED_KEYS + 3)]);
+        assert_eq!(added.tables["customers"][11]["owner"], "user_2");
+        assert_eq!(added.next, fresh.next);
+        // An edit that would leave a dangling reference changes nothing.
+        assert_eq!(edit(json!([{"add": {"dataset": "customers", "rows": 1, "set": {"owner": "nobody"}}}])).unwrap(), fresh);
+        assert!(edit(json!([{"rotate": {"dataset": "customers", "keys": [1], "fields": ["id"]}}])).is_err());
+        assert!(edit(json!([{"drop": {"dataset": "typo", "keys": [1]}}])).is_err());
+        assert!(serde_json::from_value::<Edit>(json!({"drop": {"dataset": "users", "keys": [], "extra": 1}})).is_err());
+    }
+
+    #[test]
+    fn records_belong_to_the_users_their_owner_field_names() {
+        let defs = defs();
+        let world = build(&defs, &BTreeMap::new(), 3).unwrap();
+        assert_eq!(tenants(&defs, &world), vec![json!("user_1"), json!("user_2")]);
+        let mut by_choice = defs.clone();
+        let customers = by_choice.get_mut("customers").unwrap();
+        customers.references.clear();
+        customers.choices.insert("owner".into(), vec![json!("alice"), json!("bob")]);
+        assert_eq!(tenants(&by_choice, &world), vec![json!("alice"), json!("bob")]);
+        let mut unowned = defs;
+        unowned.values_mut().for_each(|d| d.owner = None);
+        assert!(tenants(&unowned, &world).is_empty());
     }
 }

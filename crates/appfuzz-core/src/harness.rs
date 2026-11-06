@@ -521,8 +521,8 @@ impl App {
                 }
                 if let Some(q) = manifest.function(&f.key).and_then(|s| s.query.as_ref()) {
                     let names = f.param_names();
-                    if q.filter.values().any(|p| !names.contains(p)) {
-                        bail!("{}: dataset filter names an unknown parameter", f.key);
+                    if let Some((role, p)) = q.parameters().into_iter().find(|(_, p)| !names.iter().any(|n| n == p.split('.').next().unwrap_or(""))) {
+                        bail!("{}: dataset {role} names the unknown parameter {p}", f.key);
                     }
                     let types: Vec<_> = f.ty.results().collect();
                     if types.len() != 1 {
@@ -533,11 +533,22 @@ impl App {
                     let mut sample_query = q.clone();
                     sample_query.filter.clear();
                     let check = |w: &crate::dataset::World| -> Result<()> {
-                        let value = sample_query.resolve(w, &[])?;
+                        let value = sample_query.resolve(w, &[], None)?;
                         json_to_val(&value, &types[0]).with_context(|| format!("{}: dataset response does not match WIT", f.key))?;
                         Ok(())
                     };
                     check(&world)?;
+                    if let Some(page) = &q.page {
+                        if page.cursor.is_some() {
+                            json_to_val(&page.invalid(), &types[0]).with_context(|| format!("{}: page.invalid does not match WIT", f.key))?;
+                        }
+                        // A page that has a next one.
+                        let mut first = sample_query.clone();
+                        first.page.as_mut().expect("paged").max = 1;
+                        let sizes = manifest.datasets.keys().map(|k| (k.clone(), 2)).collect();
+                        let value = first.resolve(&crate::dataset::build(&manifest.datasets, &sizes, 0)?, &[], None)?;
+                        json_to_val(&value, &types[0]).with_context(|| format!("{}: dataset page with a next page does not match WIT", f.key))?;
+                    }
                     for (field, values) in &manifest.datasets[&q.dataset].choices {
                         for value in values {
                             let mut variant = world.clone();
@@ -692,11 +703,14 @@ impl App {
 
     pub fn initial_state(&self, plan: &Plan, seed: u64) -> Result<crate::dataset::State> {
         let defaults = plan.0.get("_defaults");
-        Ok(crate::dataset::State::new(crate::dataset::build(
-            &self.manifest.datasets,
-            &defaults.map(|p| p.dataset_rows.clone()).unwrap_or_default(),
-            defaults.and_then(|p| p.dataset_seed).unwrap_or(seed),
-        )?))
+        let seed = defaults.and_then(|p| p.dataset_seed).unwrap_or(seed);
+        let mut state =
+            crate::dataset::State::new(crate::dataset::build(&self.manifest.datasets, &defaults.map(|p| p.dataset_rows.clone()).unwrap_or_default(), seed)?);
+        // Edits keep the key counters, so a request creates the same keys in an edited world.
+        if let Some(edits) = defaults.map(|p| &p.dataset_edits).filter(|e| !e.is_empty()) {
+            crate::dataset::apply(&self.manifest.datasets, &mut state, edits, seed)?;
+        }
+        Ok(state)
     }
 
     pub fn run(&self, spec: &RunSpec) -> RunRecord {
@@ -809,6 +823,11 @@ impl App {
             Pre::Extism { .. } => Some(crate::extism::Kernel::default()),
             _ => None,
         };
+        let world = match state {
+            Some(s) => s,
+            None => Arc::new(Mutex::new(self.initial_state(&spec.plan, spec.seed)?)),
+        };
+        let identity = crate::identity::caller(spec, &self.manifest, &world.lock().unwrap_or_else(|e| e.into_inner()).tables);
         let host = Host {
             ctx,
             p1,
@@ -816,12 +835,9 @@ impl App {
             platform: self.platform.clone(),
             modules: Vec::new(),
             plan: Arc::new(spec.plan.clone()),
-            world: match state {
-                Some(s) => s,
-                None => Arc::new(Mutex::new(self.initial_state(&spec.plan, spec.seed)?)),
-            },
+            identity,
+            world,
             seed: spec.seed,
-            identity: crate::identity::caller(spec, &self.manifest),
             clock: clock.clone(),
             timers: Default::default(),
             fuel_start: spec.fuel,
@@ -1218,7 +1234,13 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
         && !failure
         && let Some(query) = platform.queries.get(key)
     {
-        resolved.decision = Decision::Return(query.resolve(&data.world.lock().unwrap_or_else(|e| e.into_inner()).tables, &args)?);
+        let page_size = data.plan.get(key).and_then(|f| f.page_size);
+        if page_size.is_some() && !query.page.as_ref().is_some_and(|p| p.short) {
+            let msg = format!("{key}: page_size needs a paged dataset query whose platform declares page.short = true");
+            data.plan_error = Some(msg.clone());
+            bail!("plan error: {msg}");
+        }
+        resolved.decision = Decision::Return(query.resolve(&data.world.lock().unwrap_or_else(|e| e.into_inner()).tables, &args, page_size)?);
         resolved.source = format!("dataset {}", query.dataset);
     }
     let mut pending_state = None;

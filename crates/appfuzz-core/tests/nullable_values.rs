@@ -48,7 +48,7 @@ fn explicit_null_plan_responses_keep_their_precedence_and_roundtrip() {
 fn a_null_dataset_missing_response_does_not_fall_back_to_wrapping() {
     let q: Query = serde_json::from_value(json!({"dataset":"rows","one":true,"wrap":"ok","missing":null})).unwrap();
     let world = std::collections::BTreeMap::from([("rows".into(), vec![])]);
-    assert_eq!(q.resolve(&world, &[]).unwrap(), Value::Null);
+    assert_eq!(q.resolve(&world, &[], None).unwrap(), Value::Null);
     let restored: Query = serde_json::from_slice(&serde_json::to_vec(&q).unwrap()).unwrap();
-    assert_eq!(restored.resolve(&world, &[]).unwrap(), Value::Null);
+    assert_eq!(restored.resolve(&world, &[], None).unwrap(), Value::Null);
 }

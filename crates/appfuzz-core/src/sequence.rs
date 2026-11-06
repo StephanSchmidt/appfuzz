@@ -94,8 +94,8 @@ pub fn validate(app: &App, scenario: &Scenario) -> Result<()> {
         if s.request.is_some() && s.args.is_some() {
             bail!("sequence step cannot specify both request and args");
         }
-        if s.plan.0.get("_defaults").is_some_and(|p| !p.dataset_rows.is_empty() || p.dataset_seed.is_some()) {
-            bail!("dataset size/seed controls belong in the scenario initial plan");
+        if s.plan.0.get("_defaults").is_some_and(|p| !p.dataset_rows.is_empty() || p.dataset_seed.is_some() || !p.dataset_edits.is_empty()) {
+            bail!("dataset size, seed and edit controls belong in the scenario initial plan");
         }
     }
     Ok(())

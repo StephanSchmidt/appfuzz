@@ -115,6 +115,16 @@ pub struct FnPlan {
     pub dataset_rows: BTreeMap<String, usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_seed: Option<u64>,
+    /// Changes to the generated world, applied in order; only valid under `_defaults`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dataset_edits: Vec<crate::dataset::Edit>,
+    /// The caller's user id where the request names none; only valid under `_defaults`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    /// The most rows a paged dataset query returns per page, where the
+    /// platform says its pages may be short.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<usize>,
     /// Notes such as `_sig` and `_example`.
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub notes: BTreeMap<String, Value>,
@@ -159,8 +169,13 @@ impl Plan {
             for (call, response) in &f.on_call {
                 response.validate().with_context(|| format!("{key}: on_call {call}"))?;
             }
-            if (!f.dataset_rows.is_empty() || f.dataset_seed.is_some()) && key != "_defaults" {
-                bail!("dataset_rows belongs under _defaults");
+            if (!f.dataset_rows.is_empty() || f.dataset_seed.is_some() || !f.dataset_edits.is_empty() || f.identity.is_some()) && key != "_defaults" {
+                bail!("{key}: dataset_rows, dataset_seed, dataset_edits and identity belong under _defaults");
+            }
+            match f.page_size {
+                Some(_) if key == "_defaults" => bail!("page_size belongs to one host function, not _defaults"),
+                Some(0) => bail!("{key}: page_size must be at least 1"),
+                _ => {}
             }
             for k in f.notes.keys() {
                 if !k.starts_with('_') {

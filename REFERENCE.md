@@ -507,6 +507,55 @@ and independent response mutations. Manifest rules retain precedence; explicit
 traps, `err` and `none` fault responses can still be injected. Conflicting result
 constraints are errors rather than silently rewriting shared records.
 
+### Pages, order and owners
+
+A list function that returns one page at a time says how it reads the window
+and answers it:
+
+```toml
+[functions."acme:web/customers#page"]
+query = { dataset = "customers", order = ["name"], wrap = "ok", page = { limit = "limit", cursor = "after", items = "items", next = "next", max = 50 } }
+```
+
+`order` sorts by record fields; ties keep the collection's order. `limit`,
+`offset` and `cursor` name host parameters (record paths allowed). The page
+holds `limit` rows, at most `max`, from `offset` or after the `cursor`. `items`
+and `next` are fields of the result record. `next` is `none` on the last page,
+else the next offset or an opaque cursor. A cursor the platform never handed out
+gets `invalid`, default `{ err = "invalid cursor" }`. Without `items` the result
+is the list itself. `short = true` says the platform may return fewer rows than
+asked while more remain. Then a plan can make it do so: `{"acme:web/customers#page":
+{"page_size": 3}}`. Without `short`, `page_size` is an error.
+
+`owner = "owner-id"` on a dataset names the field holding the user a record
+belongs to. `public = ["name"]` lists fields anyone may see, also in other users'
+records. The caller of a run is the request field with the `identity` role, else
+the plan's `_defaults.identity`, else the first user records belong to: the first
+key of the dataset the owner field references, or its first choice.
+
+### Edited worlds
+
+A plan can change the generated world before the run, in order:
+
+```json
+{"_defaults": {"dataset_edits": [
+  {"drop": {"dataset": "customers", "keys": [1]}},
+  {"rotate": {"dataset": "customers", "keys": [2, 3], "fields": ["balance"]}},
+  {"add": {"dataset": "customers", "rows": 2, "set": {"owner-id": "user_2"}}}
+]}}
+```
+
+`drop` removes records and the records that reference them. `rotate` gives
+fields another value the platform can produce: the next of the field's choices,
+the next parent for a reference, else the value of the next listed record.
+`add` makes records like generated ones, with `set` fields fixed. Their keys start
+above 1,000,000, so a record the request creates has the same key with and
+without the edit. A key no record has changes nothing, and so does an edit that
+would leave a reference without its record. Edits live in the run's plan:
+a run with edits replays and caches like any run, and confirmation removes edits,
+keys and added rows that the finding doesn't need. A sequence takes edits in its
+scenario plan only.
+
 Ordinary runs start with fresh data. Datasets model declared keys, references,
 choices and equality filters. Sequence mutation bindings can persist writes and
 explicit invariants can check compound uniqueness across requests. Business

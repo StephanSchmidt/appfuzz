@@ -284,6 +284,42 @@ fn candidates(app: &App, s: &RunSpec, base: &[Value], lows: &Lows) -> Vec<Cand> 
             tiers[1].push(Cand { spec: c, step: Some((at.clone(), m)) });
         }
     }
+    // Edits to the world: fewer edits, fewer keys in one, fewer added rows.
+    let edits = s.plan.0.get("_defaults").map(|p| p.dataset_edits.as_slice()).unwrap_or_default();
+    let edited = |f: &dyn Fn(&mut Vec<crate::dataset::Edit>)| {
+        let mut c = s.clone();
+        f(&mut c.plan.0.get_mut("_defaults").expect("edits live in _defaults").dataset_edits);
+        c
+    };
+    for (i, edit) in edits.iter().enumerate() {
+        tiers[0].push(edited(&|e| drop(e.remove(i))).into());
+        match edit {
+            crate::dataset::Edit::Drop { keys, .. } | crate::dataset::Edit::Rotate { keys, .. } if keys.len() > 1 => {
+                for k in 0..keys.len() {
+                    tiers[1].push(
+                        edited(&|e| {
+                            if let crate::dataset::Edit::Drop { keys, .. } | crate::dataset::Edit::Rotate { keys, .. } = &mut e[i] {
+                                keys.remove(k);
+                            }
+                        })
+                        .into(),
+                    );
+                }
+            }
+            crate::dataset::Edit::Add { rows, .. } => {
+                let at = format!("dataset_edits:{i}");
+                for m in down(*rows as u64, 1, &at, lows) {
+                    let spec = edited(&|e| {
+                        if let crate::dataset::Edit::Add { rows, .. } = &mut e[i] {
+                            *rows = m as usize;
+                        }
+                    });
+                    tiers[1].push(Cand { spec, step: Some((at.clone(), m)) });
+                }
+            }
+            _ => {}
+        }
+    }
     for (k, fp) in &s.plan.0 {
         let with = |f: &dyn Fn(&mut FnPlan)| {
             let mut c = s.clone();

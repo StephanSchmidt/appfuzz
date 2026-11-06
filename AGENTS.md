@@ -145,7 +145,11 @@ generated world per ordinary request: keys stay unique, references stay valid,
 and equality filters agree with lookups. `_defaults.dataset_rows` in a plan
 resizes collections; fuzzing, scaling and shrinking preserve their relationships.
 Model bindings override successful plan responses; manifest rules and explicit
-service failures retain precedence. Supply varied text, dates and numbers via
+service failures retain precedence. A query can return pages (`page = { limit,
+offset | cursor, items, next, max }`), a dataset can say who owns its records
+(`owner`, `public`), and a plan can edit the generated world
+(`_defaults.dataset_edits`: `drop`, `rotate`, `add`); see
+[pages and edits](REFERENCE.md#pages-order-and-owners). Supply varied text, dates and numbers via
 `choices` to exercise the values the platform can produce.
 
 ## 4. Labels: telling appfuzz what text means

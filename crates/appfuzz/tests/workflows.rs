@@ -1486,6 +1486,63 @@ fn retry_after_precommit_failure_is_not_an_idempotency_violation() {
 }
 
 #[test]
+fn plans_edit_the_world_and_paged_queries_answer_a_page_at_a_time() {
+    let f = Fixture::new(false);
+    let wit = "package test:workflow; interface db { page: func(offset:u32) -> list<u32>; } world app { import db; export run: func(offset:u32) -> u32; }";
+    let wat = r#"(module
+      (import "test:workflow/db" "page" (func $page (param i32 i32)))
+      (memory (export "memory") 4)
+      (global $heap (mut i32) (i32.const 1024))
+      (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32)
+        (local $p i32) (local.set $p (global.get $heap))
+        (global.set $heap (i32.add (global.get $heap) (local.get 3))) (local.get $p))
+      (func (export "run") (param $offset i32) (result i32)
+        (call $page (local.get $offset) (i32.const 32)) (i32.load (i32.const 36))))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    let manifest = r#"
+[app]
+wasm = "app.wasm"
+[entry]
+export = "run"
+request = 0
+[datasets.items]
+rows = 5
+key = "id"
+template = { id = 1 }
+[functions."test:workflow/db#page"]
+query = { dataset = "items", select = "id", page = { offset = "offset", max = 2, short = true } }
+"#;
+    std::fs::write(&f.manifest, manifest).unwrap();
+    let rows = |args: &str, plan: &str| {
+        let (code, r) = f.cli(&["run", "--args", args, "--plan", plan]);
+        assert_eq!(code, 0, "{r}");
+        let (_, raw) = f.cli(&["show", "last"]);
+        (r["result"].as_u64().unwrap(), raw["events"][0]["result"].clone())
+    };
+    assert_eq!(rows("[0]", "{}"), (2, json!([1, 2])));
+    assert_eq!(rows("[4]", "{}"), (1, json!([5])));
+    assert_eq!(rows("[9]", "{}"), (0, json!([])));
+    assert_eq!(rows("[0]", r#"{"test:workflow/db#page": {"page_size": 1}}"#), (1, json!([1])));
+    // Edits change the world the run starts from.
+    let drop = r#"{"_defaults": {"dataset_edits": [{"drop": {"dataset": "items", "keys": [1, 3]}}]}}"#;
+    assert_eq!(rows("[0]", drop), (2, json!([2, 4])));
+    let add = r#"{"_defaults": {"dataset_rows": {"items": 0}, "dataset_edits": [{"add": {"dataset": "items", "rows": 1}}]}}"#;
+    assert_eq!(rows("[0]", add), (1, json!([1000001])));
+    let (code, r) = f.cli(&["run", "--plan", r#"{"_defaults": {"dataset_edits": [{"drop": {"dataset": "typo", "keys": [1]}}]}}"#]);
+    assert_eq!(code, 3, "{r}");
+    assert!(r.to_string().contains("unknown dataset typo"), "{r}");
+    // Short pages need the platform's word that they can happen.
+    f.edit("short = true", "short = false");
+    let (code, r) = f.cli(&["run", "--plan", r#"{"test:workflow/db#page": {"page_size": 1}}"#]);
+    assert_eq!(code, 3, "{r}");
+    assert!(r.to_string().contains("page.short"), "{r}");
+    f.edit("offset = \"offset\"", "offset = \"from\"");
+    let (code, r) = f.cli(&["inspect"]);
+    assert_eq!(code, 3, "{r}");
+    assert!(r["error"].as_str().unwrap().contains("unknown parameter from"), "{r}");
+}
+
+#[test]
 fn changes_without_a_dataset_model_are_recorded_as_commits() {
     let f = Fixture::new(false);
     let text = std::fs::read_to_string(&f.manifest).unwrap();
