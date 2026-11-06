@@ -12,6 +12,9 @@ fn app(body: &str) -> App {
 }
 
 fn app_with_clock(body: &str, clock: bool) -> App {
+    app_with_command(body, clock, false)
+}
+fn app_with_command(body: &str, clock: bool, command: bool) -> App {
     let mut resolve = wit_parser::Resolve::new();
     resolve.push_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/wit/http")).unwrap();
     let pkg = resolve
@@ -25,15 +28,17 @@ fn app_with_clock(body: &str, clock: bool) -> App {
         import wasi:io/streams@0.2.12;
         import wasi:cli/stdout@0.2.12;
         {}
-        export run: func() -> u64;
+        {}
     }}"#,
-                if clock { "import wasi:clocks/monotonic-clock@0.2.12;" } else { "" }
+                if clock { "import wasi:clocks/monotonic-clock@0.2.12;" } else { "" },
+                if command { "import wasi:cli/exit@0.2.12; export wasi:cli/run@0.2.12;" } else { "export run:func()->u64;" }
             ),
         )
         .unwrap();
     let world = resolve.select_world(&[pkg], Some("app")).unwrap();
     let wat = format!(
         r#"(module
+        {exit_import}
         (import "wasi:http/types@0.2.12" "[constructor]fields" (func $fields (result i32)))
         (import "wasi:http/types@0.2.12" "[constructor]outgoing-request" (func $request (param i32) (result i32)))
         (import "wasi:http/types@0.2.12" "[method]outgoing-request.set-authority" (func $authority (param i32 i32 i32 i32) (result i32)))
@@ -45,6 +50,7 @@ fn app_with_clock(body: &str, clock: bool) -> App {
         (import "wasi:http/types@0.2.12" "[static]outgoing-body.finish" (func $finish (param i32 i32 i32 i32)))
         (import "wasi:http/types@0.2.12" "[constructor]request-options" (func $options (result i32)))
         (import "wasi:http/types@0.2.12" "[method]request-options.set-first-byte-timeout" (func $timeout (param i32 i32 i64) (result i32)))
+        (import "wasi:http/types@0.2.12" "[method]request-options.set-connect-timeout" (func $connect-timeout (param i32 i32 i64) (result i32)))
         (import "wasi:http/outgoing-handler@0.2.12" "handle" (func $send (param i32 i32 i32 i32)))
         (import "wasi:io/poll@0.2.12" "[method]pollable.ready" (func $ready (param i32) (result i32)))
         (import "wasi:io/poll@0.2.12" "[method]pollable.block" (func $block (param i32)))
@@ -71,8 +77,11 @@ fn app_with_clock(body: &str, clock: bool) -> App {
             (call $send (local.get $req) (local.get $some) (local.get $options) (i32.const 1024))
             (if (i32.load (i32.const 1024)) (then unreachable))
             (i32.load (i32.const 1032)))
-        (func (export "run") (result i64) (local $a i32) (local $b i32) (local $p i32) (local $q i32) (local $body i32) (local $stream i32) (local $before i64)
-            {body}))"#
+        (func (export "{export_name}") (result {result_type}) (local $a i32) (local $b i32) (local $p i32) (local $q i32) (local $body i32) (local $stream i32) (local $before i64)
+            {body}))"#,
+        exit_import = if command { r#"(import "wasi:cli/exit@0.2.12" "exit" (func $exit (param i32)))"# } else { "" },
+        export_name = if command { "wasi:cli/run@0.2.12#run" } else { "run" },
+        result_type = if command { "i32" } else { "i64" },
     );
     let wat = wat.lines().filter(|line| clock || !line.contains("(import \"wasi:clocks/")).collect::<Vec<_>>().join("\n");
     let mut module = wat::parse_str(wat).unwrap();
@@ -274,4 +283,119 @@ fn ready_streams_win_without_waiting_for_http() {
     assert_eq!(record.result, Some(json!(1)));
     assert_eq!(record.totals.host_ns, 0);
     assert_eq!(record.totals.sleep_ns, 0);
+}
+
+#[test]
+fn huge_http_deadlines_and_short_timers_share_exact_elapsed_time() {
+    use appfuzz_core::natural::Natural;
+    let app = app(r#"(local.set $a (call $start)) (local.set $p (call $subscribe (local.get $a)))
+        (local.set $q (call $timer (i64.const 5000000)))
+        (i32.store (i32.const 256) (local.get $p)) (i32.store (i32.const 260) (local.get $q))
+        (call $poll (i32.const 256) (i32.const 2) (i32.const 512))
+        (if (i32.ne (i32.load (i32.load (i32.const 512))) (i32.const 1)) (then unreachable))
+        (if (call $ready (local.get $p)) (then unreachable))
+        (call $block (local.get $p)) (i64.extend_i32_u (call $ready (local.get $p)))"#);
+    let plan = Plan::parse(&format!(r#"{{"{CLIENT_KEY}": {{"return":{{"ok":{{"status":200,"headers":[],"body":"ok"}}}},"latency_ms":1e30}}}}"#)).unwrap();
+    let record = run_app(&app, plan, 0.0);
+    assert_eq!(record.outcome.kind, OutcomeKind::Ok, "{:?}", record.outcome);
+    assert_eq!(record.result, Some(json!(1)));
+    assert_eq!(record.totals.sleep_ns, 5_000_000);
+    let total = Natural::from_scaled_f64(1e30, 1_000_000);
+    assert_eq!(record.totals.host_ns, total.clone() - Natural::from(5_000_000u64));
+    assert_eq!(record.totals.virtual_ns, total);
+}
+
+#[test]
+fn huge_overlapping_http_requests_keep_their_individual_deadlines() {
+    use appfuzz_core::natural::Natural;
+    let app = app(r#"(local.set $a (call $start)) (local.set $b (call $start))
+        (local.set $p (call $subscribe (local.get $a))) (local.set $q (call $subscribe (local.get $b)))
+        (call $block (local.get $p))
+        (if (call $ready (local.get $q)) (then unreachable))
+        (call $block (local.get $q)) (i64.extend_i32_u (call $ready (local.get $q)))"#);
+    let plan = Plan::parse(&format!(r#"{{"{CLIENT_KEY}": {{"return":{{"ok":{{"status":200,"headers":[],"body":"ok"}}}},"latency_ms":1e200,"on_call":{{"2":{{"latency_ms":2e200,"return":{{"ok":{{"status":200,"headers":[],"body":"ok"}}}}}}}}}}}}"#)).unwrap();
+    let record = run_app(&app, plan, 0.0);
+    assert_eq!(record.outcome.kind, OutcomeKind::Ok, "{:?}", record.outcome);
+    assert_eq!(record.result, Some(json!(1)));
+    assert_eq!(record.totals.host_ns, Natural::from_scaled_f64(2e200, 1_000_000));
+    assert_eq!(record.events[0].t_ns, 0);
+    assert_eq!(record.events[1].t_ns, 0);
+    assert_eq!(record.events[0].latency_ns, Natural::from_scaled_f64(1e200, 1_000_000));
+}
+
+#[test]
+fn timeout_phases_keep_their_sum_beyond_one_u64_duration() {
+    let app = app(r#"(local.set $b (call $options))
+        (if (call $timeout (local.get $b) (i32.const 1) (i64.const -1)) (then unreachable))
+        (if (call $connect-timeout (local.get $b) (i32.const 1) (i64.const -1)) (then unreachable))
+        (local.set $a (call $dispatch (call $new) (i32.const 1) (local.get $b)))
+        (local.set $p (call $subscribe (local.get $a)))
+        (call $block (local.get $p)) (call $get (local.get $a) (i32.const 2048))
+        (i64.extend_i32_u (i32.load (i32.const 2048)))"#);
+    let plan = Plan::parse(&format!(r#"{{"{CLIENT_KEY}": {{"return":{{"ok":{{"status":200,"headers":[],"body":"ok"}}}},"latency_ms":1e30}}}}"#)).unwrap();
+    let record = run_app(&app, plan, 0.0);
+    assert_eq!(record.outcome.kind, OutcomeKind::Ok, "{:?}", record.outcome);
+    assert_eq!(record.result, Some(json!(1)));
+    assert_eq!(record.totals.host_ns, 2 * u128::from(u64::MAX));
+    assert_eq!(record.events[0].latency_ns, 2 * u128::from(u64::MAX));
+    assert_eq!(record.events[0].source, "timeout");
+}
+
+#[test]
+fn outgoing_requests_issued_before_a_guest_trap_remain_in_the_trace() {
+    let record = run("(local.set $a (call $start)) unreachable");
+    assert_eq!(record.outcome.kind, OutcomeKind::Unreachable, "{:?}", record.outcome);
+    assert_eq!(record.events.len(), 1, "outgoing request disappeared on trap");
+    assert_eq!(record.totals.cost, 1);
+    assert_eq!(record.totals.host_ns, 0);
+    assert_eq!(record.events[0].func, CLIENT_KEY);
+}
+
+#[test]
+fn command_exits_keep_outgoing_requests_issued_before_termination() {
+    for code in [0, 1] {
+        let app = app_with_command(&format!("(local.set $a (call $start)) (call $exit (i32.const {code})) unreachable"), true, true);
+        let plan =
+            Plan::parse(&format!(r#"{{"{CLIENT_KEY}":{{"return":{{"ok":{{"status":200,"headers":[],"body":"ok"}}}},"latency_ms":10,"cost":3}}}}"#)).unwrap();
+        let record = app.run(&app.spec(app.export("wasi:cli/run#run").unwrap(), vec![], plan, 1));
+        assert_eq!(record.outcome.kind, OutcomeKind::Ok, "{:?}", record.outcome);
+        assert_eq!(record.command_exit_code, Some(code));
+        assert_eq!(record.events.len(), 1);
+        assert_eq!(record.totals.cost, 3);
+        assert_eq!(record.totals.host_ns, 0);
+    }
+}
+
+#[test]
+fn draining_errors_after_a_guest_trap_cannot_be_hidden_as_complete_evidence() {
+    let app = app("(local.set $a (call $start)) unreachable");
+    let plan = Plan::parse(&format!(r#"{{"{CLIENT_KEY}":{{"return":"not-a-result"}}}}"#)).unwrap();
+    let record = run_app(&app, plan, 0.0);
+    assert_eq!(record.outcome.kind, OutcomeKind::PlanError, "{:?}", record.outcome);
+    assert_eq!(record.events.len(), 1);
+    assert!(record.outcome.message.as_deref().unwrap().contains("guest also failed"));
+    assert!(record.outcome.message.as_deref().unwrap().contains("unreachable"));
+}
+
+#[test]
+fn late_host_traps_do_not_erase_guest_traps_or_drop_later_requests() {
+    let app = app("(local.set $a (call $start)) (local.set $b (call $start)) unreachable");
+    let plan = Plan::parse(&format!(r#"{{"{CLIENT_KEY}":{{"trap":"service gone"}}}}"#)).unwrap();
+    let record = run_app(&app, plan, 0.0);
+    assert_eq!(record.outcome.kind, OutcomeKind::Unreachable, "{:?}", record.outcome);
+    assert_eq!(record.events.len(), 2);
+    assert!(record.events.iter().all(|e| e.trap.is_some()));
+    assert!(appfuzz_core::detect::per_run(&record, &app.manifest).iter().any(|f| f.kind == "crash"));
+}
+
+#[test]
+fn deferred_host_traps_keep_all_issued_requests_and_the_first_failure() {
+    let app = app("(local.set $a (call $start)) (local.set $b (call $start)) (i64.const 0)");
+    let plan = Plan::parse(&format!(r#"{{"{CLIENT_KEY}":{{"trap":"first failure","on_call":{{"2":{{"trap":"second failure"}}}}}}}}"#)).unwrap();
+    let record = run_app(&app, plan, 0.0);
+    assert_eq!(record.outcome.kind, OutcomeKind::HostTrap, "{:?}", record.outcome);
+    assert_eq!(record.outcome.message.as_deref(), Some("first failure"));
+    assert_eq!(record.events.len(), 2);
+    assert_eq!(record.events[0].trap.as_deref(), Some("first failure"));
+    assert_eq!(record.events[1].trap.as_deref(), Some("second failure"));
 }

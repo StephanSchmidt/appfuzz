@@ -12,6 +12,7 @@
 //!
 //! The format is documented in ENVELOPE.md.
 
+use crate::natural::Natural;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,9 @@ pub struct Budget {
     #[serde(with = "crate::wide")]
     pub cost: u128,
     pub virtual_ms: f64,
+    /// Exact latency for new envelopes; older ones retain their millisecond budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_ns: Option<Natural>,
     pub memory: u64,
     pub host_calls: u32,
 }
@@ -96,6 +100,8 @@ pub struct Trace {
     pub args: Vec<Value>,
     pub events: Vec<TraceCall>,
     pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_exit_code: Option<i32>,
     /// Preserve execution diagnostics when reading a stored run as a trace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<Outcome>,
@@ -158,6 +164,7 @@ impl Trace {
             },
             outcome,
             result: self.result.clone(),
+            command_exit_code: self.command_exit_code,
             totals,
             events: self
                 .events
@@ -173,10 +180,10 @@ impl Trace {
                     trap: None,
                     source: "trace".into(),
                     granted: true,
-                    latency_ns: 0,
+                    latency_ns: Natural::default(),
                     cost: 0,
                     fuel_before: 0,
-                    t_ns: 0,
+                    t_ns: Natural::default(),
                     stack: e.stack.clone(),
                 })
                 .collect(),
@@ -287,7 +294,8 @@ impl Envelope {
             let (b, t) = (&mut e.budget, &r.totals);
             b.fuel = b.fuel.max(t.fuel);
             b.cost = b.cost.max(t.cost);
-            b.virtual_ms = b.virtual_ms.max(t.virtual_ns as f64 / 1_000_000.0);
+            b.virtual_ms = b.virtual_ms.max(t.virtual_ns.ms().min(f64::MAX));
+            b.virtual_ns = Some(b.virtual_ns.take().unwrap_or_default().max(t.virtual_ns.clone()));
             b.memory = b.memory.max(t.peak_memory);
             b.host_calls = b.host_calls.max(t.host_calls);
         }
@@ -399,13 +407,20 @@ impl Envelope {
         over("cost", t.cost, b.cost);
         over("memory", u128::from(t.peak_memory), u128::from(b.memory));
         over("host_calls", u128::from(t.host_calls), u128::from(b.host_calls));
-        let virtual_ms = t.virtual_ns as f64 / 1_000_000.0;
-        if virtual_ms > b.virtual_ms * self.margin {
+        let virtual_ms = t.virtual_ns.ms();
+        let exceeds_time = if self.margin.is_finite() && self.margin >= 0.0 && b.virtual_ms.is_finite() && b.virtual_ms >= 0.0 {
+            let bound =
+                b.virtual_ns.as_ref().map_or_else(|| Natural::from_scaled_product(&[b.virtual_ms, self.margin], 1_000_000), |ns| ns.scaled(self.margin));
+            t.virtual_ns > bound
+        } else {
+            virtual_ms > b.virtual_ms * self.margin
+        };
+        if exceeds_time {
             out.push(Violation::warn(
                 "budget",
                 "virtual_ms",
                 format!("uses {virtual_ms} virtual_ms; reviewed runs used at most {}", b.virtual_ms),
-                json!({"budget":"virtual_ms", "used":virtual_ms, "max":b.virtual_ms}),
+                json!({"budget":"virtual_ms", "used":t.virtual_ns.ms_json(), "max":b.virtual_ms, "used_ns": t.virtual_ns, "max_ns": b.virtual_ns}),
             ));
         }
         out
@@ -564,12 +579,12 @@ mod tests {
         let m = manifest();
         let mut reviewed = trace(&[]);
         reviewed.totals.cost = 1;
-        reviewed.totals.virtual_ns = 1_000_000;
+        reviewed.totals.virtual_ns = 1_000_000u64.into();
         reviewed.totals.peak_memory = 1024;
         let e = Envelope::build(std::slice::from_ref(&reviewed), &m);
         let mut changed = reviewed;
         changed.totals.cost = 3;
-        changed.totals.virtual_ns = 3_000_000;
+        changed.totals.virtual_ns = 3_000_000u64.into();
         changed.totals.peak_memory = 3072;
         let findings = e.check(&changed, &m);
         for budget in ["cost", "virtual_ms", "memory"] {
@@ -581,7 +596,7 @@ mod tests {
     fn zero_budget_is_an_observed_limit() {
         let e = Envelope::default();
         assert!(e.check_budget(&Totals::default()).is_empty());
-        let violations = e.check_budget(&Totals { fuel: 1, cost: 1, virtual_ns: 1, peak_memory: 1, host_calls: 1, ..Default::default() });
+        let violations = e.check_budget(&Totals { fuel: 1, cost: 1, virtual_ns: 1u64.into(), peak_memory: 1, host_calls: 1, ..Default::default() });
         for budget in ["fuel", "cost", "virtual_ms", "memory", "host_calls"] {
             assert!(violations.iter().any(|v| v.detail["budget"] == budget), "missing {budget}: {violations:?}");
         }
@@ -591,11 +606,11 @@ mod tests {
     fn latency_budgets_preserve_nanosecond_precision() {
         let m = manifest();
         let mut reviewed = trace(&[]);
-        reviewed.totals.virtual_ns = 1;
+        reviewed.totals.virtual_ns = 1u64.into();
         let e = Envelope::build(&[reviewed], &m);
         assert_eq!(e.budget.virtual_ms, 0.000001);
-        assert!(e.check_budget(&Totals { virtual_ns: 2, ..Default::default() }).is_empty());
-        assert!(e.check_budget(&Totals { virtual_ns: 3, ..Default::default() }).iter().any(|v| v.detail["budget"] == "virtual_ms"));
+        assert!(e.check_budget(&Totals { virtual_ns: 2u64.into(), ..Default::default() }).is_empty());
+        assert!(e.check_budget(&Totals { virtual_ns: 3u64.into(), ..Default::default() }).iter().any(|v| v.detail["budget"] == "virtual_ms"));
     }
 
     #[test]

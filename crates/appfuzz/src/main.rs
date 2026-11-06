@@ -566,9 +566,9 @@ fn summary(app: &App, r: &RunRecord) -> Value {
         over.push(json!({"limit": "cost_per_request", "used": appfuzz_core::wide::json(t.cost), "limit_value": c}));
     }
     if let Some(m) = l.max_latency_ms
-        && ms(t.virtual_ns) > m
+        && t.virtual_ns.exceeds_ms(m)
     {
-        over.push(json!({"limit": "max_latency_ms", "used": ms(t.virtual_ns), "limit_value": m}));
+        over.push(json!({"limit": "max_latency_ms", "used": t.virtual_ns.ms_json(), "limit_value": m}));
     }
     let mut out = json!({
         "run": r.id,
@@ -582,10 +582,10 @@ fn summary(app: &App, r: &RunRecord) -> Value {
             "guest_ns": t.guest_ns,
             "host_ns": t.host_ns,
             "sleep_ns": t.sleep_ns,
-            "virtual_ms": ms(t.virtual_ns),
-            "guest_ms": ms(t.guest_ns),
-            "host_ms": ms(t.host_ns),
-            "sleep_ms": ms(t.sleep_ns),
+            "virtual_ms": t.virtual_ns.ms_json(),
+            "guest_ms": t.guest_ns.ms_json(),
+            "host_ms": t.host_ns.ms_json(),
+            "sleep_ms": t.sleep_ns.ms_json(),
             "host_calls": t.host_calls,
             "cost": appfuzz_core::wide::json(t.cost),
             "clock_reads": t.clock_reads,
@@ -594,6 +594,9 @@ fn summary(app: &App, r: &RunRecord) -> Value {
         "calls_per_function": r.call_counts().into_iter().map(|(k, n)| (k, json!(n))).collect::<Map<_, _>>(),
         "over_limits": over,
     });
+    if let Some(code) = r.command_exit_code {
+        out["command_exit_code"] = json!(code);
+    }
     if !r.stdout.is_empty() || !r.stderr.is_empty() {
         out["output_bytes"] = json!({"stdout": r.stdout.len(), "stderr": r.stderr.len()});
     }
@@ -643,7 +646,7 @@ fn scale_table(rep: &scale::ScaleReport) -> Value {
         rep.points
             .iter()
             .map(|p| {
-                let mut o = json!({"n": p.n, "outcome": p.outcome, "host_calls": p.host_calls, "cost": appfuzz_core::wide::json(p.cost), "virtual_ms": p.virtual_ms, "fuel": p.fuel, "run": p.run});
+                let mut o = json!({"n": p.n, "outcome": p.outcome, "host_calls": p.host_calls, "cost": appfuzz_core::wide::json(p.cost), "virtual_ms": p.virtual_ms, "virtual_ns": p.virtual_ns, "fuel": p.fuel, "run": p.run});
                 for m in &metrics {
                     if let Some(f) = m.strip_prefix("calls ") {
                         o[*m] = json!(p.calls.get(f).copied().unwrap_or(0));
@@ -670,8 +673,8 @@ fn timeline(r: &RunRecord, st: &Statics) -> Value {
             .iter()
             .map(|e| {
                 let mut o = json!({
-                    "n": e.n, "t_ms": ms(e.t_ns), "func": e.func, "args": e.args,
-                    "latency_ms": ms(e.latency_ns), "cost": e.cost, "source": e.source,
+                    "n": e.n, "t_ms": e.t_ns.ms_json(), "func": e.func, "args": e.args,
+                    "latency_ms": e.latency_ns.ms_json(), "cost": e.cost, "source": e.source,
                 });
                 match (&e.result, &e.trap) {
                     (_, Some(t)) => o["trap"] = json!(t),
@@ -711,7 +714,7 @@ fn by_function(r: &RunRecord, only: Option<&str>) -> Value {
                 "calls": n,
                 "distinct_args": distinct.len(),
                 "cost": appfuzz_core::wide::json(calls.iter().map(|e| u128::from(e.cost)).sum()),
-                "latency_ms": ms(calls.iter().fold(0u64, |total, e| total.saturating_add(e.latency_ns))),
+                "latency_ms": calls.iter().map(|e| e.latency_ns.clone()).sum::<appfuzz_core::natural::Natural>().ms_json(),
                 "args": args,
             }),
         );

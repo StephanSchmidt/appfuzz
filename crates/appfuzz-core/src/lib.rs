@@ -25,6 +25,7 @@ pub mod labels;
 pub mod manifest;
 pub mod markup;
 pub mod metamorphic;
+pub mod natural;
 pub mod output;
 pub mod par;
 pub mod payload;

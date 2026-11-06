@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use wasmtime::component::Type;
 
-use crate::detect::{Finding, Severity, ms};
+use crate::detect::{Finding, Severity};
 use crate::growth::{Class, Law, fit};
 use crate::harness::App;
 use crate::par::{self, Runner};
@@ -63,11 +63,9 @@ pub struct Point {
     pub host_calls: u32,
     pub fuel: u64,
     pub peak_memory: u64,
-    pub virtual_ms: f64,
-    /// Unrounded, for fitting: `virtual_ms` keeps two decimals, and on a
-    /// fast handler the rounding alone can look like superlinear growth.
-    #[serde(skip)]
-    pub virtual_ns: u64,
+    pub virtual_ms: Value,
+    /// Exact nanoseconds, also retained in reports when fitting is approximate.
+    pub virtual_ns: crate::natural::Natural,
     #[serde(serialize_with = "crate::wide::serialize")]
     pub cost: u128,
     pub output_bytes: u64,
@@ -88,8 +86,8 @@ impl Point {
             host_calls: r.totals.host_calls,
             fuel: r.totals.fuel,
             peak_memory: r.totals.peak_memory,
-            virtual_ms: ms(r.totals.virtual_ns),
-            virtual_ns: r.totals.virtual_ns,
+            virtual_ms: r.totals.virtual_ns.ms_json(),
+            virtual_ns: r.totals.virtual_ns.clone(),
             cost: r.totals.cost,
             output_bytes: r.result.as_ref().map(|v| v.to_string().len() as u64).unwrap_or(0),
             host_arg_bytes: r.events.iter().map(|e| Value::Object(e.args.clone()).to_string().len() as u64).sum(),
@@ -392,7 +390,12 @@ pub struct Growth {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub breaks_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit: Option<f64>,
+    pub limit: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub break_evidence: Option<&'static str>,
+    /// An extrapolation remains separate from an observed violation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub predicted_breaks_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -410,15 +413,53 @@ pub struct ScaleReport {
 /// Biggest n we extrapolate breaking points to.
 const MAX_BREAK_N: u64 = 1_000_000;
 
-pub fn analyze(app: &App, knob: Knob, points: Vec<Point>) -> ScaleReport {
+#[derive(Clone, Copy)]
+enum Budget {
+    Cost(u64),
+    Latency(f64),
+    Fuel(u64),
+    Memory(u64),
+}
+impl Budget {
+    fn exceeds(self, p: &Point) -> bool {
+        match self {
+            Self::Cost(n) => p.cost > u128::from(n),
+            Self::Latency(ms) => p.virtual_ns.exceeds_ms(ms),
+            Self::Fuel(n) => p.fuel > n,
+            Self::Memory(n) => p.peak_memory > n,
+        }
+    }
+    fn approximate(self) -> f64 {
+        match self {
+            Self::Cost(n) | Self::Fuel(n) | Self::Memory(n) => n as f64,
+            Self::Latency(ms) => ms,
+        }
+    }
+    fn display(self) -> Value {
+        match self {
+            Self::Cost(n) | Self::Fuel(n) | Self::Memory(n) => json!(n),
+            Self::Latency(ms) => json!(ms),
+        }
+    }
+}
+
+pub fn analyze(app: &App, knob: Knob, mut points: Vec<Point>) -> ScaleReport {
+    points.sort_by_key(|p| p.n);
     let l = &app.manifest.limits;
     // Points after a failure (hang, crash) distort the fit.
     let good: Vec<&Point> = points.iter().take_while(|p| p.outcome == OutcomeKind::Ok).collect();
     let mut growth = Vec::new();
-    let mut add = |metric: String, f: &dyn Fn(&Point) -> f64, limit: Option<f64>| {
+    let mut add = |metric: String, f: &dyn Fn(&Point) -> f64, budget: Option<Budget>| {
         let pts: Vec<(f64, f64)> = good.iter().map(|p| (p.n as f64, f(p))).collect();
-        let Some(law) = fit(&pts) else { return };
-        if law.class == Class::Constant || law.b <= 0.0 {
+        let time_scale =
+            (metric == "virtual_ms" && pts.iter().any(|(_, y)| !y.is_finite())).then(|| good.iter().map(|p| p.virtual_ns.clone()).max().unwrap_or_default());
+        let pts = time_scale.as_ref().map_or(pts, |scale| good.iter().map(|p| (p.n as f64, p.virtual_ns.ratio(scale))).collect());
+        let Some(mut law) = fit(&pts) else { return };
+        if let Some(scale) = time_scale {
+            law.text = format!("({}) × {} ms", law.text, scale.ms_text());
+            law.time_scale_ns = Some(scale);
+        }
+        if law.class == Class::Constant || !law.increasing() {
             return;
         }
         // Fuel and memory wobble; ignore growth under 2 % over the range.
@@ -426,26 +467,23 @@ pub fn analyze(app: &App, knob: Knob, points: Vec<Point>) -> ScaleReport {
         if hi <= lo * 1.02 {
             return;
         }
-        let breaks_at = limit.and_then(|lim| {
-            // A measured break wins over the extrapolated one.
-            points
-                .iter()
-                .find(|p| f(p) > lim)
-                .map(|p| p.n)
-                .filter(|&n| law.breaking_point(lim, MAX_BREAK_N).is_none_or(|b| b > n))
-                .or(law.breaking_point(lim, MAX_BREAK_N))
-        });
-        growth.push(Growth { metric, law, breaks_at, limit });
+        let measured = budget.and_then(|limit| points.iter().find(|p| limit.exceeds(p)).map(|p| p.n));
+        let predicted = budget
+            .and_then(|limit| law.breaking_point(limit.approximate(), MAX_BREAK_N))
+            .filter(|&n| !points.iter().any(|p| p.n >= n && p.outcome == OutcomeKind::Ok && budget.is_some_and(|limit| !limit.exceeds(p))));
+        let breaks_at = measured.or(predicted);
+        let break_evidence = if measured.is_some() { Some("measured") } else { predicted.map(|_| "inferred") };
+        growth.push(Growth { metric, law, breaks_at, limit: budget.map(Budget::display), break_evidence, predicted_breaks_at: predicted });
     };
     let funcs: BTreeSet<String> = points.iter().flat_map(|p| p.calls.keys().cloned()).collect();
     for f in &funcs {
         let key = f.clone();
         add(format!("calls {f}"), &move |p: &Point| *p.calls.get(&key).unwrap_or(&0) as f64, None);
     }
-    add("cost".into(), &|p| p.cost as f64, l.cost_per_request.map(|c| c as f64));
-    add("virtual_ms".into(), &|p| p.virtual_ns as f64 / 1e6, l.max_latency_ms);
-    add("fuel".into(), &|p| p.fuel as f64, Some(l.fuel as f64));
-    add("peak_memory".into(), &|p| p.peak_memory as f64, Some(l.memory as f64));
+    add("cost".into(), &|p| p.cost as f64, l.cost_per_request.map(Budget::Cost));
+    add("virtual_ms".into(), &|p| p.virtual_ns.ms(), l.max_latency_ms.map(Budget::Latency));
+    add("fuel".into(), &|p| p.fuel as f64, Some(Budget::Fuel(l.fuel)));
+    add("peak_memory".into(), &|p| p.peak_memory as f64, Some(Budget::Memory(l.memory)));
     add("output_bytes".into(), &|p| p.output_bytes as f64, None);
     add("host_arg_bytes".into(), &|p| p.host_arg_bytes as f64, None);
 
@@ -457,6 +495,8 @@ fn findings(app: &App, knob: &Knob, points: &[Point], growth: &[Growth]) -> Vec<
     let mut out = Vec::new();
     let worst = points.iter().rfind(|p| p.outcome == OutcomeKind::Ok).or(points.last()).map(|p| p.run.as_str());
     let budget_break = growth.iter().filter_map(|g| g.breaks_at.map(|b| (b, g.metric.clone()))).min();
+    let budget_growth = budget_break.as_ref().and_then(|(_, metric)| growth.iter().find(|g| &g.metric == metric));
+    let policy_break = growth.iter().flat_map(|g| [g.breaks_at, g.predicted_breaks_at]).flatten().min();
     let kind = match knob {
         Knob::HostList(_) => "n_plus_1",
         _ => "input_amplification",
@@ -477,7 +517,7 @@ fn findings(app: &App, knob: &Knob, points: &[Point], growth: &[Growth]) -> Vec<
         let sev = if g.law.class == Class::Capped {
             // The app bounds it: a hint, not an n+1.
             Severity::Info
-        } else if g.law.class.superlinear() || budget_break.as_ref().is_some_and(|(b, _)| input || *b <= 100) || effect.is_some() || batch.is_some() {
+        } else if g.law.class.superlinear() || policy_break.is_some_and(|b| input || b <= 100) || effect.is_some() || batch.is_some() {
             Severity::Fail
         } else {
             Severity::Warn
@@ -487,7 +527,11 @@ fn findings(app: &App, knob: &Knob, points: &[Point], growth: &[Growth]) -> Vec<
             title.push_str(&format!(" (effect {}: one change per element)", e.name()));
         }
         if let Some((b, m)) = &budget_break {
-            title.push_str(&format!("; {m} breaks its limit at n = {b}"));
+            if budget_growth.is_some_and(|g| g.break_evidence == Some("measured")) {
+                title.push_str(&format!("; {m} exceeds its limit at measured n = {b}"));
+            } else {
+                title.push_str(&format!("; {m} is predicted to exceed its limit at n = {b}"));
+            }
         }
         if let Some(b) = &batch {
             title.push_str(&format!("; {b} does it in one call"));
@@ -497,7 +541,8 @@ fn findings(app: &App, knob: &Knob, points: &[Point], growth: &[Growth]) -> Vec<
             &format!("{ex}\0{knob:?}\0{f}"),
             sev,
             title,
-            json!({"knob": knob, "func": f, "law": g.law.text, "class": g.law.class, "breaks_at": budget_break, "worst_run": worst,
+            json!({"knob": knob, "func": f, "law": g.law.text, "class": g.law.class, "breaks_at": budget_break, "break_evidence":budget_growth.and_then(|g|g.break_evidence),
+                   "predicted_breaks_at":budget_growth.and_then(|g|g.predicted_breaks_at), "worst_run": worst,
                    "effect": effect.map(|e| e.name()), "batch": batch}),
             worst,
         ));
@@ -512,14 +557,14 @@ fn findings(app: &App, knob: &Knob, points: &[Point], growth: &[Growth]) -> Vec<
         };
         // A host list of thousands is unusual; a request field is the
         // requester's to choose.
-        let near = g.breaks_at.is_some_and(|b| b <= HOST_LIST_REALISTIC);
+        let near = [g.breaks_at, g.predicted_breaks_at].into_iter().flatten().any(|b| b <= HOST_LIST_REALISTIC);
         let sev = if matches!(knob, Knob::HostList(_)) && !near { Severity::Info } else { Severity::Warn };
         out.push(Finding::new(
             kind,
             &format!("{ex}\0{knob:?}\0{}", g.metric),
             sev,
             format!("{} grows as {} with n = {}", g.metric, g.law.text, knob.describe()),
-            json!({"knob": knob, "metric": g.metric, "law": g.law.text, "class": g.law.class, "breaks_at": g.breaks_at, "worst_run": worst}),
+            json!({"knob": knob, "metric": g.metric, "law": g.law.text, "class": g.law.class, "breaks_at": g.breaks_at, "break_evidence":g.break_evidence, "predicted_breaks_at":g.predicted_breaks_at, "worst_run": worst}),
             worst,
         ));
     }

@@ -4,6 +4,7 @@
 //! record (apart from `wall_us`). The run id is a hash of the spec, so
 //! asking twice for the same thing finds the stored answer.
 
+use crate::natural::Natural;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -120,12 +121,12 @@ pub struct HostCall {
     pub source: String,
     /// False if the manifest does not grant the interface.
     pub granted: bool,
-    pub latency_ns: u64,
+    pub latency_ns: Natural,
     pub cost: u64,
     /// Guest instructions spent before this call.
     pub fuel_before: u64,
     /// Virtual time at the call, ns since the start.
-    pub t_ns: u64,
+    pub t_ns: Natural,
     /// Guest frames that made the call, innermost first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stack: Vec<Frame>,
@@ -137,10 +138,10 @@ pub struct Totals {
     pub fuel: u64,
     pub peak_memory: u64,
     /// Virtual time of the whole call.
-    pub virtual_ns: u64,
-    pub guest_ns: u64,
-    pub host_ns: u64,
-    pub sleep_ns: u64,
+    pub virtual_ns: Natural,
+    pub guest_ns: Natural,
+    pub host_ns: Natural,
+    pub sleep_ns: Natural,
     pub host_calls: u32,
     /// Exact sum of u64 host charges; unusually large totals use decimal JSON strings.
     #[serde(with = "crate::wide")]
@@ -158,6 +159,10 @@ pub struct RunRecord {
     pub outcome: Outcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    /// Terminal status of a selected standard wasi:cli/run command. A normal
+    /// result maps to 0/1; an explicit exit preserves its original status code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_exit_code: Option<i32>,
     pub totals: Totals,
     pub events: Vec<HostCall>,
     /// A reviewer resource guard stopped evidence capture.

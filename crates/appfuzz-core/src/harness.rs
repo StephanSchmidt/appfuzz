@@ -8,6 +8,7 @@
 //! deterministic: virtual clocks, seeded randomness, captured output, no
 //! files, no network, sleeps that only advance virtual time.
 
+use crate::natural::{Natural, Rate};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,6 +66,18 @@ impl std::fmt::Display for TraceCaptureLimit {
 }
 
 impl std::error::Error for TraceCaptureLimit {}
+
+/// A deliberate service failure, distinct from incomplete capture or bad plans.
+#[derive(Debug)]
+struct SimulatedHostTrap(String);
+
+impl std::fmt::Display for SimulatedHostTrap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SimulatedHostTrap {}
 
 /// What the interceptors need to know about the platform.
 struct Platform {
@@ -160,7 +173,7 @@ struct Host {
     clock: VirtualClock,
     timers: p2::Timers,
     fuel_start: u64,
-    ns_per_fuel: f64,
+    ns_per_fuel: Rate,
     events: Vec<HostCall>,
     trace_bytes: usize,
     production_limits: Option<crate::manifest::Limits>,
@@ -168,10 +181,10 @@ struct Host {
     /// When the next host call started, if before it was answered: an
     /// outgoing HTTP request is in flight from `handle` until the guest
     /// waits for it, alongside the guest's work and other requests.
-    call_started_ns: Option<u64>,
+    call_started_ns: Option<Natural>,
     /// How long the next host call may take before it times out (an
     /// outgoing request's `first-byte-timeout`).
-    call_deadline_ns: Option<u64>,
+    call_deadline_ns: Option<Natural>,
     plan_error: Option<String>,
     host_trap: Option<String>,
     limiter: Limiter,
@@ -229,7 +242,7 @@ impl Host {
         if self.limiter.budget.peak() > limits.memory {
             return Some("memory");
         }
-        if limits.max_latency_ms.is_some_and(|limit| self.clock.with(|clock| crate::detect::ms(clock.elapsed_ns())) > limit) {
+        if limits.max_latency_ms.is_some_and(|limit| self.clock.with(|clock| clock.elapsed_ns().exceeds_ms(limit))) {
             return Some("latency");
         }
         let cost: u128 = self.events.iter().map(|event| u128::from(event.cost)).sum();
@@ -259,7 +272,7 @@ impl Host {
         let left = store.get_fuel().unwrap_or(0);
         let data = store.data();
         let used = data.fuel_start.saturating_sub(left);
-        let ns = (used as f64 * data.ns_per_fuel) as u64;
+        let ns = data.ns_per_fuel.apply(&used.into());
         data.clock.with(|c| c.guest_ns = ns);
         used
     }
@@ -705,6 +718,7 @@ impl App {
             events: vec![],
             guest_error: None,
             rejected_output: None,
+            command_exit_code: None,
             memory_limit_hit: false,
             capture_limited: false,
             stdout: String::new(),
@@ -745,7 +759,7 @@ impl App {
             params.iter().zip(&spec.args).map(|((name, ty), v)| json_to_val(v, ty).with_context(|| format!("argument {name}"))).collect::<Result<Vec<_>>>()?;
 
         let start = parse_datetime(&spec.now).ok_or_else(|| anyhow!("bad time {:?}", spec.now))?;
-        let start_ns = (start.max(0) as u64).checked_mul(1_000_000_000).ok_or_else(|| anyhow!("time {:?} is past the year 2554", spec.now))?;
+        let start_ns = i128::from(start) * 1_000_000_000;
         let clock = VirtualClock::new(start_ns);
         let drawn = Arc::new(Mutex::new(0u64));
         let stdout = MemoryOutputPipe::new(OUTPUT_CAPACITY);
@@ -782,7 +796,7 @@ impl App {
             clock: clock.clone(),
             timers: Default::default(),
             fuel_start: spec.fuel,
-            ns_per_fuel: spec.ns_per_fuel,
+            ns_per_fuel: Rate::new(spec.ns_per_fuel),
             events: vec![],
             calls: BTreeMap::new(),
             trace_bytes: 0,
@@ -805,9 +819,13 @@ impl App {
         // WASI clock callbacks only receive the clock object, not the store.
         // Update before every guest-to-host transition, including Preview 1
         // and startup calls, so they see the fuel consumed since the last call.
-        store.call_hook(|store, transition| {
+        store.call_hook(|mut store, transition| {
             if matches!(transition, wasmtime::CallHook::CallingHost) {
                 Host::sync_guest_time(&store);
+            } else if matches!(transition, wasmtime::CallHook::ReturningFromHost) && store.data().clock.with(|clock| clock.before_epoch_read) {
+                let message = "the configured wall time is before the Unix epoch and cannot be represented by this WASI clock".to_string();
+                store.data_mut().plan_error = Some(message.clone());
+                return Err(wasmtime::Error::msg(message));
             }
             Ok(())
         });
@@ -817,7 +835,7 @@ impl App {
 
         let mut instance = None;
         let mut initializing = true;
-        let call = match &self.pre {
+        let mut call = match &self.pre {
             Pre::Component(pre) => match pre.instantiate(&mut store) {
                 Err(error) => Err(error.context("instantiating the component")),
                 Ok(inst) => {
@@ -835,7 +853,7 @@ impl App {
                         })
                     } else {
                         let mut results = vec![Val::Bool(false); export.ty.results().len()];
-                        func.call(&mut store, &args, &mut results).and_then(|()| http::flush(&mut store)).map(|()| results)
+                        func.call(&mut store, &args, &mut results).map(|()| results)
                     };
                     instance = Some(inst);
                     call
@@ -876,11 +894,30 @@ impl App {
                 }
             },
         };
+        if matches!(self.pre, Pre::Component(_)) {
+            if wit::is_cli_run(&export) {
+                match &call {
+                    Err(error) if error.is::<wasmtime_wasi::I32Exit>() => {
+                        let code = error.downcast_ref::<wasmtime_wasi::I32Exit>().unwrap().0;
+                        record.command_exit_code = Some(code);
+                        call = Ok(vec![Val::Result(if code == 0 { Ok(None) } else { Err(None) })]);
+                    }
+                    Ok(results) => {
+                        record.command_exit_code = Some(match results.first() {
+                            Some(Val::Result(Ok(_))) => 0,
+                            _ => 1,
+                        })
+                    }
+                    Err(_) => {}
+                }
+            }
+            call = http::finish_call(&mut store, call);
+        }
         let fuel_start = store.data().fuel_start;
 
         let fuel_left = store.get_fuel().unwrap_or(0);
         let used = fuel_start.saturating_sub(fuel_left);
-        let guest_ns = (used as f64 * spec.ns_per_fuel) as u64;
+        let guest_ns = Natural::from_scaled_f64(spec.ns_per_fuel, used);
         clock.with(|c| c.guest_ns = guest_ns);
 
         match call {
@@ -941,9 +978,9 @@ impl App {
             fuel: used,
             peak_memory: data.limiter.budget.peak(),
             virtual_ns: c.elapsed_ns(),
-            guest_ns: c.guest_ns,
-            host_ns: c.host_ns,
-            sleep_ns: c.sleep_ns,
+            guest_ns: c.guest_ns.clone(),
+            host_ns: c.host_ns.clone(),
+            sleep_ns: c.sleep_ns.clone(),
             host_calls: data.events.len() as u32,
             cost: data.events.iter().map(|e| u128::from(e.cost)).sum(),
             clock_reads: c.wall_reads.saturating_add(c.monotonic_reads),
@@ -1171,7 +1208,7 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     }
     let generated = matches!(resolved.decision, Decision::Generate(_));
     let latency_ms = resolved.latency_ms.unwrap_or_else(|| platform.latency_ms.get(key).copied().unwrap_or(1.0));
-    let mut latency_ns = (latency_ms * 1_000_000.0) as u64;
+    let mut latency_ns = Natural::from_scaled_f64(latency_ms, 1_000_000);
     // A request the guest gave a timeout fails when the timeout runs out.
     if let Some(d) = data.call_deadline_ns.take()
         && latency_ns > d
@@ -1186,11 +1223,11 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
     let started = data.call_started_ns.take();
     let t_ns = data.clock.with(|c| {
         let now = c.elapsed_ns();
-        let t = started.map_or(now, |s| s.min(now));
+        let t = started.as_ref().map_or_else(|| now.clone(), |s| s.clone().min(now.clone()));
         // HTTP requests are prepared without waiting. Their pollables charge
         // the remaining host time only when the guest blocks on a response.
         if started.is_none() {
-            c.host_ns = c.host_ns.saturating_add(latency_ns);
+            c.host_ns += latency_ns.clone();
         }
         t
     });
@@ -1217,7 +1254,7 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
         Decision::Trap(msg) => {
             event.trap = Some(msg.clone());
             data.host_trap = Some(msg.clone());
-            Err(anyhow!("host trap from plan: {msg}"))
+            Err(SimulatedHostTrap(format!("host trap from plan: {msg}")).into())
         }
         Decision::Return(mut v) => {
             // The host keeps its promises, whatever the plan says.
@@ -1256,7 +1293,7 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
                         event.trap = Some(msg.clone());
                         data.host_trap = Some(msg.clone());
                         data.record_event(event);
-                        bail!("host response lost after commit: {msg}");
+                        return Err(SimulatedHostTrap(format!("host response lost after commit: {msg}")).into());
                     }
                     event.result = Some(compact(v));
                     for (r, v) in results.iter_mut().zip(vals) {

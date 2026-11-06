@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::detect::{Finding, Severity, list_in, ms};
+use crate::detect::{Finding, Severity, list_in};
 use crate::harness::{App, fn_key_eq};
 use crate::output::{impossible_percentages, response, word_bag};
 use crate::par::{self, Runner};
@@ -147,9 +147,9 @@ pub fn variants(app: &App, r: &RunRecord) -> Vec<Variant> {
     if app.manifest.limits.max_latency_ms.is_some() {
         for f in funcs {
             let calls: Vec<_> = r.events.iter().filter(|e| e.func == f).collect();
-            let mean = calls.iter().map(|e| e.latency_ns).sum::<u64>() as f64 / calls.len() as f64 / 1e6;
+            let mean = (calls.iter().map(|e| e.latency_ns.clone()).sum::<crate::natural::Natural>() / calls.len() as u64).ms();
             let mut s = base.clone();
-            s.plan.0.entry(f.to_string()).or_default().response.latency_ms = Some((mean * SLOW_FACTOR).max(SLOW_MIN_MS));
+            s.plan.0.entry(f.to_string()).or_default().response.latency_ms = Some((mean * SLOW_FACTOR).clamp(SLOW_MIN_MS, f64::MAX));
             // Pinned results carry no latency of their own, so the
             // function's latency applies to every call.
             out.push(Variant { change: Change::Slow, func: Some(f.to_string()), call: None, spec: s });
@@ -272,8 +272,8 @@ pub fn compare(app: &App, base: &RunRecord, v: &Variant, vr: &RunRecord) -> Vec<
         }
         Change::Slow => {
             let limit = m.limits.max_latency_ms.unwrap_or(f64::MAX);
-            let (t0, t1) = (ms(base.totals.virtual_ns), ms(vr.totals.virtual_ns));
-            if t0 <= limit && t1 > limit {
+            let (t0, t1) = (base.totals.virtual_ns.ms_json(), vr.totals.virtual_ns.ms_json());
+            if !base.totals.virtual_ns.exceeds_ms(limit) && vr.totals.virtual_ns.exceeds_ms(limit) {
                 let calls = vr.events.iter().filter(|e| e.func == func).count();
                 let per = v.spec.plan.0.get(&func).and_then(|p| p.response.latency_ms).unwrap_or(0.0);
                 out.push(Finding::new(

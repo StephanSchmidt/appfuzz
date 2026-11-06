@@ -188,7 +188,7 @@ fn huge_guest_sleeps_do_not_wrap_the_virtual_clock() {
     assert_eq!(record.outcome.kind, OutcomeKind::Ok, "{:?}", record.outcome);
     assert_eq!(record.result, Some(json!(u64::MAX)));
     assert_eq!(record.totals.sleep_ns, u64::MAX);
-    assert_eq!(record.totals.virtual_ns, u64::MAX);
+    assert_eq!(record.totals.virtual_ns, record.totals.sleep_ns.clone() + record.totals.guest_ns.clone() + appfuzz_core::natural::Natural::from(1000u64));
     assert_eq!(record.totals.clock_reads, 1);
 }
 
@@ -203,7 +203,9 @@ fn huge_host_latency_and_cost_remain_over_budget_without_overflow() {
     let record = app.run(&spec);
     assert_eq!(record.outcome.kind, OutcomeKind::Ok, "{:?}", record.outcome);
     assert_eq!(record.result, Some(json!(10)));
-    assert_eq!(record.totals.virtual_ns, u64::MAX);
+    let host_ns = appfuzz_core::natural::Natural::from_scaled_f64(1e30, 1_000_000) * 10;
+    assert_eq!(record.totals.host_ns, host_ns);
+    assert_eq!(record.totals.virtual_ns, host_ns + record.totals.guest_ns.clone());
     assert_eq!(record.totals.cost, 10 * u128::from(u64::MAX));
     assert_eq!(record.events.len(), 10);
     let findings = appfuzz_core::detect::per_run(&record, &app.manifest);

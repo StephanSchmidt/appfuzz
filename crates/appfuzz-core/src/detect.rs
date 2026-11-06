@@ -51,6 +51,7 @@ impl Finding {
     pub fn evidence(&self) -> &'static str {
         match self.kind.as_str() {
             "crash"
+            | "command_failed"
             | "stack_overflow"
             | "hang"
             | "over_budget"
@@ -159,6 +160,16 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let ex = &r.spec.export;
     let o = &r.outcome;
     let panic = panic_text(&r.stderr);
+    if let Some(code) = r.command_exit_code.filter(|code| *code != 0) {
+        out.push(Finding::new(
+            "command_failed",
+            ex,
+            Severity::Fail,
+            format!("{ex} completes unsuccessfully (exit code {code})"),
+            json!({"exit_code":code}),
+            run,
+        ));
+    }
     match o.kind {
         OutcomeKind::Ok | OutcomeKind::HostTrap | OutcomeKind::PlanError | OutcomeKind::Error | OutcomeKind::BudgetExceeded => {}
         OutcomeKind::OutOfFuel | OutcomeKind::Timeout => out.push(Finding::new(
@@ -166,7 +177,7 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             ex,
             Severity::Fail,
             format!("{ex} does not return ({})", kind_name(o.kind)),
-            json!({"outcome": o.kind, "fuel": r.totals.fuel, "virtual_ms": ms(r.totals.virtual_ns)}),
+            json!({"outcome": o.kind, "fuel": r.totals.fuel, "virtual_ms": r.totals.virtual_ns.ms_json()}),
             run,
         )),
         OutcomeKind::StackOverflow => out.push(Finding::new(
@@ -213,9 +224,11 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         ));
     }
     if let Some(limit) = l.max_latency_ms
-        && ms(t.virtual_ns) > limit
+        && t.virtual_ns.exceeds_ms(limit)
     {
-        out.push(over_budget(r, "latency_ms", ms(t.virtual_ns), limit));
+        let mut finding = over_budget(r, "latency_ms", t.virtual_ns.ms_json(), json!(limit));
+        finding.detail["used_ns"] = json!(t.virtual_ns);
+        out.push(finding);
     }
 
     // Redundant calls: same function, same arguments.
@@ -332,27 +345,27 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     // Serial chains: many calls one after another whose latencies add up.
     if let Some(ml) = l.max_latency_ms
         && t.host_calls >= SERIAL_MIN
-        && ms(t.host_ns) >= ml * 0.5
+        && ms(&t.host_ns) >= ml * 0.5
     {
-        let mut per: BTreeMap<&str, (u32, u64)> = BTreeMap::new();
+        let mut per: BTreeMap<&str, (u32, crate::natural::Natural)> = BTreeMap::new();
         for e in &r.events {
             let x = per.entry(&e.func).or_default();
             x.0 += 1;
-            x.1 = x.1.saturating_add(e.latency_ns);
+            x.1 += e.latency_ns.clone();
         }
-        let (f, (n, ns)) = per.iter().max_by_key(|(_, (_, ns))| *ns).map(|(f, x)| (*f, *x)).unwrap_or_default();
+        let (f, (n, ns)) = per.iter().max_by(|(_, (_, a)), (_, (_, b))| a.cmp(b)).map(|(f, x)| (*f, x.clone())).unwrap_or_default();
         out.push(Finding::new(
             "serial_chain",
             &format!("{ex}\0{f}"),
             Severity::Warn,
             format!(
                 "{ex} waits {} ms for {} host calls in a row ({n} × {f}: {} ms), the latency limit is {} ms",
-                fmt(ms(t.host_ns)),
+                fmt(ms(&t.host_ns)),
                 t.host_calls,
-                fmt(ms(ns)),
+                fmt(ms(&ns)),
                 fmt(ml)
             ),
-            json!({"host_ms": ms(t.host_ns), "host_calls": t.host_calls, "slowest_func": f, "slowest_calls": n, "slowest_ms": ms(ns), "limit_ms": ml}),
+            json!({"host_ms": t.host_ns.ms_json(), "host_calls": t.host_calls, "slowest_func": f, "slowest_calls": n, "slowest_ms": ns.ms_json(), "limit_ms": ml}),
             run,
         ));
     }
@@ -384,8 +397,8 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
             "sleeps",
             ex,
             Severity::Warn,
-            format!("{ex} sleeps {} ms in a request", fmt(ms(t.sleep_ns))),
-            json!({"sleep_ms": ms(t.sleep_ns)}),
+            format!("{ex} sleeps {} ms in a request", fmt(ms(&t.sleep_ns))),
+            json!({"sleep_ms": t.sleep_ns.ms_json()}),
             run,
         ));
     }
@@ -645,12 +658,12 @@ pub fn kind_name(k: OutcomeKind) -> String {
     serde_json::to_value(k).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
 }
 
-pub fn ms(ns: u64) -> f64 {
-    ns as f64 / 1_000_000.0
+pub fn ms(ns: impl Into<crate::natural::Natural>) -> f64 {
+    ns.into().ms()
 }
 
 fn fmt(x: f64) -> String {
-    if x.fract() == 0.0 { format!("{}", x as i64) } else { format!("{x:.2}") }
+    if x.fract() == 0.0 { format!("{x:.0}") } else { format!("{x:.2}") }
 }
 
 /// Stored findings, merged by id.
@@ -896,10 +909,10 @@ mod tests {
         let mut manifest = crate::manifest::Manifest::for_wasm(std::path::Path::new("x.wasm"));
         manifest.limits.max_latency_ms = Some(0.001);
         let mut record = crate::envelope::Trace::default().to_record();
-        record.totals.virtual_ns = 1001;
+        record.totals.virtual_ns = 1001u64.into();
         let findings = super::per_run(&record, &manifest);
         assert!(findings.iter().any(|f| f.kind == "over_budget" && f.detail["limit"] == "latency_ms"), "{findings:?}");
-        record.totals.virtual_ns = 1000;
+        record.totals.virtual_ns = 1000u64.into();
         assert!(!super::per_run(&record, &manifest).iter().any(|f| f.kind == "over_budget"));
     }
 

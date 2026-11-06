@@ -73,7 +73,10 @@ outside the envelope. Each budget is checked independently, including when
 the trace reports zero fuel.
 Integer budgets compare against the margin without rounding through floating
 point. Cost budgets may exceed `u64::MAX`; such values use decimal strings in
-JSON, while smaller budgets remain numbers.
+JSON, while smaller budgets remain numbers. New envelopes also retain exact
+`budget.virtual_ns`; latency margins use this value without converting through
+floating point. Legacy envelopes use their millisecond budget and margin,
+rounding only the final threshold to whole nanoseconds.
 
 A new call site is a warn, not a fail: requests the fuzzer never made can
 reach ordinary code. A new destination named by the app itself is a fail:
@@ -125,6 +128,9 @@ without an explicit outcome, this field indicates a failed request.
 The optional `memory_limit_hit` flag preserves a denial by the run's memory
 cap. A guest may handle it successfully, so the flag alone does not imply a
 failed or incomplete request.
+The optional `command_exit_code` preserves a standard WASI command's terminal
+status. Nonzero status produces `command_failed` when run detectors judge the
+trace; a declared command failure is distinct from a Wasm trap.
 `capture_limited = true` marks a prefix retained after a reviewer resource guard
 stopped the run. Trace conversion preserves this marker and the original error;
 it cannot represent a complete successful execution. Such traces cannot pass

@@ -17,6 +17,7 @@
 //! - `response-outparam.set`: notes which body is the response's.
 //! - `outgoing-request.set-authority`: also takes a host with a canary in it.
 
+use crate::natural::Natural;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -91,11 +92,11 @@ impl Default for Http {
 struct Pending {
     seq: u64,
     /// Virtual time when the guest sent it.
-    sent_ns: u64,
-    sent_at: u128,
+    sent_ns: Natural,
+    sent_at: Natural,
     ready: Arc<super::p2::Deadline>,
     /// How long the guest lets it take: connect plus first-byte timeout.
-    deadline_ns: Option<u64>,
+    deadline_ns: Option<Natural>,
     method: String,
     url: String,
     headers: Vec<(String, String)>,
@@ -307,8 +308,8 @@ pub(super) fn link(linker: &mut Linker<Host>) -> Result<()> {
     Ok(())
 }
 
-fn response_deadline_ns(first_byte: Duration, connect: Duration) -> u64 {
-    first_byte.saturating_add(connect).as_nanos().min(u64::MAX as u128) as u64
+fn response_deadline_ns(first_byte: Duration, connect: Duration) -> Natural {
+    Natural::from(first_byte.as_nanos()) + Natural::from(connect.as_nanos())
 }
 
 /// `outgoing-handler.handle`: checks the request like the real host and
@@ -316,7 +317,7 @@ fn response_deadline_ns(first_byte: Duration, connect: Duration) -> u64 {
 fn send(
     store: &mut StoreContextMut<'_, Host>,
     id: Resource<HostOutgoingRequest>,
-    deadline_ns: Option<u64>,
+    deadline_ns: Option<Natural>,
 ) -> wasmtime::Result<Result<Resource<HostFutureIncomingResponse>, wt::ErrorCode>> {
     let rep = id.rep();
     Host::sync_guest_time(store);
@@ -401,10 +402,46 @@ pub(super) fn answer(store: &mut StoreContextMut<'_, Host>, rep: u32, blocking: 
 pub(super) fn flush(store: &mut Store<Host>) -> wasmtime::Result<()> {
     let mut pending: Vec<_> = std::mem::take(&mut store.data_mut().http.pending).into_iter().collect();
     pending.sort_by_key(|(_, p)| p.seq);
+    let mut first_failure = None;
     for (rep, p) in pending {
-        resolve(&mut store.as_context_mut(), Some(rep), p)?;
+        if let Err(error) = resolve(&mut store.as_context_mut(), Some(rep), p) {
+            if !error.is::<super::SimulatedHostTrap>() {
+                return Err(error);
+            }
+            if first_failure.is_none() {
+                first_failure = Some((error, store.data().host_trap.clone()));
+            }
+        }
     }
-    Ok(())
+    match first_failure {
+        Some((error, message)) => {
+            store.data_mut().host_trap = message;
+            Err(error)
+        }
+        None => Ok(()),
+    }
+}
+
+/// Calls already issued by the guest remain evidence even if its entry traps.
+/// Capture or plan failures while draining must not become a complete trace.
+pub(super) fn finish_call<T>(store: &mut Store<Host>, primary: wasmtime::Result<T>) -> wasmtime::Result<T> {
+    let primary_host_trap = store.data().host_trap.clone();
+    match flush(store) {
+        Ok(()) => primary,
+        Err(error) => match primary {
+            Ok(_) => Err(error),
+            Err(guest) if error.is::<super::SimulatedHostTrap>() => {
+                store.data_mut().host_trap = primary_host_trap;
+                Err(guest.context(format!("pending request also failed: {error:#}")))
+            }
+            Err(guest) => {
+                if let Some(message) = &mut store.data_mut().plan_error {
+                    message.push_str(&format!("; guest also failed: {guest:#}"));
+                }
+                Err(error.context(format!("draining requests after guest failure: {guest:#}")))
+            }
+        },
+    }
 }
 
 /// The simulated host call of one request; the answer goes into the future.
@@ -418,7 +455,7 @@ fn resolve(store: &mut StoreContextMut<'_, Host>, future: Option<u32>, p: Pendin
     };
     let result = if end == End::Aborted {
         // The guest gave up on the body: the request never completes.
-        p.ready.set(p.sent_at);
+        p.ready.set(p.sent_at.clone());
         Err(wasmtime_wasi_http::Error::HttpProtocolError)
     } else {
         let ty = store.data().platform.funcs.get(CLIENT_KEY).map(|f| f.ty.clone()).ok_or_else(|| wasmtime::format_err!("{CLIENT_KEY} is not linked"))?;
@@ -426,11 +463,11 @@ fn resolve(store: &mut StoreContextMut<'_, Host>, future: Option<u32>, p: Pendin
         let args = [json!(p.method), json!(p.url), Value::Array(headers), json!(String::from_utf8_lossy(&body))];
         let params = ty.params().zip(args.iter()).map(|((_, t), v)| json_to_val(v, &t)).collect::<Result<Vec<_>>>().map_err(wasmtime::Error::from_anyhow)?;
         let mut results = vec![Val::Bool(false)];
-        store.data_mut().call_started_ns = Some(p.sent_ns);
-        store.data_mut().call_deadline_ns = p.deadline_ns;
+        store.data_mut().call_started_ns = Some(p.sent_ns.clone());
+        store.data_mut().call_deadline_ns = p.deadline_ns.clone();
         intercept(store.as_context_mut(), CLIENT_KEY, &params, &mut results).map_err(wasmtime::Error::from_anyhow)?;
-        let latency = store.data().events.last().map_or(0, |event| event.latency_ns);
-        p.ready.set(p.sent_at + u128::from(latency));
+        let latency = store.data().events.last().map_or_else(Natural::default, |event| event.latency_ns.clone());
+        p.ready.set(p.sent_at + latency);
         match incoming(&val_to_json(&results[0])) {
             Ok(r) => r,
             Err(e) => {
@@ -583,13 +620,8 @@ pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value)
         (req, out)
     };
     let typed = func.typed::<(Resource<HostIncomingRequest>, Resource<HostResponseOutparam>), ()>(&*store).map_err(anyhow::Error::from)?;
-    if let Err(e) = typed.call(&mut *store, (req, out)) {
-        // Requests sent before the crash still went out.
-        let _ = flush(store);
-        return Ok(Err(e));
-    }
-    if let Err(e) = flush(store) {
-        return Ok(Err(e));
+    if let Err(error) = typed.call(&mut *store, (req, out)) {
+        return Ok(Err(error));
     }
     let taken = store.data().http.response.lock().unwrap_or_else(|e| e.into_inner()).take();
     let response = match taken {
@@ -625,8 +657,8 @@ mod tests {
     #[test]
     fn response_deadlines_do_not_wrap_when_timeouts_add_up() {
         assert_eq!(response_deadline_ns(Duration::from_millis(2), Duration::from_millis(3)), 5_000_000);
-        assert_eq!(response_deadline_ns(Duration::from_nanos(u64::MAX), Duration::from_nanos(1)), u64::MAX);
-        assert_eq!(response_deadline_ns(Duration::MAX, Duration::MAX), u64::MAX);
+        assert_eq!(response_deadline_ns(Duration::from_nanos(u64::MAX), Duration::from_nanos(1)), u128::from(u64::MAX) + 1);
+        assert_eq!(response_deadline_ns(Duration::MAX, Duration::MAX), Duration::MAX.as_nanos() * 2);
     }
 
     #[test]

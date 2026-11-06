@@ -7,6 +7,7 @@ use wasmtime_wasi::p1::{WasiP1Ctx, types, wasi_snapshot_preview1::WasiSnapshotPr
 use wiggle::{GuestMemory, GuestPtr, GuestType};
 
 use super::Host;
+use crate::natural::Natural;
 use crate::wasi::VirtualClock;
 
 pub(super) fn link(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
@@ -30,14 +31,49 @@ pub(super) fn link(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
             Err(error) => error.downcast().map(|errno| i32::from(u16::from(errno))),
         }
     })?;
+    linker.func_wrap("wasi_snapshot_preview1", "clock_time_get", clock_time_get)?;
     linker.allow_shadowing(false);
     Ok(())
+}
+
+fn clock_time_get(mut caller: Caller<'_, Host>, id: i32, precision: i64, result: i32) -> wasmtime::Result<i32> {
+    let clock = caller.data().clock.clone();
+    let Some(Extern::Memory(memory)) = caller.get_export("memory") else {
+        return Err(wasmtime::Error::msg("missing required memory export"));
+    };
+    let (bytes, host) = memory.data_and_store_mut(&mut caller);
+    let mut memory = GuestMemory::Unshared(bytes);
+    let outcome = if id == 0 {
+        clock
+            .with(|state| state.read_wall_ns())
+            .filter(|ns| ns <= &Natural::from(u64::MAX))
+            .map(|ns| ns.saturating_u64())
+            .ok_or_else(|| types::Error::from(types::Errno::Overflow))
+    } else {
+        let id = match id {
+            1 => Some(types::Clockid::Monotonic),
+            2 => Some(types::Clockid::ProcessCputimeId),
+            3 => Some(types::Clockid::ThreadCputimeId),
+            _ => None,
+        };
+        match id {
+            Some(id) => host.p1.as_mut().expect("plain-module WASI context").clock_time_get(&mut memory, id, precision as u64),
+            None => Err(types::Errno::Inval.into()),
+        }
+    };
+    match outcome {
+        Ok(timestamp) => {
+            memory.write(GuestPtr::new(result as u32), timestamp)?;
+            Ok(0)
+        }
+        Err(error) => error.downcast().map(|errno| i32::from(u16::from(errno))),
+    }
 }
 
 struct Timer {
     index: usize,
     userdata: u64,
-    delay: u64,
+    delay: Natural,
 }
 
 fn poll(
@@ -58,7 +94,7 @@ fn poll(
     if bytes > fuel {
         return Err(types::Errno::Nomem.into());
     }
-    let wall = clock.with(|state| state.base_wall_ns.saturating_add(state.elapsed_ns()));
+    let wall = clock.with(|state| state.clone());
     let monotonic = clock.monotonic_now();
     let mut timers = Vec::new();
     let mut descriptors = Vec::new();
@@ -67,22 +103,23 @@ fn poll(
         let sub = memory.read(sub?)?;
         match &sub.u {
             types::SubscriptionU::Clock(timer) => {
-                let now = match timer.id {
-                    types::Clockid::Realtime => wall,
-                    types::Clockid::Monotonic => monotonic,
+                let absolute = timer.flags.contains(types::Subclockflags::SUBSCRIPTION_CLOCK_ABSTIME);
+                let delay = match timer.id {
+                    types::Clockid::Realtime if absolute => wall.until_wall_ns(timer.timeout),
+                    types::Clockid::Realtime | types::Clockid::Monotonic if !absolute => Natural::from(timer.timeout),
+                    types::Clockid::Monotonic => Natural::from(timer.timeout.saturating_sub(monotonic)),
                     _ => return Err(types::Errno::Inval.into()),
                 };
-                let absolute = timer.flags.contains(types::Subclockflags::SUBSCRIPTION_CLOCK_ABSTIME);
-                timers.push(Timer { index, userdata: sub.userdata, delay: if absolute { timer.timeout.saturating_sub(now) } else { timer.timeout } });
+                timers.push(Timer { index, userdata: sub.userdata, delay });
             }
             _ => descriptors.push((index, sub)),
         }
     }
     let mut ready = descriptor_events(ctx, &descriptors, fuel)?;
-    let delay = if ready.is_empty() { timers.iter().map(|timer| timer.delay).min().unwrap_or(0) } else { 0 };
+    let delay = if ready.is_empty() { timers.iter().map(|timer| timer.delay.clone()).min().unwrap_or_default() } else { Natural::default() };
     if !timers.is_empty() {
         clock.with(|state| {
-            state.sleep_ns = state.sleep_ns.saturating_add(delay);
+            state.sleep_ns += delay.clone();
             state.sleeps = state.sleeps.saturating_add(1);
         });
     }

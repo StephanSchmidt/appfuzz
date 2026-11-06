@@ -11,7 +11,8 @@ use wasmtime::component::{Linker, Resource, ResourceTable};
 use wasmtime_wasi::p2::{DynPollable, Pollable, bindings::io::poll as async_poll, bindings::sync::io::poll as sync_poll};
 
 use super::Host;
-use crate::wasi::{ClockState, VirtualClock};
+use crate::natural::Natural;
+use crate::wasi::VirtualClock;
 
 const CLOCK: &str = "wasi:clocks/monotonic-clock@0.2.12";
 const POLL: &str = "wasi:io/poll@0.2.12";
@@ -19,16 +20,11 @@ const POLL: &str = "wasi:io/poll@0.2.12";
 #[derive(Default)]
 pub(super) struct Timers {
     deadlines: BTreeMap<u32, Weak<Subscription>>,
-    // Preserve timer progress even after reported nanosecond counters saturate.
-    // The offset belongs to this run; metadata holds only weak references to
-    // resources, so SDK drops and reused table slots cannot revive old timers.
-    extra: Arc<Mutex<u128>>,
 }
 
 pub(super) struct Deadline {
-    at: Mutex<Option<u128>>,
+    at: Mutex<Option<Natural>>,
     clock: VirtualClock,
-    extra: Arc<Mutex<u128>>,
     charge: Charge,
 }
 
@@ -43,21 +39,14 @@ struct Subscription {
     request: Option<u32>,
 }
 
-fn elapsed(state: &ClockState) -> u128 {
-    u128::from(state.guest_ns)
-        + u128::from(state.host_ns)
-        + u128::from(state.sleep_ns)
-        + (u128::from(state.wall_reads) + u128::from(state.monotonic_reads)) * u128::from(crate::wasi::CLOCK_READ_STEP_NS)
-}
-
 impl Deadline {
-    pub(super) fn set(&self, at: u128) {
+    pub(super) fn set(&self, at: Natural) {
         *self.at.lock().unwrap_or_else(|e| e.into_inner()) = Some(at);
     }
 
-    pub(super) fn remaining(&self) -> u64 {
-        let now = self.clock.with(|state| elapsed(state) + *self.extra.lock().unwrap_or_else(|e| e.into_inner()));
-        self.at.lock().unwrap_or_else(|e| e.into_inner()).map_or(u64::MAX, |at| at.saturating_sub(now).min(u128::from(u64::MAX)) as u64)
+    pub(super) fn remaining(&self) -> Natural {
+        let now = self.clock.with(|state| state.elapsed_ns());
+        self.at.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or_else(|| Natural::from(u64::MAX), |at| at.saturating_sub(&now))
     }
 }
 
@@ -73,34 +62,28 @@ impl Pollable for Timer {
 }
 
 impl Timers {
-    pub(super) fn now(&self, clock: &VirtualClock) -> u128 {
-        clock.with(|state| elapsed(state) + *self.extra.lock().unwrap_or_else(|e| e.into_inner()))
+    pub(super) fn now(&self, clock: &VirtualClock) -> Natural {
+        clock.with(|state| state.elapsed_ns())
     }
 
     pub(super) fn response(&self, clock: &VirtualClock) -> Arc<Deadline> {
-        Arc::new(Deadline { at: Mutex::new(None), clock: clock.clone(), extra: self.extra.clone(), charge: Charge::Host })
+        Arc::new(Deadline { at: Mutex::new(None), clock: clock.clone(), charge: Charge::Host })
     }
 
-    fn advance(&self, clock: &VirtualClock, delay: u64, charge: Charge) {
+    fn advance(&self, clock: &VirtualClock, delay: Natural, charge: Charge) {
         if delay == 0 {
             return;
         }
-        clock.with(|state| {
-            let before = elapsed(state);
-            match charge {
-                Charge::Sleep => {
-                    state.sleep_ns = state.sleep_ns.saturating_add(delay);
-                    state.sleeps = state.sleeps.saturating_add(1);
-                }
-                Charge::Host => state.host_ns = state.host_ns.saturating_add(delay),
+        clock.with(|state| match charge {
+            Charge::Sleep => {
+                state.sleep_ns += delay;
+                state.sleeps = state.sleeps.saturating_add(1);
             }
-            let represented = elapsed(state) - before;
-            let mut extra = self.extra.lock().unwrap_or_else(|e| e.into_inner());
-            *extra = extra.saturating_add(u128::from(delay) - represented);
+            Charge::Host => state.host_ns += delay,
         });
     }
 
-    fn remaining(&self, pollable: &Resource<DynPollable>) -> Option<(u64, Charge)> {
+    fn remaining(&self, pollable: &Resource<DynPollable>) -> Option<(Natural, Charge)> {
         self.deadlines.get(&pollable.rep())?.upgrade().map(|subscription| (subscription.deadline.remaining(), subscription.deadline.charge))
     }
 
@@ -135,8 +118,8 @@ impl Timers {
 
 fn subscribe(store: &mut StoreContextMut<'_, Host>, delay: u64) -> wasmtime::Result<Resource<DynPollable>> {
     let host = store.data_mut();
-    let at = host.timers.now(&host.clock) + u128::from(delay);
-    let deadline = Arc::new(Deadline { at: Mutex::new(Some(at)), clock: host.clock.clone(), extra: host.timers.extra.clone(), charge: Charge::Sleep });
+    let at = host.timers.now(&host.clock) + Natural::from(delay);
+    let deadline = Arc::new(Deadline { at: Mutex::new(Some(at)), clock: host.clock.clone(), charge: Charge::Sleep });
     let subscription = Arc::new(Subscription { deadline, request: None });
     let timer = host.table.push(Timer(subscription.clone()))?;
     host.timers.subscribe(&mut host.table, timer, &subscription)
@@ -177,7 +160,7 @@ pub(super) fn link(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     })?;
     poll.func_wrap("poll", |mut store: StoreContextMut<'_, Host>, (pollables,): (Vec<Resource<DynPollable>>,)| {
         prepare(&mut store, &pollables, false)?;
-        let delay = pollables.iter().filter_map(|p| store.data().timers.remaining(p)).min_by_key(|(delay, _)| *delay);
+        let delay = pollables.iter().filter_map(|p| store.data().timers.remaining(p)).min_by(|(a, _), (b, _)| a.cmp(b));
         if delay.is_some() {
             // Probe all resources together using the SDK's validation,
             // duplicate handling and readiness rules. Ready streams win over
@@ -193,7 +176,8 @@ pub(super) fn link(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
             }
             prepare(&mut store, &pollables, true)?;
             let host = store.data_mut();
-            let (delay, charge) = pollables.iter().filter_map(|p| host.timers.remaining(p)).min_by_key(|(delay, _)| *delay).unwrap_or((0, Charge::Sleep));
+            let (delay, charge) =
+                pollables.iter().filter_map(|p| host.timers.remaining(p)).min_by(|(a, _), (b, _)| a.cmp(b)).unwrap_or((Natural::default(), Charge::Sleep));
             host.timers.advance(&host.clock, delay, charge);
         }
         sync_poll::Host::poll(&mut store.data_mut().table, pollables).map(|indices| (indices,))

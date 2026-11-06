@@ -157,11 +157,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             found.extend(sorted(per_run));
             let mut out = json!({
                 "knob": rep.knob, "sizes": rep.points.iter().map(|p| p.n).collect::<Vec<_>>(),
-                "growth": rep.growth.iter().map(|g| {
-                    let mut o = json!({"metric": g.metric, "law": g.law.text, "class": g.law.class});
-                    if let Some(b) = g.breaks_at { o["breaks_at"] = json!(b); o["limit"] = json!(g.limit); }
-                    o
-                }).collect::<Vec<_>>(),
+                "growth": rep.growth.iter().map(growth_summary).collect::<Vec<_>>(),
                 "table": scale_table(&rep),
             });
             if *points {
@@ -189,7 +185,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 .reports
                 .iter()
                 .filter(|r| r.growth.iter().any(|g| g.metric.starts_with("calls ") || g.law.class.superlinear()))
-                .map(|r| json!({"knob": r.knob, "context": r.context, "growth": r.growth.iter().map(|g| json!({"metric": g.metric, "law": g.law.text, "breaks_at": g.breaks_at})).collect::<Vec<_>>()}))
+                .map(|r| json!({"knob": r.knob, "context": r.context, "growth": r.growth.iter().map(growth_summary).collect::<Vec<_>>()}))
                 .collect();
             Ok(json!({
                 "runs": rep.runs,
@@ -507,7 +503,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 return Err(e);
             }
             corpus.save(&cli.state)?;
-            let maxima: Vec<Value> = rep.maxima.iter().map(|m| json!({"metric": m.metric, "max": appfuzz_core::wide::json(m.value), "run": m.run})).collect();
+            let maxima: Vec<Value> = rep.maxima.iter().map(|m| json!({"metric": m.metric, "max": m.value, "run": m.run})).collect();
             Ok(json!({
                 "runs": rep.runs, "discovery_runs": rep.discovery_runs, "keys": rep.keys, "modes": rep.modes,
                 "elapsed_ms": rep.elapsed_ms, "stopped": rep.stopped,
@@ -591,6 +587,22 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
 }
 
 /// The platform a `platform` command means: `--platform`, else the manifest's.
+fn growth_summary(g: &scale::Growth) -> Value {
+    let mut value = json!({"metric":g.metric,"law":g.law.text,"class":g.law.class});
+    if let Some(n) = g.breaks_at {
+        value["breaks_at"] = json!(n);
+        value["limit"] = json!(g.limit);
+        value["break_evidence"] = json!(g.break_evidence);
+    }
+    if let Some(n) = g.predicted_breaks_at {
+        value["predicted_breaks_at"] = json!(n);
+    }
+    if g.law.normalization.is_some() || g.law.time_scale_ns.is_some() {
+        value["model"] = json!(g.law);
+    }
+    value
+}
+
 fn host_manifest(cli: &Cli, spec: Option<&str>) -> Result<appfuzz_core::host_manifest::HostManifest> {
     use appfuzz_core::host_manifest::HostManifest;
     match spec {

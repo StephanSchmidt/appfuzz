@@ -47,6 +47,15 @@ pub struct Interface {
     pub funcs: Vec<FuncInfo>,
 }
 
+/// The standard WASI command entry, including its exact result contract.
+pub fn is_cli_run(f: &FuncInfo) -> bool {
+    if f.interface.split('@').next() != Some("wasi:cli/run") || f.name != "run" || f.ty.params().next().is_some() {
+        return false;
+    }
+    let mut results = f.ty.results();
+    matches!(results.next(),Some(Type::Result(r)) if r.ok().is_none()&&r.err().is_none()) && results.next().is_none()
+}
+
 pub fn is_wasi(name: &str) -> bool {
     name.starts_with("wasi:")
 }

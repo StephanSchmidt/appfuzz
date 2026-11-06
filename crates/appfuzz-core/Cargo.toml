@@ -20,6 +20,7 @@ regex.workspace = true
 regex-syntax.workspace = true
 aho-corasick.workspace = true
 memchr.workspace = true
+num-bigint.workspace = true
 psl.workspace = true
 rayon.workspace = true
 url.workspace = true

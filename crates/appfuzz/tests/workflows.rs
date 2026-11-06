@@ -524,13 +524,15 @@ fn huge_host_budgets_are_reported_without_crashing_the_cli() {
     let (code, run) = f.cli(&["run", "--plan", r#"{"test:workflow/db#get":{"return":1,"cost":18446744073709551615,"latency_ms":1e30}}"#]);
     assert_eq!(code, 0, "{run}");
     assert_eq!(run["totals"]["cost"], (2 * u128::from(u64::MAX)).to_string());
-    assert!(run["totals"]["virtual_ms"].as_f64().unwrap() > 1e12);
     let (_, raw) = f.cli(&["show", "last"]);
-    assert_eq!(raw["totals"]["virtual_ns"], u64::MAX);
+    let host_ns: appfuzz_core::natural::Natural = serde_json::from_value(raw["totals"]["host_ns"].clone()).unwrap();
+    assert_eq!(host_ns, appfuzz_core::natural::Natural::from_scaled_f64(1e30, 1_000_000) * 2);
+    let virtual_ns: appfuzz_core::natural::Natural = serde_json::from_value(raw["totals"]["virtual_ns"].clone()).unwrap();
+    assert!(virtual_ns >= host_ns);
     let (code, calls) = f.cli(&["show", "last", "--view", "calls"]);
     assert_eq!(code, 0, "{calls}");
     assert_eq!(calls["functions"]["test:workflow/db#get"]["cost"], (2 * u128::from(u64::MAX)).to_string());
-    assert!(calls["functions"]["test:workflow/db#get"]["latency_ms"].as_f64().unwrap() > 1e12);
+    assert_eq!(calls["functions"]["test:workflow/db#get"]["latency_ms"], appfuzz_core::natural::Natural::from_scaled_f64(2e30, 1_000_000).ms_json());
     let (code, explained) = f.cli(&["show", "last", "--view", "explanation"]);
     assert_eq!(code, 0, "{explained}");
     let high = run["run"].as_str().unwrap();
@@ -581,6 +583,40 @@ fn cost_overruns_above_u64_confirm_replay_and_regress() {
         ),
     )
     .unwrap();
+    let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], false);
+}
+
+#[test]
+fn huge_latency_budgets_confirm_replay_diff_and_regress() {
+    let f = Fixture::new(false);
+    f.edit("max_latency_ms = 200", "max_latency_ms = 1e20");
+    let plan = r#"{"test:workflow/db#get":{"return":1,"latency_ms":1e200}}"#;
+    let (code, run) = f.cli(&["run", "--plan", plan]);
+    assert_eq!(code, 0, "{run}");
+    let finding = run["findings"].as_array().unwrap().iter().find(|v| v["kind"] == "over_budget").unwrap();
+    assert!(run["totals"]["host_ns"].is_string());
+    let (_, checked) = f.cli(&["check", "max", "virtual_ms", "1e20", "--runs", "1", "--time", "1ms", "--max-runs", "10"]);
+    assert_eq!(checked["holds"], false, "{checked}");
+    let (_, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "10"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let (code, replayed) = f.cli(&["replay", case]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true);
+    let (_, low) = f.cli(&["run", "--plan", r#"{"test:workflow/db#get":{"return":1,"latency_ms":0}}"#]);
+    let (code, difference) = f.cli(&["diff", run["run"].as_str().unwrap(), low["run"].as_str().unwrap()]);
+    assert_eq!(code, 0, "{difference}");
+    assert_eq!(difference["totals"]["virtual_ms"]["delta"], json!(-1e200));
+    let (code, again) = f.cli(&["run", "--plan", plan]);
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["run"], run["run"]);
+    let bytes = component(
+        "package test:workflow; interface db { get: func(id: u32) -> u32; } world app {import db; export run:func(n:u32)->u32;}",
+        r#"(module (import "test:workflow/db" "get" (func (param i32) (result i32))) (func (export "run") (param i32) (result i32) (i32.const 1)))"#,
+    );
+    std::fs::write(f.dir.join("app.wasm"), bytes).unwrap();
     let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
     assert_eq!(code, 0, "{replayed}");
     assert_eq!(replayed["reproduced"], false);
@@ -2103,4 +2139,138 @@ fn confirmation_replaces_a_case_symlink_without_overwriting_its_target() {
     let (code, replayed) = f.cli(&["replay", case.to_str().unwrap()]);
     assert_eq!(code, 0, "{replayed}");
     assert_eq!(replayed["reproduced"], true, "{replayed}");
+}
+
+#[test]
+fn sums_beyond_the_float_range_remain_visible_in_cli_time_views() {
+    let f = Fixture::new(false);
+    let bytes = component(
+        "package test:workflow; interface db {get:func(id:u32)->u32;} world app {import db;export run:func(n:u32)->u32;}",
+        r#"(module (import "test:workflow/db" "get" (func $get (param i32) (result i32))) (func (export "run") (param i32) (result i32) (drop (call $get (local.get 0))) (call $get (local.get 0))))"#,
+    );
+    std::fs::write(f.dir.join("app.wasm"), bytes).unwrap();
+    let (code, run) = f.cli(&["run", "--plan", r#"{"test:workflow/db#get":{"return":1,"latency_ms":1.7976931348623157e308}}"#]);
+    assert_eq!(code, 0, "{run}");
+    assert!(run["totals"]["virtual_ms"].is_string(), "{run}");
+    assert!(run["totals"]["host_ms"].is_string());
+    let (code, calls) = f.cli(&["show", "last", "--view", "calls"]);
+    assert_eq!(code, 0, "{calls}");
+    assert!(calls["functions"]["test:workflow/db#get"]["latency_ms"].is_string());
+    let (code, diff) = f.cli(&["diff", "last", "last"]);
+    assert_eq!(code, 0, "{diff}");
+    assert_eq!(diff["totals"]["virtual_ms"]["delta"], 0);
+    assert!(diff["totals"]["virtual_ms"]["a"].is_string());
+}
+
+#[test]
+fn measured_scaling_breaks_keep_large_exact_costs_and_replay() {
+    let f = Fixture::new(false);
+    f.edit("cost_per_request = 100", "cost_per_request = 9223372036854775807");
+    let wit = "package test:workflow; interface db {get:func(id:u32)->u32;} world app {import db;export run:func(n:u32)->u32;}";
+    let bytes = component(
+        wit,
+        r#"(module
+        (import "test:workflow/db" "get" (func $get (param i32) (result i32)))
+        (func (export "run") (param $n i32) (result i32) (local $i i32)
+        (block $done (loop $again
+            (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+            (br_if $done (i32.ge_u (local.get $i) (i32.const 3)))
+            (drop (call $get (local.get $i)))
+            (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $again))) (local.get $i)))"#,
+    );
+    std::fs::write(f.dir.join("app.wasm"), bytes).unwrap();
+    let plan = r#"{"test:workflow/db#get":{"return":1,"cost":3074457345618258603,"latency_ms":0}}"#;
+    let (code, scaled) = f.cli(&["scale", "field:@0", "--sizes", "4,3,2,1", "--plan", plan]);
+    assert_eq!(code, 0, "{scaled}");
+    assert_eq!(scaled["sizes"], json!([1, 2, 3, 4]));
+    let growth = scaled["growth"].as_array().unwrap().iter().find(|g| g["metric"] == "cost").unwrap();
+    assert_eq!(growth["breaks_at"], 3);
+    assert_eq!(growth["break_evidence"], "measured");
+    assert_eq!(growth["limit"], i64::MAX);
+    let finding = scaled["findings"].as_array().unwrap().iter().find(|f| f["kind"] == "over_budget").unwrap();
+    let (_, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "30"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let (code, replayed) = f.cli(&["replay", confirmed["case"].as_str().unwrap()]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true);
+}
+
+#[test]
+fn clock_fields_keep_the_full_calendar_range_and_replay() {
+    let f = Fixture::new(true);
+    f.edit("request = \"safe\"", "request = \"safe\"\nfields = { '' = 'clock.datetime' }");
+    for now in ["0001-01-01T00:00:00", "1969-12-31T23:59:59", "3000-01-01T00:00:00", "9999-12-31T23:59:59"] {
+        let (code, run) = f.cli(&["run", "--now", now]);
+        assert_eq!(code, 0, "{run}");
+        assert_eq!(run["outcome"]["kind"], "ok");
+        assert_eq!(run["result"], now);
+        let (code, replayed) = f.cli(&["replay", run["run"].as_str().unwrap()]);
+        assert_eq!(code, 0, "{replayed}");
+        assert_eq!(replayed["same"], true);
+    }
+}
+
+#[test]
+fn unsupported_wasi_wall_dates_are_incomplete_instead_of_passing_as_the_epoch() {
+    let f = Fixture::new(false);
+    let wit = "package wasi:clocks@0.2.12; interface wall-clock {record datetime {seconds:u64,nanoseconds:u32} now:func()->datetime;} world app {import wall-clock;export run:func(n:u32)->u64;}";
+    let wat = r#"(module (import "wasi:clocks/wall-clock@0.2.12" "now" (func $now (param i32)))
+        (memory (export "memory") 1) (func (export "run") (param i32) (result i64) (call $now (i32.const 0)) (i64.load (i32.const 0))))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    let (code, run) = f.cli(&["run", "--now", "1969-12-31T23:59:59"]);
+    assert_eq!(code, 3, "{run}");
+    assert_eq!(run["outcome"]["kind"], "plan_error");
+    assert!(!run["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "crash"));
+    let (code, review) = f.cli(&["review", "--now", "1969-12-31T23:59:59", "--runs", "1", "--time", "1ms"]);
+    assert_eq!(code, 3, "{review}");
+    assert_ne!(review["verdict"], "pass");
+    let (code, current) = f.cli(&["run", "--now", "3000-01-01"]);
+    assert_eq!(code, 0, "{current}");
+    assert_eq!(current["result"], 32503680000u64);
+}
+
+#[test]
+fn wasi_command_statuses_review_confirm_replay_and_regress() {
+    let f = Fixture::new(false);
+    f.edit("export = \"run\"", "export = \"wasi:cli/run#run\"");
+    f.edit("\nrequest = 1\n", "\n");
+    let wit = "package wasi:cli@0.2.12; interface exit {exit-with-code:func(status-code:u8);} interface run {run:func()->result;} world app {import exit;export run;}";
+    let module = |code| {
+        component(
+            wit,
+            &format!(
+                r#"(module
+        (import "wasi:cli/exit@0.2.12" "exit-with-code" (func $exit (param i32)))
+        (func (export "wasi:cli/run@0.2.12#run") (result i32) (call $exit (i32.const {code})) unreachable))"#
+            ),
+        )
+    };
+    std::fs::write(f.dir.join("app.wasm"), module(7)).unwrap();
+    let (code, run) = f.cli(&["run"]);
+    assert_eq!(code, 0, "{run}");
+    assert_eq!(run["outcome"]["kind"], "ok");
+    assert_eq!(run["result"], json!({"err":null}));
+    assert_eq!(run["command_exit_code"], 7);
+    let failure = run["findings"].as_array().unwrap().iter().find(|f| f["kind"] == "command_failed").unwrap();
+    assert!(!run["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "crash"));
+    let (code, review) = f.cli(&["review", "--runs", "1", "--time", "1ms"]);
+    assert_eq!(code, 2, "{review}");
+    assert_eq!(review["verdict"], "fail");
+    let (_, confirmed) = f.cli(&["confirm", failure["id"].as_str().unwrap(), "--max-runs", "10"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let (code, replayed) = f.cli(&["replay", case]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true);
+    std::fs::write(f.dir.join("app.wasm"), module(0)).unwrap();
+    let (code, replayed) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], false);
+    let (code, run) = f.cli(&["run"]);
+    assert_eq!(code, 0, "{run}");
+    assert_eq!(run["command_exit_code"], 0);
+    assert_eq!(run["result"], json!({"ok":null}));
+    let (code, review) = f.cli(&["review", "--runs", "1", "--time", "1ms"]);
+    assert_eq!(code, 0, "{review}");
+    assert_eq!(review["verdict"], "pass");
 }

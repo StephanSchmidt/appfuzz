@@ -227,7 +227,7 @@ fn metric_of(name: &str, r: &RunRecord) -> Option<String> {
         "fuel" => t.fuel.to_string(),
         "memory" => t.peak_memory.to_string(),
         "host_calls" => t.host_calls.to_string(),
-        "virtual_ms" => format!("{}.{:06}", t.virtual_ns / 1_000_000, t.virtual_ns % 1_000_000),
+        "virtual_ms" => t.virtual_ns.ms_text(),
         "cost" => t.cost.to_string(),
         "clock_reads" => t.clock_reads.to_string(),
         "output_bytes" => r.result.as_ref().map_or(0, |v| v.to_string().len()).to_string(),
@@ -407,7 +407,7 @@ mod tests {
         record.totals.cost = u128::from(u64::MAX);
         record.totals.peak_memory = u64::MAX;
         record.totals.clock_reads = u64::MAX;
-        record.totals.virtual_ns = u64::MAX;
+        record.totals.virtual_ns = u64::MAX.into();
         for metric in ["fuel", "memory", "cost", "clock_reads"] {
             let property = Property::parse(&["max".into(), metric.into(), (u64::MAX - 1).to_string()]).unwrap();
             let (_, detail) = property.broken(&record, &m).unwrap_or_else(|| panic!("accepted {metric}"));

@@ -282,7 +282,7 @@ pub fn sweep(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, path: &str,
             .push(short(v));
         rows.push(json!({
             "value": short(v), "outcome": r.outcome.kind, "status": resp.status, "host_calls": r.totals.host_calls,
-            "virtual_ms": ms(r.totals.virtual_ns), "fuel": r.totals.fuel, "text": shown, "findings": fs.iter().map(|f| &f.kind).collect::<Vec<_>>(), "run": r.id,
+            "virtual_ms": r.totals.virtual_ns.ms_json(), "fuel": r.totals.fuel, "text": shown, "findings": fs.iter().map(|f| &f.kind).collect::<Vec<_>>(), "run": r.id,
         }));
         found.extend(fs);
     }
@@ -328,9 +328,22 @@ pub fn diff_runs(app: &App, a: &RunRecord, b: &RunRecord) -> Value {
     } else {
         json!(format!("-{}", ta.cost - tb.cost))
     };
+    let time_delta = if tb.virtual_ns >= ta.virtual_ns {
+        match (tb.virtual_ns.clone() - ta.virtual_ns.clone()).ms_json() {
+            Value::Number(n) => num(n.as_f64().unwrap()),
+            value => value,
+        }
+    } else {
+        let value = (ta.virtual_ns.clone() - tb.virtual_ns.clone()).ms_json();
+        match value {
+            Value::Number(n) => num(-n.as_f64().unwrap()),
+            Value::String(n) => json!(format!("-{n}")),
+            _ => unreachable!(),
+        }
+    };
     let totals = json!({
         "fuel": delta(ta.fuel as f64, tb.fuel as f64), "host_calls": delta(ta.host_calls as f64, tb.host_calls as f64),
-        "virtual_ms": delta(ms(ta.virtual_ns), ms(tb.virtual_ns)),
+        "virtual_ms": {"a":ta.virtual_ns.ms_json(), "b":tb.virtual_ns.ms_json(), "delta":time_delta},
         "cost": {"a":appfuzz_core::wide::json(ta.cost), "b":appfuzz_core::wide::json(tb.cost), "delta":cost_delta},
         "peak_memory": delta(ta.peak_memory as f64, tb.peak_memory as f64),
     });
@@ -529,7 +542,7 @@ pub fn explain(app: &App, store: &RunStore, r: &RunRecord) -> Result<Value> {
     let metrics: [(&str, Metric); 6] = [
         ("fuel", &|x| x.totals.fuel as f64),
         ("host_calls", &|x| x.totals.host_calls as f64),
-        ("virtual_ms", &|x| ms(x.totals.virtual_ns)),
+        ("virtual_ms", &|x| ms(&x.totals.virtual_ns)),
         ("cost", &|x| x.totals.cost as f64),
         ("peak_memory", &|x| x.totals.peak_memory as f64),
         ("output_bytes", &|x| x.result.as_ref().map_or(0, |v| v.to_string().len()) as f64),
@@ -669,7 +682,7 @@ pub fn wasi(app: &App, store: &RunStore) -> Result<Value> {
         "runs_used": runs.len(),
         "usage": {
             "clock_reads": used(&|r| r.totals.clock_reads), "random_bytes": used(&|r| r.totals.random_bytes),
-            "sleep_ms": used(&|r| r.totals.sleep_ns / 1_000_000), "stdout_bytes": used(&|r| r.stdout.len() as u64),
+            "sleep_ms": {"runs": runs.iter().filter(|r| !r.totals.sleep_ns.is_zero()).count(), "max": runs.iter().map(|r| r.totals.sleep_ns.clone() / 1_000_000).max().unwrap_or_default(), "total": runs.iter().map(|r| r.totals.sleep_ns.clone() / 1_000_000).sum::<appfuzz_core::natural::Natural>()}, "stdout_bytes": used(&|r| r.stdout.len() as u64),
             "stderr_bytes": used(&|r| r.stderr.len() as u64),
         },
         "note": "reads of the insecure random seed (hash maps) are not counted",

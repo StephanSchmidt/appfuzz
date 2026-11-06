@@ -9,6 +9,9 @@ use appfuzz_core::{
 };
 
 fn run(body: &str, plugin: bool) -> RunRecord {
+    run_at(body, plugin, None)
+}
+fn run_at(body: &str, plugin: bool, now: Option<&str>) -> RunRecord {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let index = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("appfuzz-p1-sleep-{}-{index}", std::process::id()));
@@ -43,6 +46,9 @@ fn run(body: &str, plugin: bool) -> RunRecord {
     let mut spec = app.spec(app.export(if plugin { "run" } else { "entry#run" }).unwrap(), vec![], Plan::default(), 1);
     // Isolate timer advancement from CPU time and keep failing old runs short.
     spec.ns_per_fuel = 0.0;
+    if let Some(now) = now {
+        spec.now = now.into();
+    }
     app.run(&spec)
 }
 
@@ -243,4 +249,85 @@ fn a_guest_reusing_the_subscription_buffer_for_events_is_supported() {
         "{setup} (if (call $poll (i32.const 0) (i32.const 0) (i32.const 2) (i32.const 2048)) (then unreachable)) (if (i32.ne (i32.load (i32.const 2048)) (i32.const 2)) (then unreachable)) (if (i64.ne (i64.load (i32.const 0)) (i64.const 50)) (then unreachable)) (if (i64.ne (i64.load (i32.const 32)) (i64.const 51)) (then unreachable))"
     );
     ok(&run(&body, true), 0);
+}
+
+#[test]
+fn wall_reads_outside_preview1_range_return_overflow_without_rewriting_memory() {
+    let errno = u16::from(wasmtime_wasi::p1::types::Errno::Overflow);
+    let body = format!(
+        "(i64.store (i32.const 4096) (i64.const 77)) (if (i32.ne (call $now (i32.const 0) (i64.const 1) (i32.const 4096)) (i32.const {errno})) (then unreachable)) (if (i64.ne (i64.load (i32.const 4096)) (i64.const 77)) (then unreachable)) (drop (call $read (i32.const 1)))"
+    );
+    for plugin in [false, true] {
+        for now in ["0001-01-01", "1969-12-31T23:59:59", "3000-01-01", "9999-12-31"] {
+            let record = run_at(&body, plugin, Some(now));
+            ok(&record, 0);
+            assert_eq!(record.totals.clock_reads, 2);
+        }
+    }
+}
+
+#[test]
+fn relative_wall_timers_can_cross_the_epoch_for_modules_and_plugins() {
+    let body = format!(
+        "{} {} {} (if (i64.ne (call $read (i32.const 0)) (i64.const 1000)) (then unreachable))",
+        timer(0, 17, 0, "(i64.const 1000000000)", false),
+        poll(1, 1),
+        event(0, 17, 0)
+    );
+    for plugin in [false, true] {
+        ok(&run_at(&body, plugin, Some("1969-12-31T23:59:59")), 1_000_000_000);
+    }
+}
+
+#[test]
+fn absolute_wall_timers_keep_signed_origins_and_waits_beyond_u64() {
+    use appfuzz_core::natural::Natural;
+    let errno = u16::from(wasmtime_wasi::p1::types::Errno::Overflow);
+    let body = format!(
+        "(if (i32.ne (call $now (i32.const 0) (i64.const 1) (i32.const 4096)) (i32.const {errno})) (then unreachable)) {} {} {} (if (i64.ne (call $read (i32.const 0)) (i64.const 1000)) (then unreachable))",
+        timer(0, 17, 0, "(i64.const 0)", true),
+        poll(1, 1),
+        event(0, 17, 0)
+    );
+    for plugin in [false, true] {
+        for now in ["0001-01-01", "1969-12-31T23:59:59"] {
+            let record = run_at(&body, plugin, Some(now));
+            assert_eq!(record.outcome.kind, OutcomeKind::Ok, "{now}: {:?}", record.outcome);
+            let expected = Natural::from(appfuzz_core::wasi::parse_datetime(now).unwrap().unsigned_abs()) * 1_000_000_000 - Natural::from(1000u64);
+            assert_eq!(record.totals.sleep_ns, expected);
+            assert_eq!(record.totals.clock_reads, 2);
+        }
+    }
+}
+
+#[test]
+fn absolute_preview1_timestamps_before_a_future_wall_date_are_already_due() {
+    let body = format!("{} {} {}", timer(0, 17, 0, "(i64.const -1)", true), poll(1, 1), event(0, 17, 0));
+    for plugin in [false, true] {
+        ok(&run_at(&body, plugin, Some("3000-01-01")), 0);
+    }
+}
+
+#[test]
+fn preview1_clock_ids_keep_native_errors_without_advancing_time() {
+    let badf = u16::from(wasmtime_wasi::p1::types::Errno::Badf);
+    let inval = u16::from(wasmtime_wasi::p1::types::Errno::Inval);
+    let body = format!(
+        "(if (i32.ne (call $now (i32.const 2) (i64.const 1) (i32.const 4096)) (i32.const {badf})) (then unreachable)) (if (i32.ne (call $now (i32.const 3) (i64.const 1) (i32.const 4096)) (i32.const {badf})) (then unreachable)) (if (i32.ne (call $now (i32.const -1) (i64.const 1) (i32.const -1)) (i32.const {inval})) (then unreachable))"
+    );
+    for plugin in [false, true] {
+        let record = run(&body, plugin);
+        ok(&record, 0);
+        assert_eq!(record.totals.clock_reads, 0);
+    }
+}
+
+#[test]
+fn preview1_clock_bad_result_pointers_trap_for_both_clock_kinds() {
+    for plugin in [false, true] {
+        for id in [0, 1] {
+            let record = run(&format!("(drop (call $now (i32.const {id}) (i64.const 1) (i32.const -1)))"), plugin);
+            assert_eq!(record.outcome.kind, OutcomeKind::Trap, "{:?}", record.outcome);
+        }
+    }
 }

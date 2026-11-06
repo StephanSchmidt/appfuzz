@@ -14,6 +14,7 @@
 //! admit the result. With one job a campaign is deterministic; with more,
 //! the order of admissions depends on timing (each run still replays).
 
+use crate::natural::Natural;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
@@ -198,8 +199,7 @@ pub struct StageStat {
 #[derive(Debug, Clone, Serialize)]
 pub struct Maximum {
     pub metric: String,
-    #[serde(serialize_with = "crate::wide::serialize")]
-    pub value: u128,
+    pub value: Natural,
     pub run: String,
 }
 
@@ -404,26 +404,26 @@ pub fn features(r: &RunRecord, st: &Statics, app: &App) -> BTreeSet<String> {
 }
 
 /// Resource measures of a run; the corpus keeps a new maximum of any.
-pub fn metrics(r: &RunRecord) -> Vec<(String, u128)> {
-    let mut m: Vec<(String, u128)> = r.call_counts().into_iter().map(|(f, n)| (format!("calls {f}"), u128::from(n))).collect();
+pub fn metrics(r: &RunRecord) -> Vec<(String, Natural)> {
+    let mut m: Vec<(String, Natural)> = r.call_counts().into_iter().map(|(f, n)| (format!("calls {f}"), Natural::from(n))).collect();
     let arg_bytes: usize = r.events.iter().map(|e| crate::value::json_len(&e.args)).sum();
     let out_bytes = r.result.as_ref().map(crate::value::json_len).unwrap_or(0);
     let depth = r.events.iter().map(|e| e.stack.len()).max().unwrap_or(0);
     m.extend([
-        ("fuel".to_string(), u128::from(r.totals.fuel)),
-        ("peak_memory".into(), u128::from(r.totals.peak_memory)),
-        ("output_bytes".into(), out_bytes as u128),
-        ("host_arg_bytes".into(), arg_bytes as u128),
-        ("virtual_ns".into(), u128::from(r.totals.virtual_ns)),
-        ("cost".into(), r.totals.cost),
-        ("call_depth".into(), depth as u128),
+        ("fuel".to_string(), Natural::from(r.totals.fuel)),
+        ("peak_memory".into(), Natural::from(r.totals.peak_memory)),
+        ("output_bytes".into(), Natural::from(out_bytes)),
+        ("host_arg_bytes".into(), Natural::from(arg_bytes)),
+        ("virtual_ns".into(), r.totals.virtual_ns.clone()),
+        ("cost".into(), r.totals.cost.into()),
+        ("call_depth".into(), Natural::from(depth)),
     ]);
     m
 }
 
 /// A new maximum must beat the old one by 5 % (and by at least 1).
-fn beats(new: u128, old: u128) -> bool {
-    new > old && new - old >= (old / 20).max(1)
+fn beats(new: &Natural, old: &Natural) -> bool {
+    new > old && new.clone() - old.clone() >= (old.clone() / 20).max(1u64.into())
 }
 
 /// What all workers share: the corpus and what it has covered.
@@ -433,7 +433,7 @@ struct State {
     picked: Vec<u32>,
     features: BTreeSet<String>,
     /// metric → (value, run id of the entry holding it).
-    maxima: BTreeMap<String, (u128, String)>,
+    maxima: BTreeMap<String, (Natural, String)>,
     stages: BTreeMap<Stage, StageStat>,
     known: BTreeSet<String>,
     new_findings: Vec<Finding>,
@@ -461,7 +461,7 @@ struct Executed {
     r: Arc<RunRecord>,
     findings: Vec<Finding>,
     features: BTreeSet<String>,
-    metrics: Vec<(String, u128)>,
+    metrics: Vec<(String, Natural)>,
 }
 
 /// The unlocked half of an evaluation: run, detectors, features.
@@ -545,7 +545,7 @@ impl State {
         }
         for (m, v) in metrics {
             match self.maxima.get(&m) {
-                Some((old, _)) if !beats(v, *old) => {}
+                Some((old, _)) if !beats(&v, old) => {}
                 old => {
                     if old.is_some() {
                         reasons.push(format!("max {m} {v}"));
@@ -1622,7 +1622,7 @@ pub fn fuzz(
     if let Some(error) = fz.capture_error {
         anyhow::bail!("{error}");
     }
-    let mut maxima: Vec<Maximum> = fz.maxima.iter().map(|(m, (v, r))| Maximum { metric: m.clone(), value: *v, run: r.clone() }).collect();
+    let mut maxima: Vec<Maximum> = fz.maxima.iter().map(|(m, (v, r))| Maximum { metric: m.clone(), value: v.clone(), run: r.clone() }).collect();
     maxima.sort_by(|a, b| a.metric.cmp(&b.metric));
     let report = FuzzReport {
         runs: fz.runs,
@@ -1674,7 +1674,7 @@ mod tests {
         assert_eq!(shape(&json!({"err": "x"}), 2), "err(s)");
         assert_eq!(bucket(5), 4);
         assert_eq!(bucket(200), 128);
-        assert!(beats(106, 100) && !beats(104, 100) && beats(1, 0));
+        assert!(beats(&106u64.into(), &100u64.into()) && !beats(&104u64.into(), &100u64.into()) && beats(&1u64.into(), &0u64.into()));
     }
 
     #[test]

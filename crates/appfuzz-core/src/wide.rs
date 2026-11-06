@@ -27,3 +27,14 @@ pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u128, D
         Wire::Decimal(_) => Err(serde::de::Error::custom("expected a nonnegative decimal integer")),
     }
 }
+
+/// Signed clock origins retain exact values outside JSON's 64-bit integers.
+pub fn serialize_signed<S: Serializer>(value: &i128, serializer: S) -> Result<S::Ok, S::Error> {
+    if *value >= 0 {
+        return serialize(&(*value as u128), serializer);
+    }
+    match i64::try_from(*value) {
+        Ok(n) => serializer.serialize_i64(n),
+        Err(_) => serializer.serialize_str(&value.to_string()),
+    }
+}

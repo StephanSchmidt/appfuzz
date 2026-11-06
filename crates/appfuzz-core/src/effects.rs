@@ -232,10 +232,10 @@ mod tests {
             trap: None,
             source: String::new(),
             granted: true,
-            latency_ns: 0,
+            latency_ns: 0u64.into(),
             cost: 0,
             fuel_before: 0,
-            t_ns: 0,
+            t_ns: 0u64.into(),
             stack: vec![],
         }
     }
@@ -262,6 +262,7 @@ mod tests {
             events,
             guest_error: None,
             rejected_output: None,
+            command_exit_code: None,
             memory_limit_hit: false,
             capture_limited: false,
             stdout: String::new(),

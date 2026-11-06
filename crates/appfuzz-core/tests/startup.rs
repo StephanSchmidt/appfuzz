@@ -47,7 +47,7 @@ fn virtual_time_does_not_go_backwards_after_startup() {
     let run = app.run(&app.spec(app.export("run").unwrap(), vec![], Plan::default(), 1));
     assert_eq!(run.outcome.kind, OutcomeKind::Ok, "{:?}", run.outcome);
     assert_eq!(run.events.len(), 2);
-    assert!(run.events[1].t_ns >= run.events[0].t_ns.saturating_add(run.events[0].latency_ns), "timeline went backwards: {:?}", run.events);
+    assert!(run.events[1].t_ns >= run.events[0].t_ns.clone() + run.events[0].latency_ns.clone(), "timeline went backwards: {:?}", run.events);
 }
 
 #[test]

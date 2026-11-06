@@ -243,3 +243,16 @@ fn invalid_empty_poll_and_dropped_handles_still_trap() {
         assert_eq!(result.outcome.kind, OutcomeKind::Trap, "{:?}", result.outcome);
     }
 }
+
+#[test]
+fn relative_timers_keep_exact_waits_after_the_monotonic_abi_saturates() {
+    let record = run(r#"(local.set $a (call $sleep (i64.const -1)))
+        (call $block (local.get $a)) (call $drop (local.get $a))
+        (local.set $b (call $sleep (i64.const 123)))
+        (if (call $ready (local.get $b)) (then unreachable))
+        (call $block (local.get $b)) (call $now)"#);
+    assert_eq!(record.outcome.kind, OutcomeKind::Ok, "{:?}", record.outcome);
+    assert_eq!(record.totals.sleep_ns, u128::from(u64::MAX) + 123);
+    assert_eq!(record.totals.virtual_ns, u128::from(u64::MAX) + 123 + 1000);
+    assert_eq!(record.result, Some(json!(u64::MAX)));
+}

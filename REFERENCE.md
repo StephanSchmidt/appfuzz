@@ -157,6 +157,26 @@ The `structured` stage runs automatically. Its evaluations and kept inputs appea
 under `stages.structured` in fuzz reports. Findings use the existing detectors and
 ordinary `confirm`/`replay`.
 
+## WASI commands and exit status
+
+A selected `wasi:cli/run#run` export with no parameters and a single
+`result<_, _>` of unit values is a command. Both returning and exiting complete
+the command: success maps to `{"ok": null}` and failure to `{"err": null}`.
+The optional `command_exit_code` records the terminal status, including an exit
+during component initialization. An ordinary result supplies 0 or 1; explicit
+`exit-with-code` preserves its exact status. Nonzero status is the measured fail
+finding `command_failed`, rather than a crash. Actual traps still produce crash
+findings. Command status is retained in stored runs, summaries and traces.
+A different selected export, a lookalike interface or the wrong function
+signature does not acquire command semantics. An HTTP handler that exits before
+providing a response remains a failed request.
+
+Outbound requests issued before a component exit, trap or initialization failure
+remain in the call trace and cost totals. Draining them does not add a host wait
+when the guest never awaited their responses. A capture or host-plan error while
+draining cannot be silently discarded as complete evidence; diagnostics also
+retain the earlier guest failure when applicable.
+
 ## Memory accounting and allocation
 
 The run's memory cap applies to the sum of its WebAssembly linear memories,
@@ -775,6 +795,28 @@ sequential; concurrent requests, persistent component memory, live databases
 and external service effects are outside this model. Runtime envelopes still
 use individual stateless traces, and do not enforce sequence invariants.
 
+## Scaling and fitted growth
+
+`scale` orders its points by the knob's size. Growth laws are approximate fits;
+measurements retain exact resource values. A budget's `breaks_at` prefers the
+first measured violating size and carries `break_evidence = "measured"`. Without
+a measured violation, it may use an extrapolation, marked `"inferred"`.
+`predicted_breaks_at` retains a compatible extrapolation separately. A prediction
+contradicted by a successful measured point is discarded. Failed requests do
+not establish that a budget holds at their size. Cost, fuel, memory and latency
+boundaries compare exact values, including a one-unit overrun at large limits.
+
+Regression calculations normalize both axes to avoid overflowing their squared
+residuals. A law whose raw coefficients exceed floating-point range serializes
+those coefficients as scientific decimal strings and includes `normalization`
+with the evaluable model `y = y_scale * (a + b * f(n) / x_scale)`. Timings beyond
+the floating-point millisecond range are fitted as fractions of an exact maximum;
+`time_scale_ns` records that maximum. In this case the model's coefficients and
+normalization describe the fraction, and multiplying by `time_scale_ns / 1000000`
+converts its predictions to milliseconds. CLI summaries include `model` for
+these laws. Rust callers use `Law::eval` and `Law::increasing` to account for the
+optional scaling rather than interpreting the raw `f64` coefficient fields.
+
 ## Command output
 
 Each host call's cost and the production cost limit are `u64` units. Run totals
@@ -783,7 +825,7 @@ Cost totals, envelope budgets, scaling points and search maxima use JSON numbers
 through `u64::MAX` and decimal strings above it; ordinary reports keep their
 existing number shape. Readers accept both forms without floating-point
 conversion. Resource `max cost` checks and integer envelope margins compare exact
-values. The Rust API exposes total costs and search maxima as `u128`.
+values. The Rust API exposes total costs as `u128` and search maxima as exact nonnegative counters.
 
 Commands print lossless JSON with suggested `next` commands. Exported artifacts
 (`plan template` and the raw `show` record) omit navigation metadata so another
@@ -847,10 +889,34 @@ values return WASI errors; invalid memory pointers trap.
 
 Timing limits, host latencies and `ns_per_fuel` must be finite and
 non-negative. Start times use real calendar dates (`YYYY-MM-DD`, optionally
-followed by `THH:MM[:SS]` and `Z`; a space may replace `T`). Invalid dates and
-times are errors. Virtual nanosecond counters, clock readings and accumulated
-cost saturate at their unsigned 64-bit maximum, so extreme sleeps or host
-latencies remain over budget instead of wrapping to small values.
+followed by `THH:MM[:SS]` and `Z`; a space may replace `T`), from year 0001
+through 9999. Invalid dates and times are errors. The signed wall-clock origin
+is separate from elapsed time, so dates before 1970 and after 2554 remain usable
+for request clock fields, monotonic clocks and timers. Component wall clocks
+represent post-epoch dates in their full seconds range. A pre-epoch read that a
+component wall-clock ABI cannot represent stops the request with `plan_error`
+before guest code resumes; review is incomplete rather than passing under a
+substituted epoch date. Preview 1 realtime reads outside their unsigned
+nanosecond range return `overflow`, which the guest may handle. Absolute wall
+timers keep the signed origin and can wait across the epoch, including waits
+longer than `u64` nanoseconds. Virtual nanosecond counters, host latencies and event times
+retain exact nonnegative integers, including beyond `u128::MAX`. Ordinary values
+use JSON numbers through `u64::MAX`; larger ones use decimal strings. Configured
+floating-point rates use their shortest round-tripping decimal representation,
+and each charge or fuel product is floored once to whole nanoseconds, without
+an intermediate floating-point product. Latency limits and saved resource
+checks compare exact nanoseconds. Millisecond views use decimal strings when a
+JSON number would round away evidence or exceed its range.
+
+Guest clocks retain their ABI widths: monotonic nanosecond values saturate at
+`u64::MAX`; the component wall clock uses its full seconds and nanoseconds range.
+Preview 1 realtime reads preserve the SDK's `overflow` error when that wall time
+cannot fit in a `u64` nanosecond timestamp. Relative timers and HTTP deadlines continue advancing in
+exact internal time after a guest clock saturates. New envelopes retain an
+exact `budget.virtual_ns` alongside the approximate `virtual_ms` view; legacy
+millisecond budgets remain readable. The Rust API uses `natural::Natural` for
+timing fields and search maxima; ordinary counters stay inline, with big integers
+used only when necessary.
 
 ### wasi:http handlers
 

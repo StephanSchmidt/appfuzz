@@ -13,6 +13,7 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::natural::Natural;
 use rand::rngs::StdRng;
 use rand::{SeedableRng, TryRng};
 use serde::Serialize;
@@ -25,21 +26,45 @@ const MONOTONIC_START_NS: u64 = 1_000_000_000_000;
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct ClockState {
     /// Unix time at the start of the run, in ns.
-    pub base_wall_ns: u64,
-    pub guest_ns: u64,
-    pub host_ns: u64,
-    pub sleep_ns: u64,
+    #[serde(serialize_with = "crate::wide::serialize_signed")]
+    pub base_wall_ns: i128,
+    pub guest_ns: Natural,
+    pub host_ns: Natural,
+    pub sleep_ns: Natural,
     pub wall_reads: u64,
     pub monotonic_reads: u64,
     pub sleeps: u64,
+    /// The Duration-only SDK adapter could not represent a negative wall read.
+    /// Execution rejects it at the host return boundary, before guest code resumes.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub before_epoch_read: bool,
 }
 
 impl ClockState {
-    pub fn elapsed_ns(&self) -> u64 {
-        self.guest_ns
-            .saturating_add(self.host_ns)
-            .saturating_add(self.sleep_ns)
-            .saturating_add(self.wall_reads.saturating_add(self.monotonic_reads).saturating_mul(CLOCK_READ_STEP_NS))
+    pub fn wall_ns(&self) -> Option<Natural> {
+        let elapsed = self.elapsed_ns();
+        if self.base_wall_ns >= 0 {
+            return Some(Natural::from(self.base_wall_ns as u128) + elapsed);
+        }
+        let before_epoch = Natural::from(self.base_wall_ns.unsigned_abs());
+        (elapsed >= before_epoch).then(|| elapsed - before_epoch)
+    }
+    pub fn read_wall_ns(&mut self) -> Option<Natural> {
+        self.wall_reads = self.wall_reads.saturating_add(1);
+        self.wall_ns()
+    }
+    pub fn until_wall_ns(&self, target: u64) -> Natural {
+        if self.base_wall_ns < 0 {
+            (Natural::from(target) + Natural::from(self.base_wall_ns.unsigned_abs())).saturating_sub(&self.elapsed_ns())
+        } else {
+            Natural::from(target).saturating_sub(&self.wall_ns().expect("nonnegative wall origin"))
+        }
+    }
+    pub fn elapsed_ns(&self) -> Natural {
+        self.guest_ns.clone()
+            + self.host_ns.clone()
+            + self.sleep_ns.clone()
+            + (Natural::from(self.wall_reads) + Natural::from(self.monotonic_reads)) * CLOCK_READ_STEP_NS
     }
 }
 
@@ -47,8 +72,8 @@ impl ClockState {
 pub struct VirtualClock(pub Arc<Mutex<ClockState>>);
 
 impl VirtualClock {
-    pub fn new(base_wall_ns: u64) -> Self {
-        VirtualClock(Arc::new(Mutex::new(ClockState { base_wall_ns, ..Default::default() })))
+    pub fn new(base_wall_ns: impl Into<i128>) -> Self {
+        VirtualClock(Arc::new(Mutex::new(ClockState { base_wall_ns: base_wall_ns.into(), ..Default::default() })))
     }
 
     pub fn with<R>(&self, f: impl FnOnce(&mut ClockState) -> R) -> R {
@@ -56,7 +81,7 @@ impl VirtualClock {
     }
 
     pub fn monotonic_now(&self) -> u64 {
-        self.with(|c| MONOTONIC_START_NS.saturating_add(c.elapsed_ns()))
+        self.with(|c| (Natural::from(MONOTONIC_START_NS) + c.elapsed_ns()).saturating_u64())
     }
 }
 
@@ -68,9 +93,12 @@ impl wasmtime_wasi::HostWallClock for WallClock {
         Duration::from_nanos(CLOCK_READ_STEP_NS)
     }
     fn now(&self) -> Duration {
-        self.0.with(|c| {
-            c.wall_reads = c.wall_reads.saturating_add(1);
-            Duration::from_nanos(c.base_wall_ns.saturating_add(c.elapsed_ns()))
+        self.0.with(|c| match c.read_wall_ns() {
+            Some(now) => now.duration(),
+            None => {
+                c.before_epoch_read = true;
+                Duration::ZERO
+            }
         })
     }
 }
@@ -82,7 +110,7 @@ impl wasmtime_wasi::HostMonotonicClock for MonotonicClock {
     fn now(&self) -> u64 {
         self.0.with(|c| {
             c.monotonic_reads = c.monotonic_reads.saturating_add(1);
-            MONOTONIC_START_NS.saturating_add(c.elapsed_ns())
+            (Natural::from(MONOTONIC_START_NS) + c.elapsed_ns()).saturating_u64()
         })
     }
 }
@@ -243,13 +271,40 @@ mod tests {
     }
 
     #[test]
-    fn virtual_time_saturates_without_wrapping_or_panicking() {
-        let state = ClockState { guest_ns: u64::MAX, host_ns: 1, sleep_ns: 1, wall_reads: u64::MAX, monotonic_reads: 1, ..Default::default() };
-        assert_eq!(state.elapsed_ns(), u64::MAX);
+    fn signed_wall_origins_and_epoch_crossing_remain_exact() {
+        let mut state = ClockState { base_wall_ns: -1_000_000_000, ..Default::default() };
+        assert_eq!(state.wall_ns(), None);
+        assert_eq!(state.until_wall_ns(0), 1_000_000_000);
+        state.sleep_ns = 1_000_000_000u64.into();
+        assert_eq!(state.wall_ns(), Some(0u64.into()));
+        assert_eq!(state.read_wall_ns(), Some(1000u64.into()));
+        assert_eq!(state.until_wall_ns(5000), 4000);
+        let extreme = ClockState { base_wall_ns: i128::MIN, ..Default::default() };
+        assert_eq!(extreme.until_wall_ns(u64::MAX), Natural::from(i128::MIN.unsigned_abs()) + Natural::from(u64::MAX));
+        for value in [i128::MIN, -1, 0, i64::MAX as i128, u64::MAX as i128, i128::MAX] {
+            let state = ClockState { base_wall_ns: value, ..Default::default() };
+            let wire = serde_json::to_value(state).unwrap();
+            assert_eq!(wire["base_wall_ns"].is_number(), value >= i128::from(i64::MIN) && value <= i128::from(u64::MAX));
+            if let Some(text) = wire["base_wall_ns"].as_str() {
+                assert_eq!(text, value.to_string());
+            }
+        }
+    }
+    #[test]
+    fn guest_clocks_saturate_while_internal_time_keeps_advancing() {
+        let state = ClockState {
+            guest_ns: u64::MAX.into(),
+            host_ns: 1u64.into(),
+            sleep_ns: 1u64.into(),
+            wall_reads: u64::MAX,
+            monotonic_reads: 1,
+            ..Default::default()
+        };
+        assert_eq!(state.elapsed_ns(), Natural::from(u64::MAX) + Natural::from(2u64) + (Natural::from(u64::MAX) + Natural::from(1u64)) * CLOCK_READ_STEP_NS);
         let clock = VirtualClock::new(u64::MAX);
-        clock.with(|c| c.sleep_ns = u64::MAX);
+        clock.with(|c| c.sleep_ns = u64::MAX.into());
         assert_eq!(clock.monotonic_now(), u64::MAX);
-        assert_eq!(wasmtime_wasi::HostWallClock::now(&WallClock(clock.clone())), Duration::from_nanos(u64::MAX));
+        assert_eq!(wasmtime_wasi::HostWallClock::now(&WallClock(clock.clone())), (Natural::from(u64::MAX) * 2 + Natural::from(CLOCK_READ_STEP_NS)).duration());
         assert_eq!(wasmtime_wasi::HostMonotonicClock::now(&MonotonicClock(clock)), u64::MAX);
     }
 }
