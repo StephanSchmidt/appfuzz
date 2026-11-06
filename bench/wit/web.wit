@@ -70,6 +70,15 @@ interface orders {
     get: func(id: u64) -> result<order, string>;
 }
 
+// Customer records: the whole collection, or a page at a time.
+interface customers {
+    record customer { id: u64, name: string, balance: s64, notes: string }
+    record customer-page { items: list<customer>, next: option<string> }
+    all: func() -> list<customer>;
+    page: func(offset: u32, limit: u32) -> list<customer>;
+    after: func(cursor: option<string>, limit: u32) -> result<customer-page, string>;
+}
+
 interface handler {
     use types.{request, response};
     handle: func(req: request) -> response;
@@ -98,5 +107,11 @@ world labelled-app {
     import config;
     import users;
     import orders;
+    export handler;
+}
+
+// The apps that read modeled collections.
+world data-app {
+    import customers;
     export handler;
 }

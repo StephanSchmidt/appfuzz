@@ -1385,7 +1385,7 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
                         data.record_event(event);
                         return Err(SimulatedHostTrap(format!("host response lost after commit: {msg}")).into());
                     }
-                    measure(&mut event, &v);
+                    measure(&mut event, &v, page_items(&platform, key));
                     event.result = Some(compact(v));
                     for (r, v) in results.iter_mut().zip(vals) {
                         *r = v;
@@ -1426,7 +1426,7 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
                 [one] => val_to_json(one),
                 many => Value::Array(many.iter().map(val_to_json).collect()),
             };
-            measure(&mut event, &answer);
+            measure(&mut event, &answer, None);
             if platform.changing.contains(key) && succeeded(&answer, result_types.len()) {
                 event.commit = Some(Commit { rows: vec![], lost: false });
             }
@@ -1449,7 +1449,7 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
         data.handles.adopt(&mut j, outs, generated, &h.kinds);
         if let Ok(v) = json_to_val(&j, t) {
             *r = v;
-            measure(&mut event, &j);
+            measure(&mut event, &j, None);
             event.result = Some(compact(j));
         }
     }
@@ -1617,8 +1617,17 @@ fn succeeded(answer: &Value, results: usize) -> bool {
     results == 0 || !(answer.is_null() || answer.as_object().is_some_and(|o| o.len() == 1 && o.contains_key("err")))
 }
 
-fn measure(event: &mut HostCall, answer: &Value) {
-    event.result_items = crate::detect::list_in(answer).map(|items| u32::try_from(items.len()).unwrap_or(u32::MAX));
+/// The result field holding a paged query's rows.
+fn page_items<'a>(platform: &'a Platform, key: &str) -> Option<&'a str> {
+    platform.queries.get(key)?.page.as_ref()?.items.as_deref()
+}
+
+fn measure(event: &mut HostCall, answer: &Value, items: Option<&str>) {
+    let list = match items {
+        Some(field) => answer.get("ok").unwrap_or(answer).get(field).and_then(Value::as_array),
+        None => crate::detect::list_in(answer),
+    };
+    event.result_items = list.map(|items| u32::try_from(items.len()).unwrap_or(u32::MAX));
     event.result_bytes = crate::value::json_len(answer) as u64;
 }
 
@@ -1832,12 +1841,15 @@ mod tests {
         let long = "x".repeat(MAX_RECORDED_STRING * 4);
         let answer = json!({"ok": [long.clone(), "b"]});
         let mut event = HostCall::default();
-        measure(&mut event, &answer);
+        measure(&mut event, &answer, None);
         assert_eq!(event.result_items, Some(2));
         assert_eq!(event.result_bytes, crate::value::json_len(&answer) as u64);
         assert!(crate::value::json_len(&compact(answer)) < long.len());
-        measure(&mut event, &json!(7));
+        measure(&mut event, &json!(7), None);
         assert_eq!(event.result_items, None);
+        // A paged query's rows are a field of its result record.
+        measure(&mut event, &json!({"ok": {"items": [1, 2, 3], "next": null}}), Some("items"));
+        assert_eq!(event.result_items, Some(3));
         assert!(succeeded(&json!({"ok": null}), 1) && succeeded(&Value::Null, 0));
         assert!(!succeeded(&json!({"err": "full"}), 1) && !succeeded(&Value::Null, 1));
     }

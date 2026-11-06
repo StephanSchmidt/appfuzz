@@ -1,0 +1,6 @@
+{
+  "app": "customers-first-page",
+  "bug": "shows the first page of 20 customers",
+  "expect": [],
+  "allow": []
+}

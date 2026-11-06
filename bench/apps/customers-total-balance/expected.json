@@ -1,0 +1,6 @@
+{
+  "app": "customers-total-balance",
+  "bug": "adds up the balance of every customer (every row counts)",
+  "expect": [],
+  "allow": []
+}

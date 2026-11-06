@@ -333,6 +333,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "customers_first_page"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
+name = "customers_load_all"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
+name = "customers_total_balance"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
 name = "data_endpoint"
 version = "0.1.0"
 dependencies = [

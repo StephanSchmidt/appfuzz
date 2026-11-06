@@ -14,6 +14,13 @@
 - A create mutation can answer with the new key or record: `"$key"` and
   `"$row"` in its `response`.
 
+**Unbounded reads**
+
+- New finding `unbounded_read`: the app reads every row of a host list while
+  its answer stays the same size. `scale` drops the first, middle and last row
+  to see whether every row counts, and names the paged query that would read
+  less. Scale points report `rows` per function and `host_result_bytes`.
+
 **Pages, owners and edited worlds**
 
 - Dataset queries can sort (`order`) and return a page at a time:

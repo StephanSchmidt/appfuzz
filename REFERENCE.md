@@ -894,6 +894,22 @@ converts its predictions to milliseconds. CLI summaries include `model` for
 these laws. Rust callers use `Law::eval` and `Law::increasing` to account for the
 optional scaling rather than interpreting the raw `f64` coefficient fields.
 
+### Unbounded reads
+
+Scaling a host list also counts the rows the function returned (`points[].rows`,
+by function, and `host_result_bytes`). When the rows grow at least linearly while
+`output_bytes` stays constant, logarithmic or capped, `scale` runs the largest
+size three more times, without the first, the middle and the last row it read
+(`detail.dropped`). A modeled collection drops the record with a `drop` edit; a
+plan's list loses one element; a generated list is first pinned as the run saw
+it. An answer that stays the same, result and the arguments of calls that change
+something, means some rows never count.
+
+`unbounded_read` is a fail when rows go unused, the collection has a paged query
+(`detail.paged`) and a budget breaks, measured or predicted, by 10,000 rows. It
+is a warn when rows go unused and either holds, else info: an aggregate such as
+a total needs every row. Confirmation scales again from the shrunk run.
+
 ## Page scripts (`probe scripts`)
 
 When an export's output is labelled `html:scripts`, appfuzz also runs the

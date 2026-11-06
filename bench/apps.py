@@ -947,6 +947,61 @@ app("score-percent", "draws score as a percentage bar and panics above 100, whic
         html(out + "</ul>")
     """), [], extra='\n[functions."bench:web/items#all"]\nvalues = { score = "range:0..100" }\n')
 
+# --- Modeled collections ---------------------------------------------------
+# The platform declares its customer collection once: every row has notes of
+# a few kilobytes, and `page` and `after` return at most 50 rows.
+
+CUSTOMERS = "bench:web/customers"
+
+DATA = """
+[datasets.customers]
+rows = 20
+key = "id"
+template = {{ id = 1, name = "Customer", balance = 100, notes = "{notes}" }}
+choices = {{ name = ["Ada", "Zoë", "<i>Bob</i>", "O'Neil"], balance = [100, -250, 12000, 7] }}
+
+[functions."bench:web/customers#all"]
+query = {{ dataset = "customers" }}
+
+[functions."bench:web/customers#page"]
+query = {{ dataset = "customers", page = {{ offset = "offset", limit = "limit", max = 50 }} }}
+
+[functions."bench:web/customers#after"]
+query = {{ dataset = "customers", wrap = "ok", page = {{ cursor = "cursor", limit = "limit", items = "items", next = "next", max = 50 }} }}
+""".format(notes="Called about the renewal; prefers email. " * 200)
+
+
+def data(body):
+    return handler(body, prelude="prelude-data.rs")
+
+
+app("customers-load-all", "loads every customer to show the first 20",
+    data("""
+        let _ = &req;
+        let mut out = String::from("<ul>");
+        for c in customers::all().iter().take(20) {
+            out += &format!("<li>{}: {}</li>", esc(&c.name), c.balance);
+        }
+        html(out + "</ul>")
+    """), [("unbounded_read", "fail")], grants=[CUSTOMERS], extra=DATA)
+
+app("customers-first-page", "shows the first page of 20 customers",
+    data("""
+        let _ = &req;
+        let mut out = String::from("<ul>");
+        for c in customers::page(0, 20) {
+            out += &format!("<li>{}: {}</li>", esc(&c.name), c.balance);
+        }
+        html(out + "</ul>")
+    """), [], grants=[CUSTOMERS], extra=DATA)
+
+app("customers-total-balance", "adds up the balance of every customer (every row counts)",
+    data("""
+        let _ = &req;
+        let total: i64 = customers::all().iter().map(|c| c.balance).sum();
+        html(format!("<p>Total balance: {total}</p>"))
+    """), [], grants=[CUSTOMERS], extra=DATA)
+
 MANIFEST = """\
 # appfuzz bench app: {name} ({what}).
 [app]

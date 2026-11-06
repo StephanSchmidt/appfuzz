@@ -308,6 +308,7 @@ and `confirm <id>` makes it reproducible.
 | `fails_at_size` | the app crashes or hangs once a host list or request field reaches some size, and works below it |
 | `over_budget` | fuel, memory, cost or latency above the manifest's limits |
 | `n_plus_1`, `input_amplification`, `nested_fan_out` | host calls grow with a host list or a request field (one loop, or a loop in a loop) |
+| `unbounded_read` | the app reads a whole host list while its answer stays the same size: every new row costs memory and time; fail when some rows never affect the answer, a paged query exists and a limit breaks by 10,000 rows |
 | `cpu_blowup`, `memory_blowup`, `output_amplification`, `payload_amplification` | superlinear growth of fuel, memory, output or host arguments |
 | `redundant_calls`, `chatty`, `retry_storm`, `serial_chain`, `host_call_in_loop` | wasteful call patterns |
 | `big_output`, `big_payload`, `busy_wait`, `sleeps` | too much output or host data; spinning on the clock |

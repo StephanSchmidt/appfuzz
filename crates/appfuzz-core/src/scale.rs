@@ -70,6 +70,11 @@ pub struct Point {
     pub cost: u128,
     pub output_bytes: u64,
     pub host_arg_bytes: u64,
+    /// List items each host function returned, over all its calls.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub rows: BTreeMap<String, u64>,
+    /// Bytes all host calls returned, as compact JSON.
+    pub host_result_bytes: u64,
 }
 
 impl Point {
@@ -77,6 +82,12 @@ impl Point {
         let mut calls = BTreeMap::new();
         for (k, c) in r.call_counts() {
             calls.insert(k, c);
+        }
+        let mut rows = BTreeMap::new();
+        for e in &r.events {
+            if let Some(n) = e.result_items {
+                *rows.entry(e.func.clone()).or_default() += u64::from(n);
+            }
         }
         Point {
             n,
@@ -91,6 +102,8 @@ impl Point {
             cost: r.totals.cost,
             output_bytes: r.result.as_ref().map(|v| v.to_string().len() as u64).unwrap_or(0),
             host_arg_bytes: r.events.iter().map(|e| Value::Object(e.args.clone()).to_string().len() as u64).sum(),
+            rows,
+            host_result_bytes: r.totals.host_result_bytes,
         }
     }
 }
@@ -100,13 +113,7 @@ pub fn apply(app: &App, base: &RunSpec, knob: &Knob, n: u64) -> Result<RunSpec> 
     let mut spec = base.clone();
     match knob {
         Knob::HostList(f) => {
-            let info = app
-                .imports
-                .iter()
-                .filter(|i| i.kind == ImportKind::Platform)
-                .flat_map(|i| i.funcs.iter())
-                .find(|x| x.key == *f || x.key.ends_with(&format!("/{f}")) || x.key.ends_with(&format!("#{f}")))
-                .ok_or_else(|| anyhow!("no platform import {f}"))?;
+            let info = platform_fn(app, f).ok_or_else(|| anyhow!("no platform import {f}"))?;
             if let Some(q) = app.manifest.function(&info.key).and_then(|s| s.query.as_ref()) {
                 if n > crate::dataset::MAX_ROWS as u64 {
                     bail!("dataset scale exceeds {}", crate::dataset::MAX_ROWS);
@@ -143,6 +150,15 @@ pub fn apply(app: &App, base: &RunSpec, knob: &Knob, n: u64) -> Result<RunSpec> 
         }
     }
     Ok(spec)
+}
+
+/// The platform import a knob names: the full key, or its end (`customers#all`).
+fn platform_fn<'a>(app: &'a App, f: &str) -> Option<&'a crate::wit::FuncInfo> {
+    app.imports
+        .iter()
+        .filter(|i| i.kind == ImportKind::Platform)
+        .flat_map(|i| i.funcs.iter())
+        .find(|x| x.key == *f || x.key.ends_with(&format!("/{f}")) || x.key.ends_with(&format!("#{f}")))
 }
 
 /// `@1.page` → (1, "page"); `@2` → (2, ""); `query.days` → (0, "query.days").
@@ -713,7 +729,199 @@ pub fn scale(app: &App, base: &RunSpec, knob: Knob, sizes: &[u64], run: Runner) 
             break;
         }
     }
-    Ok(analyze(app, knob, points))
+    let mut report = analyze(app, knob, points);
+    if let Some(f) = unbounded_read(app, base, &report, run) {
+        report.findings.push(f);
+    }
+    Ok(report)
+}
+
+/// Host lists up to this many rows are ordinary for a read that loads them all.
+const UNBOUNDED_REALISTIC: u64 = 10_000;
+/// Fewer rows than this at the largest size say little about a read.
+const UNBOUNDED_MIN_ROWS: u64 = 16;
+
+/// A host list the app reads whole while its answer stays the same size:
+/// each new row makes the request slower and bigger and changes nothing.
+/// Dropping the first, middle and last row shows whether every row counts.
+fn unbounded_read(app: &App, base: &RunSpec, report: &ScaleReport, run: Runner) -> Option<Finding> {
+    let Knob::HostList(name) = &report.knob else { return None };
+    let key = platform_fn(app, name)?.key.clone();
+    if app.manifest.effect_of(&key).is_some_and(|e| e.changes()) {
+        return None;
+    }
+    let good: Vec<&Point> = report.points.iter().take_while(|p| p.outcome == OutcomeKind::Ok).collect();
+    let rows = |p: &Point| p.rows.get(&key).copied().unwrap_or(0);
+    let last = *good.last()?;
+    if good.len() < 4 || rows(last) < UNBOUNDED_MIN_ROWS {
+        return None;
+    }
+    let law = fit(&good.iter().map(|p| (p.n as f64, rows(p) as f64)).collect::<Vec<_>>())?;
+    if !law.increasing() || !matches!(law.class, Class::Linear | Class::NLogN | Class::Quadratic | Class::Cubic | Class::Exponential) {
+        return None;
+    }
+    // An answer that grows with the rows shows them; that is no unbounded read.
+    if report.growth.iter().any(|g| g.metric == "output_bytes" && !matches!(g.law.class, Class::Constant | Class::Log | Class::Capped)) {
+        return None;
+    }
+    let spec = apply(app, base, &report.knob, last.n).ok()?;
+    let top = run(&spec);
+    let (pinned, drops) = dropped_rows(app, &spec, &top, &key);
+    let reference = pinned.map_or(top, |s| run(&s));
+    let tried: Vec<(String, bool, String)> = if reference.outcome.kind == OutcomeKind::Ok {
+        par::map(&drops, |(row, s)| {
+            let r = run(s);
+            (row.clone(), r.outcome.kind == OutcomeKind::Ok && answer(app, &r) == answer(app, &reference), r.id.clone())
+        })
+    } else {
+        vec![]
+    };
+    let unused: Vec<&str> = tried.iter().filter(|t| t.1).map(|t| t.0.as_str()).collect();
+    let dataset = app.manifest.function(&key).and_then(|s| s.query.as_ref()).map(|q| q.dataset.clone());
+    let paged = dataset.as_ref().and_then(|ds| {
+        let mut paged: Vec<(String, usize)> = app
+            .manifest
+            .functions
+            .iter()
+            .filter_map(|(k, s)| s.query.as_ref().filter(|q| q.dataset == *ds).and_then(|q| q.page.as_ref()).map(|p| (k.clone(), p.max)))
+            .collect();
+        paged.sort_by_key(|(k, _)| *k != key);
+        paged.into_iter().next()
+    });
+    let reads_pages = paged.as_ref().is_some_and(|(k, _)| *k == key);
+    let breaks = report
+        .growth
+        .iter()
+        .filter(|g| !g.metric.starts_with("calls "))
+        .filter_map(|g| g.breaks_at.map(|b| (b, g.metric.clone(), g.break_evidence)))
+        .min_by_key(|b| b.0);
+    let near = breaks.as_ref().is_some_and(|b| b.0 <= UNBOUNDED_REALISTIC);
+    let sev = if paged.is_some() && !unused.is_empty() && near {
+        Severity::Fail
+    } else if !unused.is_empty() && (paged.is_some() || near) {
+        Severity::Warn
+    } else {
+        Severity::Info
+    };
+    let mut title = if reads_pages {
+        format!("the app reads every page of {key}, all n rows, while its answer stays the same size")
+    } else {
+        format!("{key} returns all n rows while the answer stays the same size")
+    };
+    if !unused.is_empty() {
+        title.push_str(&format!("; some rows never affect it (dropping the {} row changes nothing)", unused.join(" or ")));
+    } else if !tried.is_empty() {
+        title.push_str("; each dropped row changes it");
+    }
+    if let Some((b, metric, evidence)) = &breaks {
+        title.push_str(&if *evidence == Some("measured") {
+            format!("; {metric} exceeds its limit at measured n = {b}")
+        } else {
+            format!("; {metric} is predicted to exceed its limit at n = {b}")
+        });
+    }
+    if let Some((k, max)) = paged.as_ref().filter(|_| !reads_pages) {
+        title.push_str(&format!("; {k} reads pages of up to {max}"));
+    }
+    let ex = app.manifest.entry.as_ref().map(|e| e.export.clone()).unwrap_or_default();
+    Some(Finding::new(
+        "unbounded_read",
+        &format!("{ex}\0{:?}\0unbounded_read", report.knob),
+        sev,
+        title,
+        json!({"knob": report.knob, "func": key, "law": law.text, "class": law.class, "n": last.n, "rows": rows(last),
+               "dropped": tried.iter().map(|(row, same, run)| json!({"row": row, "unchanged": same, "run": run})).collect::<Vec<_>>(),
+               "unused_rows": !unused.is_empty(), "breaks_at": breaks.as_ref().map(|b| json!([b.0, b.1])), "break_evidence": breaks.as_ref().and_then(|b| b.2),
+               "paged": paged.as_ref().map(|(f, max)| json!({"func": f, "max": max})), "worst_run": last.run}),
+        Some(&last.run),
+    ))
+}
+
+/// What a run answered and changed, to tell whether a row mattered.
+fn answer(app: &App, r: &RunRecord) -> Value {
+    let effects: Vec<Value> =
+        r.events.iter().filter(|e| app.manifest.effect_of(&e.func).is_some_and(|x| x.changes())).map(|e| json!([e.func, e.args])).collect();
+    json!([r.outcome.kind, r.result, effects])
+}
+
+/// The spec without the first, middle and last row the run read from `key`.
+/// A generated list is first pinned as the run saw it: that spec comes first.
+fn dropped_rows(app: &App, spec: &RunSpec, top: &RunRecord, key: &str) -> (Option<RunSpec>, Vec<(String, RunSpec)>) {
+    let picks = |n: usize| {
+        let mut v = vec![("first", 0), ("middle", n / 2), ("last", n.saturating_sub(1))];
+        v.dedup_by_key(|x| x.1);
+        v
+    };
+    if let Some(q) = app.manifest.function(key).and_then(|s| s.query.as_ref()) {
+        let d = &app.manifest.datasets[&q.dataset];
+        let items = q.page.as_ref().and_then(|p| p.items.as_deref());
+        let mut keys: Vec<Value> = top
+            .events
+            .iter()
+            .filter(|e| e.func == key)
+            .filter_map(|e| e.result.as_ref())
+            .filter_map(|v| match items {
+                Some(field) => v.get("ok").unwrap_or(v).get(field).and_then(Value::as_array),
+                None => crate::detect::list_in(v),
+            })
+            .flatten()
+            .filter_map(|item| match q.select.as_deref() {
+                None => item.get(&d.key).cloned(),
+                Some(f) if f == d.key => Some(item.clone()),
+                Some(_) => None,
+            })
+            .collect();
+        if keys.is_empty()
+            && let Ok(state) = app.initial_state(&spec.plan, spec.seed)
+        {
+            keys = state.tables.get(&q.dataset).into_iter().flatten().map(|r| r[&d.key].clone()).collect();
+        }
+        if keys.is_empty() {
+            return (None, vec![]);
+        }
+        let drops = picks(keys.len())
+            .into_iter()
+            .map(|(row, i)| {
+                let mut s = spec.clone();
+                let edit = crate::dataset::Edit::Drop { dataset: q.dataset.clone(), keys: vec![keys[i].clone()] };
+                s.plan.0.entry("_defaults".into()).or_default().dataset_edits.push(edit);
+                (row.to_string(), s)
+            })
+            .collect();
+        return (None, drops);
+    }
+    // A list the plan returns, or the one generated list the run read: the
+    // same list without one element.
+    let literal = spec.plan.0.get(key).is_some_and(|p| p.response.ret.is_some());
+    let mut base = spec.clone();
+    if !literal {
+        let calls: Vec<_> = top.events.iter().filter(|e| e.func == key).collect();
+        let [call] = calls[..] else { return (None, vec![]) };
+        let Some(seen) = call.result.clone() else { return (None, vec![]) };
+        base.plan.0.entry(key.to_string()).or_default().response.ret = Some(seen);
+    }
+    let Some(n) = base.plan.0.get(key).and_then(|p| p.response.ret.as_ref()).and_then(crate::detect::list_in).map(Vec::len).filter(|n| *n > 0) else {
+        return (None, vec![]);
+    };
+    let drops = picks(n)
+        .into_iter()
+        .map(|(row, i)| {
+            let mut s = base.clone();
+            if let Some(list) = s.plan.0.get_mut(key).and_then(|p| p.response.ret.as_mut()).and_then(list_in_mut) {
+                list.remove(i);
+            }
+            (row.to_string(), s)
+        })
+        .collect();
+    (if literal { None } else { Some(base) }, drops)
+}
+
+fn list_in_mut(v: &mut Value) -> Option<&mut Vec<Value>> {
+    match v {
+        Value::Array(a) => Some(a),
+        Value::Object(o) if o.len() == 1 && (o.contains_key("ok") || o.contains_key("some")) => o.values_mut().next().and_then(list_in_mut),
+        _ => None,
+    }
 }
 
 /// The arguments convert to the export's parameter types.

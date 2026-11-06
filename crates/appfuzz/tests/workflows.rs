@@ -1485,6 +1485,87 @@ fn retry_after_precommit_failure_is_not_an_idempotency_violation() {
     assert_eq!(f.cli(&["sequence", "run", &path]).0, 2);
 }
 
+/// `run(mode)`: 0 adds the first two ids of all customers (the bug, or of
+/// the first page when `paged`), 1 adds them all up (an aggregate).
+fn customers_fixture(paged: bool) -> Fixture {
+    let f = Fixture::new(false);
+    let wit = "package test:workflow; interface db { all: func() -> list<u32>; page: func(offset:u32) -> list<u32>; } world app { import db; export run: func(mode:u32) -> u32; }";
+    let wat = r#"(module
+      (import "test:workflow/db" "all" (func $all (param i32)))
+      (import "test:workflow/db" "page" (func $page (param i32 i32)))
+      (memory (export "memory") 4)
+      (global $heap (mut i32) (i32.const 1024))
+      (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32)
+        (local $p i32) (local.set $p (global.get $heap))
+        (global.set $heap (i32.add (global.get $heap) (local.get 3))) (local.get $p))
+      (func (export "run") (param $mode i32) (result i32)
+        (local $i i32) (local $sum i32) (local $p i32) (local $n i32)
+        (if (i32.and (i32.eqz (local.get $mode)) (i32.const PAGED))
+          (then (call $page (i32.const 0) (i32.const 32)))
+          (else (call $all (i32.const 32))))
+        (local.set $p (i32.load (i32.const 32)))
+        (local.set $n (i32.load (i32.const 36)))
+        (if (i32.eq (local.get $mode) (i32.const 1)) (then
+          (block $done (loop $next
+            (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+            (local.set $sum (i32.add (local.get $sum) (i32.load (i32.add (local.get $p) (i32.shl (local.get $i) (i32.const 2))))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $next)))
+          (return (local.get $sum))))
+        (i32.add (i32.load (local.get $p)) (i32.load (i32.add (local.get $p) (i32.const 4))))))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, &wat.replace("PAGED", if paged { "1" } else { "0" }))).unwrap();
+    let manifest = r#"
+[app]
+wasm = "app.wasm"
+[entry]
+export = "run"
+request = 0
+[datasets.customers]
+rows = 4
+key = "id"
+template = { id = 1 }
+[functions."test:workflow/db#all"]
+query = { dataset = "customers", select = "id" }
+[functions."test:workflow/db#page"]
+query = { dataset = "customers", select = "id", page = { offset = "offset", max = 2 } }
+"#;
+    std::fs::write(&f.manifest, manifest).unwrap();
+    f
+}
+
+#[test]
+fn reading_every_row_for_a_fixed_size_answer_is_an_unbounded_read() {
+    let f = customers_fixture(false);
+    let (code, scaled) = f.cli(&["scale", "fn:db#all", "--points"]);
+    assert_ne!(code, 3, "{scaled}");
+    let finding = scaled["findings"].as_array().unwrap().iter().find(|x| x["kind"] == "unbounded_read").expect("unbounded read").clone();
+    assert_eq!(finding["severity"], "warn", "{finding}");
+    let title = finding["title"].as_str().unwrap();
+    assert!(title.contains("returns all n rows") && title.contains("dropping the middle or last row changes nothing"), "{title}");
+    assert!(title.contains("db#page reads pages of up to 2"), "{title}");
+    assert_eq!(scaled["points"][0]["rows"]["test:workflow/db#all"], 1, "{scaled}");
+    let (code, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "40"]);
+    assert_eq!(code, 0, "{confirmed}");
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let saved: Value = serde_json::from_slice(&std::fs::read(case).unwrap()).unwrap();
+    let dropped = &saved["finding"]["detail"]["dropped"];
+    assert_eq!((&dropped[0]["row"], &dropped[0]["unchanged"], &dropped[2]["unchanged"]), (&json!("first"), &json!(false), &json!(true)), "{saved}");
+    let (code, v) = f.cli(&["replay", case]);
+    assert_eq!((code, &v["reproduced"]), (0, &json!(true)), "{v}");
+    // The fixed app reads one page: the finding is gone.
+    std::fs::copy(customers_fixture(true).dir.join("app.wasm"), f.dir.join("app.wasm")).unwrap();
+    let (code, v) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!((code, &v["reproduced"]), (0, &json!(false)), "{v}");
+    let (_, scaled) = f.cli(&["scale", "fn:db#page"]);
+    assert!(scaled["findings"].as_array().unwrap().iter().all(|x| x["kind"] != "unbounded_read"), "{scaled}");
+    // An aggregate needs every row: only a hint.
+    let (_, scaled) = f.cli(&["scale", "fn:db#all", "--args", "[1]"]);
+    let finding = scaled["findings"].as_array().unwrap().iter().find(|x| x["kind"] == "unbounded_read").expect("aggregate hint");
+    assert_eq!(finding["severity"], "info", "{finding}");
+    assert!(finding["title"].as_str().unwrap().contains("each dropped row changes it"), "{finding}");
+}
+
 #[test]
 fn plans_edit_the_world_and_paged_queries_answer_a_page_at_a_time() {
     let f = Fixture::new(false);

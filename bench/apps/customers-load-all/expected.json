@@ -1,0 +1,11 @@
+{
+  "app": "customers-load-all",
+  "bug": "loads every customer to show the first 20",
+  "expect": [
+    {
+      "kind": "unbounded_read",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}
