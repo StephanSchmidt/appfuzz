@@ -14,6 +14,14 @@
 - A create mutation can answer with the new key or record: `"$key"` and
   `"$row"` in its `response`.
 
+**Pagination**
+
+- New finding `broken_pagination` (fail): rows between two pages the app
+  read that it never read, the first page again before the last one, or
+  another answer when a platform with `page.short = true` returns pages of 1
+  or one less than asked. The page checks run on every run; the shorter
+  pages are a pair check in `probe pairs` and fuzzing.
+
 **Unbounded reads**
 
 - New finding `unbounded_read`: the app reads every row of a host list while

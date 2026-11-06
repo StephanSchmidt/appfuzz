@@ -1,0 +1,11 @@
+{
+  "app": "export-stops-short-page",
+  "bug": "exports customers 10 at a time and stops at the first page shorter than 10",
+  "expect": [
+    {
+      "kind": "broken_pagination",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

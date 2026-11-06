@@ -1566,6 +1566,93 @@ fn reading_every_row_for_a_fixed_size_answer_is_an_unbounded_read() {
     assert!(finding["title"].as_str().unwrap().contains("each dropped row changes it"), "{finding}");
 }
 
+/// `run` adds up the ids of every item, a page of 4 at a time, and moves on
+/// as `step` says: `stop` ends at a page shorter than asked, `skip` counts
+/// offsets by what it asked for, `follow` by what it got.
+fn pages_fixture(f: &Fixture, step: &str) {
+    let wit =
+        "package test:workflow; interface db { page: func(offset:u32, limit:u32) -> list<u32>; } world app { import db; export run: func(mode:u32) -> u32; }";
+    let step = match step {
+        "stop" => "(br_if $done (i32.lt_u (local.get $n) (i32.const 4))) (local.set $off (i32.add (local.get $off) (i32.const 4)))",
+        "skip" => "(local.set $off (i32.add (local.get $off) (i32.const 4)))",
+        _ => "(local.set $off (i32.add (local.get $off) (local.get $n)))",
+    };
+    let wat = r#"(module
+      (import "test:workflow/db" "page" (func $page (param i32 i32 i32)))
+      (memory (export "memory") 4)
+      (global $heap (mut i32) (i32.const 1024))
+      (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32)
+        (local $p i32) (local.set $p (global.get $heap))
+        (global.set $heap (i32.add (global.get $heap) (local.get 3))) (local.get $p))
+      (func (export "run") (param $mode i32) (result i32)
+        (local $off i32) (local $sum i32) (local $p i32) (local $n i32) (local $i i32)
+        (block $done (loop $next
+          (call $page (local.get $off) (i32.const 4) (i32.const 32))
+          (local.set $p (i32.load (i32.const 32)))
+          (local.set $n (i32.load (i32.const 36)))
+          (br_if $done (i32.eqz (local.get $n)))
+          (local.set $i (i32.const 0))
+          (block $sum_done (loop $sum_next
+            (br_if $sum_done (i32.ge_u (local.get $i) (local.get $n)))
+            (local.set $sum (i32.add (local.get $sum) (i32.load (i32.add (local.get $p) (i32.shl (local.get $i) (i32.const 2))))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $sum_next)))
+          STEP
+          (br $next)))
+        (local.get $sum)))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, &wat.replace("STEP", step))).unwrap();
+}
+
+#[test]
+fn an_app_that_stops_at_a_short_page_or_skips_rows_breaks_pagination() {
+    let f = Fixture::new(false);
+    let manifest = r#"
+[app]
+wasm = "app.wasm"
+[entry]
+export = "run"
+request = 0
+[datasets.items]
+rows = 10
+key = "id"
+template = { id = 1 }
+[functions."test:workflow/db#page"]
+query = { dataset = "items", select = "id", page = { offset = "offset", limit = "limit", max = 4, short = true } }
+"#;
+    std::fs::write(&f.manifest, manifest).unwrap();
+    let pairs = |f: &Fixture| {
+        let (_, r) = f.cli(&["run"]);
+        assert_eq!(r["result"], 55, "{r}");
+        let (_, out) = f.cli(&["probe", "pairs", r["run"].as_str().unwrap()]);
+        out["findings"].as_array().unwrap().iter().filter(|x| x["kind"] == "broken_pagination").cloned().collect::<Vec<_>>()
+    };
+    pages_fixture(&f, "stop");
+    let found = pairs(&f);
+    let finding = found.iter().find(|x| x["title"].as_str().unwrap().contains("returns pages of")).unwrap_or_else(|| panic!("{found:?}")).clone();
+    assert_eq!(finding["severity"], "fail", "{finding}");
+    assert!(
+        finding["title"].as_str().unwrap().contains("returns pages of 1 (it asked for 4): it reads 1 of the 10 rows and stops at a short page"),
+        "{finding}"
+    );
+    let (code, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "60"]);
+    assert_eq!((code, &confirmed["confirmed"]), (0, &json!(true)), "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let saved: Value = serde_json::from_slice(&std::fs::read(case).unwrap()).unwrap();
+    // The smallest world that still shows it: one full page and the next.
+    assert!(saved.to_string().contains(r#""dataset_rows":{"items":4}"#), "{saved}");
+    let (code, v) = f.cli(&["replay", case]);
+    assert_eq!((code, &v["reproduced"]), (0, &json!(true)), "{v}");
+    // Counting offsets by the rows asked for skips the rest of a short page.
+    pages_fixture(&f, "skip");
+    let found = pairs(&f);
+    assert!(found.iter().any(|x| x["title"].as_str().unwrap().contains("never reads rows 1 to 3 of test:workflow/db#page")), "{found:?}");
+    // Following what the platform returned reads every row.
+    pages_fixture(&f, "follow");
+    assert!(pairs(&f).is_empty());
+    let (code, v) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!((code, &v["reproduced"]), (0, &json!(false)), "{v}");
+}
+
 #[test]
 fn plans_edit_the_world_and_paged_queries_answer_a_page_at_a_time() {
     let f = Fixture::new(false);

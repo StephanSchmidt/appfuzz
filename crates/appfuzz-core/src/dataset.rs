@@ -324,7 +324,7 @@ pub fn decode_cursor(dataset: &str, token: &str) -> Option<usize> {
 }
 fn page_arg<'a>(args: &'a [(String, Value)], path: &str) -> Option<&'a Value> {
     let (root, rest) = path.split_once('.').unwrap_or((path, ""));
-    crate::harness::field(&args.iter().find(|(k, _)| k == root)?.1, rest).filter(|v| !v.is_null())
+    crate::harness::field(&args.iter().find(|(k, _)| k == root)?.1, rest).and_then(crate::value::some)
 }
 fn index(seed: u64, dataset: &str, field: &str, row: usize, len: usize) -> usize {
     let hash = blake3::hash(format!("{seed}:{dataset}:{field}:{row}").as_bytes());
@@ -772,6 +772,9 @@ mod world_tests {
         assert_eq!(second["ok"]["items"].as_array().unwrap().len(), 5);
         let last = q.resolve(&world, &[("after".into(), second["ok"]["next"].clone())], None).unwrap();
         assert_eq!((last["ok"]["items"].as_array().unwrap().len(), &last["ok"]["next"]), (1, &Value::Null));
+        // An `option<string>` cursor arrives as `{"some": token}`.
+        let wrapped = q.resolve(&world, &[("after".into(), json!({"some": token}))], None).unwrap();
+        assert_eq!(wrapped, second);
         for forged in ["5", "00000000a", &encode_cursor("orders", 5)] {
             assert_eq!(q.resolve(&world, &[("after".into(), json!(forged))], None).unwrap(), json!({"err": "bad cursor"}), "{forged}");
         }

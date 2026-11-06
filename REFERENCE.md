@@ -527,6 +527,18 @@ is the list itself. `short = true` says the platform may return fewer rows than
 asked while more remain. Then a plan can make it do so: `{"acme:web/customers#page":
 {"page_size": 3}}`. Without `short`, `page_size` is an error.
 
+Every run checks the pages it read from such a function, per list (the
+arguments other than `limit`, `offset` and `cursor`), up to the first failed
+call. Rows between two pages the app read that it never read are a
+`broken_pagination` fail (`detail.gap`): the app moved on by what it asked for,
+not what it got. So is the first page again before the walk reached a last page
+(an empty page, `next` none, or a shorter page where pages are never short).
+Where `short = true`, pair checks (`probe pairs`, fuzzing) run the same world
+again with pages of 1 and of one less than the run asked for, when it read more
+than one page. Another answer is a `broken_pagination` fail that names the rows
+the app read with full and with short pages; confirmation shrinks the
+collection to the smallest that still shows it.
+
 `owner = "owner-id"` on a dataset names the field holding the user a record
 belongs to. `public = ["name"]` lists fields anyone may see, also in other users'
 records. The caller of a run is the request field with the `identity` role, else

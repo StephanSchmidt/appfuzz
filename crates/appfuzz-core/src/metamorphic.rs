@@ -11,6 +11,8 @@
 //!   with the normal page: `inconsistent_response`
 //! - one host function 10× slower → over the latency limit:
 //!   `slow_host_sensitivity`
+//! - shorter pages, where the platform may return them (the same world) →
+//!   another answer: `broken_pagination`
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,6 +41,7 @@ pub enum Change {
     Clock,
     Fault,
     Slow,
+    Pages,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,6 +76,14 @@ pub fn variants(app: &App, r: &RunRecord) -> Vec<Variant> {
     let mut out = Vec::new();
     if r.outcome.kind != OutcomeKind::Ok {
         return out;
+    }
+    // Paged results are not pinned: the same world answers shorter pages.
+    for (func, size) in crate::pages::shorter(&app.manifest, r) {
+        let mut s = r.spec.clone();
+        let defaults = s.plan.0.entry("_defaults".into()).or_default();
+        defaults.dataset_seed = Some(defaults.dataset_seed.unwrap_or(r.spec.seed));
+        s.plan.0.entry(func.clone()).or_default().page_size = Some(size);
+        out.push(Variant { change: Change::Pages, func: Some(func), call: None, spec: s });
     }
     let Some(mut base) = pinned(r) else { return out };
     // A different guest RNG seed must keep host datasets fixed, just as
@@ -285,6 +296,10 @@ pub fn compare(app: &App, base: &RunRecord, v: &Variant, vr: &RunRecord) -> Vec<
                     run,
                 ));
             }
+        }
+        Change::Pages if !same => {
+            let size = v.spec.plan.0.get(&func).and_then(|p| p.page_size).unwrap_or(0);
+            out.push(crate::pages::shorter_finding(m, base, vr, &func, size, detail(json!({}))));
         }
         _ => {}
     }

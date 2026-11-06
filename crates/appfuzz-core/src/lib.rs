@@ -28,6 +28,7 @@ pub mod markup;
 pub mod metamorphic;
 pub mod natural;
 pub mod output;
+pub mod pages;
 pub mod par;
 pub mod payload;
 pub mod plan;

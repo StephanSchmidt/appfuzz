@@ -1,0 +1,6 @@
+{
+  "app": "export-follows-pages",
+  "bug": "exports customers page by page until the platform says there are no more",
+  "expect": [],
+  "allow": []
+}

@@ -271,6 +271,7 @@ parameter or path it doesn't have, is an error.
 | "the page's JavaScript is the problem: DOM XSS, `eval`, a beacon with the cookie, a redirect next week, a miner" | `probe scripts` |
 | "it lets in any token", "it never checks the JWT's signature", "the token compare leaks timing", "session ids are guessable" | `probe auth` |
 | "it can't handle odd host values" | `probe values --fn X` |
+| "it misses rows when a page comes back short" | `probe pairs <run>` (pages of 1 and one less than asked, where `page.short = true`) |
 | "it breaks when a later host call fails, or retries forever" | `probe faults last --runs 256`, optionally `--fn X` |
 | "why do these two runs differ?" | `diff <a> <b>`, then `provenance <b> --call <n>` |
 | "where does this argument come from?" | `provenance <run> --call <n>` |
@@ -308,6 +309,7 @@ and `confirm <id>` makes it reproducible.
 | `fails_at_size` | the app crashes or hangs once a host list or request field reaches some size, and works below it |
 | `over_budget` | fuel, memory, cost or latency above the manifest's limits |
 | `n_plus_1`, `input_amplification`, `nested_fan_out` | host calls grow with a host list or a request field (one loop, or a loop in a loop) |
+| `broken_pagination` | the app misses rows of a paged list: it moves on by the rows it asked for, not the ones it got, starts over before the last page, or answers differently when the platform returns shorter pages (where it may) |
 | `unbounded_read` | the app reads a whole host list while its answer stays the same size: every new row costs memory and time; fail when some rows never affect the answer, a paged query exists and a limit breaks by 10,000 rows |
 | `cpu_blowup`, `memory_blowup`, `output_amplification`, `payload_amplification` | superlinear growth of fuel, memory, output or host arguments |
 | `redundant_calls`, `chatty`, `retry_storm`, `serial_chain`, `host_call_in_loop` | wasteful call patterns |

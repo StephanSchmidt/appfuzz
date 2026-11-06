@@ -30,7 +30,7 @@ choices = { name = ["Ada", "Zoë", "<i>Bob</i>", "O'Neil"], balance = [100, -250
 query = { dataset = "customers" }
 
 [functions."bench:web/customers#page"]
-query = { dataset = "customers", page = { offset = "offset", limit = "limit", max = 50 } }
+query = { dataset = "customers", page = { offset = "offset", limit = "limit", max = 50, short = true } }
 
 [functions."bench:web/customers#after"]
-query = { dataset = "customers", wrap = "ok", page = { cursor = "cursor", limit = "limit", items = "items", next = "next", max = 50 } }
+query = { dataset = "customers", wrap = "ok", page = { cursor = "cursor", limit = "limit", items = "items", next = "next", max = 50, short = true } }

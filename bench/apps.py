@@ -949,7 +949,8 @@ app("score-percent", "draws score as a percentage bar and panics above 100, whic
 
 # --- Modeled collections ---------------------------------------------------
 # The platform declares its customer collection once: every row has notes of
-# a few kilobytes, and `page` and `after` return at most 50 rows.
+# a few kilobytes, and `page` and `after` return at most 50 rows, sometimes
+# fewer while more follow.
 
 CUSTOMERS = "bench:web/customers"
 
@@ -964,10 +965,10 @@ choices = {{ name = ["Ada", "Zoë", "<i>Bob</i>", "O'Neil"], balance = [100, -25
 query = {{ dataset = "customers" }}
 
 [functions."bench:web/customers#page"]
-query = {{ dataset = "customers", page = {{ offset = "offset", limit = "limit", max = 50 }} }}
+query = {{ dataset = "customers", page = {{ offset = "offset", limit = "limit", max = 50, short = true }} }}
 
 [functions."bench:web/customers#after"]
-query = {{ dataset = "customers", wrap = "ok", page = {{ cursor = "cursor", limit = "limit", items = "items", next = "next", max = 50 }} }}
+query = {{ dataset = "customers", wrap = "ok", page = {{ cursor = "cursor", limit = "limit", items = "items", next = "next", max = 50, short = true }} }}
 """.format(notes="Called about the renewal; prefers email. " * 200)
 
 
@@ -1000,6 +1001,62 @@ app("customers-total-balance", "adds up the balance of every customer (every row
         let _ = &req;
         let total: i64 = customers::all().iter().map(|c| c.balance).sum();
         html(format!("<p>Total balance: {total}</p>"))
+    """), [], grants=[CUSTOMERS], extra=DATA)
+
+app("export-stops-short-page", "exports customers 10 at a time and stops at the first page shorter than 10",
+    data("""
+        let _ = &req;
+        let mut out = String::from("<ul>");
+        let mut offset = 0;
+        loop {
+            let page = customers::page(offset, 10);
+            for c in &page {
+                out += &format!("<li>{}: {}</li>", esc(&c.name), c.balance);
+            }
+            if page.len() < 10 {
+                break;
+            }
+            offset += 10;
+        }
+        html(out + "</ul>")
+    """), [("broken_pagination", "fail")], grants=[CUSTOMERS], extra=DATA)
+
+app("export-skips-rows", "exports customers 10 at a time and moves on by 10, whatever the page held",
+    data("""
+        let _ = &req;
+        let mut out = String::from("<ul>");
+        let mut offset = 0;
+        loop {
+            let page = customers::page(offset, 10);
+            if page.is_empty() {
+                break;
+            }
+            for c in &page {
+                out += &format!("<li>{}: {}</li>", esc(&c.name), c.balance);
+            }
+            offset += 10;
+        }
+        html(out + "</ul>")
+    """), [("broken_pagination", "fail")], grants=[CUSTOMERS], extra=DATA)
+
+app("export-follows-pages", "exports customers page by page until the platform says there are no more",
+    data("""
+        let _ = &req;
+        let mut out = String::from("<ul>");
+        let mut cursor: Option<String> = None;
+        loop {
+            let Ok(page) = customers::after(cursor.as_deref(), 10) else {
+                return Response { status: 503, body: "<p>Try again later</p>".into(), headers: vec![("content-type".into(), "text/html".into())] };
+            };
+            for c in &page.items {
+                out += &format!("<li>{}: {}</li>", esc(&c.name), c.balance);
+            }
+            match page.next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        html(out + "</ul>")
     """), [], grants=[CUSTOMERS], extra=DATA)
 
 MANIFEST = """\

@@ -26,6 +26,15 @@ where
     Value::deserialize(deserializer).map(Some)
 }
 
+/// The value inside an option argument: `{"some": v}` is `v`, `null` is none.
+pub fn some(v: &Value) -> Option<&Value> {
+    match v {
+        Value::Null => None,
+        Value::Object(m) if m.len() == 1 && m.contains_key("some") => some(&m["some"]),
+        _ => Some(v),
+    }
+}
+
 /// The length of `v` as compact JSON, without building the text.
 pub fn json_len<T: Serialize + ?Sized>(v: &T) -> usize {
     struct Count(usize);

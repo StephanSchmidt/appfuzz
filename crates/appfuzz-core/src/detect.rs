@@ -390,6 +390,7 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     out.extend(crate::output::check(r, m));
     out.extend(crate::labels::check(r, m));
     out.extend(crate::effects::check(r, m));
+    out.extend(crate::pages::check(r, m));
     out.extend(crate::identity::check(r, m));
     out.extend(crate::markup::check(r, m));
     out.extend(crate::web::check(r, m));
