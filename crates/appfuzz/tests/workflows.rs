@@ -316,6 +316,46 @@ fn generation_configuration_errors_are_distinct_from_guest_crashes() {
     assert_eq!(converted["result"], json!(u32::MAX));
 }
 
+/// `probe scripts` runs the page's own script: the link's #fragment put
+/// into innerHTML is DOM XSS. The finding confirms and replays like any
+/// other; the same page with textContent shows nothing.
+#[test]
+fn page_scripts_run_confirm_and_replay() {
+    let f = Fixture::new(true);
+    let page = |sink: &str| format!(r#""<p id=g></p><script>document.getElementById(\"g\").{sink} = decodeURIComponent(location.hash.slice(1))</script>""#);
+    f.edit("\"safe\"", &page("innerHTML"));
+    f.edit("body_format = \"html\" }", "body_format = \"html\" }\nresult = { \"\" = \"html:scripts\" }");
+    let (_, out) = f.cli(&["probe", "scripts"]);
+    assert!(out["pages"].as_array().is_some_and(|p| !p.is_empty()), "{out}");
+    let finding = out["findings"].as_array().unwrap().iter().find(|v| v["kind"] == "html_injection").unwrap_or_else(|| panic!("{out}"));
+    assert!(finding["title"].as_str().unwrap().contains("location.hash"), "{finding}");
+    // `explain` on the finding's run shows what the scripts did; the page
+    // visit itself opens with `explain` and `show` like any run.
+    let (code, explained) = f.cli(&["explain", finding["run"].as_str().unwrap()]);
+    assert_eq!(code, 0, "{explained}");
+    let shown = explained["findings"].as_array().unwrap().iter().find(|v| v["id"] == finding["id"]).unwrap_or_else(|| panic!("{explained}"));
+    assert_eq!(shown["detail"]["sink"], "innerHTML", "{shown}");
+    let visit = shown["browser_run"].as_str().unwrap();
+    let (code, explained) = f.cli(&["explain", visit]);
+    assert_eq!(code, 0, "{explained}");
+    assert!(explained["findings"].as_array().unwrap().iter().any(|v| v["id"] == finding["id"]), "{explained}");
+    for view in ["summary", "calls"] {
+        let (code, shown) = f.cli(&["show", visit, "--view", view]);
+        assert_eq!(code, 0, "{view}: {shown}");
+    }
+    let (_, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "10"]);
+    assert_eq!(confirmed["confirmed"], true, "{confirmed}");
+    let (code, replayed) = f.cli(&["replay", confirmed["case"].as_str().unwrap()]);
+    assert_eq!(code, 0, "{replayed}");
+    assert_eq!(replayed["reproduced"], true, "{replayed}");
+
+    let f = Fixture::new(true);
+    f.edit("\"safe\"", &page("textContent"));
+    f.edit("body_format = \"html\" }", "body_format = \"html\" }\nresult = { \"\" = \"html:scripts\" }");
+    let (_, out) = f.cli(&["probe", "scripts"]);
+    assert!(out["findings"].as_array().unwrap().iter().all(|v| v["kind"] != "html_injection"), "{out}");
+}
+
 #[test]
 fn semantic_host_argument_violations_confirm_replay_and_regress() {
     let f = Fixture::new(false);

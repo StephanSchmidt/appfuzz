@@ -1,0 +1,11 @@
+{
+  "app": "timebomb-redirect",
+  "bug": "the page sends the visitor to another site a week after it loads",
+  "expect": [
+    {
+      "kind": "auto_navigation",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

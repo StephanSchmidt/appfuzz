@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head><title>Plain</title></head>
+<body>
+<p id="count">0</p>
+<button id="inc">+1</button>
+<button onclick="document.getElementById('count').textContent = 'inline ' + (1 + 1)">inline</button>
+<script>
+  let n = 0;
+  document.getElementById('inc').addEventListener('click', () => {
+    n += 1;
+    document.getElementById('count').textContent = String(n);
+    fetch('/api/count', { method: 'POST', body: JSON.stringify({ n }) }).then((r) => r.json()).then((j) => console.log('saved', j.ok));
+  });
+  setTimeout(() => console.log('later', Date.now()), 100);
+  document.addEventListener('DOMContentLoaded', () => console.log('dcl', document.readyState));
+  window.addEventListener('load', () => console.log('load', document.readyState));
+</script>
+<script type="module">
+  import { greet } from './greet.js';
+  console.log(greet('module'));
+  Promise.reject(new Error('nobody catches this'));
+</script>
+</body>
+</html>

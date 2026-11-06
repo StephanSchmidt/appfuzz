@@ -1,0 +1,12 @@
+[package]
+name = "appfuzz-browser-wizen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Snapshots the browser guest after QuickJS has loaded the shim."
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+wasmtime = { version = "=50.0.1", default-features = false, features = ["component-model", "cranelift", "async", "runtime", "std"] }
+wasmtime-wasi = "=50.0.1"
+wasmtime-wizer = { version = "=50.0.1", default-features = false, features = ["component-model", "wasmtime"] }

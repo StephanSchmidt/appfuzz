@@ -3,6 +3,9 @@ extend-exclude = [
     # Vendored upstream interface files: keep them byte-identical.
     "crates/appfuzz-core/platforms/fastly/witx/",
     "**/deps/*.wit",
+    # Vendored minified bundles the clean bench apps serve (React build, htmx).
+    "bench/apps/clean-react/src/index.js",
+    "bench/apps/clean-htmx/src/htmx.min.js",
     # Slides use German class names (titel, foto, vollbild).
     "website/appos/",
 ]

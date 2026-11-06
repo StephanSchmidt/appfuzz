@@ -78,7 +78,10 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
         Cmd::Show { run, field, view, call, func } => {
             if view != "record" {
                 let cmd = match view.as_str() {
-                    "summary" => return Ok(summary(load()?, &store.load(run)?)),
+                    "summary" => {
+                        let r = store.load(run)?;
+                        return Ok(summary(app_of(load()?, &r)?, &r));
+                    }
                     "calls" => Cmd::Calls { run: run.clone(), func: func.clone() },
                     "timeline" => Cmd::Timeline { run: run.clone() },
                     "logs" => Cmd::Stdout { run: run.clone() },
@@ -301,6 +304,45 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let mut out = json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, app, found)?});
             if probes.is_empty() {
                 out["note"] = json!(format!("doesn't apply: {} takes no HTTP request (a uri and headers)", base.export));
+            }
+            Ok(out)
+        }
+        Cmd::Probe { cmd: ProbeCmd::Scripts { export, spec } } => {
+            let app = load()?;
+            let base = build_spec(app, export.as_deref(), spec)?;
+            // Pages the fuzzer found: requests with canaries whose response
+            // has scripts, one per page.
+            let mut bases = vec![base.clone()];
+            let mut stored: Vec<RunRecord> = store
+                .all()?
+                .into_iter()
+                .filter(|r| r.spec.component == app.hash && r.spec.contract == app.contract && r.spec.export == base.export && r.id.starts_with('r'))
+                .filter(|r| r.spec.args.first().is_some_and(|a| a.to_string().contains("cnry")) && appfuzz_core::browser::has_scripts(r, &app.manifest))
+                .collect();
+            stored.sort_by(|a, b| a.id.cmp(&b.id));
+            let mut pages = std::collections::BTreeSet::new();
+            for r in stored {
+                if let Some(req) = r.spec.args.first()
+                    && pages.len() < 8
+                    && pages.insert(appfuzz_core::browser::page_url(req))
+                {
+                    bases.push(r.spec);
+                }
+            }
+            let recorder = Recorder::new(app, &store);
+            let runner = |s: &RunSpec| recorder.cached(s);
+            let (probes, sessions, found) = appfuzz_core::browser::probe(app, &bases, &runner)?;
+            recorder.check()?;
+            for s in &sessions {
+                store.save(&s.browser)?;
+            }
+            let mut out = json!({
+                "pages": probes,
+                "unsupported": appfuzz_core::browser::unsupported(&sessions),
+                "findings": record_findings(&cli, app, found)?,
+            });
+            if probes.is_empty() {
+                out["note"] = json!("doesn't apply: no response of these requests is HTML with a script");
             }
             Ok(out)
         }
@@ -564,10 +606,7 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
             let app = load()?;
             dig::profile(app, &store.load(run)?, *top)
         }
-        Cmd::Explain { run } => {
-            let app = load()?;
-            dig::explain(app, &store, &store.load(run)?)
-        }
+        Cmd::Explain { run } => explain(&cli, load()?, &store, &store.load(run)?),
         Cmd::Unexplored => {
             let app = load()?;
             let (mut v, found) = dig::unexplored(app, &store)?;
@@ -636,6 +675,30 @@ fn platform(cli: &Cli, cmd: &PlatformCmd) -> Result<Value> {
 }
 
 /// `--view stack` or `provenance` without `--call`: which calls there are.
+/// `explain`, and what the page's scripts did (`probe scripts`): the run
+/// alone doesn't show it, the findings of its page visits do.
+fn explain(cli: &Cli, app: &App, store: &RunStore, r: &RunRecord) -> Result<Value> {
+    let mut v = dig::explain(app_of(app, r)?, store, r)?;
+    if let Some(list) = v["findings"].as_array_mut() {
+        for f in FindingStore::new(&cli.state, &app.state_key).all()? {
+            let visit = f.detail["browser_run"].as_str();
+            if visit.is_some() && (f.run.as_deref() == Some(r.id.as_str()) || visit == Some(r.id.as_str())) {
+                list.push(json!({"id": f.id, "kind": f.kind, "severity": f.severity, "title": f.title, "browser_run": visit, "detail": f.detail}));
+            }
+        }
+    }
+    Ok(v)
+}
+
+/// The app a stored run ran: the reviewed app, or the browser for a page
+/// visit of `probe scripts`.
+fn app_of<'a>(app: &'a App, r: &RunRecord) -> Result<&'a App> {
+    if r.spec.export == appfuzz_core::browser::SESSION {
+        return Ok(&appfuzz_core::browser::Browser::shared()?.app);
+    }
+    Ok(app)
+}
+
 fn call_needed(store: &RunStore, run: &str, view: &str) -> anyhow::Error {
     match store.load(run) {
         Ok(r) => match (r.events.first(), r.events.last()) {

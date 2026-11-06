@@ -4,6 +4,9 @@ include!("../../../prelude.rs");
 
 impl exports::bench::web::handler::Guest for A {
     fn handle(req: Request) -> Response {
+        if req.path == "/static/app.js" {
+            return Response { status: 200, body: include_str!("app.js").into(), headers: vec![("content-type".into(), "text/javascript".into())] };
+        }
         // A JavaScript string literal that is safe in a <script> element.
         fn js(s: &str) -> String {
             let mut o = String::from("\"");

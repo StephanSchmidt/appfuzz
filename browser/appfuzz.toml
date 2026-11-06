@@ -1,0 +1,14 @@
+# The browser guest as appfuzz runs it, for the speed example
+# (crates/appfuzz/examples/browser_speed.rs): one page session per call,
+# under fuel and the virtual clock.
+[app]
+wasm = "target/browser.wasm"
+
+[entry]
+export = "appfuzz:browser/page#session"
+
+[limits]
+fuel = 20_000_000_000
+memory = "256MiB"
+wall_timeout_ms = 120_000
+ns_per_fuel = 0.02

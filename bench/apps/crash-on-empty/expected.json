@@ -1,0 +1,11 @@
+{
+  "app": "crash-on-empty",
+  "bug": "the page's script throws when the item list is empty",
+  "expect": [
+    {
+      "kind": "script_error",
+      "min": "warn"
+    }
+  ],
+  "allow": []
+}

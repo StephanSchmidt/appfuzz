@@ -1,0 +1,14 @@
+{
+  "name": "appfuzz-browser-shim",
+  "private": true,
+  "description": "The DOM and Web APIs the browser guest gives a page's scripts, bundled into one script.",
+  "scripts": {
+    "build": "esbuild src/shim.js --bundle --format=iife --target=es2023 --minify --legal-comments=none --alias:htmlparser2=./src/alias/htmlparser2.js --alias:cssomnom/parse=./src/alias/cssom.js --outfile=dist/shim.js"
+  },
+  "dependencies": {
+    "linkedom": "0.18.15"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

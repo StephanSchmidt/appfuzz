@@ -1,0 +1,13 @@
+{
+  "app": "eval-fetch",
+  "bug": "the page's script runs code it fetched from another host",
+  "expect": [
+    {
+      "kind": "remote_code",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "weak_csp"
+  ]
+}

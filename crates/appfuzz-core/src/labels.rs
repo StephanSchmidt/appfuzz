@@ -421,7 +421,7 @@ fn sources(r: &RunRecord, m: &Manifest) -> BTreeMap<String, (String, String)> {
 }
 
 /// What follows a canary in a sink argument, up to the end of its tail.
-fn tail(s: &str, end: usize) -> &str {
+pub(crate) fn tail(s: &str, end: usize) -> &str {
     let rest = &s[end..];
     let limit = rest.char_indices().nth(60).map(|(i, _)| i).unwrap_or(rest.len());
     let window = &rest[..limit];
@@ -448,7 +448,7 @@ fn source_tails(r: &RunRecord) -> BTreeMap<String, String> {
     tails_in(texts.iter().map(String::as_str))
 }
 
-fn tails_in<'a>(texts: impl Iterator<Item = &'a str>) -> BTreeMap<String, String> {
+pub(crate) fn tails_in<'a>(texts: impl Iterator<Item = &'a str>) -> BTreeMap<String, String> {
     let mut out: BTreeMap<String, String> = BTreeMap::new();
     for s in texts {
         for c in CANARY.find_iter(s) {
@@ -464,7 +464,7 @@ fn tails_in<'a>(texts: impl Iterator<Item = &'a str>) -> BTreeMap<String, String
     out
 }
 
-fn unescaped(t: &str, pat: &str) -> bool {
+pub(crate) fn unescaped(t: &str, pat: &str) -> bool {
     t.match_indices(pat).any(|(i, _)| !t[..i].ends_with('\\'))
 }
 
@@ -472,7 +472,7 @@ fn unescaped(t: &str, pat: &str) -> bool {
 /// this label: (kind, severity, what is intact). `sent` is what followed
 /// the canary where it came from ([`source_tails`]): a quote after it in
 /// the sink counts only if the request or host sent one.
-fn sink_problem(label: Label, s: &str, start: usize, end: usize, sent: &str) -> Option<(&'static str, Severity, &'static str)> {
+pub(crate) fn sink_problem(label: Label, s: &str, start: usize, end: usize, sent: &str) -> Option<(&'static str, Severity, &'static str)> {
     let t = tail(s, end);
     let quote = sent.contains('\'');
     match label {

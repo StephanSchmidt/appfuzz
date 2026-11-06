@@ -1,0 +1,45 @@
+package appfuzz:browser;
+
+/// What the page asks of the network. Bodies are text.
+interface net {
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: string,
+    }
+
+    /// A request to the page's own origin (fetch, XHR, beacon, script,
+    /// style, a form): the app under test answers it. `kind` says what made
+    /// it; `gesture` whether a user action did.
+    fetch-own: func(kind: string, method: string, path: string, headers: list<tuple<string, string>>, body: option<string>, gesture: bool) -> result<response, string>;
+
+    /// A request to another origin.
+    fetch-other: func(kind: string, method: string, url: string, headers: list<tuple<string, string>>, body: option<string>, gesture: bool) -> result<response, string>;
+}
+
+/// The page leaving: `location`, `window.open`, a form's target.
+interface nav {
+    go: func(how: string, url: string, gesture: bool);
+}
+
+/// Text the page turns into markup (`innerHTML`, `document.write`) or into
+/// code (`eval`, `Function`, a string timer, an `on…` attribute).
+interface sink {
+    html: func(sink: string, value: string);
+    code: func(sink: string, value: string);
+}
+
+interface page {
+    /// One page session: load the page, run its scripts, act on every
+    /// control, let time pass. `input` and the result are JSON.
+    session: func(input: string) -> string;
+}
+
+world browser {
+    import net;
+    import nav;
+    import sink;
+    export page;
+    /// Boots QuickJS with the shim; the build snapshots the guest after it.
+    export wizer-initialize: func();
+}

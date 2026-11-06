@@ -1,0 +1,6 @@
+{
+  "app": "clean-htmx",
+  "bug": "an htmx page whose fragments come from the app, the search text escaped",
+  "expect": [],
+  "allow": []
+}

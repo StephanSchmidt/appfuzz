@@ -20,6 +20,8 @@
 !/crates/
 !/website/
 !/demos/
+!/browser/
+/browser/js/dist/
 
 /bench/*
 !/bench/
@@ -27,6 +29,7 @@
 !/bench/Cargo.lock
 !/bench/prelude.rs
 !/bench/prelude-labelled.rs
+!/bench/scripts.rs
 !/bench/apps.py
 !/bench/demo.sh
 !/bench/demo.tape

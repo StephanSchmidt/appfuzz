@@ -358,12 +358,7 @@ fn from_text(s: &str, source: &str, out: &mut Vec<Found>) {
 /// any other header by the shape of its value.
 pub fn in_headers(h: &Value) -> Vec<Found> {
     let mut out = Vec::new();
-    let pairs: Vec<(String, String)> = match h {
-        Value::Array(a) => a.iter().filter_map(|p| Some((p.get(0)?.as_str()?.to_ascii_lowercase(), p.get(1)?.as_str()?.to_string()))).collect(),
-        Value::Object(o) => o.iter().filter_map(|(k, v)| Some((k.to_ascii_lowercase(), v.as_str()?.to_string()))).collect(),
-        _ => vec![],
-    };
-    for (k, v) in pairs {
+    for (k, v) in header_pairs(h) {
         match k.as_str() {
             "location" | "content-location" => out.push(Found::new(&v, "GET", &k, "redirect", "")),
             "refresh" => {
@@ -384,6 +379,15 @@ pub fn in_headers(h: &Value) -> Vec<Found> {
     out
 }
 
+/// Header pairs, names in lower case.
+fn header_pairs(h: &Value) -> Vec<(String, String)> {
+    match h {
+        Value::Array(a) => a.iter().filter_map(|p| Some((p.get(0)?.as_str()?.to_ascii_lowercase(), p.get(1)?.as_str()?.to_string()))).collect(),
+        Value::Object(o) => o.iter().filter_map(|(k, v)| Some((k.to_ascii_lowercase(), v.as_str()?.to_string()))).collect(),
+        _ => vec![],
+    }
+}
+
 /// All URLs in one run.
 pub fn extract(r: &RunRecord, m: &Manifest) -> Vec<UrlRef> {
     extract_from(r, m, true)
@@ -401,7 +405,11 @@ fn extract_from(r: &RunRecord, m: &Manifest, full: bool) -> Vec<UrlRef> {
     if let Some(result) = &r.result {
         let body = out.and_then(|o| o.body.as_deref()).and_then(|p| field(result, p));
         let headers = out.and_then(|o| o.headers.as_deref()).and_then(|p| field(result, p));
+        // A body whose content type isn't HTML (a script, a style, JSON)
+        // is no markup: a browser fetches nothing it names by itself.
+        let not_html = headers.is_some_and(|h| header_pairs(h).iter().any(|(k, v)| k == "content-type" && !v.to_ascii_lowercase().contains("html")));
         match body {
+            Some(Value::String(b)) if not_html => from_text(b, "text", &mut raw),
             Some(Value::String(b)) => raw.extend(in_html(b)),
             _ => {
                 // No manifest hint: every string in the result.

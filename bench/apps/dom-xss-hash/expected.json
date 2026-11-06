@@ -1,0 +1,11 @@
+{
+  "app": "dom-xss-hash",
+  "bug": "the page's script puts the link's #fragment into innerHTML",
+  "expect": [
+    {
+      "kind": "html_injection",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

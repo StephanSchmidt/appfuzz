@@ -127,11 +127,17 @@ pub enum Across {
     /// Forged credentials, a secret's prefixes or other random seeds
     /// (`appfuzz probe auth`).
     Auth { auth: crate::auth::Recipe },
+    /// The page the run serves, with its scripts run in the browser guest
+    /// (`appfuzz probe scripts`).
+    Browser {},
 }
 
 impl Across {
     /// How `f` was found, if it came from comparing runs this way.
     pub fn of(f: &Finding) -> Option<Across> {
+        if f.detail.get("browser_run").is_some() {
+            return Some(Across::Browser {});
+        }
         if let Some(auth) = f.detail.get("auth") {
             return serde_json::from_value(auth.clone()).ok().map(|auth| Across::Auth { auth });
         }
@@ -159,7 +165,7 @@ impl Across {
     pub fn start_run<'a>(&self, f: &'a Finding) -> Option<&'a str> {
         match self {
             Across::Pair { .. } | Across::Fault { .. } | Across::Auth { .. } => f.detail.get("base_run").and_then(Value::as_str),
-            Across::Scale { .. } | Across::Nested { .. } => f.run.as_deref(),
+            Across::Scale { .. } | Across::Nested { .. } | Across::Browser {} => f.run.as_deref(),
         }
     }
 
@@ -197,6 +203,13 @@ impl Across {
                 vs.iter().find_map(|v| metamorphic::compare(app, &r, v, &run(&v.spec)).into_iter().find(|f| f.matches_id(id)))
             }
             Across::Auth { auth } => crate::probe::auth_again(app, auth, spec, run).into_iter().find(|f| f.matches_id(id)),
+            Across::Browser {} => {
+                let page = run(spec);
+                if !crate::browser::has_scripts(&page, &app.manifest) {
+                    return Ok(None);
+                }
+                crate::browser::evaluate(app, &page, run)?.1.into_iter().find(|f| f.matches_id(id))
+            }
         })
     }
 
@@ -204,7 +217,7 @@ impl Across {
     pub fn runs_per_test(&self) -> u32 {
         match self {
             Across::Scale { sizes, .. } => sizes.len().max(1) as u32,
-            Across::Pair { .. } | Across::Fault { .. } => 2,
+            Across::Pair { .. } | Across::Fault { .. } | Across::Browser {} => 2,
             Across::Nested { .. } => 4,
             Across::Auth { auth } => auth.runs(),
         }
@@ -217,6 +230,7 @@ impl Across {
             Across::Nested { func, outer, inner } => json!({"nested": [outer, inner], "func": func}),
             Across::Pair { change, func } => json!({"variant": {"change": change, "func": func}}),
             Across::Auth { auth } => json!({"auth": auth}),
+            Across::Browser {} => json!({"browser": "the page this request serves, with its scripts run (appfuzz probe scripts)"}),
         }
     }
 }

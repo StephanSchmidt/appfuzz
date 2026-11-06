@@ -451,6 +451,21 @@ pub(crate) enum ProbeCmd {
         #[command(flatten)]
         spec: SpecArgs,
     },
+    /// The page's scripts, run in a browser (pages labelled html:scripts).
+    ///
+    /// Loads each page the app serves (the request, and requests the
+    /// fuzzer found) in appfuzz's browser: scripts run in a browser's
+    /// order, every control is clicked, virtual time passes. Requests to
+    /// the page's own origin go to the app. Finds DOM XSS, code built from
+    /// text, code fetched from elsewhere, data sent to other hosts, pages
+    /// that leave by themselves, script errors, and scripts that keep the
+    /// CPU busy.
+    Scripts {
+        #[arg(long)]
+        export: Option<String>,
+        #[command(flatten)]
+        spec: SpecArgs,
+    },
     /// Requests without credentials and with forged ones (HTTP).
     ///
     /// Where the request without credentials is turned away (401, 403, a

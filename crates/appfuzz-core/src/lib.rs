@@ -3,6 +3,7 @@
 
 pub mod agents;
 pub mod auth;
+pub mod browser;
 pub mod check;
 pub mod constraints;
 mod csp;

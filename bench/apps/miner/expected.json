@@ -1,0 +1,13 @@
+{
+  "app": "miner",
+  "bug": "the page's script keeps the CPU busy from a timer",
+  "expect": [
+    {
+      "kind": "over_budget",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "hang"
+  ]
+}

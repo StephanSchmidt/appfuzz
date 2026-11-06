@@ -92,6 +92,7 @@ impl Finding {
                 | "probing"
                 | "dormant_code"
                 | "outside_envelope"
+                | "auto_navigation"
         )
     }
 

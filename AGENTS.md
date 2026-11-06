@@ -80,7 +80,8 @@ the app's world, and each WIT export is one export to review with
    `totals`.
 3. **`review --time 2m`**: everything in one go. It runs the manifest's
    request sequences, probe values, times and web, amplify, a fuzz
-   campaign, probe auth and the saved acceptance checks, then confirms the
+   campaign, probe auth, probe scripts (for pages whose scripts may run)
+   and the saved acceptance checks, then confirms the
    worst findings. `--time` is the fuzzing budget, 60s without it. The
    verdict and exit code are 0 pass, 1 warn, 2 fail, 3 incomplete/error.
    In CI this is all you need.
@@ -206,6 +207,8 @@ allows only paths on the app's own host. `html:scripts` lets scripts run:
 from the app's origin or pinned (`integrity`) on a granted host, under a
 Content-Security-Policy (`[entry] csp`, the response header or a meta tag;
 all apply) that keeps them on the app's origin and `[grants] hosts`.
+`review` then opens those pages in a browser and runs their scripts
+(`probe scripts`): what the scripts do counts, not only the markup.
 
 Host argument requirements come from the platform's function descriptions:
 `param_values = { date = "format:date", quantity = "range:1..6" }` on a
@@ -261,6 +264,7 @@ parameter or path it doesn't have, is an error.
 | "it breaks on some clock" | `probe times`, `sweep -f today --gen dates`, `run --now 2028-02-29T23:59:00` |
 | "it depends on order, duplicates, randomness" | `probe pairs <run>` |
 | "another site can read it", "it trusts the Host header" | `probe web` |
+| "the page's JavaScript is the problem: DOM XSS, `eval`, a beacon with the cookie, a redirect next week, a miner" | `probe scripts` |
 | "it lets in any token", "it never checks the JWT's signature", "the token compare leaks timing", "session ids are guessable" | `probe auth` |
 | "it can't handle odd host values" | `probe values --fn X` |
 | "it breaks when a later host call fails, or retries forever" | `probe faults last --runs 256`, optionally `--fn X` |
@@ -313,12 +317,24 @@ and `confirm <id>` makes it reproducible.
 | `permissive_cors`, `host_header_injection` | HTTP handlers: another website may read the response with the visitor's cookies; a host the client names ends up in a link, redirect or outbound request (`probe web`) |
 | `script_in_output`, `unsafe_action`, `open_redirect`, `non_local_url` | the response breaks an output label: a script, a request the user didn't ask for, a URL off the app (§4 output labels) |
 | `weak_csp`, `unpinned_script` | `html:scripts`: the Content-Security-Policy lets scripts reach other hosts (or is missing); a script comes from another host without an `integrity` hash or from a host the grants don't list, so the code can change after the review |
+| `code_injection`, `remote_code`, `script_error` | `html:scripts`, with the page's scripts run (`probe scripts`): request or host text becomes code (`eval`, `new Function`, a timer given a string, a handler); the scripts run code they fetched from another host; the scripts throw (fail when every visitor gets the error on load) |
 | `foreign_user_access`, `missing_owner_check` | a user id that is not the caller's goes to a host call; another user's record shows in a page (§4 identity) |
 | `write_on_safe_method`, `repeated_write`, `partial_write` | a change on GET, the same change twice, a change that stays when a later one fails (§4 effects) |
 | `ungranted_import`, `ungranted_call`, `unused_grant` | imports versus the manifest's grants |
 | `check_failed`, `acceptance_failed`, `sequence_check_failed` | a property from `check`, a saved `[acceptance]` check or a sequence invariant broke |
 | `weak_assert` | a saved assert still holds when its values change: it restates the code or tests nothing |
 | `invalid_host_argument` | an actual guest-to-host argument violates its platform-declared semantic domain |
+
+With the page's scripts run, familiar kinds come from the browser too:
+`html_injection` for text the scripts put into the page as markup (DOM
+XSS, `location.hash` included), `open_redirect` and `unsafe_action` for
+where they send the visitor or a request, `n_plus_1` for a request per
+item, `secret_leak` and `pii_leak` for a cookie or labelled data sent to
+another host, `hang` for scripts that never stop, and `over_budget` for
+scripts that keep the visitor's CPU more than 10 % busy while nobody uses
+the page. `explain <run>` lists them with what the scripts did
+(`detail`); their `browser_run`, the page visit, opens with `explain`
+and `show --view calls`.
 
 Experimental kinds, marked `experimental` in reports, look for hostile code:
 
@@ -329,6 +345,7 @@ Experimental kinds, marked `experimental` in reports, look for hostile code:
 | `constant_payload` | a write or external call carries a random-looking blob from the app's own code (needs `effect` labels) |
 | `unexpected_destination`, `probing` | a URL or host call aimed at a host the grants don't list or at the internal network; one run that names many destinations of its own |
 | `dormant_code` | host calls in code no run reached, near odd large constants, hash constants or times |
+| `auto_navigation` | the page's scripts send the visitor to another site with no click, also days after the page loaded |
 | `outside_envelope` | a trace does more than the reviewed envelope allows (`envelope check`) |
 
 Findings are judged against the manifest's limits. If a limit is wrong,
@@ -358,6 +375,11 @@ refuses findings it cannot reproduce.
   2.5 times fewer inputs. It does not measure every branch. Read
   `coverage.internal_feedback` for skipped modules and fallback reasons.
 - Fuel attribution between host calls is an estimate, not a CPU profile.
+- Page scripts run in a browser built into appfuzz, without layout or
+  CSS. It loads scripts from the app's own paths only. What it couldn't
+  judge is listed under `unsupported` in `probe scripts`: scripts from
+  other hosts, Web APIs it doesn't model, and pages whose scripts used up
+  their CPU before every button was tried.
 
 ## Workflow contract
 

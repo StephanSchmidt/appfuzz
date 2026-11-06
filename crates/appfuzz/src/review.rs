@@ -158,6 +158,35 @@ pub(crate) fn note_rebuild(state: &std::path::Path, m: &appfuzz_core::manifest::
     Ok(())
 }
 
+/// The probes that run after the fuzz phase, since they use what it
+/// found: probe auth tries the paths it saw turned away, and probe scripts
+/// (when the export's pages run scripts, `html:scripts`) opens the pages.
+fn after_fuzz(app: &appfuzz_core::harness::App, o: &Opts) -> Vec<(&'static str, ProbeCmd)> {
+    let mut out = vec![("probe auth", ProbeCmd::Auth { export: o.export.clone(), spec: o.spec.clone() })];
+    let default = app.default_export().ok().map(|e| e.key.clone());
+    if o.export.clone().or(default).is_some_and(|e| appfuzz_core::browser::runs_scripts(&app.manifest, &e)) {
+        out.push(("probe scripts", ProbeCmd::Scripts { export: o.export.clone(), spec: o.spec.clone() }));
+    }
+    out
+}
+
+/// Replays the case files of earlier reviews' sequence findings: a sequence
+/// case keeps the whole journey, which a stateless run cannot replay.
+fn replay_sequences(app: &App, state: &std::path::Path, old: &FindingStore, out: &mut Vec<Finding>, errors: &mut Vec<String>) -> Result<()> {
+    for old in old.all()?.into_iter().filter(|f| f.detail["sequence_case"] == true) {
+        let Some(path) = old.confirmed.as_deref() else {
+            errors.push(format!("historical sequence {} has no case", old.id));
+            continue;
+        };
+        match crate::sequences::command(app, state, &crate::cli::SequenceCmd::Replay { case: path.into(), against_current: false }) {
+            Ok(v) if v["status"] == "complete" && v["reproduced"] == true => out.extend(crate::sequences::review_findings(&v)?),
+            Ok(_) => errors.push(format!("historical sequence {} could not reproduce", old.id)),
+            Err(e) => errors.push(format!("historical sequence {}: {e:#}", old.id)),
+        }
+    }
+    Ok(())
+}
+
 /// The CLI for one step of a review: the caller's options, the review's
 /// state folder, all findings.
 fn step_cli(cli: &Cli, state: &std::path::Path, cmd: Cmd) -> Cli {
@@ -274,8 +303,9 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
                 spec: o.spec.clone(),
             },
         );
-        // After the fuzz phase: it also tries paths the fuzzer saw turned away.
-        step("probe auth", Cmd::Probe { cmd: ProbeCmd::Auth { export: o.export.clone(), spec: o.spec.clone() } });
+        for (name, cmd) in after_fuzz(&app, o) {
+            step(name, Cmd::Probe { cmd });
+        }
     }
     if executable && app.manifest.acceptance.is_some() {
         acceptance_results = step(
@@ -296,20 +326,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
     let unexplored = step("unexplored", Cmd::Unexplored);
     let urls = step("urls", Cmd::Urls { run: None, domains: true });
     drop(step);
-    // Sequence cases retain the complete journey; a stateless run cannot replay them.
-    for old in root_findings.all()?.into_iter().filter(|f| f.detail["sequence_case"] == true) {
-        match old.confirmed.as_deref() {
-            Some(path) => {
-                let replay = crate::sequences::command(&app, &state, &crate::cli::SequenceCmd::Replay { case: path.into(), against_current: false });
-                match replay {
-                    Ok(v) if v["status"] == "complete" && v["reproduced"] == true => sequence_findings.extend(crate::sequences::review_findings(&v)?),
-                    Ok(_) => errors.push(format!("historical sequence {} could not reproduce", old.id)),
-                    Err(e) => errors.push(format!("historical sequence {}: {e:#}", old.id)),
-                }
-            }
-            None => errors.push(format!("historical sequence {} has no case", old.id)),
-        }
-    }
+    replay_sequences(&app, &state, &root_findings, &mut sequence_findings, &mut errors)?;
     findings.add(&sequence_findings)?;
     for old in root_findings.all()?.into_iter().filter(|f| f.detail["acceptance_case"] == true) {
         let Some(path) = old.confirmed.as_deref() else {

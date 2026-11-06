@@ -195,6 +195,18 @@ reaches a script, a handler or an attribute is checked on every HTML
 response (`reflection`, `stored_reflection`). Without an HTML label, a
 script from another host that isn't pinned is an `unpinned_script` warn.
 
+The scripts also run. `review` opens each `html:scripts` page in a
+browser (`probe scripts`), clicks, types and submits what a visitor
+could, and lets 30 days pass. What the scripts do is held to the same
+label: markup or code built from request and host text
+(`html_injection`, `code_injection`), code fetched from another host
+(`remote_code`), requests to hosts the grants don't list
+(`unexpected_destination`), the cookie sent
+away (`secret_leak`), a trip to another site with no click
+(`auto_navigation`), a sensitive route called by itself (`unsafe_action`),
+a request per item (`n_plus_1`), errors (`script_error`) and CPU used
+while nobody uses the page (`over_budget`).
+
 ```toml
 [entry]
 result = { body = "html:scripts" }

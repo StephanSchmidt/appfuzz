@@ -169,6 +169,12 @@ pub const DOCS: &[Doc] = &[
         next: "`explain <run>` for a permissive_cors or host_header_injection finding",
     },
     Doc {
+        path: "probe scripts",
+        examples: &["appfuzz probe scripts"],
+        output: "each page (html:scripts) opened with its scripts run: with the host data as given, with markup in host text, with empty lists; the requests its scripts made, the errors they threw; what could not be judged (unsupported: APIs, scripts from other hosts, pages cut short for the CPU they used); findings",
+        next: "`explain <run>` for a finding; `confirm <finding>` reproduces it with the page's scripts",
+    },
+    Doc {
         path: "probe auth",
         examples: &["appfuzz probe auth"],
         output: "the request without credentials and, where it is turned away, with forged ones (made-up token, unsigned JWT, wrong signature, Basic admin:admin, session cookies) and prefixes of the secret it checks them against; session tokens with other random seeds; also paths of stored runs that were turned away or issued a token: those that did not end ok, findings",
@@ -465,7 +471,7 @@ pub fn next(path: &str, out: &Value) -> Vec<String> {
                 n.push(format!("appfuzz show {r} --view explanation"));
             }
         }
-        "fuzz" | "amplify" | "scale" | "probe values" | "probe times" | "probe web" | "probe auth" | "probe pairs" => {
+        "fuzz" | "amplify" | "scale" | "probe values" | "probe times" | "probe web" | "probe scripts" | "probe auth" | "probe pairs" => {
             if path == "fuzz" {
                 if !findings.is_empty() {
                     n.push("appfuzz findings --min warn".into());

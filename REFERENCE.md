@@ -817,6 +817,55 @@ converts its predictions to milliseconds. CLI summaries include `model` for
 these laws. Rust callers use `Law::eval` and `Law::increasing` to account for the
 optional scaling rather than interpreting the raw `f64` coefficient fields.
 
+## Page scripts (`probe scripts`)
+
+When an export's output is labelled `html:scripts`, appfuzz also runs the
+page's JavaScript, in a browser built into appfuzz. Nothing else needs to
+be installed. `review` runs `probe scripts` after the fuzz phase.
+
+**Which pages.** The manifest's request, and up to 8 pages the fuzz phase
+found: requests with fuzzed text whose response has a script. Each page is
+opened three times: with the host data as given, with markup in every
+text a host function returns (stored text the scripts may put into the
+page), and with every host list empty (a new user, an empty shop). The
+URL's fragment carries request text too, so code that reads
+`location.hash` is tested.
+
+**One visit.** The page loads with its scripts: inline, from the app's
+own paths, and modules. Then 1 s passes. Next, everything a visitor can
+use is clicked, typed into or submitted, one at a time, with 0.5 s after
+each. Then 30 s pass with nobody using the page, then 30 days, with timers
+firing at most once a day, so a redirect set for next week still happens.
+Time is virtual: the 30 days cost no waiting.
+
+**Requests.** A request to the app's own origin is a run of the app,
+with the same host plan. A request for data from another host gets text
+that names the host, so code built from it shows as `remote_code`. The
+page has a session cookie that scripts can read and that holds a secret,
+so sending it away is a `secret_leak`.
+
+**CPU.** Until its actions are done, a page may use 60 ms of CPU, as a
+browser counts it; an ordinary React app uses under 10 ms. While nobody
+uses the page, it may keep the CPU busy up to 10 % of the time;
+`over_budget` reports more, as with a miner. A page that never stops is a
+`hang`.
+
+**What it reports.** `pages`: each visit, with its run, the page visit's
+`browser_run`, the requests the scripts made and the errors they threw.
+`unsupported`: what the visits couldn't judge. `apis` are Web APIs the
+scripts used that the browser doesn't model. `scripts_not_loaded` are
+scripts from other hosts. `actions_not_all_tried` are pages whose scripts
+used up their CPU before every action. `not_followed_30_days` are pages
+whose CPU ran out before 30 days passed. An empty `unsupported` means
+every visit ran to the end.
+
+A finding from a visit points at the app's run that served the page.
+`confirm` and `replay` reproduce it with the page's scripts.
+`explain <run>` lists it with its `detail`: the sink and the value that
+reached it, the URL a request went to, the error and its stack. A page
+whose scripts throw while loading, with the request and host data as
+given, fails: every visitor gets that error. Other script errors warn.
+
 ## Command output
 
 Each host call's cost and the production cost limit are `u64` units. Run totals
@@ -848,7 +897,8 @@ replaced without modifying their targets.
 
 A probe that tried nothing says why in `note`: `probe web` and `probe auth` on
 an export that takes no HTTP request, `probe auth` where no path turned away a
-request without credentials, `probe values` on an app without host functions.
+request without credentials, `probe values` on an app without host functions,
+`probe scripts` where no response is HTML with a script.
 Those exit 0, and `review` copies the note into its step. A `--fn` that matches
 no host function (`probe values`, `probe faults`) checked nothing and exits 3.
 

@@ -1,0 +1,6 @@
+{
+  "app": "clean-react",
+  "bug": "a React app built by Vite, its bundle served from the app",
+  "expect": [],
+  "allow": []
+}

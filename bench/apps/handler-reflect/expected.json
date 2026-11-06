@@ -5,6 +5,10 @@
     {
       "kind": "reflection",
       "min": "fail"
+    },
+    {
+      "kind": "code_injection",
+      "min": "fail"
     }
   ],
   "allow": []

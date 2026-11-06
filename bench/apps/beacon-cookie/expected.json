@@ -1,0 +1,11 @@
+{
+  "app": "beacon-cookie",
+  "bug": "the page's script sends document.cookie to an analytics host",
+  "expect": [
+    {
+      "kind": "secret_leak",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

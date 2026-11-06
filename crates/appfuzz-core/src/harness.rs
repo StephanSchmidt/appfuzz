@@ -49,6 +49,20 @@ const OUTPUT_CAPACITY: usize = 1 << 20;
 const TRACE_CALL_CAPACITY: usize = 65_536;
 const TRACE_BYTE_CAPACITY: usize = 32 << 20;
 
+/// Answers some host calls of a run in place of the plan: the browser
+/// guest's requests to the app under test. `None` leaves the call to the
+/// usual order (manifest rules, plan, datasets, generated values); manifest
+/// rules come first either way.
+pub type Router = Arc<dyn Fn(&str, &[(String, Value)]) -> Option<Routed> + Send + Sync>;
+
+/// A routed answer: the WIT-shaped result, how long it took, and where it
+/// came from (the record's `source`).
+pub struct Routed {
+    pub value: Value,
+    pub latency_ms: f64,
+    pub source: String,
+}
+
 #[derive(Debug)]
 enum TraceCaptureLimit {
     Calls,
@@ -200,6 +214,7 @@ struct Host {
     resource_rep: u32,
     /// wasi:http resources and requests in flight.
     http: http::Http,
+    router: Option<Router>,
 }
 
 impl WasiView for Host {
@@ -689,18 +704,25 @@ impl App {
     }
 
     fn run_shared(&self, spec: &RunSpec, state: Option<Arc<Mutex<crate::dataset::State>>>) -> RunRecord {
-        self.run_captured(spec, state).0
+        self.run_captured(spec, state, None).0
+    }
+
+    /// A run whose host calls `router` answers where it can. The record's
+    /// id covers the spec only: what the router stands for (the app under
+    /// test, its build and request) belongs in the spec's arguments.
+    pub fn run_routed(&self, spec: &RunSpec, router: Router) -> RunRecord {
+        self.run_captured(spec, None, Some(router)).0
     }
 
     pub(crate) fn feedback(&self, spec: &RunSpec) -> Result<crate::feedback::Feedback> {
-        let (record, feedback) = self.run_captured(spec, None);
+        let (record, feedback) = self.run_captured(spec, None, None);
         if matches!(record.outcome.kind, OutcomeKind::Error | OutcomeKind::PlanError) {
             bail!("{}", record.outcome.message.unwrap_or_else(|| "feedback run could not execute".into()));
         }
         Ok(feedback)
     }
 
-    fn run_captured(&self, spec: &RunSpec, state: Option<Arc<Mutex<crate::dataset::State>>>) -> (RunRecord, crate::feedback::Feedback) {
+    fn run_captured(&self, spec: &RunSpec, state: Option<Arc<Mutex<crate::dataset::State>>>, router: Option<Router>) -> (RunRecord, crate::feedback::Feedback) {
         let started = Instant::now();
         let id = if let Some(s) = &state {
             let mut bytes = serde_json::to_vec(&*s.lock().unwrap_or_else(|e| e.into_inner())).expect("state serializes");
@@ -725,7 +747,7 @@ impl App {
             stderr: String::new(),
         };
         let mut feedback = crate::feedback::Feedback::default();
-        if let Err(e) = self.run_inner(spec, &mut record, state, &mut feedback) {
+        if let Err(e) = self.run_inner(spec, &mut record, state, router, &mut feedback) {
             record.outcome = Outcome { kind: OutcomeKind::Error, message: Some(format!("{e:#}")), stack: vec![] };
         }
         record.totals.wall_us = started.elapsed().as_micros() as u64;
@@ -737,6 +759,7 @@ impl App {
         spec: &RunSpec,
         record: &mut RunRecord,
         state: Option<Arc<Mutex<crate::dataset::State>>>,
+        router: Option<Router>,
         feedback: &mut crate::feedback::Feedback,
     ) -> Result<()> {
         if spec.component != self.hash {
@@ -812,6 +835,7 @@ impl App {
             kernel,
             http: Default::default(),
             resource_rep: 0,
+            router,
         };
         let mut store = Store::new(&self.engine, host);
         store.limiter(|h| &mut h.limiter);
@@ -1132,6 +1156,13 @@ fn intercept(mut store: StoreContextMut<'_, Host>, key: &str, params: &[Val], re
         Some(rules) => crate::plan::resolve_compiled_rules(rules, &args, None).unwrap_or_else(|| data.plan.resolve(key, call, &args)),
         None => data.plan.resolve(key, call, &args),
     };
+    if !resolved.source.starts_with("manifest rule")
+        && let Some(routed) = data.router.as_ref().and_then(|r| r(key, &args))
+    {
+        resolved.decision = Decision::Return(routed.value);
+        resolved.latency_ms = Some(routed.latency_ms);
+        resolved.source = routed.source;
+    }
     let commit_trap = match &resolved.decision {
         Decision::CommitThenTrap(msg) => Some(msg.clone()),
         _ => None,

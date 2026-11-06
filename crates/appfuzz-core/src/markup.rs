@@ -150,8 +150,15 @@ pub fn unsafe_actions(html: &str, sensitive: &[String], scripts: bool) -> Vec<Hi
     let mut out = Vec::new();
     let d = doc(html);
     let script_tags: Vec<&str> = if scripts { script_loads(&d).into_iter().map(|(_, e)| e.raw.as_str()).collect() } else { Vec::new() };
+    // With scripts allowed, an attribute of no standard meaning (htmx,
+    // Alpine, Turbo, data-*) is read by a script, which then requests it.
     let by_script = |f: &crate::urls::Found| {
-        scripts && (f.source == "script" || is_handler(&f.source) || is_expression(&f.source) || script_tags.contains(&f.tag.as_str()))
+        scripts
+            && (f.source == "script"
+                || is_handler(&f.source)
+                || is_expression(&f.source)
+                || script_tags.contains(&f.tag.as_str())
+                || matches!(f.trigger.as_str(), "unknown" | "auto"))
     };
     let is_sensitive = |u: &str| {
         let path = u.split(['?', '#']).next().unwrap_or(u);
@@ -299,9 +306,15 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let ex = &r.spec.export;
     let run = Some(r.id.as_str());
     let req = request_texts(r);
+    let resp = crate::output::response(r, m);
     let mut out = Vec::new();
     for (path, label) in &entry.result {
         let Some(Value::String(v)) = field(result, path) else { continue };
+        // A body whose content type says it isn't HTML (the page's script,
+        // its style, JSON): a browser doesn't read it as markup.
+        if *label != OutputLabel::UrlLocal && entry.output.body.as_deref() == Some(path.as_str()) && !resp.html {
+            continue;
+        }
         let from_req = |s: &str| req.iter().find(|q| s.contains(q.as_str())).cloned();
         match label {
             OutputLabel::HtmlScripts => {
@@ -320,7 +333,6 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                     continue;
                 }
                 // The policies that apply: the response's, the markup's, the platform's.
-                let resp = crate::output::response(r, m);
                 let metas: Vec<String> = doc(v)
                     .elements
                     .iter()
@@ -435,9 +447,66 @@ fn request_texts(r: &RunRecord) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::{Outcome, RunSpec, Totals};
 
     fn whats(v: Vec<Hit>) -> Vec<String> {
         v.into_iter().map(|h| h.what).collect()
+    }
+
+    fn served(body: &str, content_type: &str) -> RunRecord {
+        let spec = RunSpec {
+            component: String::new(),
+            contract: String::new(),
+            export: "h".into(),
+            args: vec![],
+            plan: Default::default(),
+            now: String::new(),
+            seed: 0,
+            fuel: 0,
+            memory: 0,
+            ns_per_fuel: 0.0,
+        };
+        RunRecord {
+            id: "r1".into(),
+            spec,
+            outcome: Outcome { kind: OutcomeKind::Ok, message: None, stack: vec![] },
+            result: Some(json!({"status": 200, "body": body, "headers": [["content-type", content_type]]})),
+            totals: Totals::default(),
+            events: vec![],
+            guest_error: None,
+            rejected_output: None,
+            memory_limit_hit: false,
+            capture_limited: false,
+            stdout: String::new(),
+            stderr: String::new(),
+            command_exit_code: None,
+        }
+    }
+
+    /// The page's script or style, served by the app, is no markup, even
+    /// where the manifest's `body_format` says html: its content type
+    /// decides, as in a browser.
+    #[test]
+    fn a_script_the_app_serves_is_not_markup() {
+        let m: Manifest = toml::from_str(
+            r#"
+            [app]
+            wasm = "a.wasm"
+            [entry]
+            export = "h"
+            output = { status = "status", body = "body", headers = "headers", body_format = "html" }
+            result = { body = "html:scripts" }
+            "#,
+        )
+        .unwrap();
+        let js = r#"document.createElementNS("http://www.w3.org/2000/svg", "svg"); const t = "<img src=https://x.example/p.gif>";"#;
+        let script = served(js, "text/javascript");
+        assert!(check(&script, &m).is_empty());
+        assert!(crate::urls::extract_output(&script, &m).iter().all(|u| u.trigger == "text"));
+        // Served as HTML, the same text is markup with an image that loads.
+        let page = served(js, "text/html");
+        assert!(!check(&page, &m).is_empty());
+        assert!(crate::urls::extract_output(&page, &m).iter().any(|u| u.trigger == "load"));
     }
 
     #[test]
@@ -498,12 +567,17 @@ mod tests {
         assert_eq!(n("<img src=\"/logo.png\">"), 0);
         assert_eq!(n("<div data-endpoint=\"/admin/x\"></div>"), 1);
         assert_eq!(n("<script>navigator.sendBeacon('https://c.example/p')</script>"), 1);
-        // With scripts allowed, what scripts fetch is for the CSP; a
-        // sensitive route they name stays a warn.
+        // With scripts allowed, what scripts fetch is for the CSP (and for
+        // probe scripts, which runs them); a sensitive route they name
+        // stays a warn. Framework attributes are what scripts fetch.
         let w = |h: &str| unsafe_actions(h, &s, true).iter().map(|h| h.severity).collect::<Vec<_>>();
         assert_eq!(w("<script>navigator.sendBeacon('https://c.example/p')</script>"), []);
         assert_eq!(w("<script src=\"https://cdn.example/a.js\"></script>"), []);
         assert_eq!(w("<div x-init=\"fetch('/admin/wipe')\"></div>"), [Severity::Warn]);
+        assert_eq!(w("<div hx-get=\"/feed\" hx-trigger=\"load\"></div>"), []);
+        assert_eq!(w("<button hx-post=\"/admin/users/7/delete\">x</button>"), [Severity::Warn]);
+        // A src loads, whoever loads it.
+        assert_eq!(w("<turbo-frame src=\"https://evil.example/f\"></turbo-frame>"), [Severity::Fail]);
         assert_eq!(w("<img src=\"https://t.example/p.gif\">"), [Severity::Fail]);
         assert_eq!(w("<form action=\"https://evil.example/steal\">"), [Severity::Fail]);
     }

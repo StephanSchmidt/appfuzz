@@ -81,6 +81,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "beacon_cookie"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
 name = "beacon_pixel"
 version = "0.1.0"
 dependencies = [
@@ -203,6 +210,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "clean_htmx"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
 name = "clean_note"
 version = "0.1.0"
 dependencies = [
@@ -210,7 +224,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "clean_react"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
 name = "clean_writes"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
+name = "client_n_plus_1"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen 0.63.0",
@@ -248,6 +276,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crash_on_empty"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
 ]
 
 [[package]]
@@ -345,6 +380,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom_xss_hash"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
 name = "double_send"
 version = "0.1.0"
 dependencies = [
@@ -373,6 +415,13 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "err_unwrap"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
+name = "eval_fetch"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen 0.63.0",
@@ -867,6 +916,13 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "metadata_fetch"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
+name = "miner"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen 0.63.0",
@@ -1592,6 +1648,13 @@ dependencies = [
 
 [[package]]
 name = "time_bomb"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen 0.63.0",
+]
+
+[[package]]
+name = "timebomb_redirect"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen 0.63.0",

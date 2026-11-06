@@ -1,0 +1,11 @@
+{
+  "app": "client-n-plus-1",
+  "bug": "the page's script fetches each item with a request of its own",
+  "expect": [
+    {
+      "kind": "n_plus_1",
+      "min": "warn"
+    }
+  ],
+  "allow": []
+}

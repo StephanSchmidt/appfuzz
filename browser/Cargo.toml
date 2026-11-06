@@ -1,0 +1,11 @@
+# The browser `probe scripts` opens pages in: a Wasm component. QuickJS runs
+# the page's scripts against a DOM shim (linkedom); appfuzz's harness runs
+# the guest. `make browser` builds it into crates/appfuzz-core/assets/browser/.
+[workspace]
+resolver = "3"
+members = ["guest", "wizen"]
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = "debuginfo"
