@@ -38,6 +38,7 @@ pub mod records;
 pub mod scale;
 pub mod shrink;
 pub mod spin;
+pub mod standards;
 pub mod statics;
 pub mod store;
 pub mod tenants;

@@ -1272,7 +1272,15 @@ fn forbidden_text_in_guest_logs_cannot_pass_a_stored_run_check() {
 fn replay_distinguishes_exact_builds_from_regression_checks() {
     let f = Fixture::new(true);
     let (_, review) = f.review();
-    let case = review["findings"].as_array().unwrap().iter().find(|v| v["kind"] == "reflection").unwrap()["case"].as_str().unwrap();
+    let reflection = review["findings"].as_array().unwrap().iter().find(|v| v["kind"] == "reflection").unwrap();
+    // The finding names its standards; the review's OWASP table counts it
+    // and says which checks the manifest's missing labels kept from running.
+    assert_eq!(reflection["standards"], json!({"cwe": "CWE-79", "owasp": "A05:2025"}));
+    let a05 = &review["owasp"][4];
+    assert_eq!(a05["id"], "A05", "{}", review["owasp"]);
+    assert!(a05["found"].as_u64().unwrap() >= 1, "{a05}");
+    assert!(a05["not_checked"]["no parameter is labelled sql, shell, path, url, html or regex"].as_array().unwrap().contains(&json!("sql_injection")), "{a05}");
+    let case = reflection["case"].as_str().unwrap();
     assert_eq!(f.cli(&["replay", case]).0, 0);
     let wasm = f.dir.join("app.wasm");
     let mut bytes = std::fs::read(&wasm).unwrap();

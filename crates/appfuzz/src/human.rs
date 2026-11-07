@@ -155,6 +155,7 @@ fn review(st: &Style, out: &Value, s: &mut String) {
     }
     let _ = writeln!(s, "       {}", counts.join(&st.dim(" · ")));
     findings(st, out, s);
+    owasp(st, out, s);
     let earlier: Vec<&Value> = out["earlier_builds"].as_array().into_iter().flatten().collect();
     if !earlier.is_empty() {
         let _ = writeln!(s, "\n{}", st.bold("Found on an earlier build"));
@@ -169,6 +170,43 @@ fn review(st: &Style, out: &Value, s: &mut String) {
     }
     for e in out["errors"].as_array().into_iter().flatten() {
         let _ = writeln!(s, "  {} {}", st.paint("1;35", "✗ error"), e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string()));
+    }
+}
+
+/// The review's OWASP Top 10 table: per category what was found and how
+/// many checks ran; the checks a missing label kept from running; the
+/// platform's part where appfuzz has no check.
+fn owasp(st: &Style, out: &Value, s: &mut String) {
+    let rows: Vec<&Value> = out["owasp"].as_array().into_iter().flatten().collect();
+    if rows.is_empty() {
+        return;
+    }
+    let _ = writeln!(s, "\n{}", st.bold("OWASP Top 10 (2025)"));
+    for r in rows {
+        let found = r["found"].as_u64().unwrap_or(0);
+        let checked = r["checked"].as_array().map_or(0, Vec::len);
+        let not: Vec<(&String, &Value)> = r["not_checked"].as_object().into_iter().flatten().collect();
+        let total = checked + not.iter().map(|(_, ks)| ks.as_array().map_or(0, Vec::len)).sum::<usize>();
+        let mark = if found > 0 {
+            st.paint("1;31", "✗")
+        } else if checked > 0 {
+            st.paint("1;32", "✓")
+        } else {
+            st.dim("–")
+        };
+        let name = format!("{} {}", r["id"].as_str().unwrap_or(""), r["name"].as_str().unwrap_or(""));
+        let mut says = if total == 0 { String::new() } else { format!("{checked} of {total} checks") };
+        if found > 0 {
+            says = format!("{found} found · {says}");
+        }
+        let _ = writeln!(s, "  {mark} {name:<42} {}", st.dim(&says));
+        for (why, kinds) in not {
+            let ks: Vec<&str> = kinds.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            let _ = writeln!(s, "      {}", st.dim(&wrap(&format!("not checked, {why}: {}", ks.join(", ")), 6, st.cols)));
+        }
+        if checked == 0 {
+            let _ = writeln!(s, "      {}", st.dim(&wrap(&format!("up to the platform: {}", r["platform"].as_str().unwrap_or("")), 6, st.cols)));
+        }
     }
 }
 

@@ -305,7 +305,12 @@ case files, including `--against-current` after changing the build.
 Severity: **fail** (breaks a limit, crashes, unsafe output), **warn** (a bad
 pattern that will hurt), **info** (a hint; often fine, sometimes the key to
 a bug). Every finding has a `run`. `explain <run>` puts it in plain terms
-and `confirm <id>` makes it reproducible.
+and `confirm <id>` makes it reproducible. Security findings name their
+`standards`: CWE, OWASP Top 10 (2025) and API Security (2023) category.
+`review` lists the Top 10 under `owasp`: per category, what was found,
+the checks that ran, the checks a missing label kept from running
+(`not_checked`, by reason) and the platform's part. See
+[OWASP.md](OWASP.md).
 
 | Kind | Means |
 |------|-------|

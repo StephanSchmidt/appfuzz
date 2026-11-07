@@ -479,6 +479,13 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
     appfuzz_core::store::write_atomic(&dir.join(format!("{id}.json")), &serde_json::to_vec_pretty(&session)?)?;
     appfuzz_core::store::write_atomic(&dir.join("last"), id.as_bytes())?;
     let confirmed = all.iter().filter(|f| f.confirmed.is_some()).count();
+    let base = baseline.as_ref().and_then(|v| v["run"].as_str()).and_then(|id| store.load(id).ok());
+    let cx = appfuzz_core::standards::Context::new(
+        &app.manifest,
+        base.as_ref().map_or("", |r| r.spec.export.as_str()),
+        base.as_ref().and_then(|r| r.spec.args.first()),
+    );
+    let found: Vec<&str> = all.iter().filter(|f| f.severity >= Severity::Warn).map(|f| f.kind.as_str()).collect();
     Ok(json!({
         "session": id, "component": app.manifest.wasm_path(), "contract": app.contract,
         "status": if complete { "complete" } else { "incomplete" }, "verdict": verdict, "exit_code": code,
@@ -494,6 +501,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
             "output_policy": !app.manifest.has_output_labels(), "request_sequences": app.manifest.sequences.is_empty(), "acceptance_suite":app.manifest.acceptance.is_none(),
             "record_limit": app.manifest.limits.records_per_response.is_none() && app.manifest.datasets.values().all(|d| d.max_per_response.is_none())},
         "records": records.as_ref().map(|v| json!({"bounds": v["bounds"], "not_counted": v["not_counted"]})),
+        "owasp": appfuzz_core::standards::table(&cx, &found),
         "acceptance":acceptance_results,
         "domains": urls.map(|v| v["domains"].clone()), "steps": steps, "errors": errors,
         "budget": {"fuzz_time": o.time, "fuzz_runs": o.runs, "sequence_evaluations_per_scenario": o.runs.unwrap_or(100).min(100), "acceptance_evaluations_per_check":o.runs.unwrap_or(100).min(100), "scope": "fuzz phase; acceptance checks, sequences, probes, scaling and confirmation are additional"},

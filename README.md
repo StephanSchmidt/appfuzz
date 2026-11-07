@@ -198,6 +198,11 @@ Details: [REFERENCE.md](REFERENCE.md#review-budgets-and-exit-codes).
 - **Performance:** CPU, memory, cost and latency against your limits, and
   CPU, memory or output that grows faster than the input.
 
+Every security finding names its CWE and OWASP category, and `review`
+lists the OWASP Top 10: what it found, what it checked, which checks
+need a label you haven't added yet, and what is up to your platform.
+[OWASP.md](OWASP.md) has the mapping.
+
 Every finding comes with the request and backend answers that cause it.
 Time is simulated, so a backend that takes 200 ms or a timeout of ten
 minutes costs nothing real, and the same input always gives the same run.

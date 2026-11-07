@@ -609,6 +609,9 @@ fn summary(app: &App, r: &RunRecord) -> Value {
 
 fn finding_json(f: &Finding) -> Value {
     let mut o = json!({"id": f.id, "severity": f.severity, "kind": f.kind, "title": f.title, "evidence": f.evidence(), "experimental": f.experimental()});
+    if let Some(s) = appfuzz_core::standards::json(&f.kind) {
+        o["standards"] = s;
+    }
     if let Some(r) = &f.run {
         o["run"] = json!(r);
     }

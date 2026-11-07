@@ -40,6 +40,16 @@
 - New dataset edit `tag`: marks each record's text fields with a token
   made from its key.
 
+**OWASP**
+
+- Security findings carry `standards`: their CWE, OWASP Top 10 (2025)
+  category and OWASP API Security Top 10 (2023) category. The Top 10
+  category follows from OWASP's published CWE lists.
+- `review` reports `owasp`: per Top 10 category, findings, the checks
+  that ran, the checks that need labels the manifest lacks (by reason),
+  and what is up to the platform. `--human` prints it as a table.
+- New OWASP.md: what appfuzz checks per category.
+
 **Pagination**
 
 - New finding `broken_pagination` (fail): rows between two pages the app
