@@ -347,7 +347,7 @@ fn bucket(n: u32) -> u32 {
 pub fn features(r: &RunRecord, st: &Statics, app: &App) -> BTreeSet<String> {
     let mut f = BTreeSet::new();
     f.insert(format!("outcome:{:?}", r.outcome.kind));
-    if let Some(p) = panic_text(&r.stderr).and_then(|p| PANIC_AT.captures(&p).map(|c| c[1].to_string())) {
+    if let Some(p) = panic_text(&r.stderr).and_then(|p| PANIC_AT.captures(&p).map(|c| c[1].to_string()).or_else(|| crate::detect::js_site(&p))) {
         f.insert(format!("panic:{p}"));
     }
     let mut prev = String::from("^");
@@ -834,8 +834,47 @@ impl Mutator<'_> {
         (ptr("method"), ptr("path"))
     }
 
-    /// Mutates one node of the request.
-    fn mutate_request(&mut self, args: &mut [Value]) -> bool {
+    /// Changes the shape of the request where its WIT type allows it: a
+    /// list emptied, cut to one item or one longer; an option switched
+    /// between none and some. An empty cart, a buyer without a customer.
+    fn mutate_shape(&mut self, export: &str, args: &mut [Value]) -> bool {
+        let Ok(f) = self.app.export(export) else { return false };
+        let mut places = Vec::new();
+        for ((_, ty), (i, a)) in f.ty.params().zip(args.iter().enumerate()) {
+            shapes(a, &ty, format!("/{i}"), &mut places);
+        }
+        let Some((ptr, ty)) = self.pick(&places).cloned() else { return false };
+        let mut root = Value::Array(args.to_vec());
+        let Some(node) = root.pointer_mut(&ptr) else { return false };
+        let mut g = crate::value::Generator::new(self.rng.random(), GenOpts::default());
+        let new = match (&ty, &*node) {
+            (Type::Option(o), Value::Null) => json!({ "some": g.gen_json(&o.ty()) }),
+            (Type::Option(_), _) => Value::Null,
+            (Type::List(l), Value::Array(a)) => match self.rng.random_range(0..3u8) {
+                0 if !a.is_empty() => json!([]),
+                1 if a.len() > 1 => json!([a[self.rng.random_range(0..a.len())].clone()]),
+                _ => {
+                    let mut a = a.clone();
+                    a.push(g.gen_json(&l.ty()));
+                    Value::Array(a)
+                }
+            },
+            _ => return false,
+        };
+        if *node == new {
+            return false;
+        }
+        *node = new;
+        let Value::Array(v) = root else { return false };
+        args.clone_from_slice(&v);
+        true
+    }
+
+    /// Mutates one node of the request, or its shape.
+    fn mutate_request(&mut self, export: &str, args: &mut [Value]) -> bool {
+        if self.rng.random_bool(0.2) && self.mutate_shape(export, args) {
+            return true;
+        }
         let mut ptrs = Vec::new();
         for (i, a) in args.iter().enumerate() {
             nodes(a, format!("/{i}"), &mut ptrs);
@@ -998,7 +1037,7 @@ impl Mutator<'_> {
                 let n = 1 + self.rng.random_range(0..2u8);
                 let mut any = false;
                 for _ in 0..n {
-                    any |= self.mutate_request(&mut spec.args);
+                    any |= self.mutate_request(&spec.export, &mut spec.args);
                 }
                 // Mostly requests the platform lets through.
                 if self.rng.random_bool(0.85) {
@@ -1009,7 +1048,7 @@ impl Mutator<'_> {
             Stage::Compare => {
                 let candidates = crate::feedback::substitutions(&spec.args, &parent.feedback.comparisons);
                 let changed = self.pick(&candidates).is_some_and(|patch| patch.apply(&mut spec.args));
-                if !changed && !self.mutate_request(&mut spec.args) {
+                if !changed && !self.mutate_request(&spec.export, &mut spec.args) {
                     return None;
                 }
                 crate::constraints::conform_request_typed(&mut spec.args, self.app, &spec.export, self.rng.random()).ok()?;
@@ -1157,6 +1196,52 @@ impl Mutator<'_> {
 }
 
 /// JSON pointers of every node worth mutating.
+/// The lists and options of a request value, with their JSON pointers and
+/// types: the places `mutate_shape` can change.
+fn shapes(v: &Value, ty: &Type, ptr: String, out: &mut Vec<(String, Type)>) {
+    let esc = |k: &str| k.replace('~', "~0").replace('/', "~1");
+    match ty {
+        Type::Option(o) => {
+            out.push((ptr.clone(), ty.clone()));
+            if let Some(x) = v.get("some") {
+                shapes(x, &o.ty(), format!("{ptr}/some"), out);
+            }
+        }
+        Type::List(l) => {
+            out.push((ptr.clone(), ty.clone()));
+            if let Value::Array(a) = v {
+                for (i, x) in a.iter().enumerate() {
+                    shapes(x, &l.ty(), format!("{ptr}/{i}"), out);
+                }
+            }
+        }
+        Type::Record(r) => {
+            for f in r.fields() {
+                let key = if v.get(f.name).is_some() { f.name.to_string() } else { f.name.replace('-', "_") };
+                if let Some(x) = v.get(&key) {
+                    shapes(x, &f.ty, format!("{ptr}/{}", esc(&key)), out);
+                }
+            }
+        }
+        Type::Variant(var) => {
+            if let Value::Object(m) = v
+                && let Some((case, x)) = m.iter().next()
+                && let Some(t) = var.cases().find(|c| c.name == case).and_then(|c| c.ty)
+            {
+                shapes(x, &t, format!("{ptr}/{}", esc(case)), out);
+            }
+        }
+        Type::Tuple(t) => {
+            if let Value::Array(a) = v {
+                for (i, (x, t)) in a.iter().zip(t.types()).enumerate() {
+                    shapes(x, &t, format!("{ptr}/{i}"), out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn nodes(v: &Value, ptr: String, out: &mut Vec<String>) {
     match v {
         Value::Object(o) => {
@@ -1584,7 +1669,7 @@ pub fn fuzz(
             };
             // Sometimes stack a second, request-side change (havoc).
             if !matches!(stage, Stage::Structured | Stage::Fault) && m.rng.random_bool(0.2) {
-                m.mutate_request(&mut spec.args);
+                m.mutate_request(&spec.export, &mut spec.args);
             }
             spec.fuel = spec.fuel.min(fuel);
             let mut ex = execute(app, &st, &spec, opts.property.as_ref(), &probe, &judge);

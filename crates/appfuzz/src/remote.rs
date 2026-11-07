@@ -66,18 +66,12 @@ pub(crate) struct Fetched {
     pub(crate) state: PathBuf,
 }
 
-/// Where downloads and their runs go: `$APPFUZZ_CACHE`, else the platform's
-/// cache folder.
-fn cache_dir() -> Result<PathBuf> {
-    if let Some(d) = std::env::var_os("APPFUZZ_CACHE").filter(|d| !d.is_empty()) {
-        return Ok(PathBuf::from(d));
-    }
-    if let Some(d) = std::env::var_os("XDG_CACHE_HOME").filter(|d| !d.is_empty()) {
-        return Ok(PathBuf::from(d).join("appfuzz"));
-    }
-    let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).ok_or_else(|| anyhow!("no cache folder: set APPFUZZ_CACHE or HOME"))?;
-    let home = PathBuf::from(home);
-    Ok(if cfg!(target_os = "macos") { home.join("Library/Caches/appfuzz") } else { home.join(".cache/appfuzz") })
+use appfuzz_core::cache_dir;
+
+/// Downloads Shopify's provider modules when a function needs one.
+pub(crate) fn shopify_fetch(url: &str, limit: u64) -> Result<Vec<u8>> {
+    eprintln!("appfuzz: downloading {url}");
+    get(&agent(false), url, limit)?.ok_or_else(|| anyhow!("{url}: not found (404)"))
 }
 
 fn agent(allow_http: bool) -> ureq::Agent {
@@ -135,6 +129,9 @@ fn check_manifest(url: &str, text: &str) -> Result<()> {
         && !appfuzz_core::host_manifest::is_bundled(p)
     {
         bail!("{url}: a downloaded manifest can only name a bundled platform (like \"fastly\"), not {p:?}");
+    }
+    if table.contains_key("shopify") {
+        bail!("{url}: a downloaded manifest cannot name a Shopify extension; download the function's folder and run appfuzz there");
     }
     Ok(())
 }

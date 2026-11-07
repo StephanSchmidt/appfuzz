@@ -570,7 +570,7 @@ pub fn explain(app: &App, store: &RunStore, r: &RunRecord) -> Result<Value> {
         .filter(|e| e.trap.is_some() || e.result.as_ref().is_some_and(|v| v.get("err").is_some()))
         .map(|e| json!({"n": e.n, "func": e.func}))
         .collect();
-    Ok(json!({
+    let mut out = json!({
         "run": r.id, "export": r.spec.export, "outcome": r.outcome.kind, "message": r.outcome.message.as_deref().map(|m| m.lines().next().unwrap_or("")),
         "status": resp.status, "text": resp.body.as_deref().map(|b| visible_text(b).chars().take(200).collect::<String>()),
         "input_vs_default": input, "host_plan_for": plan, "now": r.spec.now, "seed": r.spec.seed,
@@ -584,7 +584,13 @@ pub fn explain(app: &App, store: &RunStore, r: &RunRecord) -> Result<Value> {
             }
             o
         }).collect::<Vec<_>>(),
-    }))
+    });
+    // Why its findings are only hints: the platform never sends this request.
+    let broken = appfuzz_core::constraints::broken_request_for(r, &app.manifest);
+    if !broken.is_empty() {
+        out["invalid_request"] = broken.iter().map(|(p, c, v)| json!({"field": p, "constraint": c, "value": v})).collect();
+    }
+    Ok(out)
 }
 
 /// For a finding about a canary, the text around it as the app wrote it,

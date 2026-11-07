@@ -474,6 +474,7 @@ mod tests {
             events: vec![],
             guest_error: None,
             rejected_output: None,
+            shopify: None,
             memory_limit_hit: false,
             capture_limited: false,
             stdout: String::new(),

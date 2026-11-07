@@ -89,6 +89,7 @@ fn argv_command(cmd: &mut clap::Command, args: &[String]) -> (String, String) {
 }
 
 fn main() {
+    appfuzz_core::shopify::providers::set_fetch(remote::shopify_fetch);
     let mut command = command();
     let args = remote::rewrite_args(std::env::args().collect());
     let matches = match command.clone().try_get_matches_from(&args) {
@@ -358,20 +359,25 @@ fn shadows_spin(manifest: &Option<PathBuf>, remote: bool) -> bool {
 }
 
 fn load_manifest(cli: &Cli) -> Result<Manifest> {
-    // appfuzz.toml, else a Spin app's spin.toml (unless a bare --wasm is given).
+    // appfuzz.toml, else a Spin app's spin.toml or a Shopify Function's
+    // shopify.extension.toml (unless a bare --wasm is given).
     let path = cli.manifest.clone().or_else(|| {
         let p = PathBuf::from("appfuzz.toml");
         let spin = PathBuf::from("spin.toml");
+        let shopify = PathBuf::from("shopify.extension.toml");
         if cli.remote {
             None
         } else if p.exists() {
             Some(p)
+        } else if cli.wasm.is_none() && spin.exists() {
+            Some(spin)
         } else {
-            (cli.wasm.is_none() && spin.exists()).then_some(spin)
+            shopify.exists().then_some(shopify)
         }
     });
     let mut m = match (&path, &cli.wasm) {
         (Some(p), _) if appfuzz_core::spin::is_spin(p) => appfuzz_core::spin::load(p, cli.component.as_deref())?,
+        (Some(p), _) if appfuzz_core::shopify::is_extension(p) => appfuzz_core::shopify::load(p)?,
         (Some(p), _) => Manifest::load(p)?,
         (None, Some(w)) => Manifest::for_wasm(w),
         (None, None) => match wasm_files_here().as_slice() {
@@ -514,7 +520,12 @@ fn build_spec(app: &App, export: Option<&str>, a: &SpecArgs) -> Result<RunSpec> 
             _ => bail!("--args must be a JSON array"),
         }
     } else if let Some(s) = &a.request {
-        vec![parse_json_arg(s)?]
+        let request = parse_json_arg(s)?;
+        // A Shopify function also takes its input as Shopify sends it.
+        vec![match app.manifest.shopify.as_ref().and_then(|s| s.function.as_ref()) {
+            Some(f) => f.request(&export.key, request),
+            None => request,
+        }]
     } else {
         let mut args = app.default_args(&export, &now)?;
         for s in &a.set {

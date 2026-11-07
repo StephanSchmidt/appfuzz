@@ -247,6 +247,9 @@ pub struct RunRecord {
     pub stdout: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr: String,
+    /// A Shopify Function's run measured against Shopify's limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shopify: Option<crate::shopify::RunInfo>,
 }
 
 impl RunRecord {

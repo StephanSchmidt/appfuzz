@@ -2949,6 +2949,34 @@ fn clock_fields_keep_the_full_calendar_range_and_replay() {
 }
 
 #[test]
+fn a_crash_at_every_time_is_not_blamed_on_the_clock() {
+    let wit = "package wasi:clocks@0.2.12; interface wall-clock {record datetime {seconds:u64,nanoseconds:u32} now:func()->datetime;} world app {import wall-clock;export run:func(n:u32)->u64;}";
+    // Traps after 2100-01-01, or always.
+    let module = |check: &str| {
+        component(
+            wit,
+            &format!(
+                r#"(module (import "wasi:clocks/wall-clock@0.2.12" "now" (func $now (param i32)))
+        (memory (export "memory") 1)
+        (func (export "run") (param i32) (result i64) (call $now (i32.const 0)) {check} (i64.const 1)))"#
+            ),
+        )
+    };
+    let at_time = |check: &str| {
+        let f = Fixture::new(false);
+        std::fs::write(f.dir.join("app.wasm"), module(check)).unwrap();
+        let (_, probed) = f.cli(&["probe", "times"]);
+        let kinds: Vec<String> = probed["findings"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap().to_string()).collect();
+        (kinds, probed)
+    };
+    let (kinds, probed) = at_time("(if (i64.gt_u (i64.load (i32.const 0)) (i64.const 4102444800)) (then unreachable))");
+    assert!(kinds.iter().any(|k| k == "crash_at_time"), "{probed}");
+    let (kinds, probed) = at_time("unreachable");
+    assert!(!kinds.iter().any(|k| k == "crash_at_time"), "{probed}");
+    assert!(kinds.iter().any(|k| k == "crash"), "{probed}");
+}
+
+#[test]
 fn unsupported_wasi_wall_dates_are_incomplete_instead_of_passing_as_the_epoch() {
     let f = Fixture::new(false);
     let wit = "package wasi:clocks@0.2.12; interface wall-clock {record datetime {seconds:u64,nanoseconds:u32} now:func()->datetime;} world app {import wall-clock;export run:func(n:u32)->u64;}";

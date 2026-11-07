@@ -435,6 +435,7 @@ too. Details: [REFERENCE.md](REFERENCE.md#request-sequences).
 | **Component** (wasm32-wasip2, jco, componentize-*) | the WIT inside it | nothing |
 | **HTTP handler** on `wasi:http` (Spin, wasmCloud, `wasmtime serve`) | built in | nothing |
 | **Spin app** | built in, plus your `spin.toml` | nothing |
+| **Shopify Function** (Rust or JavaScript) | your `schema.graphql` and input query | nothing |
 | **Fastly Compute app** (wasm32-wasip1) | Fastly's witx, bundled | `platform = "fastly"` |
 | **Module on another witx platform** | your platform's witx | a `platform.toml` |
 | **Extism plugin** (any PDK) | a WIT file you supply | a `platform.toml` with `abi = "extism"` |
@@ -501,6 +502,54 @@ text is SQL injection, and a key-value or Redis write on a GET request is
 reported. If your app has several HTTP components, pick one with
 `--component NAME`. Add an `appfuzz.toml` when you want limits or your own
 labels; it replaces `spin.toml` for appfuzz.
+
+### Shopify Functions
+
+Build with `shopify app function build`, then run `appfuzz review` next to
+your `shopify.extension.toml`. appfuzz reads your input query and the
+function's `schema.graphql`. It sends your function carts Shopify could
+send and checks what comes back the way Shopify does. Discounts, delivery,
+payment, cart transforms and validations all work, in Rust or JavaScript.
+
+What the review finds:
+
+- **Carts that crash it**: no lines, no customer, a metafield with broken
+  JSON. The finding names your line (`function.mjs:21:30`) and comes with
+  the smallest cart that does it.
+- **Carts that run out of instructions**, and the cart size where that
+  starts: "uses 12400000 instructions on an input with 37 cart.lines, the
+  limit for it is 11000000". Shopify gives big carts more instructions,
+  and so does the review.
+- **Output Shopify rejects**: a field the schema doesn't have, a missing
+  one, more than 20 kB. Also logs over 1 kB.
+
+Carts Shopify never sends don't count against you: a quantity of 0, a
+negative price, an input over Shopify's size limit.
+
+Business rules go in an `appfuzz.toml` next to the extension. The team
+that owns the discount can write them:
+
+```toml
+[shopify]
+extension = "shopify.extension.toml"
+
+[acceptance]
+version = 1
+
+[acceptance.checks.discounts_add_up_to_at_most_100_percent]
+origin = "app"
+let = { ops = "out.json.operations" }
+assert = "sum(ops.map(o, o.orderDiscountsAdd.percentage)) <= 100.0"
+```
+
+`out.json` is your function's output under the names in Shopify's schema,
+with amounts and percentages as numbers. The review searches for a cart
+that breaks the rule and shrinks it to the smallest one.
+
+JavaScript functions run in Shopify's own JavaScript runtime. The first
+review downloads it from Shopify's
+[function-runner](https://github.com/Shopify/function-runner) release,
+checks it against a pinned hash and keeps it in `~/.cache/appfuzz`.
 
 ### Fastly Compute
 

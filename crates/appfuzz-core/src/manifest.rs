@@ -14,6 +14,8 @@ use crate::labels::{Label, ResultLabels};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
+    /// Required, unless `[shopify]` names the function.
+    #[serde(default)]
     pub app: AppSection,
     #[serde(default)]
     pub entry: Option<Entry>,
@@ -31,6 +33,9 @@ pub struct Manifest {
     pub sequences: BTreeMap<String, crate::sequence::Scenario>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance: Option<crate::acceptance::Suite>,
+    /// A Shopify Function: its extension types the input and output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shopify: Option<crate::shopify::Section>,
     /// Where the manifest was loaded from; relative paths resolve against it.
     #[serde(skip)]
     pub dir: PathBuf,
@@ -69,9 +74,11 @@ impl std::fmt::Debug for Binary {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppSection {
+    /// Required, but `[shopify]` can give it.
+    #[serde(default)]
     pub wasm: PathBuf,
     #[serde(default)]
     pub name: Option<String>,
@@ -436,6 +443,10 @@ impl Manifest {
         let mut v = serde_json::to_value(self).expect("manifest serializes");
         v["app"]["wasm"] = Value::Null;
         v["acceptance"] = Value::Null;
+        // A Shopify function's contract is its schema, queries and targets, wherever they are.
+        if let Some(s) = &self.shopify {
+            v["shopify"] = s.function.as_ref().map_or(Value::Null, |f| Value::String(f.digest.clone()));
+        }
         // Descriptions don't change what a run does.
         for f in v["functions"].as_object_mut().into_iter().flat_map(|m| m.values_mut()) {
             if let Some(f) = f.as_object_mut() {
@@ -479,6 +490,16 @@ impl Manifest {
             m.dir = dir;
             m.host = Some(std::sync::Arc::new(host));
         }
+        if m.shopify.is_some() {
+            if m.host.is_some() {
+                bail!("{}: [shopify] and [app] platform exclude each other", path.display());
+            }
+            let table: toml::Table = toml::from_str(&text)?;
+            crate::shopify::attach(&mut m, &table).with_context(|| format!("in {}", path.display()))?;
+        }
+        if m.app.wasm.as_os_str().is_empty() {
+            bail!("{}: [app] needs wasm = \"path/to/app.wasm\"", path.display());
+        }
         if m.entry.as_ref().is_some_and(|e| e.export.is_empty()) {
             bail!("{}: [entry] needs export = \"interface#function\"", path.display());
         }
@@ -498,6 +519,7 @@ impl Manifest {
             datasets: BTreeMap::new(),
             sequences: BTreeMap::new(),
             acceptance: None,
+            shopify: None,
             dir: PathBuf::new(),
             binary: Binary::default(),
             host: None,

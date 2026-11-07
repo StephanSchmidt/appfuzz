@@ -130,6 +130,56 @@ fn over_budget<T: Serialize + std::fmt::Display>(r: &RunRecord, what: &str, used
     )
 }
 
+/// What Shopify would refuse or cut: output and modules over its limits,
+/// output its schema does not accept, logs it truncates, input too big
+/// to send.
+fn shopify(r: &RunRecord, s: &crate::shopify::RunInfo) -> Vec<Finding> {
+    let ex = &r.spec.export;
+    let run = Some(r.id.as_str());
+    let mut out = Vec::new();
+    if s.output_bytes > s.output_limit {
+        let mut f = over_budget(r, "output_bytes", s.output_bytes, s.output_limit);
+        f.detail["scale"] = json!(s.scale);
+        out.push(f);
+    }
+    if s.module_bytes > crate::shopify::MODULE_BYTES {
+        out.push(over_budget(r, "module_bytes", s.module_bytes, crate::shopify::MODULE_BYTES));
+    }
+    if !s.invalid_output.is_empty() {
+        out.push(Finding::new(
+            "invalid_response",
+            &format!("{ex}\0shopify\0{}", s.invalid_output[0].split(':').next().unwrap_or("")),
+            Severity::Fail,
+            format!("{ex} writes output Shopify rejects: {}", s.invalid_output[0]),
+            json!({"target": s.target, "problems": s.invalid_output}),
+            run,
+        ));
+    }
+    if s.log_bytes > crate::shopify::LOG_BYTES {
+        out.push(Finding::new(
+            "big_output",
+            &format!("{ex}\0shopify-logs"),
+            Severity::Warn,
+            format!("{ex} logs {} bytes; Shopify keeps {}", s.log_bytes, crate::shopify::LOG_BYTES),
+            json!({"what": "logs", "bytes": s.log_bytes, "limit": crate::shopify::LOG_BYTES}),
+            run,
+        ));
+    }
+    // Not the function's fault: Shopify never runs it on such a cart, so
+    // nothing else this run shows counts either (`broken_request_for`).
+    if s.input_refused() {
+        out.push(Finding::new(
+            "big_payload",
+            &format!("{ex}\0shopify-input"),
+            Severity::Info,
+            format!("{ex}'s input query selects {} bytes for this input; Shopify sends at most {} and does not run the function", s.input_bytes, s.input_limit),
+            json!({"what": "input", "bytes": s.input_bytes, "limit": s.input_limit, "scale": s.scale}),
+            run,
+        ));
+    }
+    out
+}
+
 /// Everything one run shows on its own.
 pub fn per_run(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let mut out = per_run_fast(r, m);
@@ -177,6 +227,9 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     match o.kind {
         OutcomeKind::Ok | OutcomeKind::HostTrap | OutcomeKind::PlanError | OutcomeKind::Error | OutcomeKind::BudgetExceeded => {}
+        // Shopify stops a function at its instruction limit, endless or
+        // not: `over_budget` below says so.
+        OutcomeKind::OutOfFuel if r.shopify.is_some() => {}
         OutcomeKind::OutOfFuel | OutcomeKind::Timeout => out.push(Finding::new(
             "hang",
             ex,
@@ -209,11 +262,29 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     }
     let l = &m.limits;
     let t = &r.totals;
-    for (what, used, limit) in [("fuel", t.fuel, Some(l.fuel)), ("memory", t.peak_memory, Some(l.memory))] {
+    // Shopify's instruction limit grows with the cart.
+    let fuel_limit = r.shopify.as_ref().map_or(l.fuel, |s| s.instructions_limit);
+    out.extend(r.shopify.as_ref().map(|s| shopify(r, s)).unwrap_or_default());
+    let fuel_name = if r.shopify.is_some() { "instructions" } else { "fuel" };
+    for (what, used, limit) in [(fuel_name, t.fuel, Some(fuel_limit)), ("memory", t.peak_memory, Some(l.memory))] {
         if let Some(limit) = limit
             && used > limit
         {
-            out.push(over_budget(r, what, used, limit));
+            let mut f = over_budget(r, what, used, limit);
+            if let Some(s) = &r.shopify
+                && what == fuel_name
+            {
+                f.detail["scale"] = json!(s.scale);
+                f.detail["sizes"] = json!(s.sizes);
+                // The limit depends on the input: say which.
+                let on = s.size_text().map(|t| format!(" on an input with {t}")).unwrap_or_default();
+                f.title = if o.kind == OutcomeKind::OutOfFuel {
+                    format!("{ex} does not finish within {used} instructions{on}, the limit for it is {limit}")
+                } else {
+                    format!("{ex} uses {used} instructions{on}, the limit for it is {limit}")
+                };
+            }
+            out.push(f);
         }
     }
     if let Some(limit) = l.cost_per_request
@@ -613,6 +684,9 @@ fn crash_site(panic: Option<&str>, o: &crate::record::Outcome, msg: &str) -> Str
     if let Some(c) = panic.and_then(|p| AT.captures(p)) {
         return c[1].to_string();
     }
+    if let Some(site) = panic.and_then(js_site) {
+        return site;
+    }
     if let Some(f) = o.stack.first() {
         return format!("{}:{}:{:x}", f.module, f.func, f.offset.unwrap_or(0));
     }
@@ -629,8 +703,41 @@ fn backtrace_func(msg: &str) -> Option<String> {
 }
 
 pub fn panic_text(stderr: &str) -> Option<String> {
-    let i = stderr.find("panicked at")?;
+    let Some(i) = stderr.find("panicked at") else { return js_error(stderr) };
     Some(stderr[i..].lines().take(3).collect::<Vec<_>>().join(" ").chars().take(400).collect())
+}
+
+/// An uncaught JavaScript error, as QuickJS prints it (Javy: Shopify,
+/// Extism JS): the error line and the first frame in the app's own code,
+/// `TypeError: cannot read property 'id' of undefined (in run at function.mjs:21:30)`.
+pub fn js_error(stderr: &str) -> Option<String> {
+    static ERR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"^(?:Uncaught )?(?:[A-Z][A-Za-z]*)?Error\b").unwrap());
+    let mut lines = stderr.lines().skip_while(|l| !ERR.is_match(l));
+    let error = lines.next()?;
+    let frames: Vec<&str> = lines.map(str::trim_start).take_while(|l| l.starts_with("at ")).collect();
+    if frames.is_empty() {
+        return None;
+    }
+    // `at run (function.mjs:21:30)`, `at function.mjs:3:1`; not `at parse (native)`
+    // or the text JSON.parse was given (`at <input>:1:0`).
+    let own = frames.iter().find_map(|f| {
+        let f = &f[3..];
+        let (func, at) = match f.rsplit_once(" (") {
+            Some((func, at)) => (Some(func), at.strip_suffix(')')?),
+            None => (None, f),
+        };
+        (!at.starts_with('<') && at != "native").then(|| match func {
+            Some(func) => format!(" (in {func} at {at})"),
+            None => format!(" (at {at})"),
+        })
+    });
+    Some(format!("{}{}", error.trim_end(), own.unwrap_or_default()).chars().take(400).collect())
+}
+
+/// The app frame of a `js_error` text: `function.mjs:21:30`.
+pub(crate) fn js_site(text: &str) -> Option<String> {
+    static AT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"\((?:in \S+ )?at ([^\s()]+:\d+:\d+)\)$").unwrap());
+    AT.captures(text).map(|c| c[1].to_string())
 }
 
 /// The first line of a message, without Rust's hint about backtraces.
@@ -767,6 +874,18 @@ impl FindingStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_javascript_error_names_the_app_line_it_came_from() {
+        let stderr = "this is a log\nError:[<input>]:1:0 unexpected token: 'birch'\n    at <input>:1:0\n    at parse (native)\n    at run (function.mjs:21:30)\n    at run_default (function.mjs:9:22)\n\n";
+        let text = super::panic_text(stderr).unwrap();
+        assert_eq!(text, "Error:[<input>]:1:0 unexpected token: 'birch' (in run at function.mjs:21:30)");
+        assert_eq!(super::js_site(&text).as_deref(), Some("function.mjs:21:30"));
+        let other = super::js_error("TypeError: cannot read property 'id' of undefined\n    at function.mjs:4:7\n").unwrap();
+        assert_eq!(super::js_site(&other).as_deref(), Some("function.mjs:4:7"));
+        // A log line that only looks like an error is not one.
+        assert_eq!(super::js_error("Error: retrying\n"), None);
+    }
+
     fn with_finding_store(action: impl FnOnce(&super::FindingStore)) {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let path = std::env::temp_dir().join(format!("appfuzz-findings-{}-{nonce}", std::process::id()));

@@ -43,6 +43,8 @@ chrono.workspace = true
 wit-component = { workspace = true, features = ["dummy-module"] }
 wit-parser = "0.262"
 witx = "0.9"
+graphql-parser.workspace = true
+rmp-serde.workspace = true
 
 [dev-dependencies]
 wat = "1.262"

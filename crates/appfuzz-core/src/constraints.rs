@@ -353,12 +353,25 @@ pub fn broken_request(args: &[Value], m: &crate::manifest::Manifest) -> Vec<(Str
         .collect()
 }
 
-pub(crate) fn broken_request_for(record: &crate::record::RunRecord, m: &crate::manifest::Manifest) -> Vec<(String, String, Value)> {
-    if m.entry.as_ref().is_some_and(|entry| crate::harness::fn_key_eq(&entry.export, &record.spec.export)) {
+/// The request fields of a run that break their constraint, and the inputs
+/// Shopify would not send: findings of such a run are only hints.
+pub fn broken_request_for(record: &crate::record::RunRecord, m: &crate::manifest::Manifest) -> Vec<(String, String, Value)> {
+    let mut out = if m.entry.as_ref().is_some_and(|entry| crate::harness::fn_key_eq(&entry.export, &record.spec.export)) {
         broken_request(&record.spec.args, m)
     } else {
         Vec::new()
+    };
+    // Shopify does not run a function on an input over its limit.
+    if let Some(s) = record.shopify.as_ref().filter(|s| s.input_refused()) {
+        out.push(("input".into(), format!("at most {} bytes (Shopify's input limit for this cart)", s.input_limit), Value::from(s.input_bytes)));
     }
+    // Nor does it send a negative price or a quantity of 0.
+    if record.shopify.is_some()
+        && let Some(f) = m.shopify.as_ref().and_then(|s| s.function.as_ref())
+    {
+        out.extend(f.unsendable(&record.spec.export, &record.spec.args).into_iter().take(5));
+    }
+    out
 }
 
 /// Makes the request's constrained fields keep to their constraints.

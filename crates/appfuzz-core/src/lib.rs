@@ -37,6 +37,7 @@ pub mod probe;
 pub mod record;
 pub mod records;
 pub mod scale;
+pub mod shopify;
 pub mod shrink;
 pub mod spin;
 pub mod standards;
@@ -66,3 +67,18 @@ pub mod feedback;
 mod structured;
 
 mod memory;
+
+/// Where downloads and their runs go: `$APPFUZZ_CACHE`, else the platform's
+/// cache folder.
+pub fn cache_dir() -> anyhow::Result<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Some(d) = std::env::var_os("APPFUZZ_CACHE").filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(d));
+    }
+    if let Some(d) = std::env::var_os("XDG_CACHE_HOME").filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(d).join("appfuzz"));
+    }
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).ok_or_else(|| anyhow::anyhow!("no cache folder: set APPFUZZ_CACHE or HOME"))?;
+    let home = PathBuf::from(home);
+    Ok(if cfg!(target_os = "macos") { home.join("Library/Caches/appfuzz") } else { home.join(".cache/appfuzz") })
+}

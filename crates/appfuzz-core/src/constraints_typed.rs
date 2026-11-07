@@ -272,6 +272,9 @@ pub(crate) fn conform_host(value: &mut Value, ty: &Type, constraints: &[(String,
 }
 
 pub(crate) fn conform_request_typed(args: &mut [Value], app: &crate::harness::App, export: &str, seed: u64) -> Result<()> {
+    if let Some(f) = app.manifest.shopify.as_ref().and_then(|s| s.function.as_ref()) {
+        f.conform(export, args);
+    }
     let Some(entry) = &app.manifest.entry else { return Ok(()) };
     if entry.values.is_empty() || !crate::harness::fn_key_eq(&entry.export, export) {
         return Ok(());

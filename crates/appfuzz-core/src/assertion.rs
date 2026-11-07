@@ -248,6 +248,13 @@ impl Binding {
             }
             Source::Result(p) => at(r.result.as_ref().ok_or("the run has no result")?, p, "the result"),
             Source::Json(p) => {
+                // A Shopify function's output, under Shopify's field names.
+                if let Some(f) = m.shopify.as_ref().and_then(|s| s.function.as_ref())
+                    && r.shopify.is_some()
+                {
+                    let out = f.output(r).ok_or("the function wrote no output Shopify accepts")?;
+                    return at(&out, p, "the function's output");
+                }
                 let body = response(r, m).body.ok_or("the response has no body")?;
                 let v: Value = serde_json::from_str(&body).map_err(|e| format!("the body is not JSON: {e}"))?;
                 at(&v, p, "the JSON body")

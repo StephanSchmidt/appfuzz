@@ -194,6 +194,7 @@ impl Trace {
             stderr: self.stderr.clone(),
             guest_error: self.guest_error.clone(),
             rejected_output: self.rejected_output.clone(),
+            shopify: None,
             memory_limit_hit: self.memory_limit_hit,
             capture_limited: self.capture_limited,
         }

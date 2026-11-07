@@ -188,14 +188,15 @@ pub struct TimeProbe {
 }
 
 /// Runs the export at every edge time. A crash or hang there is a
-/// `crash_at_time` / `hang_at_time` finding.
+/// `crash_at_time` / `hang_at_time` finding, unless the request fails the
+/// same way at its own time: then the time is not the cause.
 pub fn times(app: &App, base: &RunSpec, run: Runner) -> (Vec<TimeProbe>, Vec<Finding>) {
     // A hang ends at twice the production limit.
     let fuel = base.fuel.min(app.manifest.limits.fuel.saturating_mul(2));
     let base = RunSpec { plan: steady(&base.plan), fuel, ..base.clone() };
     let mut probes = Vec::new();
     let mut findings = Vec::new();
-    let specs: Vec<RunSpec> = EDGE_TIMES
+    let mut specs: Vec<RunSpec> = EDGE_TIMES
         .iter()
         .map(|(now, _)| {
             let mut spec = base.clone();
@@ -207,11 +208,15 @@ pub fn times(app: &App, base: &RunSpec, run: Runner) -> (Vec<TimeProbe>, Vec<Fin
             spec
         })
         .collect();
-    let runs = par::map(&specs, |s| run(s));
+    specs.push(base);
+    let mut runs = par::map(&specs, |s| run(s));
+    let own = runs.pop().expect("the run at the request's own time");
+    let always: Vec<String> =
+        crate::detect::per_run_checked(app, &own).into_iter().filter(|x| matches!(x.kind.as_str(), "crash" | "hang")).map(|x| x.title).collect();
     for ((now, what), r) in EDGE_TIMES.iter().zip(runs) {
         probes.push(TimeProbe { now: now.to_string(), what: what.to_string(), run: r.id.clone(), outcome: r.outcome.kind });
         for mut x in crate::detect::per_run_checked(app, &r) {
-            if matches!(x.kind.as_str(), "crash" | "hang") {
+            if matches!(x.kind.as_str(), "crash" | "hang") && !always.contains(&x.title) {
                 let kind = format!("{}_at_time", x.kind);
                 x = Finding::new(
                     &kind,

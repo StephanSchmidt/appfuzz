@@ -66,6 +66,18 @@ either: without `appfuzz.toml`, appfuzz reads `spin.toml` (hosts, secret
 variables, stores; `--component NAME` picks one). See
 [REFERENCE](REFERENCE.md#spin-apps-spintoml).
 
+A Shopify Function needs no manifest: `-m shopify.extension.toml` (or
+`[shopify] extension = "…"` in an `appfuzz.toml` that adds acceptance
+checks). The request is the input query's answer, WIT-shaped; `--request`
+also takes Shopify's JSON (an `input.json`). Instruction, input, output and
+log limits are Shopify's, scaled by the cart like Shopify scales them. Runs
+with input Shopify never sends (quantity 0, a negative amount, an id that
+is not `gid://shopify/…`, an oversized cart) list `invalid_request`, and
+their findings are info. In checks, `out.json` is the output under
+Shopify's names with decimals as numbers. JavaScript runtimes are
+downloaded on first use; review the module `shopify app function build`
+writes.
+
 A plain module (not a component) needs `[app] platform`, which is a bundled
 name (`fastly`) or a `platform.toml` path. For an Extism plugin, the platform
 has `abi = "extism"` and a WIT file that types the JSON. `[app] world` picks

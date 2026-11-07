@@ -47,32 +47,48 @@ pub fn shrink(app: &App, spec: &RunSpec, base: &[Value], test: &(dyn Fn(&RunSpec
     // start above it, so a boundary takes log n tests, not log² n.
     let mut lows: Lows = HashMap::new();
     let mut tests = 0;
+    // A Shopify cart shrinks to carts Shopify could send: a quantity
+    // goes down to 1, not 0.
+    let shopify = app.manifest.shopify.as_ref().and_then(|s| s.function.as_ref());
     'outer: loop {
-        let cands: Vec<Cand> = candidates(app, &cur, base, &lows).into_iter().filter(|c| tried.insert(key(&c.spec))).collect();
-        for chunk in cands.chunks(par::jobs().max(1)) {
-            let chunk = &chunk[..chunk.len().min(max_tests.saturating_sub(tests) as usize)];
+        // A candidate becomes a whole spec only when its chunk is tried:
+        // a big request has thousands of them.
+        let mut cands = candidates(app, &cur, base, &lows).into_iter();
+        loop {
+            let room = (max_tests.saturating_sub(tests) as usize).min(par::jobs().max(1));
+            let mut chunk: Vec<(RunSpec, Option<(String, u64)>)> = Vec::with_capacity(room);
+            while chunk.len() < room {
+                let Some(c) = cands.next() else { break };
+                let mut spec = c.change.apply(&cur);
+                if let Some(f) = shopify {
+                    f.conform(&spec.export, &mut spec.args);
+                }
+                if tried.insert(key(&spec)) {
+                    chunk.push((spec, c.step));
+                }
+            }
             if chunk.is_empty() {
                 break 'outer;
             }
             tests += chunk.len() as u32;
-            let ok = par::map(chunk, |c| test(&c.spec));
+            let ok = par::map(&chunk, |(spec, _)| test(spec));
             let win = ok.iter().position(|k| *k);
-            for c in &chunk[..win.unwrap_or(chunk.len())] {
-                if let Some((k, v)) = &c.step {
+            for (_, step) in &chunk[..win.unwrap_or(chunk.len())] {
+                if let Some((k, v)) = step {
                     let low = lows.entry(k.clone()).or_insert(*v);
                     *low = (*low).max(*v);
                 }
             }
             if let Some(i) = win {
+                let (spec, step) = chunk.swap_remove(i);
                 // Another change can move every boundary.
-                if chunk[i].step.is_none() {
+                if step.is_none() {
                     lows.clear();
                 }
-                cur = chunk[i].spec.clone();
+                cur = spec;
                 continue 'outer;
             }
         }
-        break;
     }
     (cur, tests)
 }
@@ -81,13 +97,36 @@ type Lows = HashMap<String, u64>;
 
 /// A candidate, and the number it sets if it steps one down.
 struct Cand {
-    spec: RunSpec,
+    change: Changed,
     step: Option<(String, u64)>,
+}
+
+/// What a candidate changes: the whole spec, or one value of the request.
+enum Changed {
+    Spec(RunSpec),
+    /// The value at this JSON pointer into the arguments (`/0/cart/lines`).
+    Request(String, Value),
+}
+
+impl Changed {
+    fn apply(self, cur: &RunSpec) -> RunSpec {
+        match self {
+            Changed::Spec(s) => s,
+            Changed::Request(at, v) => {
+                let mut root = Value::Array(cur.args.clone());
+                if let Some(slot) = root.pointer_mut(&at) {
+                    *slot = v;
+                }
+                let Value::Array(args) = root else { unreachable!("an array stays an array") };
+                RunSpec { args, ..cur.clone() }
+            }
+        }
+    }
 }
 
 impl From<RunSpec> for Cand {
     fn from(spec: RunSpec) -> Self {
-        Cand { spec, step: None }
+        Cand { change: Changed::Spec(spec), step: None }
     }
 }
 
@@ -281,7 +320,7 @@ fn candidates(app: &App, s: &RunSpec, base: &[Value], lows: &Lows) -> Vec<Cand> 
         for m in down(n as u64, 0, &at, lows) {
             let mut c = s.clone();
             c.plan.0.entry("_defaults".into()).or_default().dataset_rows.insert(name.clone(), m as usize);
-            tiers[1].push(Cand { spec: c, step: Some((at.clone(), m)) });
+            tiers[1].push(Cand { change: Changed::Spec(c), step: Some((at.clone(), m)) });
         }
     }
     // Edits to the world: fewer edits, fewer keys in one, fewer added rows.
@@ -314,7 +353,7 @@ fn candidates(app: &App, s: &RunSpec, base: &[Value], lows: &Lows) -> Vec<Cand> 
                             *rows = m as usize;
                         }
                     });
-                    tiers[1].push(Cand { spec, step: Some((at.clone(), m)) });
+                    tiers[1].push(Cand { change: Changed::Spec(spec), step: Some((at.clone(), m)) });
                 }
             }
             _ => {}
@@ -667,13 +706,7 @@ fn request_edits(app: &App, s: &RunSpec, base: &[Value], lows: &Lows, out: &mut 
             _ => vec![],
         });
         for (v, step) in variants {
-            let mut r = root.clone();
-            if let Some(slot) = r.pointer_mut(&p) {
-                *slot = v;
-            }
-            if let Value::Array(args) = r {
-                out.push(Cand { spec: RunSpec { args, ..s.clone() }, step });
-            }
+            out.push(Cand { change: Changed::Request(p.clone(), v), step });
         }
     }
 }

@@ -75,6 +75,9 @@ pub struct Point {
     pub rows: BTreeMap<String, u64>,
     /// Bytes all host calls returned, as compact JSON.
     pub host_result_bytes: u64,
+    /// This run's own fuel limit, where it depends on the input (Shopify).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fuel_limit: Option<u64>,
 }
 
 impl Point {
@@ -104,6 +107,7 @@ impl Point {
             host_arg_bytes: r.events.iter().map(|e| Value::Object(e.args.clone()).to_string().len() as u64).sum(),
             rows,
             host_result_bytes: r.totals.host_result_bytes,
+            fuel_limit: r.shopify.as_ref().map(|s| s.instructions_limit),
         }
     }
 }
@@ -441,7 +445,7 @@ impl Budget {
         match self {
             Self::Cost(n) => p.cost > u128::from(n),
             Self::Latency(ms) => p.virtual_ns.exceeds_ms(ms),
-            Self::Fuel(n) => p.fuel > n,
+            Self::Fuel(n) => p.fuel > p.fuel_limit.unwrap_or(n),
             Self::Memory(n) => p.peak_memory > n,
         }
     }
@@ -464,6 +468,9 @@ pub fn analyze(app: &App, knob: Knob, mut points: Vec<Point>) -> ScaleReport {
     let l = &app.manifest.limits;
     // Points after a failure (hang, crash) distort the fit.
     let good: Vec<&Point> = points.iter().take_while(|p| p.outcome == OutcomeKind::Ok).collect();
+    // A limit that grows with the input (Shopify): predict against the
+    // largest size measured, which the limit only grows from.
+    let fuel_limit = good.last().and_then(|p| p.fuel_limit).unwrap_or(l.fuel);
     let mut growth = Vec::new();
     let mut add = |metric: String, f: &dyn Fn(&Point) -> f64, budget: Option<Budget>| {
         let pts: Vec<(f64, f64)> = good.iter().map(|p| (p.n as f64, f(p))).collect();
@@ -498,7 +505,7 @@ pub fn analyze(app: &App, knob: Knob, mut points: Vec<Point>) -> ScaleReport {
     }
     add("cost".into(), &|p| p.cost as f64, l.cost_per_request.map(Budget::Cost));
     add("virtual_ms".into(), &|p| p.virtual_ns.ms(), l.max_latency_ms.map(Budget::Latency));
-    add("fuel".into(), &|p| p.fuel as f64, Some(Budget::Fuel(l.fuel)));
+    add("fuel".into(), &|p| p.fuel as f64, Some(Budget::Fuel(fuel_limit)));
     add("peak_memory".into(), &|p| p.peak_memory as f64, Some(Budget::Memory(l.memory)));
     add("output_bytes".into(), &|p| p.output_bytes as f64, None);
     add("host_arg_bytes".into(), &|p| p.host_arg_bytes as f64, None);
@@ -722,7 +729,14 @@ pub fn scale(app: &App, base: &RunSpec, knob: Knob, sizes: &[u64], run: Runner) 
     // platform can send: the app never runs, so it is no failure at size n.
     specs.retain(|(_, s)| fits(app, s));
     let mut points = Vec::new();
-    for p in par::map(&specs, |(n, s)| Point::of(*n, &run(s))) {
+    for (p, refused) in par::map(&specs, |(n, s)| {
+        let r = run(s);
+        (Point::of(*n, &r), r.shopify.as_ref().is_some_and(crate::shopify::RunInfo::input_refused))
+    }) {
+        // Shopify sends no input this big: no size from here on happens.
+        if refused {
+            break;
+        }
         let stop = p.outcome != OutcomeKind::Ok;
         points.push(p);
         if stop {

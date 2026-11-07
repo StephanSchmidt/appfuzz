@@ -170,6 +170,7 @@ mod tests {
             events: vec![add],
             guest_error: None,
             rejected_output: None,
+            shopify: None,
             command_exit_code: None,
             memory_limit_hit: false,
             capture_limited: false,

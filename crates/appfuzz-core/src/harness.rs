@@ -42,6 +42,9 @@ use extism::ExtismApp;
 mod p1;
 #[path = "harness_p2.rs"]
 mod p2;
+#[path = "harness_shopify.rs"]
+mod shopify;
+use shopify::ShopifyApp;
 
 const EPOCH_TICK: Duration = Duration::from_millis(10);
 const MAX_FRAMES: usize = 32;
@@ -136,6 +139,8 @@ enum Pre {
         abi: Arc<crate::extism::Abi>,
         names: Arc<BTreeMap<String, String>>,
     },
+    /// A Shopify Function; a run calls its target's export.
+    Shopify(Arc<shopify::Runtime>),
 }
 
 /// The datasets a run with this plan and seed starts from.
@@ -333,6 +338,23 @@ pub fn engine() -> Result<Engine> {
     Ok(Engine::new(&base_config())?)
 }
 
+/// Counts instructions as Shopify does: a bulk memory operation costs the
+/// same whatever its length.
+fn shopify_engine() -> Result<Engine> {
+    let mut cost = wasmtime::OperatorCost::new();
+    cost.variable.memory_copy_per_byte = 0;
+    cost.variable.memory_fill_per_byte = 0;
+    cost.variable.memory_init_per_byte = 0;
+    let mut config = base_config();
+    config.operator_cost(cost);
+    Ok(Engine::new(&config)?)
+}
+
+/// The engine for an app that cannot use the pool.
+fn engine_for(manifest: &Manifest) -> Result<Engine> {
+    if manifest.shopify.is_some() { shopify_engine() } else { engine() }
+}
+
 fn base_config() -> Config {
     let mut config = Config::new();
     config.consume_fuel(true);
@@ -393,8 +415,9 @@ impl App {
     }
 
     pub fn from_bytes(manifest: Manifest, bytes: Vec<u8>) -> Result<Self> {
-        if crate::statics::memory_requires_on_demand(&bytes)? {
-            return Self::from_bytes_engine(manifest, bytes, engine()?);
+        if manifest.shopify.is_some() || crate::statics::memory_requires_on_demand(&bytes)? {
+            let engine = engine_for(&manifest)?;
+            return Self::from_bytes_engine(manifest, bytes, engine);
         }
         let engine = pooled_engine(manifest.limits.memory.saturating_mul(4))?;
         match Self::from_bytes_engine(manifest.clone(), bytes.clone(), engine) {
@@ -405,7 +428,8 @@ impl App {
     }
 
     pub(crate) fn from_feedback(manifest: Manifest, bytes: Vec<u8>, readers: Vec<String>) -> Result<Self> {
-        let mut app = Self::from_bytes_engine(manifest, bytes, engine()?)?;
+        let engine = engine_for(&manifest)?;
+        let mut app = Self::from_bytes_engine(manifest, bytes, engine)?;
         app.feedback_readers = readers;
         Ok(app)
     }
@@ -423,7 +447,15 @@ impl App {
         let written: Vec<String> = manifest.functions.keys().cloned().collect();
         let extism_abi = manifest.host.as_ref().is_some_and(|h| h.platform.abi.as_deref() == Some("extism"));
         let mut plugin = None;
-        let (component, core, imports, exports) = if wasmparser::Parser::is_core_wasm(&bytes) && extism_abi {
+        let mut function = None;
+        let (component, core, imports, exports) = if wasmparser::Parser::is_core_wasm(&bytes) && manifest.shopify.is_some() {
+            let f = ShopifyApp::new(&engine, &manifest, &bytes)?;
+            let (imports, exports) = (f.imports.clone(), f.exports.clone());
+            function = Some(f);
+            (None, None, imports, exports)
+        } else if manifest.shopify.is_some() {
+            bail!("a Shopify Function is a WebAssembly module, not a component");
+        } else if wasmparser::Parser::is_core_wasm(&bytes) && extism_abi {
             let p = ExtismApp::new(&engine, &manifest, &bytes)?;
             let (imports, exports) = (p.imports.clone(), p.exports.clone());
             plugin = Some(p);
@@ -610,6 +642,7 @@ impl App {
             platform.handles = Some(spec);
         }
         let pre = match (component, core, plugin) {
+            _ if let Some(f) = function => Pre::Shopify(Arc::new(f.link(&engine)?)),
             (_, _, Some(p)) => Pre::Extism { pre: p.link(&engine)?, kernel: p.kernel.clone(), abi: p.abi.clone(), names: p.names.clone() },
             (_, Some(core), _) => Pre::Core { pre: core.link(&engine)?, start: core.start },
             (Some(component), None, None) => Pre::Component(link_component(&engine, &component, &imports, crate::wasi_http::uses_http(&imports, &exports))?),
@@ -704,7 +737,12 @@ impl App {
             Some(v) => vec![v],
             None => {
                 let mut g = Generator::new(0, Default::default());
-                export.ty.params().map(|(_, t)| g.gen_json(&t)).collect()
+                let mut args: Vec<Value> = export.ty.params().map(|(_, t)| g.gen_json(&t)).collect();
+                // A cart Shopify could send.
+                if let Some(f) = self.manifest.shopify.as_ref().and_then(|s| s.function.as_ref()) {
+                    f.conform(&export.key, &mut args);
+                }
+                args
             }
         };
         // Clock fields are paths of the platform's request: every export
@@ -766,6 +804,7 @@ impl App {
             events: vec![],
             guest_error: None,
             rejected_output: None,
+            shopify: None,
             command_exit_code: None,
             memory_limit_hit: false,
             capture_limited: false,
@@ -814,6 +853,8 @@ impl App {
         let stdout = MemoryOutputPipe::new(OUTPUT_CAPACITY);
         let stderr = MemoryOutputPipe::new(OUTPUT_CAPACITY);
         let mut builder = WasiCtx::builder();
+        let shopify_input = self.shopify_start(&export, &spec.args, &mut builder)?;
+        let mut shopify_written = None;
         builder
             .wall_clock(WallClock(clock.clone()))
             .monotonic_clock(MonotonicClock(clock.clone()))
@@ -929,6 +970,13 @@ impl App {
                     Err(e) => Err(e),
                 }
             }
+            Pre::Shopify(rt) => {
+                let input = shopify_input.as_ref().expect("Shopify runs encode their input first");
+                rt.call(&mut store, &export, &input.bytes, &mut initializing).map(|written| {
+                    shopify_written = Some(written);
+                    vec![]
+                })
+            }
             Pre::Extism { pre, kernel, names, abi } => match crate::extism::Runtime::instantiate(&mut store, kernel).and_then(|runtime| {
                 store.data_mut().kernel.as_mut().expect("plugin runs have a kernel").runtime = Some(runtime);
                 pre.instantiate(&mut store)
@@ -975,7 +1023,7 @@ impl App {
         clock.with(|c| c.guest_ns = guest_ns);
 
         match call {
-            Ok(_) if matches!(self.pre, Pre::Core { .. }) || crate::wasi_http::is_handler(&export) => {}
+            Ok(_) if matches!(self.pre, Pre::Core { .. } | Pre::Shopify(_)) || crate::wasi_http::is_handler(&export) => {}
             Ok(status) if let Pre::Extism { abi, .. } = &self.pre => {
                 let status = match status.first() {
                     Some(Val::S32(s)) => *s,
@@ -1071,6 +1119,7 @@ impl App {
         for (level, text) in kernel_logs {
             record.stderr.push_str(&format!("[{level}] {text}\n"));
         }
+        self.shopify_finish(&export, shopify_input, shopify_written, &stdout, record);
         Ok(())
     }
 }
