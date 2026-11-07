@@ -1,0 +1,11 @@
+{
+  "app": "webhook-http-secret",
+  "bug": "calls its API with the API key over plain http://",
+  "expect": [
+    {
+      "kind": "cleartext_transport",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

@@ -1,0 +1,6 @@
+{
+  "app": "log-escaped",
+  "bug": "logs the search term with line breaks escaped",
+  "expect": [],
+  "allow": []
+}

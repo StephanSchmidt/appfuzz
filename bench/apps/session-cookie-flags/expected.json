@@ -1,0 +1,6 @@
+{
+  "app": "session-cookie-flags",
+  "bug": "sets its session cookie with HttpOnly, Secure and SameSite",
+  "expect": [],
+  "allow": []
+}

@@ -299,7 +299,7 @@ fn escape(s: &str) -> String {
 }
 
 /// Scalars of a JSON value with their paths.
-fn leaves(v: &Value, path: String, out: &mut Vec<(String, String)>) {
+pub(crate) fn leaves(v: &Value, path: String, out: &mut Vec<(String, String)>) {
     match v {
         Value::Array(a) => {
             for (i, x) in a.iter().enumerate() {

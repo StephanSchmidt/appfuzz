@@ -65,7 +65,10 @@ impl Finding {
             | "redundant_calls"
             | "busy_wait"
             | "sleeps"
-            | "mass_disclosure" => "measured",
+            | "mass_disclosure"
+            | "insecure_cookie"
+            | "log_injection"
+            | "cleartext_transport" => "measured",
             "invalid_host_argument"
             | "acceptance_failed"
             | "sequence_check_failed"
@@ -394,6 +397,7 @@ pub fn per_run_fast(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     out.extend(crate::pages::check(r, m));
     out.extend(crate::identity::check(r, m));
     out.extend(crate::records::check(r, m));
+    out.extend(crate::hygiene::check(r, m));
     out.extend(crate::markup::check(r, m));
     out.extend(crate::web::check(r, m));
     if t.sleep_ns > 0 {

@@ -269,7 +269,7 @@ pub fn of(kind: &str) -> Option<Standard> {
         "ungranted_import" | "ungranted_call" => s(284, Some("API9"), None),
         // Configuration and transport.
         "permissive_cors" => s(942, Some("API8"), Some(Http)),
-        "insecure_cookie" => s(1004, Some("API8"), Some(Http)),
+        "insecure_cookie" => s(1004, Some("API8"), None),
         "weak_csp" => s(693, Some("API8"), Some(Scripts)),
         "cleartext_transport" => s(319, Some("API8"), Some(Sensitive)),
         // Authentication.
@@ -347,6 +347,7 @@ pub const KINDS: &[&str] = &[
     "input_passthrough",
     "host_header_injection",
     "code_injection",
+    "log_injection",
     "foreign_user_access",
     "missing_owner_check",
     "tenant_leak",
@@ -361,7 +362,9 @@ pub const KINDS: &[&str] = &[
     "ungranted_import",
     "ungranted_call",
     "permissive_cors",
+    "insecure_cookie",
     "weak_csp",
+    "cleartext_transport",
     "auth_bypass",
     "timing_unsafe_compare",
     "predictable_token",

@@ -823,6 +823,59 @@ app("granted-api", "fetches its API on a host the platform grants",
         html(format!("<p><a href=\\"/apps/bench/items\\">{}</a></p>", esc(&text)))
     """), [], grants=[HTTP], extra=LABELS, base="/apps/bench", hosts=["api.example.com"])
 
+app("webhook-http-secret", "calls its API with the API key over plain http://",
+    labelled("""
+        let _ = &req;
+        let key = config::secret("api-key");
+        let text = http::fetch("http://api.example.com/v1/items", &key).unwrap_or_default();
+        html(format!("<pre>{}</pre>", esc(&text)))
+    """), [("cleartext_transport", "fail")], grants=[CONFIG, HTTP], extra=LABELS, hosts=["api.example.com"])
+
+app("webhook-https", "calls its API with the API key over https://",
+    labelled("""
+        let _ = &req;
+        let key = config::secret("api-key");
+        let text = http::fetch("https://api.example.com/v1/items", &key).unwrap_or_default();
+        html(format!("<pre>{}</pre>", esc(&text)))
+    """), [], grants=[CONFIG, HTTP], extra=LABELS, hosts=["api.example.com"])
+
+# --- Sessions and logs -------------------------------------------------------
+
+
+def session(flags):
+    """Signs in on POST /login with a random session cookie."""
+    return handler(f"""
+        if req.method != "POST" {{
+            return html("<form method=\\"post\\" action=\\"/login\\"><button>Sign in</button></form>".into());
+        }}
+        use std::hash::{{BuildHasher, Hasher}};
+        let token = std::collections::hash_map::RandomState::new().build_hasher().finish();
+        let mut r = html("<p>Signed in</p>".into());
+        r.headers.push(("set-cookie".into(), format!("session={{token:016x}}; Path=/{flags}")));
+        r
+    """)
+
+
+app("session-cookie-plain", "sets its session cookie without HttpOnly and Secure",
+    session(""), [("insecure_cookie", "fail")])
+
+app("session-cookie-flags", "sets its session cookie with HttpOnly, Secure and SameSite",
+    session("; HttpOnly; Secure; SameSite=Lax"), [])
+
+app("log-raw-search", "logs the search term as it came",
+    handler("""
+        let term = param(&req.query, "search").unwrap_or_default();
+        println!("search {term}");
+        html("<p>Results</p>".into())
+    """), [("log_injection", "warn")])
+
+app("log-escaped", "logs the search term with line breaks escaped",
+    handler("""
+        let term = param(&req.query, "search").unwrap_or_default();
+        println!("search {}", term.escape_debug());
+        html("<p>Results</p>".into())
+    """), [])
+
 # --- Payloads ---------------------------------------------------------------
 # Data that leaves in disguise, and blobs the app writes from its own code.
 

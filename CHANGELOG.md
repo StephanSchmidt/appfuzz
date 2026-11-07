@@ -40,6 +40,15 @@
 - New dataset edit `tag`: marks each record's text fields with a token
   made from its key.
 
+**Cookies, logs and plain HTTP**
+
+- New finding `insecure_cookie`: a session cookie set without `HttpOnly`
+  or `Secure` (fail). CSRF cookies, which scripts must read, are exempt.
+- New finding `log_injection`: request text with a line break reaches the
+  log as it came, so a request can add log lines of its own (warn).
+- New finding `cleartext_transport`: a `secret` or `pii` value goes to a
+  plain `http://` URL off the platform's network (fail).
+
 **OWASP**
 
 - Security findings carry `standards`: their CWE, OWASP Top 10 (2025)

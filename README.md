@@ -178,9 +178,11 @@ Details: [REFERENCE.md](REFERENCE.md#review-budgets-and-exit-codes).
   values the backend returns (empty lists, errors, 3-byte characters, leap
   days).
 - **Security:** request fields and stored data in HTML output unescaped,
-  internal error text shown to users, imports the platform didn't grant.
+  internal error text shown to users, imports the platform didn't grant,
+  session cookies without `HttpOnly` or `Secure`, request text that forges
+  log lines.
   With labels: SQL, shell, path and HTML injection, SSRF, and leaked secrets
-  or personal data.
+  or personal data, also over plain `http://`.
 - **Output rules:** with output labels, scripts in markup that must have
   none, widgets that call routes by themselves, open redirects.
 - **Access:** with identity labels, user ids taken from the request, and

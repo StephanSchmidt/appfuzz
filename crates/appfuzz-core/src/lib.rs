@@ -19,6 +19,7 @@ pub mod handles;
 pub mod harness;
 pub mod host_manifest;
 mod html;
+pub mod hygiene;
 pub mod identity;
 mod js;
 pub mod known;

@@ -73,6 +73,25 @@ Core module IDs are unique within a component. Modules with the same imports
 and exports receive an occurrence suffix. Stack and provenance views use the
 original binary offsets, including nested components, to select the correct code.
 
+## Cookies, logs and plain HTTP
+
+Every run checks three ways data gets exposed on its way:
+
+- `insecure_cookie` (fail): a `Set-Cookie` header whose name looks like a
+  session (`sess`, `sid`, `token`, `auth`, `jwt`, `login`, `remember`, …)
+  lacks `HttpOnly` or `Secure`. A cookie with an empty value (one being
+  cleared) and CSRF cookies, which scripts must read, are exempt.
+- `log_injection` (warn): request text with a line break, followed by more
+  text, appears in standard output or standard error as it came. A WASI
+  command's standard output is its answer, so only standard error counts
+  there. The fuzzer tries line breaks in query and form values, which
+  arrive decoded (`?q=a%0D%0Ab`).
+- `cleartext_transport` (fail): a host call has an `http://` URL in its
+  arguments, to a host outside the internal network, and a value a host
+  function returned at a `pii` or `secret` path in any argument. The
+  parameter labels that allow such values (`auth = "secret"`) don't
+  exempt it.
+
 ## Search inside the compiled Wasm
 
 Internal feedback is off by default; turn it on with `--internal-feedback` on

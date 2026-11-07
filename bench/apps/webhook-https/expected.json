@@ -1,0 +1,6 @@
+{
+  "app": "webhook-https",
+  "bug": "calls its API with the API key over https://",
+  "expect": [],
+  "allow": []
+}

@@ -244,7 +244,7 @@ pub fn timing(ex: &str, what: &str, lengths: &[usize], runs: &[&RunRecord], cont
     ))
 }
 
-static TOKEN_NAME: std::sync::LazyLock<regex::Regex> =
+pub(crate) static TOKEN_NAME: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)sess|sid|token|auth|jwt|login|remember|csrf|xsrf|reset|api.?key|nonce|otp").unwrap());
 
 /// Session tokens in the response: session-like `Set-Cookie` values and

@@ -36,7 +36,8 @@ The platform's part: login and roles. appfuzz checks whose records an app
 touches, not which user may call which route.
 
 **A02 Security Misconfiguration.** CORS that lets another site read the
-answer with the visitor's cookies (`permissive_cors`). The platform's part:
+answer with the visitor's cookies (`permissive_cors`), a session cookie
+without `HttpOnly` or `Secure` (`insecure_cookie`). The platform's part:
 TLS, server headers and host settings.
 
 **A03 Software Supply Chain Failures.** The platform's part: known-vulnerable
@@ -44,8 +45,9 @@ dependencies, builds and signing. appfuzz reviews the compiled app with
 every dependency inside it, so a dependency that misbehaves shows up as the
 app misbehaving.
 
-**A04 Cryptographic Failures.** Session tokens that stay the same under other
-random seeds (`predictable_token`). The platform's part: TLS, keys and how
+**A04 Cryptographic Failures.** Secrets or personal data sent to a plain
+`http://` URL (`cleartext_transport`), session tokens that stay the same
+under other random seeds (`predictable_token`). The platform's part: TLS, keys and how
 secrets are stored.
 
 **A05 Injection.** SQL, shell, HTML, regex and header injection, text
@@ -69,8 +71,10 @@ integrity hash (`unpinned_script`), and the experimental hostile-code
 checks (hidden text, encoded data, dormant code, unexpected destinations).
 The platform's part: deploying the build that was reviewed.
 
-**A09 Security Logging & Alerting Failures.** The platform's part:
-collecting logs, keeping them and alerting on them.
+**A09 Security Logging & Alerting Failures.** Request text whose line
+breaks reach the log as they came, so a request can write log lines of its
+own (`log_injection`). The platform's part: collecting logs, keeping them
+and alerting on them.
 
 **A10 Mishandling of Exceptional Conditions.** Crashes on a request, on an
 odd value a host returned or at some clock time, internal error text shown
@@ -88,7 +92,7 @@ error, a change that stays when a later one fails (`partial_write`).
 | API5 Broken Function Level Authorization | platform: roles |
 | API6 Unrestricted Access to Sensitive Business Flows | `repeated_write`; the rest is the team's acceptance checks |
 | API7 Server Side Request Forgery | `ssrf`, `url_path_injection` |
-| API8 Security Misconfiguration | `permissive_cors`, `weak_csp` |
+| API8 Security Misconfiguration | `permissive_cors`, `weak_csp`, `insecure_cookie`, `cleartext_transport` |
 | API9 Improper Inventory Management | `ungranted_import`, `ungranted_call` |
 | API10 Unsafe Consumption of APIs | `stored_reflection`, `crash_on_host_value`, `hang_on_host_value` |
 

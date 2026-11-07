@@ -1,0 +1,11 @@
+{
+  "app": "session-cookie-plain",
+  "bug": "sets its session cookie without HttpOnly and Secure",
+  "expect": [
+    {
+      "kind": "insecure_cookie",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

@@ -37,8 +37,8 @@ function doesn't have.
 | `url` | a URL to fetch | control of the scheme or host: `ssrf` (fail; warn when the platform refused the request, as Spin does for hosts outside `allowed_outbound_hosts`); `../` intact in the path, so other endpoints of the API are reachable: `url_path_injection` (fail) |
 | `html` | markup | `<i>` intact: `html_injection` (fail) |
 | `regex` | a regular expression | `(` intact: `regex_injection` (warn) |
-| `pii` | may receive personal data | no `pii_leak` for it |
-| `secret` | may receive secrets | no `secret_leak` for it |
+| `pii` | may receive personal data | no `pii_leak` for it; still `cleartext_transport` to a plain `http://` URL |
+| `secret` | may receive secrets | no `secret_leak` for it; still `cleartext_transport` to a plain `http://` URL |
 | `user-id` | names a user; must be the caller | a value that is not the caller's identity: `foreign_user_access` (fail) |
 
 The parameter must hold text (`user-id`: text or a number). Canaries in request fields and host strings

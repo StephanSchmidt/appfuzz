@@ -1,0 +1,11 @@
+{
+  "app": "log-raw-search",
+  "bug": "logs the search term as it came",
+  "expect": [
+    {
+      "kind": "log_injection",
+      "min": "warn"
+    }
+  ],
+  "allow": []
+}
