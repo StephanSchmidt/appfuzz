@@ -8,6 +8,9 @@ import { rememberName } from './names.js';
 const nativeParse = DOMParser.prototype.parseFromString;
 const HTML = 'http://www.w3.org/1999/xhtml';
 const SVG = 'http://www.w3.org/2000/svg';
+const modes = new WeakMap();
+export const documentMode = modes.get.bind(modes);
+export const rememberDocumentMode = modes.set.bind(modes);
 
 export function parseHTML(markup, scriptingEnabled) {
   const tree = parse(String(markup), { scriptingEnabled });
@@ -44,7 +47,9 @@ export function parseHTML(markup, scriptingEnabled) {
     }
     parent.appendChild(node);
   }
-  Object.defineProperty(doc, 'compatMode', { value: tree.mode === 'quirks' ? 'BackCompat' : 'CSS1Compat' });
+  const mode = tree.mode === 'quirks' ? 'BackCompat' : 'CSS1Compat';
+  rememberDocumentMode(doc, mode);
+  Object.defineProperty(doc, 'compatMode', { value: mode });
   // The native getter looks only at the first child; a leading comment
   // must not hide the actual doctype.
   Object.defineProperty(doc, 'doctype', { get: () => [...doc.childNodes].find(n => n.nodeType === 10) || null });

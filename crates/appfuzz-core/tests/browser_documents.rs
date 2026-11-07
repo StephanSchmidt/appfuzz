@@ -656,3 +656,109 @@ fn observers_can_watch_other_documents_and_disconnecting_one_keeps_other_observe
     let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
     assert_eq!(logs, ["survivor 1"]);
 }
+
+#[test]
+fn document_clones_use_a_fresh_registry_and_own_all_copied_nodes_without_adoption_callbacks() {
+    let (_, report) = visit(
+        r#"<!doctype html><script>
+        const logs=[];customElements.define('clone-check',class extends HTMLElement {
+            constructor(){super();logs.push('constructor');}
+            connectedCallback(){logs.push('connected');}
+            adoptedCallback(){logs.push('adopted');}
+        });
+        const el=document.createElement('clone-check');el.setAttribute('data-value','value');el.append('text',document.createComment('comment'));document.body.append(el);logs.length=0;
+        const copy=document.cloneNode(true),child=copy.querySelector('clone-check');
+        logs.push([child.ownerDocument===copy,child.attributes[0].ownerDocument===copy,child.firstChild.ownerDocument===copy,child.lastChild.ownerDocument===copy,copy.doctype.ownerDocument===copy]);
+        console.log(JSON.stringify(logs));
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "[[true,true,true,true,true]]");
+}
+
+#[test]
+fn element_clones_preserve_the_class_implied_by_their_namespace() {
+    let (_, report) = visit(
+        r#"<script>
+        for(const ns of [null,'urn:test','http://www.w3.org/1998/Math/MathML','http://www.w3.org/1999/xhtml','http://www.w3.org/2000/svg']) {
+            const source=document.createElementNS(ns,'script'),copy=source.cloneNode(true);
+            console.log(JSON.stringify([copy.namespaceURI,copy.constructor===source.constructor,copy instanceof HTMLElement]));
+        }
+    </script>"#,
+    );
+    let logs: Vec<Value> = report["console"].as_array().unwrap().iter().map(|v| serde_json::from_str(v["text"].as_str().unwrap()).unwrap()).collect();
+    assert_eq!(
+        logs,
+        [
+            json!([null, true, false]),
+            json!(["urn:test", true, false]),
+            json!(["http://www.w3.org/1998/Math/MathML", true, false]),
+            json!(["http://www.w3.org/1999/xhtml", true, true]),
+            json!(["http://www.w3.org/2000/svg", true, false])
+        ]
+    );
+}
+
+#[test]
+fn document_clones_keep_document_type_and_distinguish_shallow_from_deep_copies() {
+    let (_, report) = visit(
+        r#"<!doctype html><!--leading--><script>
+        const xml=new DOMParser().parseFromString('<Root a="v"><![CDATA[text]]><!--comment--></Root>','text/xml');
+        for(const source of [document,xml])for(const deep of [false,true]) {
+            const copy=source.cloneNode(deep);
+            console.log(copy.constructor===source.constructor,copy.childNodes.length===(deep?source.childNodes.length:0),deep?copy.documentElement.ownerDocument===copy:copy.documentElement===null);
+            if(deep&&source===document)console.log(copy.doctype.name,copy.compatMode);
+            if(deep&&source===xml)console.log(copy.documentElement.localName,copy.documentElement.namespaceURI,copy.documentElement.firstChild.nodeType,copy.documentElement.firstChild.ownerDocument===copy,copy.documentElement.lastChild.ownerDocument===copy);
+        }
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["true true true", "true true true", "html CSS1Compat", "true true true", "true true true", "Root null 4 true true"]);
+}
+
+#[test]
+fn page_overrides_of_weakmap_cannot_prevent_script_cloning() {
+    let (r, report) = visit(
+        r#"<script>
+        const source=document.createElement('script');source.textContent="fetch('/cloned');";
+        const NativeWeakMap=WeakMap,get=NativeWeakMap.prototype.get,set=NativeWeakMap.prototype.set;let calls=0,copy;
+        WeakMap=function(){calls++;throw Error('page constructor');};
+        NativeWeakMap.prototype.get=NativeWeakMap.prototype.set=function(){calls++;throw Error('page method');};
+        try{copy=source.cloneNode(true);}catch(e){}finally{WeakMap=NativeWeakMap;NativeWeakMap.prototype.get=get;NativeWeakMap.prototype.set=set;}
+        console.log(calls,copy?.localName||'missing');if(copy)document.body.append(copy);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "0 script");
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["/cloned"]);
+}
+
+#[test]
+fn public_document_properties_cannot_inject_code_into_cloning() {
+    let (_, report) = visit(
+        r#"<script>
+        const xml=new DOMParser().parseFromString('<root/>','text/xml');let calls=0,copy;
+        for(const name of ['constructor','compatMode'])Object.defineProperty(xml,name,{get(){calls++;throw Error('page getter');}});
+        Object.defineProperty(xml.documentElement,'nodeType',{get(){calls++;throw Error('page node type');}});
+        try{copy=xml.cloneNode(true);}catch(e){}console.log(calls,copy?.documentElement.localName||'missing');
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "0 root");
+}
+
+#[test]
+fn page_map_and_property_helpers_cannot_break_document_cloning() {
+    let (_, report) = visit(
+        r#"<script>
+        const logs=[];
+        for(const kind of ['map','define']) {
+            const xml=new DOMParser().parseFromString('<!--before--><root/>','text/xml'),get=Map.prototype.get,define=Object.defineProperty;let calls=0,copy;
+            const replacement=()=>{calls++;throw Error('page helper');};
+            if(kind==='map')Map.prototype.get=replacement;else Object.defineProperty=replacement;
+            try{copy=xml.cloneNode(true);}catch(e){}finally{Map.prototype.get=get;Object.defineProperty=define;}
+            logs.push([calls,copy?.documentElement.localName||'missing']);
+        }
+        console.log(JSON.stringify(logs));
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], r#"[[0,"root"],[0,"root"]]"#);
+}

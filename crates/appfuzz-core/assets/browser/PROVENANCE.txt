@@ -12,4 +12,4 @@ parse5 entities: 9.0.0
 tldts: 7.4.19
 tldts-core: 7.4.20
 rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
-SHA-256: bb9d8d5518c53817ff5d891176274cb078e01c2746b06d3ddec4dd5f97924f12
+SHA-256: f539888d17aee5f0f310acad522e5bfa2fe5213f6de720407acc7d62dd94d879

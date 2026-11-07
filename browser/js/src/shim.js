@@ -6,7 +6,8 @@
 import * as L from 'linkedom';
 import { CookieJar } from './cookies.js';
 import { parseHTML } from './document.js';
-import { qualifiedName, installName, nameIdentity } from './names.js';
+import { qualifiedName, installName } from './names.js';
+import { installCloning } from './cloning.js';
 import { installAdoption } from './adoption.js';
 import { installObservers } from './observers.js';
 
@@ -1057,49 +1058,10 @@ function installWindow(doc) {
   // documents whose newly-created scripts can later join the active page.
   htmlPrototype.createElement = createElement;
   L.Document.prototype.createElement = createElement;
-  // Native cloning passes local names to document factories. They are not
-  // qualified names: a colon parsed from HTML must remain a literal colon.
-  // Use the native factories privately, then restore namespace identities.
-  const cloneElement = L.Element.prototype.cloneNode;
-  const childNodes = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(L.Element.prototype), 'childNodes').get;
-  const NativeProxy = Proxy, read = Reflect.get;
-  const isSVG = Object.prototype.isPrototypeOf.bind(L.SVGElement.prototype);
-  L.Element.prototype.cloneNode = function (deep = false) {
-    const owner = this.ownerDocument;
-    const ownerCreate = isHTMLDocument(owner) ? create : createXML;
-    const factories = new NativeProxy(owner, {
-      get(target, key) {
-        if (key === 'createElement') return name => ownerCreate.call(owner, name);
-        if (key === 'createElementNS') return (ns, name) => createNS.call(owner, ns, name);
-        return read(target, key, target);
-      },
-    });
-    const source = new NativeProxy(this, {
-      get(target, key) { return key === 'ownerDocument' ? factories : read(target, key, target); },
-    });
-    const clone = cloneElement.call(source, deep);
-    const stack = [[this, clone, null]];
-    while (stack.length) {
-      const [original, copy, svg] = stack.pop();
-      const identity = nameIdentity(original) || {
-        namespace: isSVG(original) ? SVG_NS : HTML_NS,
-        prefix: null, local: original.localName, qualified: original.localName,
-      };
-      copy.localName = identity.local;
-      installName(copy, identity, isHTMLDocument);
-      if (identity.namespace === SVG_NS) copy.ownerSVGElement = svg;
-      if (identity.local === 'script') {
-        rememberScript(copy, identity);
-        if (!S.parsing) S.created.push(copy);
-      }
-      const originals = childNodes.call(original), copies = childNodes.call(copy);
-      const descendantSVG = identity.namespace === SVG_NS && identity.local === 'svg' ? copy : svg;
-      for (let i = copies.length - 1; i >= 0; i--) {
-        if (copies[i].nodeType === 1) stack.push([originals[i], copies[i], descendantSVG]);
-      }
-    }
-    return clone;
-  };
+  installCloning(L, { html: create, xml: createXML, svg: createNS }, shareObservers, (copy, identity) => {
+    rememberScript(copy, identity);
+    if (!S.parsing) S.created.push(copy);
+  });
   L.Document.prototype.createElementNS = function (ns, name, o) {
     const identity = qualifiedName(ns, name, arguments.length, BrowserDOMException);
     const { namespace, local } = identity;
