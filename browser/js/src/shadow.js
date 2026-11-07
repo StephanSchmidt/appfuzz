@@ -1,3 +1,4 @@
+import { rememberShadow, shadowInfo } from './dom-state.js';
 import { nameIdentity } from './names.js';
 import { validName } from './custom-name.js';
 import { domString } from './registry.js';
@@ -7,15 +8,14 @@ import { ShadowRoot } from '../node_modules/linkedom/esm/interface/shadow-root.j
 import { shadowRoots } from '../node_modules/linkedom/esm/shared/shadow-roots.js';
 const hasShadow = shadowRoots.has.bind(shadowRoots), apply = Reflect.apply;
 const NativeTypeError = TypeError;
-const modes = new WeakMap();
-const rememberMode = modes.set.bind(modes), modeFor = modes.get.bind(modes);
+
 const hosts = new Set('article aside blockquote body div footer h1 h2 h3 h4 h5 h6 header main nav p section span'.split(' '));
 const validHost = hosts.has.bind(hosts);
 export function installShadowConstraints(Element, DOMError) {
   const attach = Element.prototype.attachShadow;
   const isElement = Object.prototype.isPrototypeOf.bind(Element.prototype);
   Object.defineProperty(ShadowRoot.prototype, 'mode', { configurable: true, enumerable: true, get() {
-    const mode = modeFor(this);
+    const mode = shadowInfo(this)?.mode;
     if (mode === undefined) throw new NativeTypeError('Illegal shadow root receiver');
     return mode;
   } });
@@ -32,7 +32,7 @@ export function installShadowConstraints(Element, DOMError) {
     if (definition?.disableShadow) throw new DOMError('The definition disables shadow roots', 'NotSupportedError');
     if (hasShadow(this)) throw new DOMError('The element already has a shadow root', 'NotSupportedError');
     const root = apply(attach, this, [{ mode }]);
-    rememberMode(root, mode);
+    rememberShadow(root, { host: this, mode });
     return root;
   };
 }

@@ -7,7 +7,11 @@ import * as L from 'linkedom';
 import { CookieJar } from './cookies.js';
 import { parseHTML, parseHTMLFragment, fragmentElements, documentMode } from './document.js';
 import { qualifiedName } from './names.js';
-import { setEventClock, assertEvent, cancelEvent } from './event-state.js';
+import { setEventClock, cancelEvent, setRelatedTarget, relatedTarget, markEventUninitialized } from './event-state.js';
+import { fireEvent, installEventHooks, registerWindow, nullableTarget, getHandler, setHandler, setContentHandler } from './event-target.js';
+import { initializeSignal, signalState, abortSignal } from './abort-state.js';
+import { installEventAttributeHook } from './ce-hooks.js';
+import { nodeInfo } from './dom-state.js';
 import { exceptionInfo, clipDiagnostic } from './error-info.js';
 import { installShadowConstraints } from './shadow.js';
 import { EVENT_TARGET } from '../node_modules/linkedom/esm/shared/symbols.js';
@@ -363,15 +367,16 @@ if (typeof G.structuredClone !== 'function') {
 const Ev = L.Event;
 const MODS = ['ctrlKey', 'shiftKey', 'altKey', 'metaKey'];
 class UIEvent extends Ev {
-  constructor(t, i = {}) { super(t, i); this.view = i.view ?? null; this.detail = i.detail ?? 0; this.composed = !!i.composed; }
+  constructor(t, i = {}) { super(t, i); this.view = i.view ?? null; this.detail = i.detail ?? 0; }
 }
 class MouseEvent extends UIEvent {
   constructor(t, i = {}) {
     super(t, i);
     for (const k of ['screenX', 'screenY', 'clientX', 'clientY', 'pageX', 'pageY', 'offsetX', 'offsetY', 'movementX', 'movementY', 'button', 'buttons']) this[k] = i[k] ?? 0;
     for (const k of MODS) this[k] = !!i[k];
-    this.relatedTarget = i.relatedTarget ?? null;
+    setRelatedTarget(this, nullableTarget(i.relatedTarget));
   }
+  get relatedTarget() { return relatedTarget(this); }
   getModifierState() { return false; }
 }
 class PointerEvent extends MouseEvent {
@@ -393,7 +398,7 @@ class KeyboardEvent extends UIEvent {
   }
   getModifierState() { return false; }
 }
-class FocusEvent extends UIEvent { constructor(t, i = {}) { super(t, i); this.relatedTarget = i.relatedTarget ?? null; } }
+class FocusEvent extends UIEvent { constructor(t, i = {}) { super(t, i); setRelatedTarget(this, nullableTarget(i.relatedTarget)); } get relatedTarget() { return relatedTarget(this); } }
 class SubmitEvent extends Ev { constructor(t, i = {}) { super(t, i); this.submitter = i.submitter ?? null; } }
 class MessageEvent extends Ev {
   constructor(t, i = {}) { super(t, i); this.data = i.data ?? null; this.origin = i.origin ?? ''; this.lastEventId = ''; this.source = i.source ?? null; this.ports = []; }
@@ -420,8 +425,7 @@ class ErrorEvent extends Ev {
     const bubbles = !!init.bubbles, cancelable = !!init.cancelable, colno = +init.colno >>> 0, composed = !!init.composed, error = init.error;
     const rawFilename = init.filename, filename = wellFormed(domString(rawFilename === undefined ? '' : rawFilename));
     const lineno = +init.lineno >>> 0, rawMessage = init.message, message = domString(rawMessage === undefined ? '' : rawMessage);
-    super(type, { bubbles, cancelable });
-    this.composed = composed;
+    super(type, { bubbles, cancelable, composed });
     brandErrorEvent(this, { message, filename, lineno, colno, error });
   }
   get message() { return errorEventData(this).message; }
@@ -443,108 +447,81 @@ Object.assign(G, {
   HashChangeEvent, PopStateEvent, ErrorEvent, PromiseRejectionEvent, StorageEvent, TransitionEvent, AnimationEvent,
   CompositionEvent, ClipboardEvent, TouchEvent, DragEvent,
 });
-Object.defineProperty(Ev.prototype, 'isTrusted', { get() { return !!this._trusted; }, configurable: true });
-const trusted = (e) => { e._trusted = true; return e; };
 
 // Listeners: a throwing listener is reported, not passed on, and `this` is
 // the current target. Every target remembers its event types: that is how
 // the driver finds what a person could click.
-const ET = L.EventTarget.prototype;
-const origAdd = ET.addEventListener;
-const origRemove = ET.removeEventListener;
-const origDispatch = ET.dispatchEvent;
-const windowTargets = new WeakMap();
-const windowFor = windowTargets.get.bind(windowTargets), rememberWindow = windowTargets.set.bind(windowTargets);
 const applyCallback = Reflect.apply;
-const wrappers = new WeakMap();
-const wrap = (listener, key) => {
-  let m = wrappers.get(listener);
-  if (!m) wrappers.set(listener, (m = new Map()));
-  let w = m.get(key);
-  if (!w) {
-    w = function (ev) {
-      const window = windowFor(ev.currentTarget);
-      const self = window || ev.currentTarget || this;
-      if (window) { ev.currentTarget = window; if (windowFor(ev.target)) ev.target = window; }
-      try {
-        return runDOMCallback(() => typeof listener === 'function' ? applyCallback(listener, self, [ev]) : listener.handleEvent(ev));
-      } catch (e) {
-        error('listener:' + ev.type, e);
-      }
-    };
-    m.set(key, w);
-  }
-  return w;
-};
-ET.addEventListener = function (type, listener, options) {
-  if (listener == null || (typeof listener !== 'function' && typeof listener !== 'object')) return;
-  const capture = typeof options === 'boolean' ? options : !!(options && options.capture);
-  const w = wrap(listener, type + '|' + capture);
-  origAdd.call(this, type, w, typeof options === 'object' ? options : undefined);
-  let types = S.listened.get(this);
-  if (!types) S.listened.set(this, (types = new Set()));
-  types.add(type);
-  const signal = options && typeof options === 'object' && options.signal;
-  if (signal) signal.addEventListener('abort', () => this.removeEventListener(type, listener, options));
-};
-ET.removeEventListener = function (type, listener, options) {
-  if (listener == null) return;
-  const capture = typeof options === 'boolean' ? options : !!(options && options.capture);
-  const m = wrappers.get(listener);
-  const w = m && m.get(type + '|' + capture);
-  if (w) origRemove.call(this, type, w);
-};
+const NativeSet = Set;
+const finiteNumber = Number.isFinite, truncateNumber = Math.trunc;
+const nativeSetAdd = Function.prototype.call.bind(Set.prototype.add);
+let currentEvent;
+installEventHooks({
+  error,
+  changed(target, types) {
+    if (!types.length) { mapDelete(S.listened, target); return; }
+    const set = new NativeSet();
+    for (let i = 0; i < types.length; i++) nativeSetAdd(set, types[i]);
+    mapSet(S.listened, target, set);
+  },
+  current(value, shadow, restore) { const previous = currentEvent; if (restore || !shadow) currentEvent = value; return previous; },
+}, BrowserDOMException);
 
-// Inline handlers (`onclick="…"`) are compiled when an event reaches them.
-const inline = new WeakMap();
-function compileInline(node, type) {
-  if (!node.getAttribute) return;
-  const code = node.getAttribute('on' + type);
-  let m = inline.get(node);
-  const old = m && m.get(type);
-  if (old && old.code === code) return;
-  if (old) origRemove.call(node, type, old.fn);
-  if (code == null) { if (m) m.delete(type); return; }
-  if (!m) inline.set(node, (m = new Map()));
-  let f;
-  try {
-    push(S.code, { where: 'handler:on' + type, code: clip(code, 2000), gesture: S.gesture });
-    toCode('handler:on' + type, code);
-    f = new RealFunction('event', code);
-  } catch (e) {
-    error('handler:on' + type, e);
-    m.set(type, { code, fn: () => {} });
-    return;
-  }
-  const fn = function (ev) {
-    try { if (f.call(node, ev) === false) ev.preventDefault(); } catch (e) { error('handler:on' + type, e); }
-  };
-  m.set(type, { code, fn });
-  origAdd.call(node, type, fn);
+// Content attributes activate the same handler slot as IDL assignments at
+// mutation time; compilation stays lazy until a getter or invocation needs it.
+const handlerNames = Object.getOwnPropertyNames(L.HTMLElement.prototype).filter(name => name.startsWith('on'));
+for (const type of ['wheel', 'beforeinput', 'reset', 'message', 'messageerror', 'pageshow', 'pagehide', 'hashchange', 'popstate', 'resize', 'scroll', 'focusin', 'focusout']) {
+  if (!handlerNames.includes('on' + type)) handlerNames.push('on' + type);
 }
-ET.dispatchEvent = function (ev) {
-  assertEvent(ev);
-  for (let n = this; n; n = ev.bubbles && n._getParent ? n._getParent() : null) compileInline(n, ev.type);
-  return origDispatch.call(this, ev);
-};
-
+const handlerTypes = new Set(handlerNames), isHandlerName = handlerTypes.has.bind(handlerTypes);
+for (const proto of [L.Element.prototype, L.HTMLElement.prototype, L.SVGElement.prototype, L.Document.prototype]) for (const name of handlerNames) {
+  const type = name.slice(2);
+  Object.defineProperty(proto, name, { configurable: true, enumerable: true,
+    get() { return getHandler(this, type); }, set(value) { setHandler(this, type, value); },
+  });
+}
+installEventAttributeHook((node, name, code) => {
+  if (nodeInfo(node)?.kind !== 1 || !isHandlerName(name)) return;
+  const type = name.slice(2);
+  setContentHandler(node, type, code == null ? null : () => {
+    try {
+      push(S.code, { where: 'handler:on' + type, code: clip(code, 2000), gesture: S.gesture });
+      toCode('handler:on' + type, code);
+      return new RealFunction('event', code);
+    } catch (e) { error('handler:on' + type, e); return null; }
+  });
+});
+const signalToken = {}, controllerSignals = new WeakMap();
+const controllerSignal = controllerSignals.get.bind(controllerSignals), rememberController = controllerSignals.set.bind(controllerSignals);
 class AbortSignal extends L.EventTarget {
-  constructor() { super(); this.aborted = false; this.reason = undefined; this.onabort = null; }
-  throwIfAborted() { if (this.aborted) throw this.reason; }
-  static abort(r) { const c = new AbortController(); c.abort(r); return c.signal; }
-  static timeout(ms) { const c = new AbortController(); setTimeout(() => c.abort(new DOMException('timeout', 'TimeoutError')), ms); return c.signal; }
+  constructor(token) {
+    if (token !== signalToken) throw new NativeTypeError('Illegal AbortSignal constructor');
+    super(); initializeSignal(this);
+  }
+  get aborted() { return signalState(this).aborted; }
+  get reason() { return signalState(this).reason; }
+  get onabort() { return getHandler(this, 'abort'); }
+  set onabort(value) { setHandler(this, 'abort', value); }
+  throwIfAborted() { const state = signalState(this); if (state.aborted) throw state.reason; }
+  static abort(reason) { const signal = new AbortSignal(signalToken); abort(signal, reason); return signal; }
+  static timeout(ms) {
+    if (!arguments.length) throw new NativeTypeError('timeout requires a delay');
+    const delay = truncateNumber(+ms);
+    if (!finiteNumber(delay) || delay < 0 || delay >= 18446744073709551616) throw new NativeTypeError('Invalid timeout');
+    const signal = new AbortSignal(signalToken);
+    addTimer(() => abort(signal, new BrowserDOMException('The operation timed out', 'TimeoutError')), delay, [], false, 'abort-timeout', false);
+    return signal;
+  }
+}
+function abort(signal, reason) {
+  if (signalState(signal).aborted) return;
+  if (reason === undefined) reason = new BrowserDOMException('The operation was aborted', 'AbortError');
+  if (abortSignal(signal, reason)) fireEvent(signal, new Ev('abort'));
 }
 class AbortController {
-  constructor() { this.signal = new AbortSignal(); }
-  abort(reason = new DOMException('aborted', 'AbortError')) {
-    const s = this.signal;
-    if (s.aborted) return;
-    s.aborted = true;
-    s.reason = reason;
-    const ev = new Ev('abort');
-    if (typeof s.onabort === 'function') s.onabort(ev);
-    s.dispatchEvent(ev);
-  }
+  constructor() { rememberController(this, new AbortSignal(signalToken)); }
+  get signal() { const signal = controllerSignal(this); if (!signal) throw new NativeTypeError('Illegal AbortController receiver'); return signal; }
+  abort(reason) { const signal = controllerSignal(this); if (!signal) throw new NativeTypeError('Illegal AbortController receiver'); abort(signal, reason); }
 }
 Object.assign(G, { AbortSignal, AbortController });
 
@@ -554,8 +531,7 @@ class MessagePort extends L.EventTarget {
     const o = this._other;
     addTimer(() => {
       const ev = new MessageEvent('message', { data });
-      if (typeof o.onmessage === 'function') o.onmessage(ev);
-      o.dispatchEvent(ev);
+      fireEvent(o, ev);
     }, 0, [], false, 'MessageChannel', false);
   }
   start() {}
@@ -754,9 +730,7 @@ class XMLHttpRequest extends L.EventTarget {
   }
   _fire(type) {
     const ev = new ProgressEvent(type);
-    const h = this['on' + type];
-    if (typeof h === 'function') { try { h.call(this, ev); } catch (e) { error('xhr.on' + type, e); } }
-    this.dispatchEvent(ev);
+    fireEvent(this, ev);
   }
 }
 ['UNSENT', 'OPENED', 'HEADERS_RECEIVED', 'LOADING', 'DONE'].forEach((k, i) => { XMLHttpRequest[k] = i; XMLHttpRequest.prototype[k] = i; });
@@ -798,7 +772,7 @@ class FileReader extends L.EventTarget {
     addTimer(() => {
       this.result = f();
       this.readyState = 2;
-      for (const t of ['load', 'loadend']) { const ev = new ProgressEvent(t); if (typeof this['on' + t] === 'function') this['on' + t](ev); this.dispatchEvent(ev); }
+      for (const t of ['load', 'loadend']) fireEvent(this, new ProgressEvent(t));
     }, 0, [], false, 'FileReader', false);
   }
   readAsText(b) { this._read(() => b._text); }
@@ -807,6 +781,11 @@ class FileReader extends L.EventTarget {
   abort() {}
 }
 Object.assign(G, { Blob, File, FileReader });
+for (const [Class, types] of [[MessagePort, ['message', 'messageerror']], [XMLHttpRequest, ['readystatechange', 'load', 'error', 'abort', 'loadstart', 'loadend', 'progress', 'timeout']], [FileReader, ['load', 'error', 'abort', 'loadstart', 'loadend', 'progress']]]) {
+  for (const type of types) Object.defineProperty(Class.prototype, 'on' + type, { configurable: true, enumerable: true,
+    get() { return getHandler(this, type); }, set(value) { setHandler(this, type, value); },
+  });
+}
 
 // --- The page's document ----------------------------------------------------
 
@@ -885,7 +864,7 @@ function navigate(target, how, extra = {}) {
     const oldURL = S.url.href;
     S.url = u;
     push(S.history, { how, url: u.href });
-    addTimer(() => G.dispatchEvent(new HashChangeEvent('hashchange', { oldURL, newURL: u.href })), 0, [], false, 'hashchange', false);
+    addTimer(() => fireEvent(G, new HashChangeEvent('hashchange', { oldURL, newURL: u.href })), 0, [], false, 'hashchange', false);
     return;
   }
   push(S.navigations, { url: u.href, how, gesture: S.gesture, at: S.now - S.start, ...extra });
@@ -1005,7 +984,9 @@ function installWindow(doc) {
   G.HTMLDocument = L.Document;
   for (const k of ['addEventListener', 'removeEventListener', 'dispatchEvent']) G[k] = view[k];
   const windowTarget = doc[EVENT_TARGET];
-  rememberWindow(windowTarget, G);
+  registerWindow(doc, windowTarget, G, view);
+  Object.defineProperty(doc, 'defaultView', { configurable: true, value: G });
+  Object.defineProperty(G, 'event', { configurable: true, get: () => currentEvent, set(value) { Object.defineProperty(G, 'event', { configurable: true, writable: true, value }); } });
   const addWindow = G.addEventListener, removeWindow = G.removeEventListener;
   const eventHandler = (type, errorHandler = false) => {
     let handler = null;
@@ -1028,10 +1009,14 @@ function installWindow(doc) {
   eventHandler('error', true);
   eventHandler('unhandledrejection');
   eventHandler('rejectionhandled');
-  dispatchGlobalEvent = event => {
-    try { return origDispatch.call(windowTarget, trusted(event)); }
-    finally { event.target = G; event.currentTarget = null; }
-  };
+  eventHandler('load');
+  for (const name of handlerNames) if (name !== 'onerror' && name !== 'onload') {
+    const type = name.slice(2);
+    Object.defineProperty(G, name, { configurable: true, enumerable: true,
+      get() { return getHandler(G, type); }, set(value) { setHandler(G, type, value); },
+    });
+  }
+  dispatchGlobalEvent = event => fireEvent(windowTarget, event);
   dispatchGlobalError = (info, value) => dispatchGlobalEvent(new ErrorEvent('error', { cancelable: true, message: info.eventMessage, error: value, filename: S.url?.href || '' }));
   G.reportError = function (value) {
     if (!arguments.length) throw new NativeTypeError('reportError requires an argument');
@@ -1061,13 +1046,12 @@ function installWindow(doc) {
     getSelection: () => ({ rangeCount: 0, isCollapsed: true, removeAllRanges() {}, addRange() {}, getRangeAt() { return doc.createRange(); }, toString: () => '' }),
     postMessage(data, target) {
       push(S.requests, { kind: 'postMessage', method: 'POST', url: String(target ?? ''), own: true, body: clip(typeof data === 'string' ? data : JSON.stringify(data) ?? ''), headers: {}, gesture: S.gesture, at: S.now - S.start });
-      addTimer(() => G.dispatchEvent(new MessageEvent('message', { data, origin: S.origin, source: G })), 0, [], false, 'postMessage', false);
+      addTimer(() => fireEvent(G, new MessageEvent('message', { data, origin: S.origin, source: G })), 0, [], false, 'postMessage', false);
     },
     CSS: { supports: () => false, escape: (s) => String(s).replace(/[^a-zA-Z0-9_-]/g, (c) => '\\' + c) },
     Notification: Object.assign(function Notification() { unmodelled('Notification'); }, { permission: 'default', requestPermission: () => Promise.resolve('denied') }),
   });
   Object.defineProperty(G, 'location', { configurable: true, get: () => location, set: (v) => navigate(v, 'location') });
-  Object.defineProperty(G, 'onload', { configurable: true, writable: true, value: null });
 
   G.navigator = {
     userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
@@ -1210,6 +1194,14 @@ function installWindow(doc) {
     get() { return templateInnerHTML(this); },
     set(v) { setInner.call(this, v); },
   });
+  L.Document.prototype.createEvent = function (name) {
+    if (!arguments.length) throw new NativeTypeError('createEvent requires a name');
+    const type = domString(name).toLowerCase();
+    const Classes = { __proto__: null, event: Ev, events: Ev, htmlevents: Ev, customevent: L.CustomEvent, uievent: UIEvent, uievents: UIEvent, mouseevent: MouseEvent, mouseevents: MouseEvent, keyboardevent: KeyboardEvent };
+    const Class = Classes[type];
+    if (!Class) throw new BrowserDOMException('Unsupported event interface', 'NotSupportedError');
+    const event = new Class(''); markEventUninitialized(event); return event;
+  };
   doc.evaluate = (expr, node) => new XPathExpression(expr).evaluate(node);
 
   // A fragment has descendant text and the same replace-with-text setter
@@ -1365,13 +1357,13 @@ function candidates() {
   });
 }
 
-function dispatch(el, ev) { return el.dispatchEvent(trusted(ev)); }
+function dispatch(el, ev) { return fireEvent(el, ev); }
 
 function click(el, gesture) {
   const was = S.gesture;
   S.gesture = was || gesture;
   try {
-    const o = { bubbles: true, cancelable: true, view: G, button: 0, detail: 1 };
+    const o = { bubbles: true, cancelable: true, composed: true, view: G, button: 0, detail: 1 };
     if (gesture) {
       dispatch(el, new PointerEvent('pointerdown', o));
       dispatch(el, new MouseEvent('mousedown', o));
@@ -1384,7 +1376,7 @@ function click(el, gesture) {
     const before = toggles ? el.checked : null;
     if (toggles) el.checked = type === 'radio' ? true : !el.checked;
     const ev = new MouseEvent('click', o);
-    const ok = gesture ? dispatch(el, ev) : el.dispatchEvent(ev);
+    const ok = gesture ? dispatch(el, ev) : fireEvent(el, ev, false);
     if (toggles) {
       if (!ok) el.checked = before;
       else if (before !== el.checked) { dispatch(el, new L.InputEvent('input', { bubbles: true })); dispatch(el, new Ev('change', { bubbles: true })); }
@@ -1535,7 +1527,7 @@ function prepareScript(s) {
 }
 
 function scriptError(el) {
-  addTimer(() => el.dispatchEvent(new Ev('error')), 0, [], false, 'script-error', false);
+  addTimer(() => fireEvent(el, new Ev('error')), 0, [], false, 'script-error', false);
 }
 
 function scriptsChanged(nodes) {
@@ -1623,7 +1615,7 @@ function scriptDone(ok) {
   S.current = null;
   S.currentEl = null;
   S.currentExternal = false;
-  if (el && external) el.dispatchEvent(new Ev(ok ? 'load' : 'error'));
+  if (el && external) fireEvent(el, new Ev(ok ? 'load' : 'error'));
 }
 
 // --- The driver's handle ---------------------------------------------------------
@@ -1707,14 +1699,13 @@ G.__af = {
   },
   ready() {
     S.readyState = 'interactive';
-    G.document.dispatchEvent(new Ev('DOMContentLoaded', { bubbles: true }));
+    fireEvent(G.document, new Ev('DOMContentLoaded', { bubbles: true }));
   },
   loaded() {
     S.readyState = 'complete';
     const ev = new Ev('load');
-    if (typeof G.onload === 'function') { try { G.onload(ev); } catch (e) { error('onload', e); } }
-    G.dispatchEvent(ev);
-    G.dispatchEvent(new Ev('pageshow'));
+    fireEvent(G, ev, true, S.document);
+    fireEvent(G, new Ev('pageshow'));
   },
   // Lets due tasks run for `ms` more virtual milliseconds.
   until(ms) { S.horizon = S.now + ms; },

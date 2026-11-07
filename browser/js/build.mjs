@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 // The pinned DOM library's native reaction sites are the reliable place
 // to obtain attribute changes. Keep the DOM algorithms, while routing
 // reactions through the browser guest's definition snapshots and queues.
+const eventTarget = fileURLToPath(new URL('./src/event-target.js', import.meta.url));
+const domState = fileURLToPath(new URL('./src/dom-state.js', import.meta.url));
 const eventState = fileURLToPath(new URL('./src/event-state.js', import.meta.url));
 const replace = (source, before, after) => {
   if (!source.includes(before)) throw new Error('The pinned DOM event sites changed: ' + before);
@@ -18,29 +20,23 @@ await build({
   outfile: 'dist/shim.js',
   plugins: [{ name: 'dom-internals', setup(plugin) {
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]event\.js$/ }, async ({ path }) => {
-      let source = await readFile(path, 'utf8');
-      source = replace(source, 'this.cancelable = !!eventInitDict.cancelable;', 'initializeEvent(this, !!eventInitDict.cancelable);');
-      source = replace(source, 'this.timeStamp = Date.now();', '');
-      source = replace(source, 'this.defaultPrevented = false;', '');
-      source = replace(source, 'this.returnValue = null;', '');
-      source = replace(source, 'this.eventPhase = this.NONE;', 'this.eventPhase = NONE;');
-      source = replace(source, 'preventDefault() { this.defaultPrevented = true; }', `get timeStamp() { return eventTimeStamp(this); }
-    get cancelable() { return eventCancelable(this); }
-    get defaultPrevented() { return eventCanceled(this); }
-    get returnValue() { return !eventCanceled(this); }
-    set returnValue(value) { if (!value) cancelEvent(this); }
-    preventDefault() { cancelEvent(this); }`);
-      return { contents: `import {initializeEvent, eventTimeStamp, eventCancelable, eventCanceled, cancelEvent} from ${JSON.stringify(eventState)};\n` + source, loader: 'js' };
+      const source = await readFile(path, 'utf8');
+      if (!source.includes('class GlobalEvent')) throw new Error('The pinned DOM Event changed');
+      return { contents: `export {Event} from ${JSON.stringify(eventState)};`, loader: 'js' };
+    });
+    plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]custom-event\.js$/ }, async ({ path }) => {
+      const source = await readFile(path, 'utf8');
+      if (!source.includes('class CustomEvent extends Event')) throw new Error('The pinned DOM CustomEvent changed');
+      return { contents: `export {CustomEvent} from ${JSON.stringify(eventState)};`, loader: 'js' };
     });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]event-target\.js$/ }, async ({ path }) => {
-      let source = await readFile(path, 'utf8');
-      source = replace(source, 'dispatchEvent(event) {', 'dispatchEvent(event) { assertEvent(event);');
-      source = replace(source, 'return !event.defaultPrevented;', 'return !eventCanceled(event);');
-      source = replace(source, 'this.eventPhase = this.AT_TARGET;', 'this.eventPhase = 2;');
-      source = replace(source, 'this.eventPhase = this.BUBBLING_PHASE;', 'this.eventPhase = 3;');
-      source = replace(source, 'event.eventPhase = event.CAPTURING_PHASE;', 'event.eventPhase = 1;');
-      source = replace(source, 'event.eventPhase = event.NONE;', 'event.eventPhase = 0;');
-      return { contents: `import {assertEvent, eventCanceled} from ${JSON.stringify(eventState)};\n` + source, loader: 'js' };
+      const source = await readFile(path, 'utf8');
+      if (!source.includes('class DOMEventTarget')) throw new Error('The pinned DOM EventTarget changed');
+      return { contents: `export {EventTarget} from ${JSON.stringify(eventTarget)};`, loader: 'js' };
+    });
+    plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]node\.js$/ }, async ({ path }) => {
+      const source = replace(await readFile(path, 'utf8'), 'this.nodeType = nodeType;', 'this.nodeType = nodeType; initializeNode(this, nodeType, localName);');
+      return { contents: `import {initializeNode} from ${JSON.stringify(domState)};\n` + source, loader: 'js' };
     });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]custom-element-registry\.js$/ }, async ({ path }) => {
       const source = await readFile(path, 'utf8');

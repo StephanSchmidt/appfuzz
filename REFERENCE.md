@@ -1032,6 +1032,14 @@ Created scripts execute once, and nested batches keep pending page scripts.
 External script completion events retain the original load even when the
 script changes its URL attribute while running.
 
+Event dispatch preserves capture and bubble phases, listener option snapshots,
+once/passive/abort behavior, and removals during dispatch. Composed events
+cross shadow roots with retargeting; closed roots hide their internal path
+from outside listeners. Routing uses private event and tree state, so public
+property shadows do not change it. Content attributes and event handler
+properties share a listener position. Native XHR, MessageChannel and FileReader
+notifications use the same dispatcher and retain trusted event metadata.
+
 **Requests.** A request to the app's own origin is a run of the app,
 with the same host plan. A request for data from another host gets text
 that names the host, so code built from it shows as `remote_code`. The
