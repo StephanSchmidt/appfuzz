@@ -1044,6 +1044,13 @@ precede listeners and roll back on cancellation. Radio groups follow physical
 trees and form owners; programmatic clicks honor disabled controls and suppress
 recursive calls to `click()`. Labels forward clicks, links queue navigation,
 and the first summary toggles its details with a coalesced trusted toggle event.
+Requests and clones carry distinct signals that follow their source. Combined
+signals (`AbortSignal.any`) preserve the first abort reason and update dependent
+state before abort events run. Fetch cancellation uses private signal state,
+rejects promptly, and cancels pending response delivery; pre-aborted requests
+never call the host. Unread response bodies and clones preserve cancellation.
+Request routing, headers and body consumption also use private state rather
+than public property shadows.
 
 **Requests.** A request to the app's own origin is a run of the app,
 with the same host plan. A request for data from another host gets text

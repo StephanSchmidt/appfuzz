@@ -9,7 +9,7 @@ import { parseHTML, parseHTMLFragment, fragmentElements, documentMode } from './
 import { qualifiedName, nameIdentity } from './names.js';
 import { setEventClock, eventState, cancelEvent, setRelatedTarget, relatedTarget, markEventUninitialized } from './event-state.js';
 import { fireEvent, installEventHooks, registerWindow, nullableTarget, getHandler, setHandler, setContentHandler } from './event-target.js';
-import { initializeSignal, signalState, abortSignal } from './abort-state.js';
+import { initializeSignal, signalState, abortSignal, dependSignal, onSignalAbort, setAbortEventDispatcher, signalListenersChanged } from './abort-state.js';
 import { installEventAttributeHook } from './ce-hooks.js';
 import { htmlName, controlType, treeElements, formOwner, connected, disabled, checked, setChecked, indeterminate, setIndeterminate, beginInputActivation, cancelInputActivation, installControlState, setControlAttribute } from './controls.js';
 import { nodeInfo, eventAttribute, physicalParent, retarget } from './dom-state.js';
@@ -490,6 +490,7 @@ installEventHooks({
   activation: prepareActivation,
   activated: completeActivation,
   changed(target, types) {
+    signalListenersChanged(target, types);
     if (!types.length) { mapDelete(S.listened, target); return; }
     const set = new NativeSet();
     for (let i = 0; i < types.length; i++) nativeSetAdd(set, types[i]);
@@ -522,6 +523,7 @@ installEventAttributeHook((node, name, code) => {
     } catch (e) { error('handler:on' + type, e); return null; }
   });
 });
+const iteratorSymbol = Symbol.iterator;
 const signalToken = {}, controllerSignals = new WeakMap();
 const controllerSignal = controllerSignals.get.bind(controllerSignals), rememberController = controllerSignals.set.bind(controllerSignals);
 class AbortSignal extends L.EventTarget {
@@ -534,7 +536,29 @@ class AbortSignal extends L.EventTarget {
   get onabort() { return getHandler(this, 'abort'); }
   set onabort(value) { setHandler(this, 'abort', value); }
   throwIfAborted() { const state = signalState(this); if (state.aborted) throw state.reason; }
-  static abort(reason) { const signal = new AbortSignal(signalToken); abort(signal, reason); return signal; }
+  static abort(reason) {
+    const signal = new AbortSignal(signalToken), state = signalState(signal);
+    state.aborted = true; state.reason = reason === undefined ? new BrowserDOMException('The operation was aborted', 'AbortError') : reason;
+    return signal;
+  }
+  static any(signals) {
+    if (!arguments.length) throw new NativeTypeError('any requires a sequence of signals');
+    const inputs = runDOMCallback(() => {
+      if (signals === null || (typeof signals !== 'object' && typeof signals !== 'function')) throw new NativeTypeError('A sequence requires an iterable object');
+      const result = [], method = signals[iteratorSymbol];
+      if (typeof method !== 'function') throw new NativeTypeError('A sequence requires an iterable object');
+      const iterator = nativeApply(method, signals, []);
+      if (iterator === null || (typeof iterator !== 'object' && typeof iterator !== 'function')) throw new NativeTypeError('Invalid iterator');
+      const next = iterator.next;
+      while (true) {
+        const step = nativeApply(next, iterator, []);
+        if (step === null || (typeof step !== 'object' && typeof step !== 'function')) throw new NativeTypeError('Invalid iterator result');
+        if (step.done) return result;
+        const signal = step.value; signalState(signal); result[result.length] = signal;
+      }
+    });
+    return dependSignal(new AbortSignal(signalToken), inputs);
+  }
   static timeout(ms) {
     if (!arguments.length) throw new NativeTypeError('timeout requires a delay');
     const delay = truncateNumber(+ms);
@@ -547,13 +571,14 @@ class AbortSignal extends L.EventTarget {
 function abort(signal, reason) {
   if (signalState(signal).aborted) return;
   if (reason === undefined) reason = new BrowserDOMException('The operation was aborted', 'AbortError');
-  if (abortSignal(signal, reason)) fireEvent(signal, new Ev('abort'));
+  abortSignal(signal, reason);
 }
 class AbortController {
   constructor() { rememberController(this, new AbortSignal(signalToken)); }
   get signal() { const signal = controllerSignal(this); if (!signal) throw new NativeTypeError('Illegal AbortController receiver'); return signal; }
   abort(reason) { const signal = controllerSignal(this); if (!signal) throw new NativeTypeError('Illegal AbortController receiver'); abort(signal, reason); }
 }
+setAbortEventDispatcher(signal => fireEvent(signal, new Ev('abort')));
 Object.assign(G, { AbortSignal, AbortController });
 
 class MessagePort extends L.EventTarget {
@@ -575,24 +600,48 @@ G.MessageChannel = class MessageChannel {
 
 // --- Network: every request is recorded; answers come from the session -----
 
+const NativeMap = Map, NativePromise = Promise, createFetchObject = Object.create, objectKeys = Object.keys;
+const rejectPromise = Promise.reject.bind(Promise), parseBodyJSON = JSON.parse;
+const headerTables = new WeakMap(), headerTable = headerTables.get.bind(headerTables), rememberHeaders = headerTables.set.bind(headerTables);
+const mapHas = Function.prototype.call.bind(Map.prototype.has);
+const sorted = Function.prototype.call.bind(Array.prototype.sort), stringLower = Function.prototype.call.bind(String.prototype.toLowerCase), stringUpper = Function.prototype.call.bind(String.prototype.toUpperCase);
+function requireHeaders(value) { const result = headerTable(value); if (!result) throw new NativeTypeError('A Headers object is required'); return result; }
+function headerPairs(headers) {
+  const pairs = []; mapEach(requireHeaders(headers), (value, key) => { pairs[pairs.length] = [key, value]; });
+  return sorted(pairs, (a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+}
+function appendHeader(headers, name, value) {
+  name = stringLower(domString(name)); value = domString(value);
+  const table = requireHeaders(headers), old = mapGet(table, name); mapSet(table, name, old == null ? value : old + ', ' + value);
+}
+function copyHeaders(headers) {
+  const result = new Headers(); mapEach(requireHeaders(headers), (value, key) => { mapSet(requireHeaders(result), key, value); }); return result;
+}
 class Headers {
   constructor(init) {
-    this._m = new Map();
-    if (init instanceof Headers) init.forEach((v, k) => this.append(k, v));
-    else if (Array.isArray(init)) for (const [k, v] of init) this.append(k, v);
-    else if (init) for (const k of Object.keys(init)) this.append(k, init[k]);
+    rememberHeaders(this, new NativeMap());
+    if (init == null) return;
+    if (typeof init !== 'object' && typeof init !== 'function') throw new NativeTypeError('Header initialization must be an object');
+    if (init[iteratorSymbol] !== undefined) {
+      for (const pair of init) {
+        if (pair === null || (typeof pair !== 'object' && typeof pair !== 'function')) throw new NativeTypeError('A header pair must be a sequence');
+        const values = []; for (const value of pair) values[values.length] = value;
+        if (values.length !== 2) throw new NativeTypeError('A header pair requires two values');
+        appendHeader(this, values[0], values[1]);
+      }
+    } else for (const key of objectKeys(init)) appendHeader(this, key, init[key]);
   }
-  append(k, v) { k = String(k).toLowerCase(); const o = this._m.get(k); this._m.set(k, o == null ? String(v) : o + ', ' + v); }
-  set(k, v) { this._m.set(String(k).toLowerCase(), String(v)); }
-  get(k) { const v = this._m.get(String(k).toLowerCase()); return v == null ? null : v; }
-  has(k) { return this._m.has(String(k).toLowerCase()); }
-  delete(k) { this._m.delete(String(k).toLowerCase()); }
-  forEach(f, t) { for (const [k, v] of this._m) f.call(t, v, k, this); }
-  *entries() { yield* this._m.entries(); }
-  *keys() { yield* this._m.keys(); }
-  *values() { yield* this._m.values(); }
-  getSetCookie() { return []; }
-  [Symbol.iterator]() { return this.entries(); }
+  append(name, value) { appendHeader(this, name, value); }
+  set(name, value) { mapSet(requireHeaders(this), stringLower(domString(name)), domString(value)); }
+  get(name) { const value = mapGet(requireHeaders(this), stringLower(domString(name))); return value == null ? null : value; }
+  has(name) { return mapHas(requireHeaders(this), stringLower(domString(name))); }
+  delete(name) { mapDelete(requireHeaders(this), stringLower(domString(name))); }
+  forEach(callback, receiver) { const pairs = headerPairs(this); for (let i = 0; i < pairs.length; i++) nativeApply(callback, receiver, [pairs[i][1], pairs[i][0], this]); }
+  *entries() { const pairs = headerPairs(this); for (let i = 0; i < pairs.length; i++) yield pairs[i]; }
+  *keys() { const pairs = headerPairs(this); for (let i = 0; i < pairs.length; i++) yield pairs[i][0]; }
+  *values() { const pairs = headerPairs(this); for (let i = 0; i < pairs.length; i++) yield pairs[i][1]; }
+  getSetCookie() { requireHeaders(this); return []; }
+  [Symbol.iterator]() { const pairs = headerPairs(this); return (function* () { for (let i = 0; i < pairs.length; i++) yield pairs[i]; })(); }
 }
 const bodyText = (b) => {
   if (b == null) return null;
@@ -602,49 +651,121 @@ const bodyText = (b) => {
   if (b instanceof Blob) return b._text;
   return String(b);
 };
-class Request {
-  constructor(input, init = {}) {
-    const src = input instanceof Request ? input : null;
-    this.url = new URL(src ? src.url : String(input), S.url.href).href;
-    this.method = String(init.method || (src && src.method) || 'GET').toUpperCase();
-    this.headers = new Headers(init.headers || (src && src.headers));
-    this._body = bodyText(init.body ?? (src && src._body));
-    this.signal = init.signal || (src && src.signal) || null;
-    this.credentials = String(init.credentials ?? (src && src.credentials) ?? 'same-origin');
-    if (!['omit', 'same-origin', 'include'].includes(this.credentials)) throw new TypeError('Invalid credentials mode');
-    this.mode = init.mode || 'cors';
-    this.cache = init.cache || 'default';
-    this.redirect = init.redirect || 'follow';
+const requests = new WeakMap(), requestData = requests.get.bind(requests), saveRequest = requests.set.bind(requests);
+const responses = new WeakMap(), responseData = responses.get.bind(responses), saveResponse = responses.set.bind(responses);
+const bodies = new WeakMap(), bodyData = bodies.get.bind(bodies), saveBody = bodies.set.bind(bodies);
+function requireRequest(value) { const result = requestData(value); if (!result) throw new NativeTypeError('A Request is required'); return result; }
+function requireResponse(value) { const result = responseData(value); if (!result) throw new NativeTypeError('A Response is required'); return result; }
+function initializeBody(owner, text, signal = null) { saveBody(owner, { text, present: text !== null, used: false, signal }); }
+function requireBody(owner) { const body = bodyData(owner); if (!body) throw new NativeTypeError('A Request or Response is required'); return body; }
+function consumeBody(owner) {
+  const body = requireBody(owner);
+  if (body.used) return rejectPromise(new NativeTypeError('Body has already been consumed.'));
+  body.used = body.present;
+  if (body.present && body.signal && signalState(body.signal).aborted) return rejectPromise(signalState(body.signal).reason);
+  return nativeResolve(body.text ?? '');
+}
+function cloneBody(source, target) {
+  const body = requireBody(source);
+  if (body.used) throw new NativeTypeError('Body has already been consumed.');
+  initializeBody(target, body.text, body.signal);
+}
+const requestMembers = ['body','cache','credentials','duplex','headers','integrity','keepalive','method','mode','priority','redirect','referrer','referrerPolicy','signal','window'];
+const credentialModes = new Set(['omit','same-origin','include']), validCredentials = credentialModes.has.bind(credentialModes);
+const requestModes = new Set(['cors','no-cors','same-origin','navigate']), validRequestMode = requestModes.has.bind(requestModes);
+const cacheModes = new Set(['default','no-store','reload','no-cache','force-cache','only-if-cached']), validCacheMode = cacheModes.has.bind(cacheModes);
+const redirectModes = new Set(['follow','error','manual']), validRedirect = redirectModes.has.bind(redirectModes);
+const normalizedMethods = new Set(['DELETE','GET','HEAD','OPTIONS','POST','PUT']), normalizeMethod = normalizedMethods.has.bind(normalizedMethods);
+const tokenCode = code => (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 33 || (code >= 35 && code <= 39) || code === 42 || code === 43 || code === 45 || code === 46 || code === 94 || code === 95 || code === 96 || code === 124 || code === 126;
+const charCode = Function.prototype.call.bind(String.prototype.charCodeAt), stringIndex = Function.prototype.call.bind(String.prototype.indexOf), stringSlice = Function.prototype.call.bind(String.prototype.slice);
+function convertRequest(input, init, argumentCount) {
+  if (!argumentCount) throw new NativeTypeError('Request requires an input');
+  const src = requestData(input);
+  const rawURL = src ? src.url : wellFormed(domString(input));
+  if (init == null) init = { __proto__: null };
+  if (typeof init !== 'object' && typeof init !== 'function') throw new NativeTypeError('Request options must be a dictionary');
+  const options = { __proto__: null };
+  for (let i = 0; i < requestMembers.length; i++) {
+    const key = requestMembers[i], value = init[key];
+    if (value === undefined) continue;
+    if (key === 'signal') { if (value !== null) signalState(value); options.signal = value; }
+    else if (key === 'body') options.body = bodyText(value);
+    else if (key === 'headers') options.headers = new Headers(value);
+    else if (key === 'keepalive') options.keepalive = !!value;
+    else if (key === 'window') { if (value !== null) throw new NativeTypeError('Request window must be null'); options.window = null; }
+    else options[key] = domString(value);
   }
-  clone() { return new Request(this); }
-  text() { return Promise.resolve(this._body ?? ''); }
-  json() { return this.text().then(JSON.parse); }
+  const parsed = N.url(rawURL, S.url._p[0]);
+  if (!parsed || parsed[3] || parsed[4]) throw new NativeTypeError('Invalid request URL');
+  const fragment = stringIndex(parsed[0], '#'), url = fragment < 0 ? parsed[0] : stringSlice(parsed[0], 0, fragment);
+  let method = options.method ?? src?.method ?? 'GET';
+  if (!method.length) throw new NativeTypeError('Invalid HTTP method');
+  for (let i = 0; i < method.length; i++) if (!tokenCode(charCode(method, i))) throw new NativeTypeError('Invalid HTTP method');
+  const upper = stringUpper(method);
+  if (upper === 'CONNECT' || upper === 'TRACE' || upper === 'TRACK') throw new NativeTypeError('Forbidden HTTP method');
+  if (normalizeMethod(upper)) method = upper;
+  const credentials = options.credentials ?? src?.credentials ?? 'same-origin', mode = options.mode ?? src?.mode ?? 'cors', cache = options.cache ?? src?.cache ?? 'default', redirect = options.redirect ?? src?.redirect ?? 'follow';
+  if (!validCredentials(credentials) || !validRequestMode(mode) || mode === 'navigate' || !validCacheMode(cache) || !validRedirect(redirect) || (cache === 'only-if-cached' && mode !== 'same-origin') || (mode === 'no-cors' && method !== 'GET' && method !== 'HEAD' && method !== 'POST')) throw new NativeTypeError('Invalid request mode');
+  const sourceBody = src && requireBody(input), body = options.body ?? sourceBody?.text ?? null;
+  if (body !== null && (method === 'GET' || method === 'HEAD')) throw new NativeTypeError('GET and HEAD requests cannot have a body');
+  if (sourceBody && body !== null && options.body == null && sourceBody.used) throw new NativeTypeError('Body has already been consumed.');
+  const source = options.signal === undefined ? src?.signal : options.signal;
+  const signal = new AbortSignal(signalToken); if (source) dependSignal(signal, [source]);
+  return { url, method, headers: options.headers || (src ? copyHeaders(src.headers) : new Headers()), signal, credentials, mode, cache, redirect, body, sourceBody: options.body == null ? sourceBody : null };
+}
+class Request {
+  constructor(input, init = undefined) {
+    const data = runDOMCallback(() => convertRequest(input, init, arguments.length));
+    saveRequest(this, data); initializeBody(this, data.body);
+    if (data.sourceBody && data.body !== null) data.sourceBody.used = true;
+    data.body = data.sourceBody = undefined;
+  }
+  get url() { return requireRequest(this).url; }
+  get method() { return requireRequest(this).method; }
+  get headers() { return requireRequest(this).headers; }
+  get signal() { return requireRequest(this).signal; }
+  get credentials() { return requireRequest(this).credentials; }
+  get mode() { return requireRequest(this).mode; }
+  get cache() { return requireRequest(this).cache; }
+  get redirect() { return requireRequest(this).redirect; }
+  get body() { requireRequest(this); return null; }
+  get bodyUsed() { requireRequest(this); return requireBody(this).used; }
+  clone() {
+    const data = requireRequest(this), body = requireBody(this);
+    if (body.used) throw new NativeTypeError('Body has already been consumed.');
+    const result = createFetchObject(Request.prototype), signal = dependSignal(new AbortSignal(signalToken), [data.signal]);
+    saveRequest(result, { ...data, headers: copyHeaders(data.headers), signal }); cloneBody(this, result); return result;
+  }
+  text() { requireRequest(this); return consumeBody(this); }
+  json() { requireRequest(this); return nativeThen(consumeBody(this), parseBodyJSON); }
 }
 class Response {
-  constructor(body = null, init = {}) {
-    this._text = bodyText(body) ?? '';
-    this.status = init.status ?? 200;
-    this.statusText = init.statusText ?? (this.status === 200 ? 'OK' : '');
-    this.ok = this.status >= 200 && this.status < 300;
-    this.headers = new Headers(init.headers);
-    this.url = init.url || '';
-    this.redirected = false;
-    this.type = 'basic';
-    this.bodyUsed = false;
-    this.body = null;
+  constructor(body = null, init = undefined) {
+    if (init == null) init = { __proto__: null };
+    const text = bodyText(body), status = init.status ?? 200;
+    saveResponse(this, { status, statusText: init.statusText ?? (status === 200 ? 'OK' : ''), headers: new Headers(init.headers), url: init.url || '', redirected: false, type: 'basic' });
+    initializeBody(this, text);
   }
-  _use() {
-    if (this.bodyUsed) return Promise.reject(new TypeError('Body has already been consumed.'));
-    this.bodyUsed = true;
-    return Promise.resolve(this._text);
+  get status() { return requireResponse(this).status; }
+  get statusText() { return requireResponse(this).statusText; }
+  get ok() { const status = requireResponse(this).status; return status >= 200 && status < 300; }
+  get headers() { return requireResponse(this).headers; }
+  get url() { return requireResponse(this).url; }
+  get redirected() { return requireResponse(this).redirected; }
+  get type() { return requireResponse(this).type; }
+  get bodyUsed() { requireResponse(this); return requireBody(this).used; }
+  get body() { requireResponse(this); return null; }
+  _use() { requireResponse(this); return consumeBody(this); }
+  text() { requireResponse(this); return consumeBody(this); }
+  json() { requireResponse(this); return nativeThen(consumeBody(this), parseBodyJSON); }
+  blob() { requireResponse(this); return nativeThen(consumeBody(this), text => new Blob([text])); }
+  arrayBuffer() { requireResponse(this); return nativeThen(consumeBody(this), text => new TextEncoder().encode(text).buffer); }
+  formData() { requireResponse(this); unmodelled('Response.formData'); return nativeThen(consumeBody(this), () => new FormData()); }
+  clone() {
+    const data = requireResponse(this), result = createFetchObject(Response.prototype);
+    cloneBody(this, result); saveResponse(result, { ...data, headers: copyHeaders(data.headers) }); return result;
   }
-  text() { return this._use(); }
-  json() { return this._use().then(JSON.parse); }
-  blob() { return this._use().then((t) => new Blob([t])); }
-  arrayBuffer() { return this._use().then((t) => new TextEncoder().encode(t).buffer); }
-  formData() { unmodelled('Response.formData'); return this._use().then(() => new FormData()); }
-  clone() { return new Response(this._text, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url }); }
-  static json(v, init) { return new Response(JSON.stringify(v), { ...init, headers: { 'content-type': 'application/json' } }); }
+  static json(value, init) { return new Response(JSON.stringify(value), { ...init, headers: { 'content-type': 'application/json' } }); }
   static error() { return new Response(null, { status: 0 }); }
   static redirect(url, status = 302) { return new Response(null, { status, headers: { location: url } }); }
 }
@@ -701,20 +822,30 @@ function respond(method, url, body, headers, kind, credentials = 'same-origin', 
   return networkAnswer(r.status ?? 200, typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? ''), r.headers, u.href, include, delayed);
 }
 
-G.fetch = function fetch(input, init = {}) {
-  let req;
-  try { req = new Request(input, init); } catch (e) { return Promise.reject(new TypeError(e.message)); }
-  const hs = {};
-  req.headers.forEach((v, k) => { hs[k] = v; });
-  return new Promise((resolve, reject) => {
-    if (req.signal && req.signal.aborted) return reject(req.signal.reason);
-    const r = respond(req.method, req.url, req._body, hs, 'fetch', req.credentials, true);
-    addTimer(() => {
-      if (req.signal && req.signal.aborted) return reject(req.signal.reason);
-      if (r.error != null) return reject(new TypeError('Failed to fetch'));
-      receive(r);
-      resolve(new Response(r.body, { status: r.status, headers: r.headers, url: r.url }));
-    }, r.latency, [], false, 'fetch', false);
+G.fetch = function fetch(input, init = undefined) {
+  let request;
+  try { if (!arguments.length) throw new NativeTypeError('fetch requires an input'); request = new Request(input, init); } catch (e) { return rejectPromise(e); }
+  const req = requireRequest(request), body = requireBody(request), signal = signalState(req.signal);
+  if (signal.aborted) return rejectPromise(signal.reason);
+  const headers = {}; mapEach(requireHeaders(req.headers), (value, key) => { headers[key] = value; });
+  return new NativePromise((resolve, reject) => {
+    let timer = null, settled = false;
+    const unsubscribe = onSignalAbort(req.signal, () => {
+      if (settled) return;
+      settled = true; if (timer !== null) mapDelete(S.timers, timer); reject(signalState(req.signal).reason);
+    });
+    let answer;
+    try { answer = respond(req.method, req.url, body.text, headers, 'fetch', req.credentials, true); } catch (e) { settled = true; unsubscribe(); reject(e); return; }
+    timer = addTimer(() => {
+      if (settled) return;
+      settled = true; unsubscribe();
+      if (answer.error != null) { reject(new NativeTypeError('Failed to fetch')); return; }
+      receive(answer);
+      const noBody = req.method === 'HEAD' || answer.status === 204 || answer.status === 205 || answer.status === 304;
+      const response = new Response(noBody ? null : answer.body, { status: answer.status, headers: answer.headers, url: answer.url });
+      requireBody(response).signal = req.signal;
+      resolve(response);
+    }, answer.latency, [], false, 'fetch', false);
   });
 };
 
