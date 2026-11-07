@@ -156,11 +156,17 @@ fn shopify(r: &RunRecord, s: &crate::shopify::RunInfo) -> Vec<Finding> {
         ));
     }
     if s.log_bytes > crate::shopify::LOG_BYTES {
+        // Memory-IO providers keep logs in a ring one byte larger than the
+        // limit: a full ring says only that the function logged more.
+        let bytes = match s.log_bytes {
+            n if n == crate::shopify::LOG_BYTES + 1 => format!("more than {}", crate::shopify::LOG_BYTES),
+            n => n.to_string(),
+        };
         out.push(Finding::new(
             "big_output",
             &format!("{ex}\0shopify-logs"),
             Severity::Warn,
-            format!("{ex} logs {} bytes; Shopify keeps {}", s.log_bytes, crate::shopify::LOG_BYTES),
+            format!("{ex} logs {bytes} bytes; Shopify keeps {}", crate::shopify::LOG_BYTES),
             json!({"what": "logs", "bytes": s.log_bytes, "limit": crate::shopify::LOG_BYTES}),
             run,
         ));
