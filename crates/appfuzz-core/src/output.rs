@@ -662,7 +662,7 @@ fn breakout(body: &str, id: &str) -> Option<(&'static str, String)> {
     let doc = crate::html::doc(body);
     let marked = format!("{id}<i>");
     if body.contains(&marked) {
-        let script = doc.elements.iter().find(|e| e.name == "script" && e.body.as_ref().is_some_and(|b| b.contains(&marked)));
+        let script = doc.elements.iter().find(|e| e.is_script() && e.body.as_ref().is_some_and(|b| b.contains(&marked)));
         return Some(match script {
             Some(e) if is_js(e.get("type")) => ("script", "into a script unescaped, where `</script>` in it ends the script".into()),
             Some(_) => ("json", "into a data block unescaped, where `</script>` in it ends the block".into()),
@@ -735,7 +735,7 @@ fn js_in(e: &crate::html::Element, out: &mut Vec<JsSource>) {
             out.push(JsSource { context: "url", place: format!("the script URL in {k}"), code });
         }
     }
-    if e.name == "script"
+    if e.is_script()
         && is_js(e.get("type"))
         && let Some(b) = &e.body
     {
@@ -871,6 +871,20 @@ pub fn word_bag(body: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn script_execution_contexts_keep_their_namespaces() {
+        assert!(super::attack_runs("<math><script>alert(1)</script></math>").is_none());
+        for html in [
+            "<script>alert(1)</script>",
+            "<svg><script>alert(1)</script></svg>",
+            "<math><mtext><script>alert(1)</script></mtext></math>",
+            "<svg><foreignObject><script>alert(1)</script></foreignObject></svg>",
+        ] {
+            assert_eq!(super::attack_runs(html).map(|v| v.0), Some("script"), "{html}");
+        }
+        assert_eq!(super::attack_runs("<math><mrow onclick='alert(1)'>x</mrow></math>").map(|v| v.0), Some("handler"));
+    }
+
     #[test]
     fn sniffing_like_a_browser() {
         assert!(super::sniffs_html("  <h1>Hi</h1>"));

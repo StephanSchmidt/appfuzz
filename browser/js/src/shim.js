@@ -8,6 +8,14 @@ import { CookieJar } from './cookies.js';
 import { parseHTML } from './document.js';
 
 const G = globalThis;
+const HTML_NS = 'http://www.w3.org/1999/xhtml';
+const SVG_NS = 'http://www.w3.org/2000/svg';
+// Script preparation uses the node's identity, not public DOM properties
+// that page code can shadow without changing the actual kind of element.
+const scriptIdentities = new WeakMap();
+const scriptIdentity = scriptIdentities.get.bind(scriptIdentities);
+const rememberScript = scriptIdentities.set.bind(scriptIdentities);
+const copyScriptBatch = Function.prototype.call.bind(Array.prototype.slice);
 const CAP = 200;
 
 const S = {
@@ -17,7 +25,7 @@ const S = {
   errors: [], console: [], requests: [], navigations: [], code: [],
   cookieWrites: [], storage: [], dialogs: [], history: [], unmodelled: new Set(),
   listened: new Map(), cands: [], scripts: [], created: [], started: new WeakSet(),
-  active: null, readyState: 'loading', actions: [],
+  active: null, readyState: 'loading', actions: [], currentExternal: false,
 };
 
 const push = (list, v) => { if (list.length < CAP) list.push(v); };
@@ -1071,14 +1079,26 @@ function installWindow(doc) {
   // (innerHTML and the like) never runs.
   const create = doc.createElement;
   doc.createElement = function (name, o) {
-    const el = create.call(this, name, o);
-    if (!S.parsing && String(name).toLowerCase() === 'script') S.created.push(el);
+    const local = String(name).replace(/[A-Z]/g, c => c.toLowerCase());
+    const el = create.call(this, local, o);
+    if (local === 'script') {
+      rememberScript(el, { namespace: HTML_NS, local });
+      if (!S.parsing) S.created.push(el);
+    }
     return el;
   };
   const createNS = doc.createElementNS;
   doc.createElementNS = function (ns, name, o) {
-    const el = createNS.call(this, ns, name, o);
-    if (!S.parsing && String(name).toLowerCase() === 'script') S.created.push(el);
+    const namespace = ns == null || ns === '' ? null : String(ns);
+    const qualified = String(name);
+    // The native non-SVG path calls this.createElement, whose HTML case
+    // folding must not change a namespace-qualified name.
+    const el = namespace === SVG_NS ? createNS.call(this, namespace, qualified, o) : create.call(this, qualified, o);
+    if (el.namespaceURI !== namespace) define(el, 'namespaceURI', { value: namespace });
+    if (qualified === 'script') {
+      rememberScript(el, { namespace, local: qualified });
+      if (!S.parsing) S.created.push(el);
+    }
     return el;
   };
   // `sink`: the name the host hears, with the markup argument's index.
@@ -1369,10 +1389,16 @@ function act(i, value) {
 // --- Scripts -------------------------------------------------------------------
 
 function scriptKind(s) {
+  const identity = scriptIdentity(s);
+  if (!identity || identity.local !== 'script' || (identity.namespace !== HTML_NS && identity.namespace !== SVG_NS)) return null;
   const t = (s.getAttribute('type') || '').trim().toLowerCase();
   if (t === 'module') return 'module';
   if (t === '' || /^(text|application)\/(x-)?(java|ecma)script$/.test(t) || t === 'text/jscript') return s.hasAttribute('nomodule') ? null : 'classic';
   return null;
+}
+
+function scriptSource(s) {
+  return scriptIdentity(s)?.namespace === SVG_NS ? (s.getAttribute('href') ?? s.getAttribute('xlink:href')) : s.getAttribute('src');
 }
 
 // What to run for one script element: its kind, its URL, its code (null
@@ -1381,7 +1407,7 @@ function source(s, n) {
   S.started.add(s);
   const kind = scriptKind(s);
   if (!kind) return null;
-  const src = s.getAttribute('src');
+  const src = scriptSource(s);
   if (src == null) {
     const code = s.textContent;
     push(S.code, { where: 'script', code: clip(code, 2000), gesture: S.gesture });
@@ -1412,6 +1438,7 @@ function nextScript(el) {
   if (!s) return null;
   if (s.kind === 'classic') S.current = el;
   S.currentEl = el;
+  S.currentExternal = !s.inline;
   return s;
 }
 
@@ -1421,10 +1448,11 @@ function pageScripts() {
   const all = [...G.document.querySelectorAll('script')];
   const blocking = [], deferred = [], later = [];
   for (const s of all) {
+    rememberScript(s, { namespace: s.namespaceURI, local: s.localName });
     S.started.add(s);
     const kind = scriptKind(s);
     if (!kind) continue;
-    const src = s.hasAttribute('src');
+    const src = scriptSource(s) != null;
     if (s.hasAttribute('async') && (src || kind === 'module')) later.push(s);
     else if (kind === 'module' || (src && s.hasAttribute('defer'))) deferred.push(s);
     else blocking.push(s);
@@ -1442,16 +1470,18 @@ function newScripts() {
   return ready.length;
 }
 
-function scriptAt(i) {
-  const el = S.scripts[i];
+function scriptAt(batch, i) {
+  const el = batch[i];
   return el ? nextScript(el) : null;
 }
 
 function scriptDone(ok) {
   const el = S.currentEl;
+  const external = S.currentExternal;
   S.current = null;
   S.currentEl = null;
-  if (el && el.hasAttribute('src')) el.dispatchEvent(new Ev(ok ? 'load' : 'error'));
+  S.currentExternal = false;
+  if (el && external) el.dispatchEvent(new Ev(ok ? 'load' : 'error'));
 }
 
 // --- The driver's handle ---------------------------------------------------------
@@ -1488,6 +1518,7 @@ G.__af = {
     return pageScripts();
   },
   scriptAt,
+  scriptList: () => copyScriptBatch(S.scripts),
   scriptDone,
   newScripts,
   resolve(spec, base) {

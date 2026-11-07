@@ -286,9 +286,19 @@ impl Page {
 
     /// Runs the shim's current script list, flushing after each.
     fn scripts(&self, n: usize) {
+        // Flushing may run a newly created batch. Keep this batch's
+        // remaining nodes, rather than indexing the shim's replaced list.
+        let Some(batch) = self.ctx.with(|ctx| shim::<_, Option<Object>>(&ctx, "scriptList", ()).map(|v| Persistent::save(&ctx, v))) else { return };
         for i in 0..n {
             self.ctx.with(|ctx| {
-                let Some(s) = shim::<_, Option<Object>>(&ctx, "scriptAt", (i,)) else { return };
+                let batch = match batch.clone().restore(&ctx) {
+                    Ok(batch) => batch,
+                    Err(e) => {
+                        report(&ctx, "driver:scriptList", e);
+                        return;
+                    }
+                };
+                let Some(s) = shim::<_, Option<Object>>(&ctx, "scriptAt", (batch, i)) else { return };
                 let kind: String = s.get("kind").unwrap_or_default();
                 let url: String = s.get("url").unwrap_or_default();
                 let inline: bool = s.get("inline").unwrap_or_default();

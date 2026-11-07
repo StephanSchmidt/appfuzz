@@ -274,22 +274,26 @@ fn find_in_html(html: &str) -> Vec<Found> {
                 }
                 continue;
             }
-            let standard = match k.as_str() {
-                "href" | "xlink:href" => Some(("GET".to_string(), if el.name == "link" { "load" } else { "link" })),
-                "src" | "poster" | "background" | "manifest" => Some(("GET".into(), "load")),
-                "data" if el.name == "object" => Some(("GET".into(), "load")),
-                "ping" => Some(("POST".into(), "link")),
-                "action" => Some((form_method("method", "GET"), "form")),
-                "formaction" => Some((form_method("formmethod", "POST"), "form")),
-                "srcset" | "imagesrcset" => {
-                    for part in v.split(',') {
-                        if let Some(u) = part.split_whitespace().next() {
-                            out.push(Found::new(u, "GET", k, "load", tag));
+            let standard = if el.name == "script" && matches!(k.as_str(), "src" | "href" | "xlink:href") {
+                el.script_source_attribute(k).then(|| ("GET".into(), "load"))
+            } else {
+                match k.as_str() {
+                    "href" | "xlink:href" => Some(("GET".to_string(), if el.name == "link" && el.is_html() { "load" } else { "link" })),
+                    "src" | "poster" | "background" | "manifest" => Some(("GET".into(), "load")),
+                    "data" if el.is_html() && el.name == "object" => Some(("GET".into(), "load")),
+                    "ping" => Some(("POST".into(), "link")),
+                    "action" => Some((form_method("method", "GET"), "form")),
+                    "formaction" => Some((form_method("formmethod", "POST"), "form")),
+                    "srcset" | "imagesrcset" => {
+                        for part in v.split(',') {
+                            if let Some(u) = part.split_whitespace().next() {
+                                out.push(Found::new(u, "GET", k, "load", tag));
+                            }
                         }
+                        continue;
                     }
-                    continue;
+                    _ => None,
                 }
-                _ => None,
             };
             if let Some((method, trigger)) = standard {
                 out.push(Found::new(v, &method, k, trigger, tag));

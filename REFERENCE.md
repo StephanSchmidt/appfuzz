@@ -966,6 +966,14 @@ document elements, table sections, raw text, inert `noscript` and template
 contents, and HTML inside SVG integration points retain their browser meaning.
 `DOMParser` uses those rules for `text/html` with scripting disabled; XML keeps
 its XML parser and root.
+Only HTML and SVG `script` elements execute; a MathML element with that name
+is text. SVG scripts load from `href` (or legacy `xlink:href` when `href` is
+absent), while HTML scripts load from `src`. Static checks and page execution
+use the same distinction, including HTML inside foreign-content integration
+points. Explicitly created namespaced elements retain that namespace.
+Created scripts execute once, and nested batches keep pending page scripts.
+External script completion events retain the original load even when the
+script changes its URL attribute while running.
 
 **Requests.** A request to the app's own origin is a run of the app,
 with the same host plan. A request for data from another host gets text

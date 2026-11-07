@@ -103,11 +103,11 @@ pub(crate) fn is_expression(k: &str) -> bool {
 pub fn scripts(html: &str) -> Vec<Hit> {
     let mut out = Vec::new();
     for t in &doc(html).elements {
-        if ACTIVE_TAGS.contains(&t.name.as_str()) {
+        if t.is_script() || (t.is_html() && ACTIVE_TAGS.contains(&t.name.as_str())) {
             out.push(hit(format!("a <{}> element", t.name), &t.raw, Severity::Fail));
             continue;
         }
-        if t.name == "iframe" && t.get("srcdoc").is_some() {
+        if t.is_html() && t.name == "iframe" && t.get("srcdoc").is_some() {
             out.push(hit("an iframe with srcdoc".into(), &t.raw, Severity::Fail));
         }
         for (k, v) in &t.attrs {
@@ -165,7 +165,7 @@ pub fn unsafe_actions(html: &str, sensitive: &[String], scripts: bool) -> Vec<Hi
         sensitive.iter().find(|s| path == s.as_str() || path.starts_with(&format!("{}/", s.trim_end_matches('/'))))
     };
     for t in &doc(html).elements {
-        if t.name == "meta" && t.get("http-equiv").is_some_and(|h| h.eq_ignore_ascii_case("refresh")) {
+        if t.is_html() && t.name == "meta" && t.get("http-equiv").is_some_and(|h| h.eq_ignore_ascii_case("refresh")) {
             out.push(hit("a meta refresh (the page moves on by itself)".into(), &t.raw, Severity::Fail));
         }
     }
@@ -216,12 +216,14 @@ pub fn unsafe_actions(html: &str, sensitive: &[String], scripts: bool) -> Vec<Hi
 fn script_loads(doc: &crate::html::Doc) -> Vec<(&str, &crate::html::Element)> {
     let mut out = Vec::new();
     for e in &doc.elements {
+        for url in e.script_sources() {
+            out.push((url, e));
+        }
         let rel = e.get("rel").unwrap_or("").to_ascii_lowercase();
         let rel: Vec<&str> = rel.split_ascii_whitespace().collect();
         let preload = rel.contains(&"modulepreload") || (rel.contains(&"preload") && e.get("as").is_some_and(|a| a.eq_ignore_ascii_case("script")));
         let url = match e.name.as_str() {
-            "script" => e.get("src"),
-            "link" if preload => e.get("href"),
+            "link" if e.is_html() && preload => e.get("href"),
             _ => None,
         };
         if let Some(u) = url {
@@ -243,7 +245,7 @@ pub fn unpinned_scripts(html: &str, hosts: &[String]) -> Vec<(String, Hit)> {
     let mut out = Vec::new();
     // Import map: bare names to URLs, URLs to hashes.
     let (mut imports, mut hashes) = (serde_json::Map::new(), serde_json::Map::new());
-    for e in doc.elements.iter().filter(|e| e.name == "script" && e.get("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("importmap"))) {
+    for e in doc.elements.iter().filter(|e| e.is_html() && e.is_script() && e.get("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("importmap"))) {
         if let Some(Ok(Value::Object(map))) = e.body.as_deref().map(serde_json::from_str::<Value>) {
             imports.extend(map.get("imports").and_then(Value::as_object).cloned().unwrap_or_default());
             hashes.extend(map.get("integrity").and_then(Value::as_object).cloned().unwrap_or_default());
@@ -256,7 +258,7 @@ pub fn unpinned_scripts(html: &str, hosts: &[String]) -> Vec<(String, Hit)> {
             out.push((host, hit(what, &e.raw, Severity::Fail)));
         }
     }
-    for e in doc.elements.iter().filter(|e| e.name == "script" && e.get("src").is_none()) {
+    for e in doc.elements.iter().filter(|e| e.is_inline_script()) {
         let Some(code) = e.body.as_deref() else { continue };
         for c in IMPORT.captures_iter(code) {
             let spec = &c[1];

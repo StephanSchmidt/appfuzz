@@ -19,6 +19,7 @@ use regex::Regex;
 /// decoded, names in lower case.
 pub(crate) struct Element {
     pub name: String,
+    namespace: Namespace,
     pub attrs: Vec<(String, String)>,
     /// The start tag rebuilt from the element, at most 160 characters.
     pub raw: String,
@@ -26,9 +27,55 @@ pub(crate) struct Element {
     pub body: Option<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Namespace {
+    Html,
+    Svg,
+    Other,
+    /// The bounded fallback cannot reconstruct namespaces; keep its
+    /// conservative interpretation of every potentially active tag.
+    Unknown,
+}
+
 impl Element {
     pub fn get(&self, k: &str) -> Option<&str> {
         self.attrs.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
+    }
+
+    pub fn is_html(&self) -> bool {
+        matches!(self.namespace, Namespace::Html | Namespace::Unknown)
+    }
+
+    pub fn is_script(&self) -> bool {
+        self.name == "script" && self.namespace != Namespace::Other
+    }
+
+    pub fn script_sources(&self) -> impl Iterator<Item = &str> {
+        let urls = if !self.is_script() {
+            [None; 3]
+        } else {
+            match self.namespace {
+                Namespace::Svg => [self.get("href").or_else(|| self.get("xlink:href")), None, None],
+                Namespace::Html => [self.get("src"), None, None],
+                Namespace::Unknown => [self.get("src"), self.get("href"), self.get("xlink:href")],
+                Namespace::Other => [None; 3],
+            }
+        };
+        urls.into_iter().flatten()
+    }
+
+    pub fn is_inline_script(&self) -> bool {
+        self.is_script() && (self.namespace == Namespace::Unknown || self.script_sources().next().is_none())
+    }
+
+    pub fn script_source_attribute(&self, attr: &str) -> bool {
+        self.is_script()
+            && match self.namespace {
+                Namespace::Svg => attr == "href" || (attr == "xlink:href" && self.get("href").is_none()),
+                Namespace::Html => attr == "src",
+                Namespace::Unknown => matches!(attr, "src" | "href" | "xlink:href"),
+                Namespace::Other => false,
+            }
     }
 }
 
@@ -148,7 +195,7 @@ fn read_tags(html: &str) -> Doc {
             }
             let name = t[1].to_ascii_lowercase();
             let body = if name == "script" || name == "style" { bodies.next() } else { None };
-            Element { name, attrs, raw: t[0].chars().take(160).collect(), body }
+            Element { name, namespace: Namespace::Unknown, attrs, raw: t[0].chars().take(160).collect(), body }
         })
         .collect();
     let text = crate::urls::decode_entities(&TAG.replace_all(&BLOCK.replace_all(html, " "), " "));
@@ -164,12 +211,17 @@ fn flatten(root: &Handle) -> Doc {
         match &n.data {
             Data::Element { name, attrs, template, .. } => {
                 let local = str::to_ascii_lowercase(&name.local);
+                let namespace = match name.ns.as_ref() {
+                    "http://www.w3.org/1999/xhtml" => Namespace::Html,
+                    "http://www.w3.org/2000/svg" => Namespace::Svg,
+                    _ => Namespace::Other,
+                };
                 let attrs: Vec<(String, String)> = attrs.borrow().iter().map(|a| (attr_name(&a.name), a.value.to_string())).collect();
-                let is_body = local == "script" || local == "style";
+                let is_body = matches!(local.as_str(), "script" | "style") && namespace != Namespace::Other;
                 let body = is_body.then(|| {
                     n.children.borrow().iter().filter_map(|c| if let Data::Text(t) = &c.data { Some(t.borrow().to_string()) } else { None }).collect()
                 });
-                doc.elements.push(Element { raw: start_tag(&local, &attrs), name: local, attrs, body });
+                doc.elements.push(Element { raw: start_tag(&local, &attrs), name: local, namespace, attrs, body });
                 if let Some(t) = template {
                     stack.push((t.clone(), false));
                 }
