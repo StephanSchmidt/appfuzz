@@ -23,3 +23,4 @@ export const definitionForClass = definitions.get.bind(definitions);
 export const rememberDefinition = definitions.set.bind(definitions);
 export const elementDefinition = instances.get.bind(instances);
 export const rememberElementDefinition = instances.set.bind(instances);
+export const forgetElementDefinition = instances.delete.bind(instances);

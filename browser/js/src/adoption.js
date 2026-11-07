@@ -41,7 +41,7 @@ function treeNodes(root, document) {
   return nodes;
 }
 
-export function installAdoption(Element, shareObservers, onError) {
+export function installAdoption(Element, shareObservers, onError, DOMError) {
   const parent = Object.getPrototypeOf(Element.prototype);
   const insert = parent.insertBefore;
   const connected = Object.getOwnPropertyDescriptor(Element.prototype, 'isConnected').get;
@@ -55,13 +55,13 @@ export function installAdoption(Element, shareObservers, onError) {
   const queueUpgrade = (node, prepared) => {
     const definition = prepared === undefined ? upgradeDefinition(node) : prepared;
     if (!definition) return;
-    enqueueReaction(node, () => withReactions(() => upgradeInserted(node, isConnected, enqueue, onError, true, definition)));
+    enqueueReaction(node, () => withReactions(() => upgradeInserted(node, isConnected, enqueue, onError, true, definition, DOMError)));
   };
   setReactionErrorHandler(onError);
   const includes = Function.prototype.call.bind(Array.prototype.includes);
   installCEHooks((node, name, oldValue, value) => {
     const definition = elementDefinition(node);
-    if (definition && includes(definition.observed, name)) withReactions(() => enqueue(node, 'attributeChangedCallback', [name, oldValue, value, null]));
+    if (customElement(node) && definition && includes(definition.observed, name)) withReactions(() => enqueue(node, 'attributeChangedCallback', [name, oldValue, value, null]));
   }, root => {
     const nodes = shadowTreeNodes(root);
     for (let i = 0; i < nodes.length; i++) {

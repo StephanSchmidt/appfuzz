@@ -46,8 +46,9 @@ fn call<'js, A: IntoArgs<'js>, R: FromJs<'js>>(ctx: &Ctx<'js>, name: &str, args:
 
 /// Reports an error to the page's error list.
 fn report<'js>(ctx: &Ctx<'js>, place: &str, e: Error) {
-    let v = if e.is_exception() { ctx.catch() } else { e.to_string().into_js(ctx).unwrap_or(Value::new_undefined(ctx.clone())) };
-    let _ = call::<_, ()>(ctx, "error", (place, v));
+    let notify = e.is_exception();
+    let v = if notify { ctx.catch() } else { e.to_string().into_js(ctx).unwrap_or(Value::new_undefined(ctx.clone())) };
+    let _ = call::<_, ()>(ctx, "error", (place, v, notify));
 }
 
 /// Calls the shim, reporting a failure instead of returning it.
@@ -267,17 +268,26 @@ impl Page {
     /// Runs microtasks until none is left, then the scripts the page
     /// created meanwhile.
     fn flush(&self) {
-        for _ in 0..MAX_JOBS {
-            match self.rt.execute_pending_job() {
-                Ok(true) => {}
-                Ok(false) => break,
-                Err(e) => e.0.with(|ctx| {
-                    let v = ctx.catch();
-                    let _ = call::<_, ()>(&ctx, "error", ("job", v));
-                }),
+        let mut remaining = MAX_JOBS;
+        loop {
+            while remaining > 0 {
+                remaining -= 1;
+                match self.rt.execute_pending_job() {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(e) => e.0.with(|ctx| {
+                        let v = ctx.catch();
+                        let _ = call::<_, ()>(&ctx, "error", ("job", v));
+                    }),
+                }
+            }
+            // Rejection listeners can queue more microtasks. Drain them
+            // before returning to the next script or timer task.
+            let notified: bool = self.ctx.with(|ctx| shim(&ctx, "checkpoint", ()));
+            if !notified || remaining == 0 {
+                break;
             }
         }
-        self.ctx.with(|ctx| shim::<_, ()>(&ctx, "checkpoint", ()));
         let n: usize = self.ctx.with(|ctx| shim(&ctx, "newScripts", ()));
         if n > 0 {
             self.scripts(n);

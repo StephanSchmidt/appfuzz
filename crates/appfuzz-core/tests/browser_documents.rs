@@ -1790,3 +1790,327 @@ fn html_serialization_uses_local_names_for_html_svg_and_mathml_and_omits_void_ch
     let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
     assert_eq!(logs, ["<span></span>", "<span></span>", "<span></span>", "<p:span></p:span>", " <input> <frame>"]);
 }
+
+#[test]
+fn observed_attribute_sequences_reject_primitive_strings_and_allow_retry_after_failure() {
+    let (_, report) = visit(
+        r#"<script>
+    for(const [key,value] of [['string','a'],['null',null],['number',4]]){class A extends HTMLElement{static observedAttributes=value;attributeChangedCallback(){}}try{customElements.define('x-'+key,A);console.log(key,'accepted')}catch(e){console.log(key,e.name,customElements.get('x-'+key)===undefined)}A.observedAttributes=['a'];customElements.define('x-'+key,A);console.log(customElements.get('x-'+key)===A)}
+    class Iterable extends HTMLElement{static observedAttributes={*[Symbol.iterator](){yield {toString(){console.log('coerce');return 'a'}}}};attributeChangedCallback(...a){console.log('attribute',...a)}}customElements.define('x-iterable',Iterable);document.createElement('x-iterable').setAttribute('a','v');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["string TypeError true", "true", "null TypeError true", "true", "number TypeError true", "true", "coerce", "attribute a null v null"]);
+}
+
+#[test]
+fn disabled_features_are_captured_once_and_invalid_sequences_do_not_register_a_definition() {
+    let (_, report) = visit(
+        r#"<script>
+    for(const [key,value] of [['string','shadow'],['null',null],['number',7]]){try{customElements.define('x-'+key,class extends HTMLElement{static disabledFeatures=value});console.log(key,'accepted')}catch(e){console.log(key,e.name,customElements.get('x-'+key)===undefined)}}
+    const features=['shadow'];let reads=0;class Disabled extends HTMLElement{static get disabledFeatures(){reads++;return features}}customElements.define('x-disabled',Disabled);features.length=0;const node=new Disabled();try{node.attachShadow({mode:'open'});console.log('allowed')}catch(e){console.log('shadow',e.name)}console.log(reads,node.shadowRoot);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["string TypeError true", "null TypeError true", "number TypeError true", "shadow NotSupportedError", "1 null"]);
+}
+
+#[test]
+fn a_throwing_disabled_features_getter_leaves_the_name_constructor_and_registry_available() {
+    let (_, report) = visit(
+        r#"<script>
+    let fail=true;class A extends HTMLElement{static get disabledFeatures(){if(fail)throw Error('feature getter');return []}}
+    try{customElements.define('x-feature',A)}catch(e){console.log(e.message,customElements.get('x-feature')===undefined)}fail=false;customElements.define('x-feature',A);console.log(new A() instanceof A);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "feature getter true");
+    assert_eq!(report["console"][1]["text"], "true");
+}
+
+#[test]
+fn disabled_shadow_prevents_upgrading_an_existing_closed_root_without_running_the_constructor() {
+    let (_, report) = visit_unchecked(
+        r#"<script>
+    let count=0;const node=document.createElement('x-closed');node.attachShadow({mode:'closed'});document.body.append(node);class Closed extends HTMLElement{static disabledFeatures=['shadow'];constructor(){super();count++}}customElements.define('x-closed',Closed);customElements.upgrade(node);console.log(count,node instanceof Closed);console.log(new Closed() instanceof Closed,count);
+    </script>"#,
+        json!({}),
+    );
+    assert_eq!(report["console"][0]["text"], "0 false");
+    assert_eq!(report["console"][1]["text"], "true 1");
+    assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["errors"][0]["name"], "NotSupportedError");
+}
+
+#[test]
+fn hostile_thrown_values_do_not_escape_construction_or_cancel_later_reactions() {
+    let (_, report) = visit_unchecked(
+        r#"<script>
+    const bomb={};for(const key of ['name','message','stack'])Object.defineProperty(bomb,key,{get(){console.log('unexpected-property',key);throw Error('property getter')}});bomb[Symbol.toPrimitive]=()=>{console.log('primitive');throw Error('conversion')};
+    customElements.define('x-bad',class extends HTMLElement{constructor(){super();throw bomb}});try{console.log('returned',document.createElement('x-bad') instanceof HTMLUnknownElement)}catch(e){console.log('escaped')}
+    customElements.define('x-throw',class extends HTMLElement{connectedCallback(){throw bomb}});customElements.define('x-later',class extends HTMLElement{connectedCallback(){console.log('later')}});const a=document.createElement('x-throw'),b=document.createElement('x-later');try{document.body.append(a,b);console.log('append-returned')}catch(e){console.log('append-escaped')}
+    </script>"#,
+        json!({}),
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["primitive", "returned true", "primitive", "later", "append-returned"]);
+    assert_eq!(report["errors"].as_array().unwrap().len(), 2, "{report}");
+}
+
+#[test]
+fn global_error_handlers_run_synchronously_with_the_original_error_and_can_cancel_reporting() {
+    let (_, report) = visit(
+        r#"<script>
+    let original;window.onerror=function(message,source,line,column,value){console.log('handler',this===window,value===original,typeof message,typeof source,typeof line,typeof column);return true};
+    customElements.define('x-fault',class extends HTMLElement{constructor(){super();original=Error('fault');throw original}});console.log('returned',document.createElement('x-fault') instanceof HTMLUnknownElement);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["handler true true string string number number", "returned true"]);
+}
+
+#[test]
+fn native_error_property_failures_are_isolated_and_do_not_consult_stack_getters() {
+    let (_, report) = visit_unchecked(
+        r#"<script>
+    const failure=new Error('original');for(const key of ['name','message','stack'])Object.defineProperty(failure,key,{get(){console.log('getter',key);throw Error('getter failed')}});class A extends HTMLElement{constructor(){super();throw failure}}customElements.define('x-fail',A);console.log('returned',document.createElement('x-fail') instanceof HTMLUnknownElement);
+    </script>"#,
+        json!({}),
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["getter name", "getter message", "returned true"]);
+    assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report}");
+}
+
+#[test]
+fn throwing_global_error_listeners_do_not_recurse_or_prevent_later_error_listeners() {
+    let (_, report) = visit_unchecked(
+        r#"<script>
+    addEventListener('error',()=>{console.log('first');throw Error('listener failed')});addEventListener('error',event=>{console.log('second',event.target===window,event.currentTarget===window,event.isTrusted);event.preventDefault()});reportError(Error('original'));console.log('returned');
+    </script>"#,
+        json!({}),
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["first", "second true true true", "returned"]);
+    assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["errors"][0]["message"], "listener failed");
+}
+
+#[test]
+fn replacing_window_onerror_keeps_its_listener_position_and_captured_registration_methods() {
+    let (_, report) = visit(
+        r#"<script>
+    addEventListener('error',()=>console.log('before'));onerror=()=>{console.log('old');return true};addEventListener('error',()=>console.log('after'));const add=window.addEventListener,remove=window.removeEventListener;window.addEventListener=window.removeEventListener=()=>{throw Error('public registration')};onerror=()=>{console.log('new');return true};window.addEventListener=add;window.removeEventListener=remove;reportError('order');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["before", "new", "after"]);
+}
+
+#[test]
+fn rejected_promises_fire_separate_cancelable_events_and_late_handlers_are_notified() {
+    let (_, report) = visit(
+        r#"<script>
+    let pending;addEventListener('error',()=>console.log('unexpected-error'));addEventListener('unhandledrejection',event=>{console.log('rejection',event.reason==='rejected',event.promise===pending,event.cancelable,event.isTrusted,event.target===window);event.preventDefault();setTimeout(()=>pending.catch(()=>console.log('caught')),0)});addEventListener('rejectionhandled',event=>console.log('handled',event.reason==='rejected',event.promise===pending,event.cancelable,event.isTrusted));pending=Promise.reject('rejected');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["rejection true true true true true", "caught", "handled true true false true"]);
+}
+
+#[test]
+fn queue_microtask_exceptions_report_runtime_errors_and_reject_non_callbacks_synchronously() {
+    let (_, report) = visit(
+        r#"<script>
+    addEventListener('error',event=>{console.log('runtime',event.error==='microtask',event.isTrusted);event.preventDefault()});addEventListener('unhandledrejection',()=>console.log('unexpected-rejection'));queueMicrotask(()=>{throw 'microtask'});try{queueMicrotask(1)}catch(e){console.log('invalid',e.name)}console.log('after');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["invalid TypeError", "after", "runtime true true"]);
+}
+
+#[test]
+fn early_rejection_handlers_and_handlers_attached_during_notification_do_not_fire_rejectionhandled() {
+    let (_, report) = visit(
+        r#"<script>
+    addEventListener('unhandledrejection',event=>{console.log('late',event.reason);event.promise.catch(()=>console.log('caught-late'));event.preventDefault()});addEventListener('rejectionhandled',()=>console.log('unexpected-handled'));const early=Promise.reject('early');queueMicrotask(()=>early.catch(()=>console.log('caught-early')));Promise.reject('late');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["caught-early", "late late", "caught-late"]);
+}
+
+#[test]
+fn plain_thrown_undefined_and_proxy_errors_use_string_conversion_without_reading_message_properties() {
+    let (_, report) = visit(
+        r#"<script>
+    const values=[undefined,new Proxy(new Error('proxy'),{get(target,key){console.log('get',String(key));return Reflect.get(target,key)},getOwnPropertyDescriptor(){throw Error('unexpected descriptor')}})];addEventListener('error',event=>{console.log('event',event.error===values[0]);values.shift();event.preventDefault()});reportError(values[0]);reportError(values[0]);console.log('returned');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["event true", "get Symbol(Symbol.toPrimitive)", "get toString", "get name", "get message", "event true", "returned"]);
+}
+
+#[test]
+fn definition_metadata_is_read_in_standard_order_and_form_callback_errors_are_atomic() {
+    let (_, report) = visit(
+        r#"<script>
+    class Ordered extends HTMLElement{}for(const name of ['connectedCallback','disconnectedCallback','connectedMoveCallback','adoptedCallback','attributeChangedCallback'])Object.defineProperty(Ordered.prototype,name,{get(){console.log(name);return ()=>{}}});for(const [name,value] of [['observedAttributes',[]],['disabledFeatures',[]],['formAssociated',true]])Object.defineProperty(Ordered,name,{get(){console.log(name);return value}});for(const name of ['formAssociatedCallback','formResetCallback','formDisabledCallback','formStateRestoreCallback'])Object.defineProperty(Ordered.prototype,name,{get(){console.log(name);return ()=>{}}});customElements.define('x-ordered',Ordered);
+    class Bad extends HTMLElement{static formAssociated=true;}Object.defineProperty(Bad.prototype,'formResetCallback',{value:3,configurable:true});try{customElements.define('x-form',Bad)}catch(e){console.log(e.name,customElements.get('x-form')===undefined)}delete Bad.prototype.formResetCallback;customElements.define('x-form',Bad);console.log(customElements.get('x-form')===Bad);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        logs,
+        [
+            "connectedCallback",
+            "disconnectedCallback",
+            "connectedMoveCallback",
+            "adoptedCallback",
+            "attributeChangedCallback",
+            "observedAttributes",
+            "disabledFeatures",
+            "formAssociated",
+            "formAssociatedCallback",
+            "formResetCallback",
+            "formDisabledCallback",
+            "formStateRestoreCallback",
+            "TypeError true",
+            "true"
+        ]
+    );
+}
+
+#[test]
+fn shadow_roots_validate_hosts_and_modes_once_and_expose_their_creation_mode() {
+    let (_, report) = visit(
+        r#"<script>
+    for(const kind of ['div','script','button','svg']){const host=kind==='svg'?document.createElementNS('http://www.w3.org/2000/svg','svg'):document.createElement(kind);try{const root=host.attachShadow({get mode(){console.log('mode',kind);return {toString(){console.log('coerce',kind);return 'closed'}}}});console.log('shadow',kind,root.mode,host.shadowRoot);try{host.attachShadow({mode:'open'})}catch(e){console.log('duplicate',e.name)}}catch(e){console.log('shadow',kind,e.name)}}
+    for(const options of [undefined,null,{}, {mode:'invalid'}]){try{document.createElement('div').attachShadow(options)}catch(e){console.log('invalid',e.name)}}
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        logs,
+        [
+            "mode div",
+            "coerce div",
+            "shadow div closed null",
+            "duplicate NotSupportedError",
+            "mode script",
+            "coerce script",
+            "shadow script NotSupportedError",
+            "mode button",
+            "coerce button",
+            "shadow button NotSupportedError",
+            "mode svg",
+            "coerce svg",
+            "shadow svg NotSupportedError",
+            "invalid TypeError",
+            "invalid TypeError",
+            "invalid TypeError",
+            "invalid TypeError"
+        ]
+    );
+}
+
+#[test]
+fn literal_undefined_exceptions_remain_visible_and_manual_error_events_preserve_fields() {
+    let (_, report) = visit_unchecked(
+        r#"<script>
+    const event=new ErrorEvent('error',{message:'m',filename:'\uD800',lineno:7,colno:9,error:null});console.log(event.message,event.filename==='\uFFFD',event.lineno,event.colno,event.error,new ErrorEvent('error').error===undefined);reportError(undefined);console.log('returned');
+    </script>"#,
+        json!({}),
+    );
+    assert_eq!(report["console"][0]["text"], "m true 7 9 null true");
+    assert_eq!(report["console"][1]["text"], "returned");
+    assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["errors"][0]["message"], "undefined");
+}
+
+#[test]
+fn script_load_failures_do_not_fire_runtime_error_events_or_disappear_when_onerror_cancels() {
+    let (_, report) = visit_unchecked(
+        r#"<script>onerror=()=>{console.log('unexpected-runtime');return true};</script><script src='/missing.js' onerror='console.log("resource",event.type);'></script><script>console.log('after');</script>"#,
+        json!({FETCH_OWN:{"return":{"ok":{"status":404,"headers":[],"body":""}}}}),
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["resource error", "after"]);
+    assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report}");
+}
+
+#[test]
+fn error_event_attributes_are_readonly_and_getters_require_a_real_error_event() {
+    let (_, report) = visit(
+        r#"<script>
+    const event=new ErrorEvent('error',{message:null,filename:null,lineno:-1,colno:1.9,error:0});event.message='changed';console.log(event.message==='null',event.filename==='null',event.lineno,event.colno,event.error);const get=Object.getOwnPropertyDescriptor(ErrorEvent.prototype,'error').get;try{get.call({})}catch(e){console.log(e.name)}console.log(new ErrorEvent('error',null).error===undefined);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "true true 4294967295 1 0");
+    assert_eq!(report["console"][1]["text"], "TypeError");
+    assert_eq!(report["console"][2]["text"], "true");
+}
+
+#[test]
+fn changing_public_diagnostic_helpers_cannot_interrupt_native_exception_reporting() {
+    let (_, report) = visit(
+        r#"<script>
+    let called=0,reported=0;const failure=Error('original'),savedString=String,savedIsError=Error.isError,savedDescriptor=Object.getOwnPropertyDescriptor;onerror=()=>{reported++;return true};const replacement=()=>{called++;throw failure};String=replacement;Error.isError=replacement;Object.getOwnPropertyDescriptor=replacement;try{reportError(failure)}finally{String=savedString;Error.isError=savedIsError;Object.getOwnPropertyDescriptor=savedDescriptor}console.log(called,reported);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "0 1");
+}
+
+#[test]
+fn canceled_rejection_notifications_do_not_stringify_the_reason_or_leak_it_as_an_error() {
+    let (_, report) = visit(
+        r#"<script>
+    const reason={toString(){console.log('unexpected-stringify');return 'reason'}};onunhandledrejection=function(event){console.log(this===window,event.reason===reason);return false};Promise.reject(reason);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "true true");
+    assert_eq!(report["console"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn failed_upgrade_construction_stacks_are_cleared_before_error_handlers_construct_the_same_class() {
+    let (_, report) = visit(
+        r#"<script>
+    let fail=true,candidate;class A extends HTMLElement{constructor(){super();if(fail){fail=false;throw Error('upgrade failed')}console.log('fresh',this===candidate)}}candidate=document.createElement('x-stack');document.body.append(candidate);onerror=()=>{try{console.log('handler-new',new A() instanceof A)}catch(e){console.log('handler-error',e.name)}return true};customElements.define('x-stack',A);console.log('after');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["fresh false", "handler-new true", "after"]);
+}
+
+#[test]
+fn event_creation_and_error_reporting_do_not_call_the_pages_date_now() {
+    let (_, report) = visit(
+        r#"<script>
+    let escaped=false,reported=0;onerror=()=>{reported++;return true};const saved=Date.now;Date.now=()=>{throw Error('page clock')};try{const event=new Event('notice');reportError(Error('original'))}catch(e){escaped=true}finally{Date.now=saved}console.log(escaped,reported);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "false 1");
+}
+
+#[test]
+fn cancellation_respects_private_event_flags_and_return_value_cannot_uncancel_an_event() {
+    let (_, report) = visit(
+        r#"<script>
+    for(const cancelable of [false,true]){const event=new Event('notice',{cancelable});event.preventDefault();console.log(cancelable,event.defaultPrevented,event.returnValue)}
+    const event=new Event('notice',{cancelable:true});Object.defineProperty(event,'cancelable',{value:false});event.returnValue=false;console.log(event.defaultPrevented,event.returnValue);event.returnValue=true;console.log(event.defaultPrevented,event.returnValue);Object.defineProperty(event,'defaultPrevented',{value:false});console.log(document.body.dispatchEvent(event));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["false false true", "true true false", "true false", "true false", "false"]);
+}
+
+#[test]
+fn dispatch_and_cancellation_reject_non_events_without_reading_their_properties() {
+    let (_, report) = visit(
+        r#"<script>
+    let getters=0;try{document.body.dispatchEvent({get type(){getters++;return 'notice'}})}catch(e){console.log(e.name,getters)}try{Event.prototype.preventDefault.call({get cancelable(){getters++;return true}})}catch(e){console.log(e.name,getters)}
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "TypeError 0");
+    assert_eq!(report["console"][1]["text"], "TypeError 0");
+}

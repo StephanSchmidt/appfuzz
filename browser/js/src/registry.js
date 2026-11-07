@@ -25,6 +25,14 @@ const NativeTypeError = TypeError, NativeProxy = Proxy, NativePromise = Promise,
 const rejected = Promise.reject.bind(Promise), resolved = Promise.resolve.bind(Promise);
 export function domString(value) { if (typeof value === 'symbol') throw new NativeTypeError('A Symbol cannot be converted to a DOMString'); return string(value); }
 
+function stringSequence(value) {
+  if (value === undefined) return [];
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) throw new NativeTypeError('A sequence requires an iterable object');
+  const result = [];
+  for (const item of value) result[result.length] = domString(item);
+  return result;
+}
+
 export function installRegistry(upgradeCopies, DOMError, report) {
   const proto = CustomElementRegistry.prototype;
   const running = new WeakMap(), promises = new WeakMap();
@@ -54,8 +62,20 @@ export function installRegistry(upgradeCopies, DOMError, report) {
         callbacks[field] = callback;
       }
       if (callbacks.attribute) {
-        const values = Class.observedAttributes;
-        if (values !== undefined) for (const value of values) callbacks.observed[callbacks.observed.length] = domString(value);
+        callbacks.observed = stringSequence(Class.observedAttributes);
+      }
+      const disabled = stringSequence(Class.disabledFeatures);
+      for (let i = 0; i < disabled.length; i++) {
+        if (disabled[i] === 'shadow') callbacks.disableShadow = true;
+        if (disabled[i] === 'internals') callbacks.disableInternals = true;
+      }
+      callbacks.formAssociated = !!Class.formAssociated;
+      if (callbacks.formAssociated) {
+        for (const name of ['formAssociatedCallback','formResetCallback','formDisabledCallback','formStateRestoreCallback']) {
+          const callback = p[name];
+          if (callback !== undefined && typeof callback !== 'function') throw new NativeTypeError('Lifecycle callbacks must be functions');
+          callbacks[name] = callback;
+        }
       }
       return callbacks;
     }); } finally { setRunning(this, false); }

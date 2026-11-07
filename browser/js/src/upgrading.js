@@ -6,8 +6,9 @@ import { Classes, customElements } from '../node_modules/linkedom/esm/interface/
 import { nameIdentity } from './names.js';
 import { templateContent } from './templates.js';
 import { runDOMCallback } from './dom-callbacks.js';
-import { elementIs, definitionForClass, beginConstruction, endConstruction } from './element-state.js';
+import { elementIs, definitionForClass, beginConstruction, endConstruction, rememberElementDefinition, forgetElementDefinition } from './element-state.js';
 import { markCustom } from './element-internals.js';
+import { shadowRoots } from '../node_modules/linkedom/esm/shared/shadow-roots.js';
 
 const known = customElements.has.bind(customElements);
 const definition = Classes.get.bind(Classes);
@@ -17,10 +18,11 @@ const attempts = new WeakMap();
 const attempted = attempts.has.bind(attempts), attemptedSet = attempts.set.bind(attempts);
 const includes = Function.prototype.call.bind(Array.prototype.includes);
 const HTML = 'http://www.w3.org/1999/xhtml';
+const hasShadow = shadowRoots.has.bind(shadowRoots);
 
-export function upgradeDefinition(element, registryOverride) {
+export function lookupDefinition(element, registryOverride) {
   const identity = nameIdentity(element);
-  if (!identity || identity.namespace !== HTML || known(element) || attempted(element)) return null;
+  if (!identity || identity.namespace !== HTML) return null;
   const owner = element[END].ownerDocument, registry = registryOverride === undefined ? owner[CUSTOM_ELEMENTS] : registryOverride;
   if (!registry?.active) return null;
   const is = elementIs(element);
@@ -32,7 +34,11 @@ export function upgradeDefinition(element, registryOverride) {
   return snapshot ? { Class, info, snapshot } : null;
 }
 
-export function upgradeInserted(element, connected, enqueue, onError, allowDetached = false, prepared) {
+export function upgradeDefinition(element, registryOverride) {
+  return known(element) || attempted(element) ? null : lookupDefinition(element, registryOverride);
+}
+
+export function upgradeInserted(element, connected, enqueue, onError, allowDetached = false, prepared, DOMError) {
   if (known(element) || attempted(element)) return;
   const definition = prepared === undefined ? upgradeDefinition(element) : prepared;
   if (!definition) return;
@@ -42,8 +48,11 @@ export function upgradeInserted(element, connected, enqueue, onError, allowDetac
   const attrs = [];
   for (let attr = element[NEXT]; attr.nodeType === 2; attr = attr[NEXT]) attrs.push([attr.localName, null, attr[VALUE], null]);
   attemptedSet(element, true);
+  rememberElementDefinition(element, callbacks);
   beginConstruction(Class, element);
+  let failed = false, failure;
   try {
+    if (callbacks.disableShadow && hasShadow(element)) throw new DOMError('The definition disables shadow roots', 'NotSupportedError');
     const result = runDOMCallback(() => construct(Class, []));
     if (result !== element) throw new TypeError('A custom-element constructor must return its element');
     templateContent(element);
@@ -52,8 +61,11 @@ export function upgradeInserted(element, connected, enqueue, onError, allowDetac
       if (typeof callbacks.attribute === 'function' && includes(callbacks.observed, attrs[i][0])) enqueue(element, 'attributeChangedCallback', attrs[i], callbacks.attribute);
     }
     if (wasConnected && typeof callbacks.connected === 'function') enqueue(element, 'connectedCallback', [], callbacks.connected);
-  } catch (e) { onError('constructor', e); }
+  } catch (e) { forgetElementDefinition(element); failed = true; failure = e; }
   finally { endConstruction(Class); }
+  // Reporting invokes author error handlers. They can construct this
+  // same class, after the failed upgrade's construction frame is gone.
+  if (failed) onError('constructor', failure);
 }
 
 export function markFailed(element) { attemptedSet(element, true); }

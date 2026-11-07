@@ -7,6 +7,10 @@ import * as L from 'linkedom';
 import { CookieJar } from './cookies.js';
 import { parseHTML, parseHTMLFragment, fragmentElements, documentMode } from './document.js';
 import { qualifiedName } from './names.js';
+import { setEventClock, assertEvent, cancelEvent } from './event-state.js';
+import { exceptionInfo, clipDiagnostic } from './error-info.js';
+import { installShadowConstraints } from './shadow.js';
+import { EVENT_TARGET } from '../node_modules/linkedom/esm/shared/symbols.js';
 import { installCloning } from './cloning.js';
 import { installRegistry, domString } from './registry.js';
 import { installHTMLConstructors } from './html-constructors.js';
@@ -42,16 +46,27 @@ const S = {
   active: null, readyState: 'loading', actions: [], currentExternal: false,
 };
 
-const push = (list, v) => { if (list.length < CAP) list.push(v); };
+setEventClock(() => S.now - S.start);
+
+const push = (list, v) => { if (list.length < CAP) list[list.length] = v; };
 const clip = (s, n = 400) => { s = String(s); return s.length > n ? s.slice(0, n) + '…' : s; };
-const fmt = (e) => {
-  if (e && typeof e === 'object' && 'message' in e) {
-    return { name: String(e.name || 'Error'), message: clip(e.message), stack: clip(e.stack || '', 1200) };
+let dispatchGlobalError = null, dispatchGlobalEvent = null, reportingError = false;
+const error = (where, value, notify = true) => {
+  const info = exceptionInfo(value);
+  let unhandled = true;
+  if (notify && dispatchGlobalError && !reportingError) {
+    reportingError = true;
+    try { unhandled = dispatchGlobalError(info, value); }
+    finally { reportingError = false; }
   }
-  return { name: 'Thrown', message: clip(e), stack: '' };
+  if (unhandled) push(S.errors, { where, at: S.now - S.start, name: clipDiagnostic(info.name), message: clipDiagnostic(info.message), stack: clipDiagnostic(info.stack, 1200) });
 };
-const error = (where, e) => push(S.errors, { where, at: S.now - S.start, ...fmt(e) });
-const rejections = new Map();
+const rejections = new Map(), notifiedRejections = new WeakMap();
+const notified = notifiedRejections.get.bind(notifiedRejections), rememberNotified = notifiedRejections.set.bind(notifiedRejections), forgetNotified = notifiedRejections.delete.bind(notifiedRejections);
+const mapGet = Function.prototype.call.bind(Map.prototype.get), mapSet = Function.prototype.call.bind(Map.prototype.set), mapDelete = Function.prototype.call.bind(Map.prototype.delete), mapEach = Function.prototype.call.bind(Map.prototype.forEach);
+const nativeResolve = Promise.resolve.bind(Promise), nativeThen = Function.prototype.call.bind(Promise.prototype.then);
+const nativeApply = Reflect.apply, NativeTypeError = TypeError;
+let handledRejections = [];
 const unmodelled = (name) => S.unmodelled.add(name);
 
 // The host: appfuzz's browser guest installs globalThis.__host, the
@@ -150,7 +165,10 @@ G.requestAnimationFrame = (cb) => {
 G.cancelAnimationFrame = G.clearTimeout;
 G.requestIdleCallback = (cb) => addTimer(() => cb({ didTimeout: false, timeRemaining: () => 50 }), 1, [], false, 'requestIdleCallback', false);
 G.cancelIdleCallback = G.clearTimeout;
-G.queueMicrotask = (fn) => { Promise.resolve().then(fn); };
+G.queueMicrotask = (fn) => {
+  if (typeof fn !== 'function') throw new NativeTypeError('queueMicrotask requires a callback');
+  nativeThen(nativeResolve(), () => { try { runDOMCallback(() => nativeApply(fn, undefined, [])); } catch (e) { error('queueMicrotask', e); } });
+};
 
 // The next due task, if it is due by the horizon.
 function step() {
@@ -383,7 +401,35 @@ class MessageEvent extends Ev {
 class ProgressEvent extends Ev { constructor(t, i = {}) { super(t, i); this.lengthComputable = !!i.lengthComputable; this.loaded = i.loaded ?? 0; this.total = i.total ?? 0; } }
 class HashChangeEvent extends Ev { constructor(t, i = {}) { super(t, i); this.oldURL = i.oldURL ?? ''; this.newURL = i.newURL ?? ''; } }
 class PopStateEvent extends Ev { constructor(t, i = {}) { super(t, i); this.state = i.state ?? null; } }
-class ErrorEvent extends Ev { constructor(t, i = {}) { super(t, i); this.message = i.message ?? ''; this.error = i.error ?? null; this.filename = ''; this.lineno = 0; this.colno = 0; } }
+const errorEventBrands = new WeakMap();
+const brandErrorEvent = errorEventBrands.set.bind(errorEventBrands), isErrorEvent = errorEventBrands.has.bind(errorEventBrands);
+const wellFormed = Function.prototype.call.bind(String.prototype.toWellFormed);
+const errorEventFor = errorEventBrands.get.bind(errorEventBrands);
+function errorEventData(event) {
+  const data = errorEventFor(event);
+  if (!data) throw new NativeTypeError('Illegal error event receiver');
+  return data;
+}
+class ErrorEvent extends Ev {
+  constructor(type, options = {}) {
+    if (!arguments.length) throw new NativeTypeError('ErrorEvent requires a type');
+    type = domString(type);
+    const init = options == null ? {} : options;
+    if (typeof init !== 'object' && typeof init !== 'function') throw new NativeTypeError('ErrorEvent options must be a dictionary');
+    // Web IDL dictionaries convert members in lexicographic order.
+    const bubbles = !!init.bubbles, cancelable = !!init.cancelable, colno = +init.colno >>> 0, composed = !!init.composed, error = init.error;
+    const rawFilename = init.filename, filename = wellFormed(domString(rawFilename === undefined ? '' : rawFilename));
+    const lineno = +init.lineno >>> 0, rawMessage = init.message, message = domString(rawMessage === undefined ? '' : rawMessage);
+    super(type, { bubbles, cancelable });
+    this.composed = composed;
+    brandErrorEvent(this, { message, filename, lineno, colno, error });
+  }
+  get message() { return errorEventData(this).message; }
+  get filename() { return errorEventData(this).filename; }
+  get lineno() { return errorEventData(this).lineno; }
+  get colno() { return errorEventData(this).colno; }
+  get error() { return errorEventData(this).error; }
+}
 class PromiseRejectionEvent extends Ev { constructor(t, i = {}) { super(t, i); this.promise = i.promise; this.reason = i.reason; } }
 class StorageEvent extends Ev {}
 class TransitionEvent extends Ev {}
@@ -407,6 +453,9 @@ const ET = L.EventTarget.prototype;
 const origAdd = ET.addEventListener;
 const origRemove = ET.removeEventListener;
 const origDispatch = ET.dispatchEvent;
+const windowTargets = new WeakMap();
+const windowFor = windowTargets.get.bind(windowTargets), rememberWindow = windowTargets.set.bind(windowTargets);
+const applyCallback = Reflect.apply;
 const wrappers = new WeakMap();
 const wrap = (listener, key) => {
   let m = wrappers.get(listener);
@@ -414,9 +463,11 @@ const wrap = (listener, key) => {
   let w = m.get(key);
   if (!w) {
     w = function (ev) {
-      const self = ev.currentTarget ?? this;
+      const window = windowFor(ev.currentTarget);
+      const self = window || ev.currentTarget || this;
+      if (window) { ev.currentTarget = window; if (windowFor(ev.target)) ev.target = window; }
       try {
-        return typeof listener === 'function' ? listener.call(self, ev) : listener.handleEvent(ev);
+        return runDOMCallback(() => typeof listener === 'function' ? applyCallback(listener, self, [ev]) : listener.handleEvent(ev));
       } catch (e) {
         error('listener:' + ev.type, e);
       }
@@ -472,6 +523,7 @@ function compileInline(node, type) {
   origAdd.call(node, type, fn);
 }
 ET.dispatchEvent = function (ev) {
+  assertEvent(ev);
   for (let n = this; n; n = ev.bubbles && n._getParent ? n._getParent() : null) compileInline(n, ev.type);
   return origDispatch.call(this, ev);
 };
@@ -942,7 +994,7 @@ function installWindow(doc) {
   const shareObservers = installObservers(doc);
   shareTemplateObservers(shareObservers);
   shareObservers(templateOwner(doc));
-  const upgradeCopies = installAdoption(L.Element, shareObservers, (name, e) => error('custom-element:' + name, e));
+  const upgradeCopies = installAdoption(L.Element, shareObservers, (name, e) => error('custom-element:' + name, e), BrowserDOMException);
   const view = doc.defaultView;
   for (const [k, v] of Object.entries(L)) {
     if (/^[A-Z]/.test(k) && typeof v === 'function') G[k] = v;
@@ -952,6 +1004,39 @@ function installWindow(doc) {
   G.Document = L.Document;
   G.HTMLDocument = L.Document;
   for (const k of ['addEventListener', 'removeEventListener', 'dispatchEvent']) G[k] = view[k];
+  const windowTarget = doc[EVENT_TARGET];
+  rememberWindow(windowTarget, G);
+  const addWindow = G.addEventListener, removeWindow = G.removeEventListener;
+  const eventHandler = (type, errorHandler = false) => {
+    let handler = null;
+    const listener = event => {
+      const callback = handler;
+      if (!callback) return;
+      const special = errorHandler && isErrorEvent(event);
+      const data = special ? errorEventData(event) : null;
+      const args = special ? [data.message, data.filename, data.lineno, data.colno, data.error] : [event];
+      const result = runDOMCallback(() => applyCallback(callback, G, args));
+      if (special ? result === true : result === false) cancelEvent(event);
+    };
+    Object.defineProperty(G, 'on' + type, { configurable: true, get: () => handler, set(value) {
+      const next = typeof value === 'function' ? value : null;
+      if (handler && !next) applyCallback(removeWindow, G, [type, listener]);
+      else if (!handler && next) applyCallback(addWindow, G, [type, listener]);
+      handler = next;
+    } });
+  };
+  eventHandler('error', true);
+  eventHandler('unhandledrejection');
+  eventHandler('rejectionhandled');
+  dispatchGlobalEvent = event => {
+    try { return origDispatch.call(windowTarget, trusted(event)); }
+    finally { event.target = G; event.currentTarget = null; }
+  };
+  dispatchGlobalError = (info, value) => dispatchGlobalEvent(new ErrorEvent('error', { cancelable: true, message: info.eventMessage, error: value, filename: S.url?.href || '' }));
+  G.reportError = function (value) {
+    if (!arguments.length) throw new NativeTypeError('reportError requires an argument');
+    error('reportError', value);
+  };
   G.customElements = view.customElements;
   G.MutationObserver = view.MutationObserver;
   G.Image = view.Image;
@@ -1130,6 +1215,7 @@ function installWindow(doc) {
   // A fragment has descendant text and the same replace-with-text setter
   // as an element; linkedom otherwise inherits Node's null/no-op stubs.
   Object.defineProperty(L.DocumentFragment.prototype, 'textContent', Object.getOwnPropertyDescriptor(L.Element.prototype, 'textContent'));
+  installShadowConstraints(L.Element, BrowserDOMException);
   installSerialization(L);
   installScriptMutations(L, scriptsChanged);
   installReactionBoundaries(L);
@@ -1583,16 +1669,41 @@ G.__af = {
     return new URL(spec, base).href;
   },
   file,
-  error(where, e) { error(where, e); },
+  error(where, e, notify = true) { error(where, e, notify); },
   // A module's evaluation promise: its rejection is the module's error.
   watch(p, url) { p.then(null, (e) => error('module:' + url, e)); },
   // A rejection is unhandled if no handler is attached by the end of the
   // microtask checkpoint.
-  rejected(p, reason) { rejections.set(p, reason); },
-  handled(p) { rejections.delete(p); },
+  rejected(promise, reason) { mapSet(rejections, promise, { reason, handled: false }); },
+  handled(promise) {
+    const pending = mapGet(rejections, promise);
+    if (pending) { pending.handled = true; mapDelete(rejections, promise); }
+    const record = notified(promise);
+    if (record) {
+      forgetNotified(promise);
+      handledRejections[handledRejections.length] = [promise, record.reason];
+    }
+  },
   checkpoint() {
-    for (const r of rejections.values()) error('unhandledrejection', r);
-    rejections.clear();
+    const pending = [], handled = handledRejections;
+    handledRejections = [];
+    mapEach(rejections, (record, promise) => { pending[pending.length] = [promise, record]; });
+    let dispatched = false;
+    for (let i = 0; i < pending.length; i++) {
+      const [promise, record] = pending[i];
+      if (mapGet(rejections, promise) !== record || record.handled) continue;
+      dispatched = true;
+      const unhandled = dispatchGlobalEvent(new PromiseRejectionEvent('unhandledrejection', { cancelable: true, promise, reason: record.reason }));
+      mapDelete(rejections, promise);
+      if (!record.handled) rememberNotified(promise, record);
+      if (unhandled) error('unhandledrejection', record.reason, false);
+    }
+    for (let i = 0; i < handled.length; i++) {
+      const [promise, reason] = handled[i];
+      dispatched = true;
+      dispatchGlobalEvent(new PromiseRejectionEvent('rejectionhandled', { promise, reason }));
+    }
+    return dispatched;
   },
   ready() {
     S.readyState = 'interactive';
