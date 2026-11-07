@@ -4,7 +4,10 @@ include!("../../../prelude-data.rs");
 
 impl exports::bench::web::handler::Guest for A {
     fn handle(req: Request) -> Response {
-        let want: usize = { let _ = &req; 100 };
+        let want: usize = {
+            let _ = &req;
+            100
+        };
         let mut out = String::from("<ul>");
         let mut shown = 0;
         let mut cursor: Option<String> = None;
