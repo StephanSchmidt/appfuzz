@@ -134,6 +134,11 @@
 
 **Apps that ship JavaScript**
 
+- URL and query state stays private, including native request routing and
+  history origin checks when a page replaces URL accessors. Query iterators
+  and callbacks see live changes; Web IDL argument conversion and query body
+  serialization follow browser behavior.
+
 - HTML is read as a browser reads it (the WHATWG parser of Servo,
   `html5ever`): `<noscript>`, SVG `<style>`, tables, templates and
   malformed markup end up where a browser puts them. Deeply nested markup

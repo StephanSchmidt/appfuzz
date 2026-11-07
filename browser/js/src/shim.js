@@ -5,6 +5,7 @@
 // is recorded.
 import * as L from 'linkedom';
 import { Headers, convertHeadersInit, headersFromConverted, setHeadersGuard, copyHeaders, filterHeaders, headerObject, headerValue, appendNativeHeader } from './headers.js';
+import { URL, URLSearchParams, urlPart, setURLPart, serializeParams, setObjectURLHooks } from './urls.js';
 import { CookieJar } from './cookies.js';
 import { parseHTML, parseHTMLFragment, fragmentElements, documentMode } from './document.js';
 import { qualifiedName, nameIdentity } from './names.js';
@@ -257,92 +258,14 @@ G.DOMException = BrowserDOMException;
 // lookalike and numeric hosts, IPv6, backslashes, dot segments.
 const N = G.__native;
 
-// What a Web API takes as a string: lone surrogates become U+FFFD.
-const usv = (s) => {
-  s = String(s);
-  return typeof s.toWellFormed === 'function' ? s.toWellFormed() : s;
-};
-
-class URLSearchParams {
-  constructor(init = '') {
-    this._l = [];
-    this._u = null;
-    if (init instanceof URLSearchParams) this._l = init._l.map((p) => [...p]);
-    else if (init && typeof init === 'object' && typeof init[Symbol.iterator] === 'function') {
-      for (const pair of init) {
-        const p = [...pair];
-        if (p.length !== 2) throw new TypeError('URLSearchParams: each pair needs a name and a value');
-        this._l.push([usv(p[0]), usv(p[1])]);
-      }
-    } else if (init && typeof init === 'object') for (const k of Object.keys(init)) this._l.push([usv(k), usv(init[k])]);
-    else this._parse(usv(init));
-  }
-  _parse(s) { s = s.replace(/^\?/, ''); this._l = s ? N.formParse(s) : []; }
-  _sync() { if (this._u) this._u._update('search', this.toString(), true); }
-  get size() { return this._l.length; }
-  append(k, v) { this._l.push([usv(k), usv(v)]); this._sync(); }
-  delete(k, v) { k = usv(k); this._l = this._l.filter((p) => p[0] !== k || (v !== undefined && p[1] !== usv(v))); this._sync(); }
-  get(k) { k = usv(k); const p = this._l.find((p) => p[0] === k); return p ? p[1] : null; }
-  getAll(k) { k = usv(k); return this._l.filter((p) => p[0] === k).map((p) => p[1]); }
-  has(k, v) { k = usv(k); return this._l.some((p) => p[0] === k && (v === undefined || p[1] === usv(v))); }
-  set(k, v) {
-    k = usv(k);
-    const i = this._l.findIndex((p) => p[0] === k);
-    if (i < 0) this._l.push([k, usv(v)]);
-    else { this._l[i][1] = usv(v); this._l = this._l.filter((p, j) => j <= i || p[0] !== k); }
-    this._sync();
-  }
-  sort() { this._l.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); this._sync(); }
-  forEach(f, t) { for (const [k, v] of this._l) f.call(t, v, k, this); }
-  *entries() { yield* this._l.map((p) => [...p]); }
-  *keys() { for (const p of this._l) yield p[0]; }
-  *values() { for (const p of this._l) yield p[1]; }
-  [Symbol.iterator]() { return this.entries(); }
-  toString() { return N.formSerialize(this._l); }
-}
 G.URLSearchParams = URLSearchParams;
-
-// A URL keeps its parts, in this order, as the guest gives them.
-const PARTS = ['href', 'origin', 'protocol', 'username', 'password', 'host', 'hostname', 'port', 'pathname', 'search', 'hash'];
-
-class URL {
-  constructor(input, base) {
-    const p = N.url(usv(input), base === undefined ? null : usv(base));
-    if (!p) throw new TypeError('Invalid URL: ' + clip(input, 80));
-    this._p = p;
-    this._sp = null;
-  }
-  // A setter: refused values leave the URL as it was; an href that
-  // doesn't parse throws. `fromParams`: the change came from searchParams.
-  _update(key, value, fromParams = false) {
-    const p = N.urlSet(this._p[0], key, usv(value));
-    if (!p) throw new TypeError('Invalid URL: ' + clip(value, 80));
-    this._p = p;
-    if (this._sp && !fromParams && (key === 'href' || key === 'search')) this._sp._parse(p[9]);
-  }
-  get searchParams() {
-    if (!this._sp) { this._sp = new URLSearchParams(this._p[9]); this._sp._u = this; }
-    return this._sp;
-  }
-  toString() { return this._p[0]; }
-  toJSON() { return this._p[0]; }
-  static canParse(u, b) { try { new URL(u, b); return true; } catch { return false; } }
-  static parse(u, b) { try { return new URL(u, b); } catch { return null; } }
-  static createObjectURL(blob) {
-    const u = 'blob:' + S.origin + '/' + uuid();
-    blobs.set(u, blob);
-    return u;
-  }
-  static revokeObjectURL(u) { blobs.delete(u); }
-}
-PARTS.forEach((k, i) => Object.defineProperty(URL.prototype, k, {
-  configurable: true,
-  enumerable: true,
-  get() { return this._p[i]; },
-  set: k === 'origin' ? undefined : function (v) { this._update(k, v); },
-}));
 G.URL = URL;
 const blobs = new Map();
+setObjectURLHooks(blob => {
+  requireBlob(blob);
+  const url = 'blob:' + S.origin + '/' + uuid();
+  mapSet(blobs, url, blob); return url;
+}, url => { mapDelete(blobs, url); });
 
 function uuid() {
   const h = [...Array(16)].map(() => Math.floor(rand() * 256));
@@ -606,7 +529,7 @@ const rejectPromise = Promise.reject.bind(Promise), parseBodyJSON = JSON.parse;
 const stringUpper = Function.prototype.call.bind(String.prototype.toUpperCase);
 const blobRecords = new WeakMap(), blobRecord = blobRecords.get.bind(blobRecords), saveBlob = blobRecords.set.bind(blobRecords);
 const formRecords = new WeakMap(), formRecord = formRecords.get.bind(formRecords), saveForm = formRecords.set.bind(formRecords);
-const nativeEncode = N.formSerialize, NativeTextDecoder = TextDecoder;
+const NativeTextDecoder = TextDecoder;
 function requireBlob(value) { const data = blobRecord(value); if (!data) throw new NativeTypeError('A Blob is required'); return data; }
 function requireForm(value) { const data = formRecord(value); if (!data) throw new NativeTypeError('A FormData object is required'); return data; }
 function crlf(value) {
@@ -634,7 +557,8 @@ function extractBody(body) {
     }
     return { text: text + '--' + boundary + '--\r\n', type: 'multipart/form-data; boundary=' + boundary };
   }
-  if (body instanceof URLSearchParams) return { text: nativeEncode(body._l), type: 'application/x-www-form-urlencoded;charset=UTF-8' };
+  const query = serializeParams(body);
+  if (query !== null) return { text: query, type: 'application/x-www-form-urlencoded;charset=UTF-8' };
   return { text: wellFormed(domString(body)), type: 'text/plain;charset=UTF-8' };
 }
 const bodyText = body => extractBody(body).text;
@@ -682,7 +606,7 @@ function convertRequest(input, init, argumentCount) {
     else if (key === 'window') { if (value !== null) throw new NativeTypeError('Request window must be null'); options.window = null; }
     else options[key] = domString(value);
   }
-  const parsed = N.url(rawURL, S.url._p[0]);
+  const parsed = N.url(rawURL, urlPart(S.url, 'href'));
   if (!parsed || parsed[3] || parsed[4]) throw new NativeTypeError('Invalid request URL');
   const fragment = stringIndex(parsed[0], '#'), url = fragment < 0 ? parsed[0] : stringSlice(parsed[0], 0, fragment);
   let method = options.method ?? src?.method ?? 'GET';
@@ -792,33 +716,33 @@ function networkAnswer(status, body, rawHeaders, url, acceptCookies, delayed, la
   return delayed ? r : receive(r);
 }
 function respond(method, url, body, headers, kind, credentials = 'same-origin', delayed = false) {
-  const u = new URL(String(url), S.url.href);
-  const own = u.origin === S.origin;
+  const u = new URL(String(url), urlPart(S.url, 'href'));
+  const own = urlPart(u, 'origin') === S.origin;
   const include = credentials === 'include' || (credentials === 'same-origin' && own);
   headers = Object.fromEntries(Object.entries(headers || {}).filter(([k]) => !['cookie', 'cookie2'].includes(k.toLowerCase())));
   if (include) {
-    const cookie = S.cookies.header(u.href, true, S.url.href);
+    const cookie = S.cookies.header(urlPart(u, 'href'), true, urlPart(S.url, 'href'));
     if (cookie) headers.cookie = cookie;
   }
   push(S.requests, {
-    kind, method, url: u.href, own, body: body == null ? null : clip(body, 2000),
+    kind, method, url: urlPart(u, 'href'), own, body: body == null ? null : clip(body, 2000),
     headers: headers || {}, gesture: S.gesture, at: S.now - S.start,
   });
-  const path = own ? u.pathname + u.search : u.href;
+  const path = own ? urlPart(u, 'pathname') + urlPart(u, 'search') : urlPart(u, 'href');
   const h = host();
   if (h) {
     // Sent now, delivered after the latency: the answer is the host's.
-    const target = own ? path : u.href.split('#')[0];
+    const target = own ? path : urlPart(u, 'href').split('#')[0];
     const pairs = Object.entries(headers || {}).map(([k, v]) => [String(k), String(v)]);
     const [status, rh, text, failed, latency] = h.fetch(kind, method, own, target, pairs, body == null ? null : String(body), [!!S.gesture, S.now]);
-    if (failed != null) return { status: 0, error: failed, body: '', headers: {}, url: u.href, latency: latency ?? S.latency };
-    return networkAnswer(status, text, rh, u.href, include, delayed, latency ?? S.latency);
+    if (failed != null) return { status: 0, error: failed, body: '', headers: {}, url: urlPart(u, 'href'), latency: latency ?? S.latency };
+    return networkAnswer(status, text, rh, urlPart(u, 'href'), include, delayed, latency ?? S.latency);
   }
-  const plain = own ? u.pathname : u.origin + u.pathname;
+  const plain = own ? urlPart(u, 'pathname') : urlPart(u, 'origin') + urlPart(u, 'pathname');
   const r = S.responses[method + ' ' + path] || S.responses[method + ' ' + plain] || S.responses[path] || S.responses[plain]
-    || (method === 'GET' && own && S.files[u.pathname] != null ? { status: 200, body: S.files[u.pathname] } : null)
+    || (method === 'GET' && own && S.files[urlPart(u, 'pathname')] != null ? { status: 200, body: S.files[urlPart(u, 'pathname')] } : null)
     || { status: 404, body: '' };
-  return networkAnswer(r.status ?? 200, typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? ''), r.headers, u.href, include, delayed);
+  return networkAnswer(r.status ?? 200, typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? ''), r.headers, urlPart(u, 'href'), include, delayed);
 }
 
 G.fetch = function fetch(input, init = undefined) {
@@ -1023,47 +947,47 @@ function makeStorage(kind) {
 }
 
 function setCookie(text) {
-  const written = S.cookies.set(String(text), S.url.href);
+  const written = S.cookies.set(String(text), urlPart(S.url, 'href'));
   if (written) push(S.cookieWrites, { name: clip(written.name, 100), value: clip(written.value, 200), flags: written.flags, gesture: S.gesture });
 }
 
 function navigate(target, how, extra = {}) {
   let u;
-  try { u = new URL(String(target), S.url.href); } catch (e) { error(how, e); return; }
-  if (u.protocol === 'javascript:') {
-    let code = u.href.slice('javascript:'.length);
+  try { u = new URL(String(target), urlPart(S.url, 'href')); } catch (e) { error(how, e); return; }
+  if (urlPart(u, 'protocol') === 'javascript:') {
+    let code = urlPart(u, 'href').slice('javascript:'.length);
     try { code = decodeURIComponent(code); } catch {}
     runCode(code, 'javascript-url');
     return;
   }
   const strip = (h) => h.split('#')[0];
-  if (strip(u.href) === strip(S.url.href) && u.hash && how !== 'location.reload' && !extra.method) {
-    const oldURL = S.url.href;
+  if (strip(urlPart(u, 'href')) === strip(urlPart(S.url, 'href')) && urlPart(u, 'hash') && how !== 'location.reload' && !extra.method) {
+    const oldURL = urlPart(S.url, 'href');
     S.url = u;
-    push(S.history, { how, url: u.href });
-    addTimer(() => fireEvent(G, new HashChangeEvent('hashchange', { oldURL, newURL: u.href })), 0, [], false, 'hashchange', false);
+    push(S.history, { how, url: urlPart(u, 'href') });
+    addTimer(() => fireEvent(G, new HashChangeEvent('hashchange', { oldURL, newURL: urlPart(u, 'href') })), 0, [], false, 'hashchange', false);
     return;
   }
-  push(S.navigations, { url: u.href, how, gesture: S.gesture, at: S.now - S.start, ...extra });
-  { const h = host(); if (h) h.go(how, u.href, !!S.gesture); }
-  if (!extra.popup && !S.ended) S.ended = { url: u.href, how };
+  push(S.navigations, { url: urlPart(u, 'href'), how, gesture: S.gesture, at: S.now - S.start, ...extra });
+  { const h = host(); if (h) h.go(how, urlPart(u, 'href'), !!S.gesture); }
+  if (!extra.popup && !S.ended) S.ended = { url: urlPart(u, 'href'), how };
 }
 
 const location = {};
 for (const k of ['protocol', 'host', 'hostname', 'port', 'pathname', 'search', 'hash']) {
   Object.defineProperty(location, k, {
     enumerable: true,
-    get: () => S.url[k],
-    set: (v) => { const u = new URL(S.url.href); u[k] = v; navigate(u.href, 'location.' + k); },
+    get: () => urlPart(S.url, k),
+    set: (v) => { const u = new URL(urlPart(S.url, 'href')); setURLPart(u, k, v); navigate(urlPart(u, 'href'), 'location.' + k); },
   });
 }
-Object.defineProperty(location, 'origin', { enumerable: true, get: () => S.url.origin });
-Object.defineProperty(location, 'href', { enumerable: true, get: () => S.url.href, set: (v) => navigate(v, 'location.href') });
+Object.defineProperty(location, 'origin', { enumerable: true, get: () => urlPart(S.url, 'origin') });
+Object.defineProperty(location, 'href', { enumerable: true, get: () => urlPart(S.url, 'href'), set: (v) => navigate(v, 'location.href') });
 Object.assign(location, {
   assign: (v) => navigate(v, 'location.assign'),
   replace: (v) => navigate(v, 'location.replace'),
-  reload: () => navigate(S.url.href, 'location.reload'),
-  toString: () => S.url.href,
+  reload: () => navigate(urlPart(S.url, 'href'), 'location.reload'),
+  toString: () => urlPart(S.url, 'href'),
   ancestorOrigins: [],
 });
 
@@ -1071,12 +995,12 @@ const historyApi = {
   length: 1, state: null, scrollRestoration: 'auto',
   _go(how, state, url) {
     if (url != null) {
-      const u = new URL(String(url), S.url.href);
-      if (u.origin !== S.origin) throw new DOMException(how + ': another origin', 'SecurityError');
+      const u = new URL(String(url), urlPart(S.url, 'href'));
+      if (urlPart(u, 'origin') !== S.origin) throw new DOMException(how + ': another origin', 'SecurityError');
       S.url = u;
     }
     this.state = state ?? null;
-    push(S.history, { how, url: S.url.href });
+    push(S.history, { how, url: urlPart(S.url, 'href') });
   },
   pushState(state, _title, url) { this._go('pushState', state, url); this.length++; },
   replaceState(state, _title, url) { this._go('replaceState', state, url); },
@@ -1194,7 +1118,7 @@ function installWindow(doc) {
     });
   }
   dispatchGlobalEvent = event => fireEvent(windowTarget, event);
-  dispatchGlobalError = (info, value) => dispatchGlobalEvent(new ErrorEvent('error', { cancelable: true, message: info.eventMessage, error: value, filename: S.url?.href || '' }));
+  dispatchGlobalError = (info, value) => dispatchGlobalEvent(new ErrorEvent('error', { cancelable: true, message: info.eventMessage, error: value, filename: (S.url && urlPart(S.url, 'href')) || '' }));
   G.reportError = function (value) {
     if (!arguments.length) throw new NativeTypeError('reportError requires an argument');
     error('reportError', value);
@@ -1261,12 +1185,12 @@ function installWindow(doc) {
   define(doc, 'readyState', { get: () => S.readyState });
   define(doc, 'location', { get: () => location, set: (v) => navigate(v, 'document.location') });
   define(doc, 'cookie', {
-    get: () => S.cookies.header(S.url.href, false),
+    get: () => S.cookies.header(urlPart(S.url, 'href'), false),
     set: (v) => setCookie(v),
   });
   define(doc, 'activeElement', { get: () => (S.active && S.active.isConnected ? S.active : doc.body) });
-  for (const k of ['URL', 'documentURI', 'baseURI']) define(doc, k, { get: () => S.url.href });
-  define(doc, 'domain', { get: () => S.url.hostname, set() {} });
+  for (const k of ['URL', 'documentURI', 'baseURI']) define(doc, k, { get: () => urlPart(S.url, 'href') });
+  define(doc, 'domain', { get: () => urlPart(S.url, 'hostname'), set() {} });
   define(doc, 'referrer', { value: '' });
   define(doc, 'visibilityState', { value: 'visible' });
   define(doc, 'hidden', { value: false });
@@ -1596,7 +1520,7 @@ function completeActivation(action, event) {
     if (href !== null) {
       const target = eventAttribute(node, 'target');
       const extra = target && target !== '_self' ? { popup: true, target } : {}, gesture = S.gesture;
-      let destination; try { destination = new URL(href, S.url.href).href; } catch { return; }
+      let destination; try { destination = urlPart(new URL(href, urlPart(S.url, 'href')), 'href'); } catch { return; }
       addTimer(() => { const was = S.gesture; S.gesture = gesture; try { navigate(destination, 'link', extra); } finally { S.gesture = was; } }, 0, [], false, 'link-navigation', false);
     }
   } else if (kind === 'input' || kind === 'button') {
@@ -1634,12 +1558,12 @@ function formNavigate(form, submitter) {
   const attr = (k) => (submitter && submitter.getAttribute('form' + k)) || form.getAttribute(k);
   const method = (attr('method') || 'get').toLowerCase();
   if (method === 'dialog') return;
-  const action = new URL(attr('action') || S.url.href, S.url.href);
-  const data = new URLSearchParams([...new FormData(form, submitter)].map(([k, v]) => [k, typeof v === 'string' ? v : '[file]'])).toString();
+  const action = new URL(attr('action') || urlPart(S.url, 'href'), urlPart(S.url, 'href'));
+  const data = serializeParams(new URLSearchParams([...new FormData(form, submitter)].map(([k, v]) => [k, typeof v === 'string' ? v : '[file]'])));
   const target = attr('target');
   const extra = target && target !== '_self' ? { popup: true, target } : {};
-  if (method === 'post') navigate(action.href, 'form', { method: 'POST', body: clip(data, 2000), ...extra });
-  else { action.search = data; navigate(action.href, 'form', { method: 'GET', ...extra }); }
+  if (method === 'post') navigate(urlPart(action, 'href'), 'form', { method: 'POST', body: clip(data, 2000), ...extra });
+  else { setURLPart(action, 'search', data); navigate(urlPart(action, 'href'), 'form', { method: 'GET', ...extra }); }
 }
 
 function act(i, value) {
@@ -1727,10 +1651,10 @@ function prepareScript(s) {
   let prepared;
   if (src == null) {
     push(S.code, { where: 'script', code: clip(code, 2000), gesture: S.gesture });
-    prepared = { kind, url: kind === 'module' ? S.url.href.split('#')[0] + '#inline-' + n : S.url.href, code, inline: true };
+    prepared = { kind, url: kind === 'module' ? urlPart(S.url, 'href').split('#')[0] + '#inline-' + n : urlPart(S.url, 'href'), code, inline: true };
   } else {
     let url;
-    try { url = new URL(src, S.url.href).href; }
+    try { url = urlPart(new URL(src, urlPart(S.url, 'href')), 'href'); }
     catch { scriptError(s); return null; }
     if (src === '' && record.identity.namespace === HTML_NS) { scriptError(s); return null; }
     prepared = { kind, url, code: file(url), inline: false };
@@ -1768,14 +1692,14 @@ function scriptsChanged(nodes) {
 // A script's code: what its URL answers, or null when it failed.
 function file(url) {
   const u = new URL(url);
-  const own = u.origin === S.origin;
-  const r = respond('GET', u.href, null, {}, 'script', 'same-origin', true);
+  const own = urlPart(u, 'origin') === S.origin;
+  const r = respond('GET', urlPart(u, 'href'), null, {}, 'script', 'same-origin', true);
   if (host()) {
     S.now += r.latency;
     receive(r);
     return r.error == null && r.status >= 200 && r.status < 300 ? r.body : null;
   }
-  const body = own ? S.files[u.pathname] : S.files[u.href];
+  const body = own ? S.files[urlPart(u, 'pathname')] : S.files[urlPart(u, 'href')];
   return body == null ? null : body;
 }
 
@@ -1844,21 +1768,21 @@ G.__af = {
   init(json, now, hostSeed) {
     const s = JSON.parse(json);
     S.url = new URL(s.url || 'https://app.example/');
-    S.origin = S.url.origin;
+    S.origin = urlPart(S.url, 'origin');
     S.start = S.now = s.now ?? now ?? RealDate.UTC(2026, 10, 2, 10);
     S.horizon = S.now;
     seed = s.seed ?? hostSeed ?? 1;
     S.files = s.files || {};
     S.responses = s.responses || {};
     S.latency = s.latency_ms ?? 5;
-    for (const [k, v] of Object.entries(s.cookies || {})) S.cookies.seed(k, v, S.url.href);
-    for (const cookie of s.request_cookies || []) S.cookies.request(cookie, S.url.href);
-    for (const cookie of s.set_cookies || []) S.cookies.set(cookie, S.url.href, true);
+    for (const [k, v] of Object.entries(s.cookies || {})) S.cookies.seed(k, v, urlPart(S.url, 'href'));
+    for (const cookie of s.request_cookies || []) S.cookies.request(cookie, urlPart(S.url, 'href'));
+    for (const cookie of s.set_cookies || []) S.cookies.set(cookie, urlPart(S.url, 'href'), true);
     if (s.probe_cookie) {
       const base = String(s.probe_cookie.name);
       let name = base;
       for (let i = 1; S.cookies.has(name); i++) name = base + '_' + i;
-      S.cookies.seed(name, s.probe_cookie.value, S.url.href);
+      S.cookies.seed(name, s.probe_cookie.value, urlPart(S.url, 'href'));
     }
     const doc = parseHTML(s.html || '', true);
     S.document = doc;
@@ -1871,7 +1795,7 @@ G.__af = {
   newScripts,
   resolve(spec, base) {
     if (!/^(\.{0,2}\/|[a-zA-Z][a-zA-Z0-9+.-]*:)/.test(spec)) throw new TypeError(`Failed to resolve module specifier "${spec}"`);
-    return new URL(spec, base).href;
+    return urlPart(new URL(spec, base), 'href');
   },
   file,
   error(where, e, notify = true) { error(where, e, notify); },
@@ -1944,7 +1868,7 @@ G.__af = {
   text: () => (G.document.body ? G.document.body.textContent.replace(/\s+/g, ' ').trim() : ''),
   report() {
     return JSON.stringify({
-      url: S.url.href, ended: S.ended, now_ms: S.now - S.start, steps: S.steps, timers: S.timers.size,
+      url: urlPart(S.url, 'href'), ended: S.ended, now_ms: S.now - S.start, steps: S.steps, timers: S.timers.size,
       errors: S.errors, console: S.console, requests: S.requests, navigations: S.navigations,
       code: S.code, cookies: S.cookieWrites, storage: S.storage, dialogs: S.dialogs, history: S.history,
       unmodelled: [...S.unmodelled], actions: S.actions,
