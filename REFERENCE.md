@@ -1039,6 +1039,11 @@ from outside listeners. Routing uses private event and tree state, so public
 property shadows do not change it. Content attributes and event handler
 properties share a listener position. Native XHR, MessageChannel and FileReader
 notifications use the same dispatcher and retain trusted event metadata.
+Mouse click dispatch also runs default activation: checkbox/radio state changes
+precede listeners and roll back on cancellation. Radio groups follow physical
+trees and form owners; programmatic clicks honor disabled controls and suppress
+recursive calls to `click()`. Labels forward clicks, links queue navigation,
+and the first summary toggles its details with a coalesced trusted toggle event.
 
 **Requests.** A request to the app's own origin is a run of the app,
 with the same host plan. A request for data from another host gets text

@@ -9,7 +9,7 @@ const targetFor = targets.get.bind(targets), remember = targets.set.bind(targets
 const apply = Reflect.apply, define = Object.defineProperty, NativeTypeError = TypeError, NativeMap = Map;
 const mapGet = Function.prototype.call.bind(Map.prototype.get), mapSet = Function.prototype.call.bind(Map.prototype.set);
 let DOMError = class DOMException extends Error { constructor(message, name) { super(message); this.name = name; } };
-let hooks = { error() {}, changed() {}, current() {} };
+let hooks = { error() {}, changed() {}, current() {}, activation() {}, activated() {} };
 export function installEventHooks(next, ErrorClass) { hooks = { ...hooks, ...next }; if (ErrorClass) DOMError = ErrorClass; }
 export function canonicalTarget(value) {
   const target = aliasFor(value) || value;
@@ -157,13 +157,14 @@ export function fireEvent(target, event, trusted = true, legacyTarget = null) {
   if (state.dispatching || !state.initialized) throw new DOMError('The event is already being dispatched or is uninitialized', 'InvalidStateError');
   setEventTrusted(event, trusted);
   state.dispatching = true;
-  let clear = false;
+  let clear = false, activation = null;
   try {
     const path = pathFor(target, state, legacyTarget);
     state.path = path;
     for (let i = path.length - 1; i >= 0; i--) if (path[i].atTarget) {
       clear = !!shadowInfo(physicalRoot(path[i].rawTarget)) || !!shadowInfo(physicalRoot(path[i].rawRelated)); break;
     }
+    activation = hooks.activation(path, event);
     for (let i = path.length - 1; i >= 0; i--) { state.phase = path[i].atTarget ? 2 : 1; invoke(path[i], event, true); }
     for (let i = 0; i < path.length; i++) {
       if (!path[i].atTarget && !state.bubbles) continue;
@@ -175,6 +176,7 @@ export function fireEvent(target, event, trusted = true, legacyTarget = null) {
     if (clear) state.target = state.related = null;
     state.originalRelated = state.related;
   }
+  hooks.activated(activation, event);
   return !state.canceled;
 }
 export class EventTarget {

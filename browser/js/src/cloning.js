@@ -15,6 +15,7 @@ import { CDATASection } from '../node_modules/linkedom/esm/interface/cdata-secti
 import { DocumentType } from '../node_modules/linkedom/esm/interface/document-type.js';
 import { DocumentFragment } from '../node_modules/linkedom/esm/interface/document-fragment.js';
 import { createBareElement } from './creation.js';
+import { copyInputState } from './controls.js';
 import { elementIs } from './element-state.js';
 import { CustomElementRegistry } from '../node_modules/linkedom/esm/interface/custom-element-registry.js';
 
@@ -112,6 +113,7 @@ export function installCloning(L, shareObservers, onScript, upgradeCopies, DOMEr
     const nearestSVG = new NativeWeakMap();
     for (let i = 0; i < copies.length; i++) {
       const copy = copies[i], identity = identities[i];
+      copyInputState(originals[i], copy);
       const content = templateContent(copy);
       if (content && deep) templateJobs.push([templateContent(originals[i]), content]);
       const svg = weakGet(nearestSVG, copy.parentNode) || null;

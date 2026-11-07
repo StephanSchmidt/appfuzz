@@ -6,12 +6,13 @@
 import * as L from 'linkedom';
 import { CookieJar } from './cookies.js';
 import { parseHTML, parseHTMLFragment, fragmentElements, documentMode } from './document.js';
-import { qualifiedName } from './names.js';
-import { setEventClock, cancelEvent, setRelatedTarget, relatedTarget, markEventUninitialized } from './event-state.js';
+import { qualifiedName, nameIdentity } from './names.js';
+import { setEventClock, eventState, cancelEvent, setRelatedTarget, relatedTarget, markEventUninitialized } from './event-state.js';
 import { fireEvent, installEventHooks, registerWindow, nullableTarget, getHandler, setHandler, setContentHandler } from './event-target.js';
 import { initializeSignal, signalState, abortSignal } from './abort-state.js';
 import { installEventAttributeHook } from './ce-hooks.js';
-import { nodeInfo } from './dom-state.js';
+import { htmlName, controlType, treeElements, formOwner, connected, disabled, checked, setChecked, indeterminate, setIndeterminate, beginInputActivation, cancelInputActivation, installControlState, setControlAttribute } from './controls.js';
+import { nodeInfo, eventAttribute, physicalParent, retarget } from './dom-state.js';
 import { exceptionInfo, clipDiagnostic } from './error-info.js';
 import { installShadowConstraints } from './shadow.js';
 import { EVENT_TARGET } from '../node_modules/linkedom/esm/shared/symbols.js';
@@ -51,6 +52,7 @@ const S = {
 };
 
 setEventClock(() => S.now - S.start);
+installControlState(queueDetailsToggle);
 
 const push = (list, v) => { if (list.length < CAP) list[list.length] = v; };
 const clip = (s, n = 400) => { s = String(s); return s.length > n ? s.slice(0, n) + '…' : s; };
@@ -372,6 +374,7 @@ class UIEvent extends Ev {
 class MouseEvent extends UIEvent {
   constructor(t, i = {}) {
     super(t, i);
+    eventState(this).mouse = true;
     for (const k of ['screenX', 'screenY', 'clientX', 'clientY', 'pageX', 'pageY', 'offsetX', 'offsetY', 'movementX', 'movementY', 'button', 'buttons']) this[k] = i[k] ?? 0;
     for (const k of MODS) this[k] = !!i[k];
     setRelatedTarget(this, nullableTarget(i.relatedTarget));
@@ -435,6 +438,32 @@ class ErrorEvent extends Ev {
   get error() { return errorEventData(this).error; }
 }
 class PromiseRejectionEvent extends Ev { constructor(t, i = {}) { super(t, i); this.promise = i.promise; this.reason = i.reason; } }
+class ToggleEvent extends Ev {
+  constructor(type, options = {}) {
+    if (!arguments.length) throw new NativeTypeError('ToggleEvent requires a type');
+    const data = runDOMCallback(() => {
+      type = domString(type);
+      const init = options == null ? {} : options;
+      if (typeof init !== 'object' && typeof init !== 'function') throw new NativeTypeError('ToggleEvent options must be a dictionary');
+      const bubbles = !!init.bubbles, cancelable = !!init.cancelable, composed = !!init.composed;
+      const rawNew = init.newState, newState = domString(rawNew === undefined ? '' : rawNew), rawOld = init.oldState, oldState = domString(rawOld === undefined ? '' : rawOld), source = init.source;
+      if (source != null && nodeInfo(source)?.kind !== 1) throw new NativeTypeError('ToggleEvent source must be an Element');
+      return { bubbles, cancelable, composed, oldState, newState, source: source ?? null };
+    });
+    super(type, { bubbles: data.bubbles, cancelable: data.cancelable, composed: data.composed });
+    eventState(this).toggle = data;
+  }
+  get oldState() { const data = eventState(this).toggle; if (!data) throw new NativeTypeError('A ToggleEvent is required'); return data.oldState; }
+  get newState() { const data = eventState(this).toggle; if (!data) throw new NativeTypeError('A ToggleEvent is required'); return data.newState; }
+  get source() { const state = eventState(this), data = state.toggle; if (!data) throw new NativeTypeError('A ToggleEvent is required'); return retarget(data.source, state.current); }
+}
+const detailsToggles = new WeakMap(), pendingToggle = detailsToggles.get.bind(detailsToggles), rememberToggle = detailsToggles.set.bind(detailsToggles), forgetToggle = detailsToggles.delete.bind(detailsToggles);
+function queueDetailsToggle(node, wasOpen, isOpen) {
+  const pending = pendingToggle(node), oldState = pending ? pending.oldState : wasOpen ? 'open' : 'closed', newState = isOpen ? 'open' : 'closed';
+  if (pending) mapDelete(S.timers, pending.id);
+  const id = addTimer(() => { forgetToggle(node); fireEvent(node, new ToggleEvent('toggle', { oldState, newState })); }, 0, [], false, 'details-toggle', false);
+  rememberToggle(node, { id, oldState });
+}
 class StorageEvent extends Ev {}
 class TransitionEvent extends Ev {}
 class AnimationEvent extends Ev {}
@@ -445,7 +474,7 @@ class DragEvent extends MouseEvent { constructor(t, i = {}) { super(t, i); this.
 Object.assign(G, {
   UIEvent, MouseEvent, PointerEvent, WheelEvent, KeyboardEvent, FocusEvent, SubmitEvent, MessageEvent, ProgressEvent,
   HashChangeEvent, PopStateEvent, ErrorEvent, PromiseRejectionEvent, StorageEvent, TransitionEvent, AnimationEvent,
-  CompositionEvent, ClipboardEvent, TouchEvent, DragEvent,
+  CompositionEvent, ClipboardEvent, TouchEvent, DragEvent, ToggleEvent,
 });
 
 // Listeners: a throwing listener is reported, not passed on, and `this` is
@@ -458,6 +487,8 @@ const nativeSetAdd = Function.prototype.call.bind(Set.prototype.add);
 let currentEvent;
 installEventHooks({
   error,
+  activation: prepareActivation,
+  activated: completeActivation,
   changed(target, types) {
     if (!types.length) { mapDelete(S.listened, target); return; }
     const set = new NativeSet();
@@ -1268,23 +1299,24 @@ function installWindow(doc) {
     this.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
   };
   H.blur = function () { if (S.active === this) { S.active = null; this.dispatchEvent(new FocusEvent('blur')); } };
-  H.click = function () { click(this, false); };
+  H.click = function () {
+    if (nodeInfo(this)?.kind !== 1 || !htmlName(this)) throw new NativeTypeError('An HTMLElement is required');
+    if (disabled(this) || clicking(this)) return;
+    rememberClick(this, true);
+    try { click(this, false); } finally { rememberClick(this, false); }
+  };
   define(H, 'isContentEditable', { get() { const v = this.getAttribute('contenteditable'); return v === '' || v === 'true'; } });
   define(H, 'form', { get() { return this.closest('form'); } });
 
   const I = L.HTMLInputElement.prototype;
-  const checked = new WeakMap();
-  define(I, 'checked', {
-    get() { return checked.has(this) ? checked.get(this) : this.hasAttribute('checked'); },
-    set(v) {
-      v = !!v;
-      checked.set(this, v);
-      if (v && (this.getAttribute('type') || '').toLowerCase() === 'radio' && this.name) {
-        const scope = this.closest('form') || doc;
-        for (const r of scope.querySelectorAll('input[type=radio]')) if (r !== this && r.name === this.name) checked.set(r, false);
-      }
-    },
+  define(I, 'type', { get() { if (htmlName(this) !== 'input') throw new NativeTypeError('An HTMLInputElement is required'); return controlType(this); },
+    set(value) { if (htmlName(this) !== 'input') throw new NativeTypeError('An HTMLInputElement is required'); setControlAttribute(this, 'type', value); },
   });
+  define(L.HTMLDetailsElement.prototype, 'open', { get() { if (htmlName(this) !== 'details') throw new NativeTypeError('An HTMLDetailsElement is required'); return eventAttribute(this, 'open') !== null; },
+    set(value) { if (htmlName(this) !== 'details') throw new NativeTypeError('An HTMLDetailsElement is required'); setControlAttribute(this, 'open', value ? '' : null); },
+  });
+  define(I, 'checked', { get() { return checked(this); }, set(value) { setChecked(this, value); } });
+  define(I, 'indeterminate', { get() { return indeterminate(this); }, set(value) { setIndeterminate(this, value); } });
   define(I, 'defaultChecked', { get() { return this.hasAttribute('checked'); }, set(v) { this.toggleAttribute('checked', !!v); } });
   define(I, 'files', { get: () => [] });
   define(I, 'valueAsNumber', { get() { return this.value === '' ? NaN : Number(this.value); }, set(v) { this.value = String(v); } });
@@ -1371,44 +1403,79 @@ function click(el, gesture) {
       dispatch(el, new PointerEvent('pointerup', o));
       dispatch(el, new MouseEvent('mouseup', o));
     }
-    const type = (el.getAttribute && el.getAttribute('type') || '').toLowerCase();
-    const toggles = el.localName === 'input' && (type === 'checkbox' || type === 'radio');
-    const before = toggles ? el.checked : null;
-    if (toggles) el.checked = type === 'radio' ? true : !el.checked;
-    const ev = new MouseEvent('click', o);
-    const ok = gesture ? dispatch(el, ev) : fireEvent(el, ev, false);
-    if (toggles) {
-      if (!ok) el.checked = before;
-      else if (before !== el.checked) { dispatch(el, new L.InputEvent('input', { bubbles: true })); dispatch(el, new Ev('change', { bubbles: true })); }
-    }
-    if (ok) activate(el);
+    const ev = new PointerEvent('click', { ...o, detail: gesture ? 1 : 0 });
+    fireEvent(el, ev, gesture);
   } finally {
     S.gesture = was;
   }
 }
 
-function activate(el) {
-  const a = el.closest && el.closest('a[href],area[href]');
-  if (a) {
-    const target = a.getAttribute('target');
-    navigate(a.getAttribute('href'), 'link', target && target !== '_self' ? { popup: true, target } : {});
+const clickFlags = new WeakMap(), clicking = clickFlags.get.bind(clickFlags), rememberClick = clickFlags.set.bind(clickFlags);
+function activationKind(node) {
+  const name = htmlName(node), identity = nameIdentity(node);
+  if (identity?.namespace === SVG_NS && identity.local === 'a' && (eventAttribute(node, 'href') !== null || eventAttribute(node, 'xlink:href') !== null)) return 'link';
+  if (name === 'input' || name === 'button' || name === 'label') return name;
+  if (name === 'a' || name === 'area') return eventAttribute(node, 'href') === null ? null : 'link';
+  if (name === 'summary' && htmlName(physicalParent(node)) === 'details') {
+    const siblings = treeElements(physicalParent(node));
+    for (let i = 1; i < siblings.length; i++) if (physicalParent(siblings[i]) === physicalParent(node) && htmlName(siblings[i]) === 'summary') return siblings[i] === node ? 'summary' : null;
+  }
+  return null;
+}
+function prepareActivation(path, event) {
+  const state = eventState(event);
+  if (!state.mouse || state.type !== 'click') return null;
+  for (let i = 0; i < path.length; i++) {
+    const entry = path[i];
+    if (i && !state.bubbles && !entry.atTarget) continue;
+    const kind = activationKind(entry.node);
+    if (kind) return { node: entry.node, kind, before: kind === 'input' ? beginInputActivation(entry.node) : null, original: path[0].node };
+  }
+  return null;
+}
+function completeActivation(action, event) {
+  if (!action) return;
+  const { node, kind, before } = action, state = eventState(event);
+  if (state.canceled) { if (kind === 'input') cancelInputActivation(node, before); return; }
+  const type = controlType(node);
+  if (kind === 'input' && (type === 'checkbox' || type === 'radio')) {
+    if (before.changed && connected(node)) {
+      fireEvent(node, new Ev('input', { bubbles: true, composed: true }));
+      fireEvent(node, new Ev('change', { bubbles: true }));
+    }
     return;
   }
-  const b = el.closest && el.closest('button,input[type=submit],input[type=image]');
-  if (b) {
-    const t = (b.getAttribute('type') || 'submit').toLowerCase();
-    const form = b.closest('form') || (b.getAttribute('form') && G.document.getElementById(b.getAttribute('form')));
-    if ((t === 'submit' || t === 'image') && form) submit(form, b);
-    else if (t === 'reset' && form) form.reset();
-    return;
-  }
-  const s = el.closest && el.closest('summary');
-  if (s && s.parentElement && s.parentElement.localName === 'details') s.parentElement.toggleAttribute('open');
-  const label = el.closest && el.closest('label');
-  if (label) {
-    const f = label.getAttribute('for');
-    const control = f ? G.document.getElementById(f) : label.querySelector('input,select,textarea,button');
-    if (control && control !== el) click(control, false);
+  if (kind === 'link') {
+    const href = eventAttribute(node, 'href') ?? eventAttribute(node, 'xlink:href');
+    if (href !== null) {
+      const target = eventAttribute(node, 'target');
+      const extra = target && target !== '_self' ? { popup: true, target } : {}, gesture = S.gesture;
+      let destination; try { destination = new URL(href, S.url.href).href; } catch { return; }
+      addTimer(() => { const was = S.gesture; S.gesture = gesture; try { navigate(destination, 'link', extra); } finally { S.gesture = was; } }, 0, [], false, 'link-navigation', false);
+    }
+  } else if (kind === 'input' || kind === 'button') {
+    if (disabled(node)) return;
+    const form = formOwner(node), buttonType = kind === 'button' && type !== 'reset' && type !== 'button' ? 'submit' : type;
+    if (form && (buttonType === 'submit' || buttonType === 'image')) submit(form, node);
+    else if (form && buttonType === 'reset') form.reset();
+  } else if (kind === 'summary') {
+    const details = physicalParent(node);
+    if (activationKind(node) === 'summary' && htmlName(details) === 'details') setControlAttribute(details, 'open', eventAttribute(details, 'open') === null ? '' : null);
+  } else if (kind === 'label') {
+    for (let current = action.original; current && current !== node; current = physicalParent(current)) {
+      const name = htmlName(current);
+      if (name === 'input' || name === 'button' || name === 'select' || name === 'textarea' || (name === 'a' && eventAttribute(current, 'href') !== null)) return;
+    }
+    const id = eventAttribute(node, 'for'), nodes = treeElements(id === null ? node : S.document);
+    for (let i = id === null ? 1 : 0; i < nodes.length; i++) {
+      const control = nodes[i], name = htmlName(control);
+      if (id !== null && eventAttribute(control, 'id') !== id) continue;
+      if (name === 'button' || name === 'select' || name === 'textarea' || (name === 'input' && controlType(control) !== 'hidden')) {
+        if (!disabled(control)) click(control, false);
+        return;
+      }
+      if (id !== null) return;
+    }
   }
 }
 
