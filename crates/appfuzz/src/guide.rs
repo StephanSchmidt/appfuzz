@@ -163,6 +163,12 @@ pub const DOCS: &[Doc] = &[
         next: "`explain <run>`; `sweep -f today --gen dates`",
     },
     Doc {
+        path: "probe records",
+        examples: &["appfuzz probe records", "appfuzz probe records --set '{\"query\": [[\"limit\", \"50\"]]}'"],
+        output: "each host collection the app reads, given one more record than the platform's limit per response and twice as many (1,024 without a limit), from the request and the pages it links to, and with count fields (`limit`, `size`, …) asking for more: the most records that left through the response, the logs and calls that send data out (bounds), collections whose records can't be told apart, findings",
+        next: "`explain <run>` for a mass_disclosure finding; `confirm <finding>` shrinks it to one record over the limit",
+    },
+    Doc {
         path: "probe web",
         examples: &["appfuzz probe web"],
         output: "the request from another website (Origin, CORS preflight) and naming another host: those that did not end ok, findings",
@@ -471,7 +477,7 @@ pub fn next(path: &str, out: &Value) -> Vec<String> {
                 n.push(format!("appfuzz show {r} --view explanation"));
             }
         }
-        "fuzz" | "amplify" | "scale" | "probe values" | "probe times" | "probe web" | "probe scripts" | "probe auth" | "probe pairs" => {
+        "fuzz" | "amplify" | "scale" | "probe values" | "probe times" | "probe web" | "probe records" | "probe scripts" | "probe auth" | "probe pairs" => {
             if path == "fuzz" {
                 if !findings.is_empty() {
                     n.push("appfuzz findings --min warn".into());

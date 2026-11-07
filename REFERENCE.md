@@ -940,6 +940,37 @@ something, means some rows never count.
 is a warn when rows go unused and either holds, else info: an aggregate such as
 a total needs every row. Confirmation scales again from the shrunk run.
 
+### Records per response
+
+`[limits] records_per_response = 100` is the most records of one collection a
+response may carry; `max_per_response` on a `[datasets.NAME]` sets it for that
+collection. A platform file may set either; an app's manifest may only lower them.
+
+`probe records`, part of `review`, gives each collection the app reads one record
+more than the limit and twice the limit, marks every record, and counts the
+records that leave in one request: in the response, in the logs, and in calls
+that send data away (`effect = "external"` and outgoing HTTP). It starts from
+the request and the pages it links to. Where the limit holds, it asks for more:
+each number in the request, and `limit`, `count`, `size`, `per_page`,
+`page_size`, `max`, `n`, `top`, `take` and `rows` in the query, the form or the
+URL, at twice the limit and at 1,000,000.
+
+More records than the limit in one place is `mass_disclosure` (fail). Without
+a limit, a collection gets 1,024 records; a request that puts every one of them
+in one place is a warn when the collection's results hold `pii` or `secret`
+data, else info. `bounds[]` lists, per collection, `cap`, `total` and `most`:
+the most records one run put into each place.
+
+A collection is a dataset the app queries, as a list or page by page (not with
+`one`), or a host function returning a list without a dataset. A record is
+marked in its text fields: not its key, owner or references, not a field a
+query filters or sorts on, and not a field held to a format, a set or a length.
+A text key counts as a mark too. A dataset without either is listed under
+`not_counted`. Marks survive escaping and case, not encoding or hashing.
+The mark is a dataset edit, `{"tag": {"dataset": "customers", "fields": ["name"]}}`,
+so a counted run replays like any run, and confirmation shrinks the collection
+to one record over the limit.
+
 ## Page scripts (`probe scripts`)
 
 When an export's output is labelled `html:scripts`, appfuzz also runs the

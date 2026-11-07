@@ -26,6 +26,20 @@
   changes or deletes a record whose dataset `owner` is not the caller is a
   fail. Creates and functions declared `shared = true` are not checked.
 
+**Records per response**
+
+- `[limits] records_per_response` (and `max_per_response` per dataset)
+  says how many records one response may carry.
+- New `probe records`, part of `review`: gives each collection one record
+  more than the limit and twice the limit, marks every record and counts
+  how many leave in the response, the logs and calls that send data away.
+  Request fields such as `?limit=` then ask for 1,000,000.
+- New finding `mass_disclosure`: more records than the limit in one
+  place (fail). Without a limit, a request that sends out all 1,024
+  records is a warn when they hold `pii` or `secret` data, else info.
+- New dataset edit `tag`: marks each record's text fields with a token
+  made from its key.
+
 **Pagination**
 
 - New finding `broken_pagination` (fail): rows between two pages the app

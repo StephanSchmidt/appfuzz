@@ -300,6 +300,12 @@ pub fn merge(host: &HostManifest, mut app: Manifest, app_toml: &toml::Table) -> 
         }
         limits.max_latency_ms = Some(v);
     }
+    if let Some(v) = a.records_per_response {
+        if h.records_per_response.is_some_and(|h| v > h) {
+            return Err(weaker("limits.records_per_response".into(), v.to_string(), h.records_per_response.unwrap_or(0).to_string()));
+        }
+        limits.records_per_response = Some(v);
+    }
     for k in ["default_cost", "default_host_latency_ms", "ns_per_fuel"] {
         if set("limits", k) {
             return Err(owned(format!("limits.{k}")));

@@ -266,6 +266,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
     let baseline = step("run", Cmd::Run(RunArgs { export: o.export.clone(), legacy_export: None, trace: false, spec: o.spec.clone() }));
     let executable = baseline.as_ref().is_some_and(|v| !matches!(v["outcome"]["kind"].as_str(), None | Some("error" | "plan_error")));
     let mut fuzz = None;
+    let mut records = None;
     let mut sequence_findings = Vec::new();
     let mut acceptance_results = Value::Null;
     if executable {
@@ -288,6 +289,7 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
         step("probe values", Cmd::Probe { cmd: ProbeCmd::Values { func: None, export: o.export.clone(), spec: o.spec.clone() } });
         step("probe times", Cmd::Probe { cmd: ProbeCmd::Times { export: o.export.clone(), spec: o.spec.clone() } });
         step("probe web", Cmd::Probe { cmd: ProbeCmd::Web { export: o.export.clone(), spec: o.spec.clone() } });
+        records = step("probe records", Cmd::Probe { cmd: ProbeCmd::Records { export: o.export.clone(), spec: o.spec.clone() } });
         step("amplify", Cmd::Amplify { func: None, dict: 200, export: o.export.clone(), spec: o.spec.clone() });
         fuzz = step(
             "fuzz",
@@ -489,7 +491,9 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
             "corpus": fuzz.as_ref().map(|v| &v["corpus"]), "static_call_sites": unexplored.as_ref().map(|v| &v["static_sites"]),
             "unreached_call_sites": unexplored.as_ref().map(|v| &v["unreached"]), "instruction_branch_coverage": false},
         "not_exercised": {"sink_checks": !app.manifest.has_sinks(), "identity_checks": !appfuzz_core::identity::declared(&app.manifest),
-            "output_policy": !app.manifest.has_output_labels(), "request_sequences": app.manifest.sequences.is_empty(), "acceptance_suite":app.manifest.acceptance.is_none()},
+            "output_policy": !app.manifest.has_output_labels(), "request_sequences": app.manifest.sequences.is_empty(), "acceptance_suite":app.manifest.acceptance.is_none(),
+            "record_limit": app.manifest.limits.records_per_response.is_none() && app.manifest.datasets.values().all(|d| d.max_per_response.is_none())},
+        "records": records.as_ref().map(|v| json!({"bounds": v["bounds"], "not_counted": v["not_counted"]})),
         "acceptance":acceptance_results,
         "domains": urls.map(|v| v["domains"].clone()), "steps": steps, "errors": errors,
         "budget": {"fuzz_time": o.time, "fuzz_runs": o.runs, "sequence_evaluations_per_scenario": o.runs.unwrap_or(100).min(100), "acceptance_evaluations_per_check":o.runs.unwrap_or(100).min(100), "scope": "fuzz phase; acceptance checks, sequences, probes, scaling and confirmation are additional"},

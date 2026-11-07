@@ -440,6 +440,19 @@ pub(crate) enum ProbeCmd {
         #[command(flatten)]
         spec: SpecArgs,
     },
+    /// How many records of a host collection one request sends out.
+    ///
+    /// Gives each collection the app reads one more record than the
+    /// platform's limit per response (`[limits] records_per_response`)
+    /// and twice as many, each record marked, and counts the marks in the
+    /// response, the logs and calls that send data out. Request fields
+    /// such as `limit` then ask for more.
+    Records {
+        #[arg(long)]
+        export: Option<String>,
+        #[command(flatten)]
+        spec: SpecArgs,
+    },
     /// Requests from another website and naming another host (HTTP).
     ///
     /// Catches CORS headers that let any site read the response with the

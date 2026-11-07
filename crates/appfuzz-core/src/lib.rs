@@ -34,6 +34,7 @@ pub mod payload;
 pub mod plan;
 pub mod probe;
 pub mod record;
+pub mod records;
 pub mod scale;
 pub mod shrink;
 pub mod spin;

@@ -198,6 +198,8 @@ struct Host {
     seed: u64,
     /// The caller's id for generated `identity` and `owner` values.
     identity: String,
+    /// The records this run marked, counted in calls that send data out.
+    records: Option<Arc<crate::records::Counter>>,
     clock: VirtualClock,
     timers: p2::Timers,
     fuel_start: u64,
@@ -831,7 +833,11 @@ impl App {
             Some(s) => s,
             None => Arc::new(Mutex::new(self.initial_state(&spec.plan, spec.seed)?)),
         };
-        let identity = crate::identity::caller(spec, &self.manifest, &world.lock().unwrap_or_else(|e| e.into_inner()).tables);
+        let (identity, records) = {
+            let tables = &world.lock().unwrap_or_else(|e| e.into_inner()).tables;
+            let records = crate::records::marks(spec, &self.manifest).then(|| crate::records::Counter::new(spec, &self.manifest, tables)).flatten();
+            (crate::identity::caller(spec, &self.manifest, tables), records.map(Arc::new))
+        };
         let host = Host {
             ctx,
             p1,
@@ -840,6 +846,7 @@ impl App {
             modules: Vec::new(),
             plan: Arc::new(spec.plan.clone()),
             identity,
+            records,
             world,
             seed: spec.seed,
             clock: clock.clone(),
@@ -1311,6 +1318,7 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
         t
     });
 
+    let records = data.records.as_ref().filter(|c| c.watches(key)).map(|c| c.count_call(&args)).unwrap_or_default();
     let mut event = HostCall {
         n: data.events.len() as u32 + 1,
         func: key.to_string(),
@@ -1321,6 +1329,7 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
         result_items: None,
         result_bytes: 0,
         commit: None,
+        records,
         trap: None,
         source: resolved.source.clone(),
         granted: platform.granted.get(key).copied().unwrap_or(true),

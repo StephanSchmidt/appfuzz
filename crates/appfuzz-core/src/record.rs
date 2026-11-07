@@ -126,6 +126,10 @@ pub struct HostCall {
     /// took effect: the rows a modeled mutation changed, none for others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<Commit>,
+    /// Marked records (`records::Counter`) in the arguments of a call that
+    /// sends them out, per collection, counted before long strings are cut.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub records: std::collections::BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trap: Option<String>,
     /// Which part of the plan decided (`rule 0`, `generated`, …).

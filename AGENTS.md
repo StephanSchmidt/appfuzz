@@ -48,6 +48,7 @@ fuel = 2_000_000_000
 memory = "64MiB"
 cost_per_request = 100       # host call cost units per request
 max_latency_ms = 200         # virtual time
+records_per_response = 100   # records of one collection per response
 
 [functions."acme:web/items#get"]
 latency_ms = 4.0             # virtual latency of one call
@@ -79,7 +80,7 @@ the app's world, and each WIT export is one export to review with
 2. **`run`**: one request. Does it work at all? Read `result`, `calls`,
    `totals`.
 3. **`review --time 2m`**: everything in one go. It runs the manifest's
-   request sequences, probe values, times and web, amplify, a fuzz
+   request sequences, probe values, times, web and records, amplify, a fuzz
    campaign, probe auth, probe scripts (for pages whose scripts may run)
    and the saved acceptance checks, then confirms the
    worst findings. `--time` is the fuzzing budget, 60s without it. The
@@ -271,6 +272,7 @@ parameter or path it doesn't have, is an error.
 | "the page's JavaScript is the problem: DOM XSS, `eval`, a beacon with the cookie, a redirect next week, a miner" | `probe scripts` |
 | "it lets in any token", "it never checks the JWT's signature", "the token compare leaks timing", "session ids are guessable" | `probe auth` |
 | "it can't handle odd host values" | `probe values --fn X` |
+| "it can dump the whole customer table", "`?limit=1000000` gets everything" | `[limits] records_per_response`, then `probe records` |
 | "one user sees what another user has" | dataset `owner` and `public`, then `probe pairs <run>` |
 | "one user can change another user's records" | dataset `owner` and a `mutation` binding on the write; every run checks it |
 | "it misses rows when a page comes back short" | `probe pairs <run>` (pages of 1 and one less than asked, where `page.short = true`) |
@@ -313,6 +315,7 @@ and `confirm <id>` makes it reproducible.
 | `n_plus_1`, `input_amplification`, `nested_fan_out` | host calls grow with a host list or a request field (one loop, or a loop in a loop) |
 | `broken_pagination` | the app misses rows of a paged list: it moves on by the rows it asked for, not the ones it got, starts over before the last page, or answers differently when the platform returns shorter pages (where it may) |
 | `unbounded_read` | the app reads a whole host list while its answer stays the same size: every new row costs memory and time; fail when some rows never affect the answer, a paged query exists and a limit breaks by 10,000 rows |
+| `mass_disclosure` | one request sends more records of a collection than `records_per_response` allows, in the response, the logs or a call that sends data away; without a limit, all 1,024 records of a collection with `pii` or `secret` data (warn) (`probe records`) |
 | `cpu_blowup`, `memory_blowup`, `output_amplification`, `payload_amplification` | superlinear growth of fuel, memory, output or host arguments |
 | `redundant_calls`, `chatty`, `retry_storm`, `serial_chain`, `host_call_in_loop` | wasteful call patterns |
 | `big_output`, `big_payload`, `busy_wait`, `sleeps` | too much output or host data; spinning on the clock |

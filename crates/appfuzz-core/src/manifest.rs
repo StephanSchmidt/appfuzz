@@ -224,6 +224,10 @@ pub struct Limits {
     /// A call taking longer than this (virtual time) is slow.
     #[serde(default)]
     pub max_latency_ms: Option<f64>,
+    /// The most records of one host collection a response, the logs or
+    /// the calls that send data out may carry (`mass_disclosure`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records_per_response: Option<u64>,
     /// Virtual latency of a host call without its own setting.
     #[serde(default = "default_host_latency")]
     pub default_host_latency_ms: f64,
@@ -243,6 +247,7 @@ impl Default for Limits {
             cost_per_request: None,
             default_cost: default_cost(),
             max_latency_ms: None,
+            records_per_response: None,
             default_host_latency_ms: default_host_latency(),
             ns_per_fuel: default_ns_per_fuel(),
             wall_timeout_ms: default_wall_timeout(),
@@ -440,7 +445,7 @@ impl Manifest {
             }
         }
         let mut h = blake3::Hasher::new();
-        h.update(b"appfuzz-execution-v63");
+        h.update(b"appfuzz-execution-v64");
         h.update(crate::extism::KERNEL_BYTES);
         h.update(browser);
         h.update(env!("CARGO_PKG_VERSION").as_bytes());

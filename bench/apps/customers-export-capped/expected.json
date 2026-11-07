@@ -1,0 +1,6 @@
+{
+  "app": "customers-export-capped",
+  "bug": "lists the first 100 customers and says more exist",
+  "expect": [],
+  "allow": []
+}

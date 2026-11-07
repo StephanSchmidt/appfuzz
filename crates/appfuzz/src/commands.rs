@@ -289,6 +289,20 @@ pub(super) fn run_with_app(cli: Cli, existing: Option<&App>) -> Result<Value> {
                 .collect();
             Ok(json!({"probes": probes.len(), "not_ok": failed, "findings": record_findings(&cli, app, found)?}))
         }
+        Cmd::Probe { cmd: ProbeCmd::Records { export, spec } } => {
+            let app = load()?;
+            let base = build_spec(app, export.as_deref(), spec)?;
+            let recorder = Recorder::new(app, &store);
+            let runner = |s: &RunSpec| recorder.cached(s);
+            let probe = appfuzz_core::records::probe(app, &base, &runner);
+            recorder.check()?;
+            let mut out = json!({"runs": probe.runs, "bounds": probe.bounds, "not_counted": probe.not_counted});
+            if probe.runs == 0 {
+                out["note"] = json!("no host collection to count: the app imports no function that returns a list");
+            }
+            out["findings"] = record_findings(&cli, app, probe.findings)?;
+            Ok(out)
+        }
         Cmd::Probe { cmd: ProbeCmd::Web { export, spec } } => {
             let app = load()?;
             let base = build_spec(app, export.as_deref(), spec)?;

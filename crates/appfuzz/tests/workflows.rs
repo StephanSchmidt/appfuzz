@@ -2013,6 +2013,76 @@ mutation = { dataset = "deals", operation = "update", filter = { id = "id", owne
     assert!(changes(&f).is_empty());
 }
 
+/// An app that returns as many customers as its request asks for; `capped`
+/// also stops at 3.
+fn customer_list_fixture(f: &Fixture, capped: bool) {
+    let wit = "package test:workflow; interface db { record customer { id: u32, name: string } all: func() -> list<customer>; } world app { import db; use db.{customer}; export run: func(limit: u32) -> list<customer>; }";
+    let cap = if capped { "(if (i32.gt_u (local.get $n) (i32.const 3)) (then (local.set $n (i32.const 3))))" } else { "" };
+    let wat = r#"(module
+      (import "test:workflow/db" "all" (func $all (param i32)))
+      (memory (export "memory") 2)
+      (global $heap (mut i32) (i32.const 1024))
+      (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32)
+        (local $p i32) (local.set $p (global.get $heap))
+        (global.set $heap (i32.add (global.get $heap) (local.get 3))) (local.get $p))
+      (func (export "run") (param $limit i32) (result i32) (local $n i32)
+        (call $all (i32.const 16))
+        (local.set $n (i32.load (i32.const 20)))
+        (if (i32.lt_u (local.get $limit) (local.get $n)) (then (local.set $n (local.get $limit))))
+        CAP
+        (i32.store (i32.const 20) (local.get $n))
+        (i32.const 16)))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, &wat.replace("CAP", cap))).unwrap();
+}
+
+#[test]
+fn a_request_that_lifts_the_record_limit_is_mass_disclosure() {
+    let f = Fixture::new(false);
+    let manifest = r#"
+[app]
+wasm = "app.wasm"
+[entry]
+export = "run"
+request = 2
+[limits]
+records_per_response = 3
+[datasets.customers]
+rows = 5
+key = "id"
+template = { id = 1, name = "Customer" }
+[functions."test:workflow/db#all"]
+query = { dataset = "customers" }
+"#;
+    std::fs::write(&f.manifest, manifest).unwrap();
+    customer_list_fixture(&f, false);
+    // Ordinary runs mark nothing and count nothing.
+    let (_, r) = f.cli(&["run", "--args", "[1000]"]);
+    assert!(r["findings"].as_array().unwrap().iter().all(|x| x["kind"] != "mass_disclosure"), "{r}");
+    let (code, probe) = f.cli(&["probe", "records"]);
+    assert_eq!(code, 0, "{probe}");
+    assert_eq!(probe["bounds"][0]["source"], "customers", "{probe}");
+    assert_eq!(probe["bounds"][0]["most"]["the response"], 6, "{probe}");
+    let found: Vec<&Value> = probe["findings"].as_array().unwrap().iter().filter(|x| x["kind"] == "mass_disclosure").collect();
+    assert_eq!(found.len(), 1, "{probe}");
+    assert_eq!(found[0]["severity"], "fail");
+    assert_eq!(found[0]["title"], "run puts 6 of 6 customers records into the response; the platform allows 3 per response");
+    // Confirming shrinks to one record more than the limit.
+    let (code, confirmed) = f.cli(&["confirm", found[0]["id"].as_str().unwrap(), "--max-runs", "200"]);
+    assert_eq!((code, &confirmed["confirmed"]), (0, &json!(true)), "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let saved: Value = serde_json::from_slice(&std::fs::read(case).unwrap()).unwrap();
+    assert_eq!(saved["spec"]["plan"]["_defaults"]["dataset_rows"]["customers"], 4, "{saved}");
+    let (code, v) = f.cli(&["replay", case]);
+    assert_eq!((code, &v["reproduced"]), (0, &json!(true)), "{v}");
+    // The fixed build stops at the limit, whatever the request asks.
+    customer_list_fixture(&f, true);
+    let (code, probe) = f.cli(&["probe", "records"]);
+    assert_eq!(code, 0, "{probe}");
+    assert_eq!(probe["bounds"][0]["most"]["the response"], 3, "{probe}");
+    let (code, v) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!((code, &v["reproduced"]), (0, &json!(false)), "{v}");
+}
+
 #[test]
 fn plans_edit_the_world_and_paged_queries_answer_a_page_at_a_time() {
     let f = Fixture::new(false);

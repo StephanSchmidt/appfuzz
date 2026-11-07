@@ -183,8 +183,11 @@ Details: [REFERENCE.md](REFERENCE.md#review-budgets-and-exit-codes).
   or personal data.
 - **Output rules:** with output labels, scripts in markup that must have
   none, widgets that call routes by themselves, open redirects.
-- **Access:** with identity labels, user ids taken from the request and
-  other users' records shown in a page.
+- **Access:** with identity labels, user ids taken from the request, and
+  other users' records shown in a page or changed.
+- **Mass leaks:** with a limit per response, an export or a `?limit=1000000`
+  that sends more records than the platform allows, in the page, the logs
+  or an email.
 - **Writes:** with effect labels, changes on GET requests, the same write
   twice, retried writes, one write per row, and a write that stays when a
   later one fails.
@@ -251,6 +254,7 @@ imports = ["acme:web/items", "acme:web/store"]
 memory = "64MiB"
 cost_per_request = 100       # host call cost units per request
 max_latency_ms = 200
+records_per_response = 100   # records of one collection per response
 ```
 
 **Host plans** script realistic backend data when you need it:

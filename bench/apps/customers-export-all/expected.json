@@ -1,0 +1,11 @@
+{
+  "app": "customers-export-all",
+  "bug": "lists every customer on one page, past the platform's 100 per response",
+  "expect": [
+    {
+      "kind": "mass_disclosure",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

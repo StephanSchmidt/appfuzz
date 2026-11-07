@@ -23,6 +23,10 @@ pub struct Dataset {
     /// Fields anyone may see, also in other users' records.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub public: Vec<String>,
+    /// The most of these records one response may carry, in place of
+    /// `[limits] records_per_response`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_response: Option<u64>,
 }
 fn default_rows() -> usize {
     4
@@ -175,11 +179,19 @@ pub enum Edit {
         #[serde(default, skip_serializing_if = "Map::is_empty")]
         set: Map<String, Value>,
     },
+    /// Mark each record, so that its records can be counted where they
+    /// show: these text fields get a token made from the record's key
+    /// (`records::token`). Without fields, string keys are counted.
+    Tag {
+        dataset: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<String>,
+    },
 }
 impl Edit {
     pub fn dataset(&self) -> &str {
         match self {
-            Edit::Drop { dataset, .. } | Edit::Rotate { dataset, .. } | Edit::Add { dataset, .. } => dataset,
+            Edit::Drop { dataset, .. } | Edit::Rotate { dataset, .. } | Edit::Add { dataset, .. } | Edit::Tag { dataset, .. } => dataset,
         }
     }
 }
@@ -192,7 +204,7 @@ pub fn apply(defs: &BTreeMap<String, Dataset>, state: &mut State, edits: &[Edit]
         let name = edit.dataset();
         let d = defs.get(name).with_context(|| format!("dataset edit names the unknown dataset {name}"))?;
         let fields: Vec<&String> = match edit {
-            Edit::Rotate { fields, .. } => fields.iter().collect(),
+            Edit::Rotate { fields, .. } | Edit::Tag { fields, .. } => fields.iter().collect(),
             Edit::Add { set, .. } => set.keys().collect(),
             Edit::Drop { .. } => vec![],
         };
@@ -243,6 +255,16 @@ pub fn apply(defs: &BTreeMap<String, Dataset>, state: &mut State, edits: &[Edit]
                     }
                     row.extend(set.clone());
                     rows.push(Value::Object(row));
+                }
+            }
+            Edit::Tag { fields, .. } => {
+                for row in rows.iter_mut() {
+                    let token = crate::records::token(name, &crate::labels::id_text(&row[&d.key]));
+                    for f in fields {
+                        if let Some(v) = row.get_mut(f.as_str()).filter(|v| v.is_string()) {
+                            crate::records::mark(v, &token);
+                        }
+                    }
                 }
             }
         }

@@ -1,0 +1,6 @@
+{
+  "app": "customers-count-capped",
+  "bug": "counts every customer and shows only the number",
+  "expect": [],
+  "allow": []
+}

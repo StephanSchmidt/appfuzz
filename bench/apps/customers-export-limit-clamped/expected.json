@@ -1,0 +1,6 @@
+{
+  "app": "customers-export-limit-clamped",
+  "bug": "lists as many customers as ?limit= asks for, at most 100",
+  "expect": [],
+  "allow": []
+}

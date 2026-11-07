@@ -19,9 +19,9 @@ ITEMS, STORE, MAIL = "bench:web/items", "bench:web/store", "bench:web/mail"
 APPS = []
 
 
-def app(name, what, code, expect, allow=(), grants=(ITEMS,), extra="", fuel="200_000_000", pending=None, entry="", base=None, hosts=()):
+def app(name, what, code, expect, allow=(), grants=(ITEMS,), extra="", fuel="200_000_000", pending=None, entry="", base=None, hosts=(), limits=""):
     APPS.append(dict(name=name, what=what, code=code, expect=expect, allow=list(allow), grants=list(grants), extra=extra, fuel=fuel, pending=pending, entry=entry,
-                     base=base, hosts=list(hosts)))
+                     base=base, hosts=list(hosts), limits=limits))
 
 
 def handler(body, prelude="prelude.rs"):
@@ -1059,6 +1059,68 @@ app("export-follows-pages", "exports customers page by page until the platform s
         html(out + "</ul>")
     """), [], grants=[CUSTOMERS], extra=DATA)
 
+# --- Records per response ----------------------------------------------------
+# The platform lets one response carry at most 100 customers.
+
+CAPPED = "records_per_response = 100\n"
+
+
+def walk(want, tail=""):
+    """Lists customers page by page until `want` are shown."""
+    return data(f"""
+        let want: usize = {want};
+        let mut out = String::from("<ul>");
+        let mut shown = 0;
+        let mut cursor: Option<String> = None;
+        while shown < want {{
+            let Ok(page) = customers::after(cursor.as_deref(), 50) else {{
+                return Response {{ status: 503, body: "<p>Try again later</p>".into(), headers: vec![("content-type".into(), "text/html".into())] }};
+            }};
+            for c in page.items.iter().take(want - shown) {{
+                out += &format!("<li>{{}}: {{}}</li>", esc(&c.name), c.balance);
+                shown += 1;
+            }}
+            match page.next {{
+                Some(next) => cursor = Some(next),
+                None => break,
+            }}
+        }}
+        out += "</ul>";{tail}
+        html(out)
+    """)
+
+
+app("customers-export-all", "lists every customer on one page, past the platform's 100 per response",
+    walk("{ let _ = &req; usize::MAX }"), [("mass_disclosure", "fail")], grants=[CUSTOMERS], extra=DATA, limits=CAPPED)
+
+app("customers-export-limit-param", "lists as many customers as ?limit= asks for",
+    walk('param(&req.query, "limit").and_then(|v| v.parse().ok()).unwrap_or(50)'), [("mass_disclosure", "fail")], grants=[CUSTOMERS], extra=DATA,
+    limits=CAPPED)
+
+app("customers-export-capped", "lists the first 100 customers and says more exist",
+    walk("{ let _ = &req; 100 }", tail='\n        out += "<p>Showing the first 100 customers.</p>";'), [], grants=[CUSTOMERS], extra=DATA, limits=CAPPED)
+
+app("customers-export-limit-clamped", "lists as many customers as ?limit= asks for, at most 100",
+    walk('param(&req.query, "limit").and_then(|v| v.parse().ok()).unwrap_or(50).min(100)'), [], grants=[CUSTOMERS], extra=DATA, limits=CAPPED)
+
+app("customers-count-capped", "counts every customer and shows only the number",
+    data("""
+        let _ = &req;
+        let mut n = 0;
+        let mut cursor: Option<String> = None;
+        loop {
+            let Ok(page) = customers::after(cursor.as_deref(), 50) else {
+                return Response { status: 503, body: "<p>Try again later</p>".into(), headers: vec![("content-type".into(), "text/html".into())] };
+            };
+            n += page.items.len();
+            match page.next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        html(format!("<p>{n} customers</p>"))
+    """), [], grants=[CUSTOMERS], extra=DATA, limits=CAPPED)
+
 # --- Records of other users -----------------------------------------------
 # Deals and slots belong to users; anyone may see when a slot is booked.
 
@@ -1183,7 +1245,7 @@ fuel = {fuel}
 memory = "64MiB"
 cost_per_request = 100
 max_latency_ms = 200
-{extra}"""
+{limits}{extra}"""
 
 CARGO = """\
 [package]
@@ -1210,7 +1272,7 @@ def main():
         with open(os.path.join(d, "src", "lib.rs"), "w") as f:
             f.write(f"//! Bench app `{a['name']}`: {a['what']}.\n\n" + a["code"])
         with open(os.path.join(d, "appfuzz.toml"), "w") as f:
-            f.write(MANIFEST.format(name=a["name"], what=a["what"], crate=crate, fuel=a["fuel"], extra=a["extra"], entry=a["entry"],
+            f.write(MANIFEST.format(name=a["name"], what=a["what"], crate=crate, fuel=a["fuel"], extra=a["extra"], entry=a["entry"], limits=a["limits"],
                                     base=f'base = "{a["base"]}"\n' if a["base"] else "",
                                     hosts="hosts = [" + ", ".join(f'"{h}"' for h in a["hosts"]) + "]\n" if a["hosts"] else "",
                                     grants=", ".join(f'"{g}"' for g in a["grants"])))
