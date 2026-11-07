@@ -3,7 +3,7 @@
   "private": true,
   "description": "The DOM and Web APIs the browser guest gives a page's scripts, bundled into one script.",
   "scripts": {
-    "build": "esbuild src/shim.js --bundle --inject:./src/weak-map.js --format=iife --target=es2023 --minify --legal-comments=none --alias:htmlparser2=./src/alias/htmlparser2.js --alias:cssomnom/parse=./src/alias/cssom.js --outfile=dist/shim.js"
+    "build": "node build.mjs"
   },
   "dependencies": {
     "linkedom": "0.18.15",

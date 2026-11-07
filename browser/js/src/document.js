@@ -3,22 +3,19 @@
 // namespaces and inert template contents must keep their parsed meaning.
 import { DOMParser } from 'linkedom';
 import { parse, parseFragment, defaultTreeAdapter } from 'parse5';
-import { HTMLDocument } from '../node_modules/linkedom/esm/html/document.js';
 import { Document } from '../node_modules/linkedom/esm/interface/document.js';
 import { Element } from '../node_modules/linkedom/esm/interface/element.js';
 import { NEXT, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
-import { installName, nameIdentity } from './names.js';
+import { nameIdentity } from './names.js';
+import { createBareElement } from './creation.js';
 import { rememberScript } from './script-state.js';
 import { templateContent } from './templates.js';
-import { rememberDocumentMode } from './document-state.js';
+import { rememberDocumentScripting, rememberDocumentMode } from './document-state.js';
 export { documentMode, rememberDocumentMode } from './document-state.js';
 
 const nativeParse = DOMParser.prototype.parseFromString;
 const HTML = 'http://www.w3.org/1999/xhtml';
 const SVG = 'http://www.w3.org/2000/svg';
-const createHTML = HTMLDocument.prototype.createElement;
-const createXML = Document.prototype.createElement;
-const createNS = Document.prototype.createElementNS;
 const text = Document.prototype.createTextNode;
 const comment = Document.prototype.createComment;
 const doctype = Document.prototype.createDocumentType;
@@ -26,11 +23,11 @@ const fragment = Document.prototype.createDocumentFragment;
 const insert = Object.getPrototypeOf(Element.prototype).insertBefore;
 const setAttribute = Element.prototype.setAttribute;
 const setAttributeNS = Element.prototype.setAttributeNS;
-const isHTMLDocument = Object.prototype.isPrototypeOf.bind(HTMLDocument.prototype);
 
 export function parseHTML(markup, scriptingEnabled) {
   const tree = parse(String(markup), { scriptingEnabled });
   const doc = nativeParse.call(new DOMParser(), '', 'text/html');
+  rememberDocumentScripting(doc, scriptingEnabled);
   appendTree(doc, doc, tree.childNodes, !scriptingEnabled);
   const mode = tree.mode === 'quirks' ? 'BackCompat' : 'CSS1Compat';
   rememberDocumentMode(doc, mode);
@@ -41,7 +38,7 @@ export function parseHTML(markup, scriptingEnabled) {
   return doc;
 }
 
-function appendTree(doc, target, nodes, inertScripts, svg = null) {
+function appendTree(doc, target, nodes, inertScripts, svg = null, elements = []) {
   const stack = [];
   const children = (parent, nodes, svg = null, owner = doc) => {
     for (let i = nodes.length - 1; i >= 0; i--) stack.push([parent, nodes[i], svg, owner]);
@@ -56,9 +53,8 @@ function appendTree(doc, target, nodes, inertScripts, svg = null) {
       case '#documentType': node = doctype.call(owner, source.name, source.publicId, source.systemId); break;
       default: {
         const is = source.attrs.find(attr => attr.name === 'is' && !attr.namespace)?.value;
-        node = source.namespaceURI === SVG ? createNS.call(owner, SVG, source.tagName)
-          : (source.namespaceURI === HTML ? createHTML : createXML).call(owner, source.tagName, is == null ? undefined : { is });
-        installName(node, { namespace: source.namespaceURI, prefix: null, local: source.tagName, qualified: source.tagName }, isHTMLDocument);
+        node = createBareElement(owner, { namespace: source.namespaceURI, prefix: null, local: source.tagName, qualified: source.tagName }, is ?? null);
+        elements.push(node);
         if (source.tagName === 'script') rememberScript(node, { namespace: source.namespaceURI, local: source.tagName }, inertScripts);
         if (source.namespaceURI === SVG) node.ownerSVGElement = svg;
         for (const attr of source.attrs) {
@@ -74,6 +70,10 @@ function appendTree(doc, target, nodes, inertScripts, svg = null) {
     insert.call(parent, node);
   }
 }
+
+const fragments = new WeakMap();
+const saveFragment = fragments.set.bind(fragments);
+export const fragmentElements = fragments.get.bind(fragments);
 
 // Each copied script gets its parser state explicitly. API calls made by
 // custom-element constructors during this work are ordinary fresh scripts.
@@ -97,6 +97,8 @@ export function parseHTMLFragment(markup, context, doc, inertScripts = true) {
   }
   const tree = parseFragment(context, String(markup), { scriptingEnabled: true });
   const result = fragment.call(doc);
-  appendTree(doc, result, tree.childNodes, inertScripts, svg);
+  const elements = [];
+  appendTree(doc, result, tree.childNodes, inertScripts, svg, elements);
+  saveFragment(result, elements);
   return result;
 }

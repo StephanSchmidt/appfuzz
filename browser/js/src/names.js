@@ -21,6 +21,8 @@ define(asciiLower, {
   exec: { value: exec }, global: { value: true }, unicode: { value: false }, unicodeSets: { value: false },
 });
 
+export const validElementLocalName = name => apply(exec, elementName, [name]) !== null;
+
 function domString(value) {
   if (typeof value === 'symbol') throw new TypeErrorClass('A Symbol cannot be converted to a DOMString');
   return toString(value);

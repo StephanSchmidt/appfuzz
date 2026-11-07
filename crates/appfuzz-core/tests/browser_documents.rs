@@ -1505,3 +1505,288 @@ fn failed_import_constructors_do_not_throw_from_import_or_cancel_later_child_upg
     assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report}");
     assert_eq!(report["errors"][0]["message"], "import failed");
 }
+
+#[test]
+fn changing_or_removing_is_does_not_change_the_definition_used_by_clones_and_imports() {
+    let (_, report) = visit(
+        r#"<script>
+    class A extends HTMLButtonElement{}class B extends HTMLButtonElement{}
+    customElements.define('x-a',A,{extends:'button'});customElements.define('x-b',B,{extends:'button'});
+    const source=document.createElement('button',{is:'x-a'});source.setAttribute('is','x-b');
+    const copy=source.cloneNode(true);console.log(copy instanceof A,copy instanceof B,copy.getAttribute('is'));
+    source.removeAttribute('is');const removed=document.importNode(source);console.log(removed instanceof A,removed.getAttribute('is'));
+    const other=new DOMParser().parseFromString('','text/html'),foreign=other.createElement('button',{is:'x-a'});foreign.setAttribute('is','x-b');const imported=document.importNode(foreign);console.log(imported instanceof A,imported instanceof B,imported.getAttribute('is'));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["true false x-b", "true null", "true false x-b"]);
+}
+
+#[test]
+fn adding_an_is_attribute_does_not_create_a_customized_builtin() {
+    let (_, report) = visit(
+        r#"<script>
+    let count=0;class A extends HTMLButtonElement{constructor(){super();count++;}}
+    const fake=document.createElement('button');fake.setAttribute('is','x-a');document.body.append(fake);customElements.define('x-a',A,{extends:'button'});
+    const copy=fake.cloneNode(true),imported=document.importNode(fake);customElements.upgrade(fake);console.log(count,fake instanceof A,copy instanceof A,imported instanceof A);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "0 false false false");
+}
+
+#[test]
+fn unknown_customized_builtins_keep_their_builtin_interface_without_a_registry_definition() {
+    let (_, report) = visit(
+        r#"<script>
+    const other=new DOMParser().parseFromString('','text/html'),button=other.createElement('button',{is:'x-later'}),script=other.createElement('script',{is:'x-script'});
+    console.log(button instanceof HTMLButtonElement,script instanceof HTMLScriptElement,button.getAttribute('is'),script.getAttribute('is'));
+    const t=document.createElement('template');t.innerHTML='<button is=x-later></button><script is=x-script></'+'script>';console.log(t.content.firstChild instanceof HTMLButtonElement,t.content.lastChild instanceof HTMLScriptElement);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["true true null null", "true true"]);
+}
+
+#[test]
+fn registered_script_constructors_register_script_identity_before_the_constructor_body() {
+    let (r, report) = visit(
+        r#"<script>
+    class CustomScript extends HTMLScriptElement{constructor(){super();this.text='console.log("executed");fetch("/direct-script");';document.body.append(this);console.log('constructor-after');}}
+    customElements.define('x-script',CustomScript,{extends:'script'});const s=new CustomScript();console.log('returned',s instanceof HTMLScriptElement);document.body.append(s.cloneNode(true));
+    </script>"#,
+    );
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["/direct-script"]);
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["executed", "constructor-after", "returned true", "constructor-after"]);
+}
+
+#[test]
+fn customized_builtin_identity_is_not_a_reflected_attribute() {
+    let (_, report) = visit(
+        r#"<script>
+    class A extends HTMLButtonElement{constructor(){super();console.log('constructor',this.getAttribute('is'));}static observedAttributes=['is'];attributeChangedCallback(name,oldValue,value){console.log('attribute',name,oldValue,value);}}
+    customElements.define('x-a',A,{extends:'button'});const a=new A(),b=document.createElement('button',{is:'x-a'});console.log('attributes',a.getAttribute('is'),b.getAttribute('is'));a.setAttribute('is','changed');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["constructor null", "constructor null", "attributes null null", "attribute is null changed"]);
+}
+
+#[test]
+fn serializing_customized_builtins_preserves_creation_identity_without_construction_or_mutation() {
+    let (_, report) = visit(
+        r#"<script>
+    let count=0;class A extends HTMLScriptElement{constructor(){super();count++;}}
+    customElements.define('x-script',A,{extends:'script'});const s=new A();s.text='console.log("text");';const root=document.createElement('div');root.append(s);const observer=new MutationObserver(()=>{});observer.observe(s,{attributes:true,childList:true,subtree:true});
+    console.log(s.outerHTML,root.innerHTML,s.getAttribute('is'),count,observer.takeRecords().length);observer.disconnect();
+    </script>"#,
+    );
+    assert_eq!(
+        report["console"][0]["text"],
+        "<script is=\"x-script\">console.log(\"text\");</script> <script is=\"x-script\">console.log(\"text\");</script> null 1 0"
+    );
+}
+
+#[test]
+fn late_definitions_use_creation_identity_even_if_the_is_attribute_has_been_removed() {
+    let (_, report) = visit(
+        r#"<script>
+    const button=document.createElement('button',{is:'x-later'});button.removeAttribute('is');document.body.append(button);let count=0;
+    class A extends HTMLButtonElement{constructor(){super();count++;}}customElements.define('x-later',A,{extends:'button'});console.log(count,button instanceof A,button.getAttribute('is'));
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "1 true null");
+}
+
+#[test]
+fn custom_element_definitions_capture_callbacks_and_observed_attributes_once() {
+    let (_, report) = visit(
+        r#"<script>
+    const observed=['a'];let reads=0;
+    class Saved extends HTMLElement{static get observedAttributes(){reads++;return observed;}attributeChangedCallback(...a){console.log('saved',...a)}connectedCallback(){console.log('connected')}disconnectedCallback(){console.log('disconnected')}}
+    customElements.define('x-saved',Saved);observed.push('b');Saved.prototype.attributeChangedCallback=()=>console.log('replacement');Saved.prototype.connectedCallback=()=>console.log('replacement-connected');
+    const saved=document.createElement('x-saved');saved.attributeChangedCallback=()=>console.log('instance');saved.setAttribute('a','v');saved.setAttribute('a','v');saved.setAttribute('b','v');document.body.append(saved);saved.remove();console.log('reads',reads);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["saved a null v null", "saved a v v null", "connected", "disconnected", "reads 1"]);
+}
+
+#[test]
+fn recursive_construction_during_an_upgrade_cannot_reuse_the_element() {
+    let (_, report) = visit(
+        r#"<script>
+    let recurse=false;class Recursive extends HTMLElement{constructor(){super();if(recurse){recurse=false;try{new Recursive();}catch(e){console.log('recursive',e.name)}}}}
+    const candidate=document.createElement('x-recursive');document.body.append(candidate);recurse=true;customElements.define('x-recursive',Recursive);console.log('upgraded',candidate instanceof Recursive);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "recursive TypeError");
+    assert_eq!(report["console"][1]["text"], "upgraded true");
+}
+
+#[test]
+fn html_constructors_require_a_registered_class_and_the_matching_builtin_interface() {
+    let (_, report) = visit(
+        r#"<script>
+    class Wrong extends HTMLButtonElement{}customElements.define('x-wrong',Wrong);try{new Wrong()}catch(e){console.log('wrong',e.name)}
+    class Unregistered extends HTMLElement{}try{new Unregistered()}catch(e){console.log('unregistered',e.name)}
+    class Div extends HTMLDivElement{}customElements.define('x-div',Div,{extends:'div'});const div=new Div();console.log(div.localName,div instanceof HTMLDivElement);
+    class Col extends HTMLTableColElement{}customElements.define('x-col',Col,{extends:'col'});const col=document.createElement('col',{is:'x-col'});console.log(col.localName,col instanceof Col);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["wrong TypeError", "unregistered TypeError", "div true", "col true"]);
+}
+
+#[test]
+fn element_creation_options_convert_is_once_without_reflecting_an_attribute() {
+    let (_, report) = visit(
+        r#"<script>
+    let count=0;const getter={get is(){count++;return {toString(){count++;return 'x-unknown'}}}};const button=document.createElement('button',getter),script=document.createElementNS('http://www.w3.org/1999/xhtml','script',getter);console.log(count,button.getAttribute('is'),script.getAttribute('is'));console.log(document.createElement('div',5).localName);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "4 null null");
+    assert_eq!(report["console"][1]["text"], "div");
+}
+
+#[test]
+fn fragment_custom_element_constructors_see_the_completed_tree_before_attribute_reactions() {
+    let (_, report) = visit(
+        r#"<script>
+    class Parsed extends HTMLElement{constructor(){super();console.log('parsed',this.getAttribute('a'),this.childNodes.length,this.parentNode?.localName)}static observedAttributes=['a'];attributeChangedCallback(...a){console.log('attribute',...a)}}
+    customElements.define('x-parse',Parsed);const root=document.createElement('div');root.innerHTML='<x-parse a=v><span></span></x-parse>';console.log('after');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["parsed v 1 div", "attribute a null v null", "after"]);
+}
+
+#[test]
+fn registry_upgrade_includes_closed_shadows_but_excludes_templates_and_foreign_namespaces() {
+    let (_, report) = visit(
+        r#"<script>
+    const root=document.createElement('div'),shadow=root.attachShadow({mode:'closed'}),node=document.createElement('x-tree'),template=document.createElement('template');template.innerHTML='<x-tree></x-tree>';shadow.append(node,template);const foreign=document.createElementNS('urn:test','x-tree');root.append(foreign);let count=0;class Tree extends HTMLElement{constructor(){super();count++}}customElements.define('x-tree',Tree);customElements.upgrade(root);console.log(count,node instanceof Tree,template.content.firstChild instanceof Tree,foreign instanceof Tree);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "1 true false false");
+}
+
+#[test]
+fn reflected_builtin_attributes_deliver_custom_reactions_before_the_setter_returns() {
+    let (_, report) = visit(
+        r#"<script>
+    class Script extends HTMLScriptElement{static observedAttributes=['type'];attributeChangedCallback(...a){console.log('type',...a)}}customElements.define('x-script',Script,{extends:'script'});const script=new Script();script.type='text/plain';console.log('after');
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "type type null text/plain null");
+    assert_eq!(report["console"][1]["text"], "after");
+}
+
+#[test]
+fn registry_definitions_reject_unknown_builtins_and_reentrant_definition_without_poisoning_the_registry() {
+    let (_, report) = visit(
+        r#"<script>
+    for(const name of ['madeup','unknown','bgsound','x-other','annotation-xml']){try{customElements.define('x-test-'+name,class extends HTMLElement{},{extends:name})}catch(e){console.log(name,e.name)}}
+    let reads=0;class Reentrant extends HTMLElement{static get observedAttributes(){reads++;try{customElements.define('x-inner',class extends HTMLElement{})}catch(e){console.log('nested',e.name)}return ['a']}attributeChangedCallback(){}}
+    customElements.define('x-reentrant',Reentrant);console.log(reads,customElements.get('x-inner')===undefined,customElements.getName(Reentrant));customElements.define('x-inner',class extends HTMLElement{});console.log(!!customElements.get('x-inner'));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        logs,
+        [
+            "madeup NotSupportedError",
+            "unknown NotSupportedError",
+            "bgsound NotSupportedError",
+            "x-other NotSupportedError",
+            "annotation-xml NotSupportedError",
+            "nested NotSupportedError",
+            "1 true x-reentrant",
+            "true"
+        ]
+    );
+}
+
+#[test]
+fn html_serialization_escapes_attributes_and_foreign_text_without_calling_page_serializers() {
+    let (_, report) = visit(
+        r#"<script>
+    const root=document.createElement('div'),s=document.createElement('script');s.textContent='a < b && c > d';root.append(s);s.toString=()=>{console.log('page-serializer');return 'bad'};console.log(root.innerHTML);
+    const t=document.createElement('template');t.innerHTML='<div title="&lt;&gt;&amp;&quot;"><input disabled><textarea>&lt;&amp;&gt;</textarea><svg><script>a &lt; b</'+'script><path/></svg></div>';console.log(t.innerHTML);
+    const active=document.createElement('noscript');active.textContent='<b>&x';console.log(active.innerHTML);const inert=new DOMParser().parseFromString('','text/html'),ns=inert.createElement('noscript');ns.textContent='<b>&x';console.log(ns.innerHTML);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        logs,
+        [
+            "<script>a < b && c > d</script>",
+            "<div title=\"&lt;&gt;&amp;&quot;\"><input disabled=\"\"><textarea>&lt;&amp;&gt;</textarea><svg><script>a &lt; b</script><path></path></svg></div>",
+            "<b>&x",
+            "&lt;b&gt;&amp;x"
+        ]
+    );
+}
+
+#[test]
+fn registered_constructors_and_upgrades_do_not_read_a_public_constructor_property() {
+    let (_, report) = visit(
+        r#"<script>
+    let count=0;class A extends HTMLButtonElement{constructor(){super();count++;}}
+    customElements.define('x-a',A,{extends:'button'});Object.defineProperty(A.prototype,'constructor',{get(){throw Error('page constructor getter')}});
+    const a=new A(),b=document.createElement('button',{is:'x-a'}),c=b.cloneNode(true);console.log(count,a instanceof A,b instanceof A,c instanceof A);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "3 true true true");
+}
+
+#[test]
+fn invalid_create_element_constructors_return_a_failed_unknown_element_without_retrying() {
+    let (_, report) = visit_unchecked(
+        r#"<script>
+    let calls=0;class Bad extends HTMLElement{constructor(){super();calls++;this.setAttribute('invalid','yes')}}customElements.define('x-bad',Bad);const bad=document.createElement('x-bad');console.log(bad instanceof HTMLUnknownElement,bad instanceof Bad,bad.getAttribute('invalid'));document.body.append(bad);customElements.upgrade(bad);console.log(calls);
+    </script>"#,
+        json!({}),
+    );
+    assert_eq!(report["console"][0]["text"], "true false null");
+    assert_eq!(report["console"][1]["text"], "1");
+    assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["errors"][0]["name"], "NotSupportedError");
+}
+
+#[test]
+fn custom_element_names_follow_current_dom_rules_without_becoming_css_selectors() {
+    let (_, report) = visit(
+        r#"<script>
+    for(const name of ['x-!','x-a?','x-a:']){const node=document.createElement(name);document.body.append(node);class A extends HTMLElement{}customElements.define(name,A);console.log(name,node instanceof A,new A().localName)}
+    for(const name of ['x-A','x- a','annotation-xml']){try{customElements.define(name,class extends HTMLElement{})}catch(e){console.log(name,e.name)}}
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["x-! true x-!", "x-a? true x-a?", "x-a: true x-a:", "x-A SyntaxError", "x- a SyntaxError", "annotation-xml SyntaxError"]);
+}
+
+#[test]
+fn when_defined_shares_pending_promises_and_rejects_invalid_names_asynchronously() {
+    let (_, report) = visit(
+        r#"<script>
+    const first=customElements.whenDefined('x-ready');console.log(first===customElements.whenDefined('x-ready'));class Ready extends HTMLElement{}customElements.define('x-ready',Ready);console.log(first===customElements.whenDefined('x-ready'));first.then(value=>console.log(value===Ready));
+    customElements.whenDefined('invalid').catch(e=>console.log(e.name));customElements.whenDefined(Symbol()).catch(e=>console.log(e.name));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["true", "false", "true", "SyntaxError", "TypeError"]);
+}
+
+#[test]
+fn html_serialization_uses_local_names_for_html_svg_and_mathml_and_omits_void_children() {
+    let (_, report) = visit(
+        r#"<script>
+    for(const ns of ['http://www.w3.org/1999/xhtml','http://www.w3.org/2000/svg','http://www.w3.org/1998/Math/MathML','urn:test']){const node=document.createElementNS(ns,'p:span');console.log(node.outerHTML)}
+    const input=document.createElement('input');input.append('hidden');const frame=document.createElement('frame');console.log(input.innerHTML,input.outerHTML,frame.outerHTML);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["<span></span>", "<span></span>", "<span></span>", "<p:span></p:span>", " <input> <frame>"]);
+}

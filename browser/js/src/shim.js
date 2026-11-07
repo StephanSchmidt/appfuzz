@@ -5,9 +5,14 @@
 // is recorded.
 import * as L from 'linkedom';
 import { CookieJar } from './cookies.js';
-import { parseHTML, parseHTMLFragment, documentMode } from './document.js';
-import { qualifiedName, installName } from './names.js';
+import { parseHTML, parseHTMLFragment, fragmentElements, documentMode } from './document.js';
+import { qualifiedName } from './names.js';
 import { installCloning } from './cloning.js';
+import { installRegistry, domString } from './registry.js';
+import { installHTMLConstructors } from './html-constructors.js';
+import { installReactionBoundaries, withReactions } from './ce-reactions.js';
+import { runDOMCallback } from './dom-callbacks.js';
+import { installSerialization } from './serialization.js';
 import { installAdoption } from './adoption.js';
 import { installObservers } from './observers.js';
 import { templateContent, templateOwner, templateInnerHTML, shareTemplateObservers } from './templates.js';
@@ -942,6 +947,8 @@ function installWindow(doc) {
   for (const [k, v] of Object.entries(L)) {
     if (/^[A-Z]/.test(k) && typeof v === 'function') G[k] = v;
   }
+  installHTMLConstructors(G, L);
+  const createInternal = installRegistry(upgradeCopies, BrowserDOMException, (name, e) => error('custom-element:' + name, e));
   G.Document = L.Document;
   G.HTMLDocument = L.Document;
   for (const k of ['addEventListener', 'removeEventListener', 'dispatchEvent']) G[k] = view[k];
@@ -1027,46 +1034,32 @@ function installWindow(doc) {
   // A script the page creates runs once connected; one parsed from markup
   // (innerHTML and the like) never runs.
   const htmlPrototype = Object.getPrototypeOf(doc);
-  const create = htmlPrototype.createElement;
-  const createXML = L.Document.prototype.createElement;
-  const createNS = L.Document.prototype.createElementNS;
   const isHTMLDocument = Object.prototype.isPrototypeOf.bind(htmlPrototype);
-  const createElement = function (name, o) {
-    const html = isHTMLDocument(this);
-    const converted = String(name);
-    const local = html ? converted.replace(/[A-Z]/g, c => c.toLowerCase()) : converted;
-    const namespace = html ? HTML_NS : null;
-    shareObservers(this);
-    const el = (html ? create : createXML).call(this, local, o);
-    const identity = { namespace, prefix: null, local, qualified: local };
-    installName(el, identity, isHTMLDocument);
-    templateContent(el);
-    if (local === 'script') {
-      rememberScript(el, identity);
-    }
-    return el;
+  const creationIs = options => {
+    if (options == null) return null;
+    if (typeof options !== 'object' && typeof options !== 'function') { domString(options); return null; }
+    const value = options.is;
+    return value === undefined ? null : domString(value);
   };
-  // Every document uses the same factories, including inert DOMParser
-  // documents whose newly-created scripts can later join the active page.
+  const createElement = function (name, options) {
+    if (!arguments.length) throw new TypeError('createElement requires a name');
+    const html = isHTMLDocument(this), converted = domString(name), is = creationIs(options);
+    const local = html ? converted.replace(/[A-Z]/g, c => c.toLowerCase()) : converted;
+    // Reuse the namespace factory's local-name validation without treating
+    // a colon in createElement's name as a namespace prefix.
+    qualifiedName(null, local.replace(/:/g, '_'), 2, BrowserDOMException);
+    shareObservers(this);
+    return createInternal(this, { namespace: html ? HTML_NS : null, prefix: null, local, qualified: local }, is);
+  };
   htmlPrototype.createElement = createElement;
   L.Document.prototype.createElement = createElement;
-  installCloning(L, { html: create, xml: createXML, svg: createNS }, shareObservers, (copy, identity, original) => {
+  installCloning(L, shareObservers, (copy, identity, original) => {
     rememberScript(copy, identity, scriptRecord(original)?.alreadyStarted || false);
   }, upgradeCopies, BrowserDOMException);
-  L.Document.prototype.createElementNS = function (ns, name, o) {
-    const identity = qualifiedName(ns, name, arguments.length, BrowserDOMException);
-    const { namespace, local } = identity;
+  L.Document.prototype.createElementNS = function (ns, name, options) {
+    const identity = qualifiedName(ns, name, arguments.length, BrowserDOMException), is = creationIs(options);
     shareObservers(this);
-    // The native non-SVG path calls this.createElement, whose HTML case
-    // folding must not change a namespace-qualified name.
-    const el = namespace === SVG_NS ? createNS.call(this, namespace, local, o)
-      : (namespace === HTML_NS ? create : createXML).call(this, local, o);
-    installName(el, identity, isHTMLDocument);
-    templateContent(el);
-    if (local === 'script') {
-      rememberScript(el, identity);
-    }
-    return el;
+    return createInternal(this, identity, is);
   };
   const parsing = (f, sink, at = 0) => function (...a) {
     if (sink) { a[at] = String(a[at]); toMarkup(sink, a[at]); }
@@ -1074,7 +1067,9 @@ function installWindow(doc) {
   };
   const htmlFragment = (node, markup, inert = true) => {
     const context = isShadowRoot(node) ? scriptShadowHost(node) : node;
-    return parseHTMLFragment(markup, context, node.ownerDocument, inert);
+    const result = parseHTMLFragment(markup, context, node.ownerDocument, inert);
+    upgradeCopies(fragmentElements(result));
+    return result;
   };
   for (const proto of [L.Element.prototype, L.ShadowRoot.prototype, L.DocumentFragment.prototype]) {
     for (const key of ['innerHTML', 'outerHTML']) {
@@ -1087,6 +1082,7 @@ function installWindow(doc) {
         } else {
           const target = templateContent(this) || this;
           const content = parseHTMLFragment(markup, this, target.ownerDocument);
+          upgradeCopies(fragmentElements(content));
           target.replaceChildren(content);
         }
       }, key) });
@@ -1114,7 +1110,11 @@ function installWindow(doc) {
   rangePrototype.createContextualFragment = function (markup) {
     const context = this.commonAncestorContainer || doc;
     const owner = context.nodeType === 9 ? context : context.ownerDocument;
-    if (documentMode(owner) !== undefined) return parseHTMLFragment(markup, context, owner, false);
+    if (documentMode(owner) !== undefined) return withReactions(() => {
+      const result = parseHTMLFragment(markup, context, owner, false);
+      upgradeCopies(fragmentElements(result));
+      return result;
+    });
     return contextualFragment.call(this, markup);
   };
   const T = L.HTMLTemplateElement.prototype;
@@ -1130,7 +1130,9 @@ function installWindow(doc) {
   // A fragment has descendant text and the same replace-with-text setter
   // as an element; linkedom otherwise inherits Node's null/no-op stubs.
   Object.defineProperty(L.DocumentFragment.prototype, 'textContent', Object.getOwnPropertyDescriptor(L.Element.prototype, 'textContent'));
+  installSerialization(L);
   installScriptMutations(L, scriptsChanged);
+  installReactionBoundaries(L);
 
   // linkedom puts stubs on Node.prototype and the real accessors on its
   // subclasses. Code that takes an accessor from Node.prototype and calls
@@ -1466,7 +1468,7 @@ function scriptsChanged(nodes) {
     const current = S.current, currentEl = S.currentEl, external = S.currentExternal;
     S.current = S.currentEl = el;
     S.currentExternal = false;
-    try { S.runClassic(script.code, script.url); }
+    try { runDOMCallback(() => S.runClassic(script.code, script.url)); }
     catch (e) { error('script:' + script.url, e); }
     finally { S.current = current; S.currentEl = currentEl; S.currentExternal = external; }
   }

@@ -4,8 +4,8 @@
 import { HTMLDocument } from '../node_modules/linkedom/esm/html/document.js';
 import { SVGDocument } from '../node_modules/linkedom/esm/svg/document.js';
 import { XMLDocument } from '../node_modules/linkedom/esm/xml/document.js';
-import { CUSTOM_ELEMENTS, UPGRADE, END, NEXT, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
-import { installName, nameIdentity } from './names.js';
+import { CUSTOM_ELEMENTS, END, NEXT, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
+import { nameIdentity } from './names.js';
 import { documentMode, rememberDocumentMode } from './document.js';
 import { templateContent } from './templates.js';
 import { Attr } from '../node_modules/linkedom/esm/interface/attr.js';
@@ -14,6 +14,8 @@ import { Comment } from '../node_modules/linkedom/esm/interface/comment.js';
 import { CDATASection } from '../node_modules/linkedom/esm/interface/cdata-section.js';
 import { DocumentType } from '../node_modules/linkedom/esm/interface/document-type.js';
 import { DocumentFragment } from '../node_modules/linkedom/esm/interface/document-fragment.js';
+import { createBareElement } from './creation.js';
+import { elementIs } from './element-state.js';
 import { CustomElementRegistry } from '../node_modules/linkedom/esm/interface/custom-element-registry.js';
 
 const HTML = 'http://www.w3.org/1999/xhtml';
@@ -38,7 +40,7 @@ function ownNodes(root, owner) {
   } while (node !== stop);
 }
 
-export function installCloning(L, factories, shareObservers, onScript, upgradeCopies, DOMError) {
+export function installCloning(L, shareObservers, onScript, upgradeCopies, DOMError) {
   const cloneElement = L.Element.prototype.cloneNode;
   const insert = Object.getPrototypeOf(L.Element.prototype).insertBefore;
   const isElement = Object.prototype.isPrototypeOf.bind(L.Element.prototype);
@@ -71,24 +73,12 @@ export function installCloning(L, factories, shareObservers, onScript, upgradeCo
       }
     }
     const copies = [], identities = [];
-    // Creating a clone queues an upgrade. Suppressing only this factory's
-    // registry leaves the real destination document usable by reentrant
-    // constructors, and never constructs source-document custom elements.
-    const constructionOwner = new NativeProxy(facade(owner), { get(_target, key) {
-      if (key === CUSTOM_ELEMENTS) return { active: false, registry: null };
-      if (key === UPGRADE) return null;
-      if (key === 'createDocumentFragment') return () => new DocumentFragment(owner);
-      return read(owner, key, owner);
-    } });
     const createCopy = () => {
       const original = originals[copies.length];
       const identity = identityOf(original);
-      const { namespace, local } = identity;
-      const copy = namespace === SVG ? factories.svg.call(constructionOwner, namespace, local)
-        : (namespace === HTML ? factories.html : factories.xml).call(constructionOwner, local);
-      ownNodes(copy, owner);
+      const { local } = identity;
+      const copy = createBareElement(owner, identity, elementIs(original));
       copies.push(copy); identities.push(identity); elements.push(copy);
-      installName(copy, identity, isHTMLDocument);
       if (local === 'script') onScript(copy, identity, original);
       return copy;
     };

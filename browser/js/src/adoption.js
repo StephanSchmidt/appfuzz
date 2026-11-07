@@ -7,7 +7,10 @@ import { shadowRoots } from '../node_modules/linkedom/esm/shared/shadow-roots.js
 import { customElements } from '../node_modules/linkedom/esm/interface/custom-element-registry.js';
 import { templateContent, templateOwner } from './templates.js';
 import { upgradeInserted, upgradeDefinition } from './upgrading.js';
-import { runDOMCallback } from './dom-callbacks.js';
+import { enqueueReaction, withReactions, setReactionErrorHandler } from './ce-reactions.js';
+import { elementDefinition } from './element-state.js';
+import { installCEHooks } from './ce-hooks.js';
+import { shadowTreeNodes } from './shadow-tree.js';
 
 // Takes any node out of its parent, as Element and CharacterData's own
 // remove() do: an element ends at its end tag, text and comments at
@@ -16,9 +19,6 @@ const detach = (node) => unlink(node[PREV], node, getEnd(node)[NEXT]);
 
 const shadowRoot = shadowRoots.get.bind(shadowRoots);
 const customElement = customElements.get.bind(customElements);
-const queues = new WeakMap();
-const reactionQueue = queues.get.bind(queues);
-const rememberQueue = queues.set.bind(queues);
 
 function treeNodes(root, document) {
   const nodes = [];
@@ -46,31 +46,34 @@ export function installAdoption(Element, shareObservers, onError) {
   const insert = parent.insertBefore;
   const connected = Object.getOwnPropertyDescriptor(Element.prototype, 'isConnected').get;
   const isConnected = Function.prototype.call.bind(connected);
-  const invoke = (node, name, callback, args) => {
-    try {
-      runDOMCallback(() => callback.apply(node, args));
-    } catch (e) { onError(name, e); }
-  };
+  const callbackKeys = { connectedCallback: 'connected', disconnectedCallback: 'disconnected', adoptedCallback: 'adopted', attributeChangedCallback: 'attribute' };
   const enqueue = (node, name, args = [], selected) => {
-    try {
-      const callback = selected === undefined ? node[name] : selected;
-      if (typeof callback !== 'function') return;
-      let queue = reactionQueue(node);
-      if (!queue) rememberQueue(node, queue = { items: [], at: 0 });
-      queue.items.push([name, callback, args]);
-    } catch (e) { onError(name, e); }
+    const definition = elementDefinition(node);
+    const callback = selected !== undefined ? selected : definition ? definition[callbackKeys[name]] : node[name];
+    enqueueReaction(node, callback, args);
   };
-  const flush = (node) => {
-    const queue = reactionQueue(node);
-    if (!queue) return;
-    // A callback may adopt another element whose earlier reactions are
-    // already queued. Nested operations drain that same element queue.
-    while (queue.at < queue.items.length) {
-      const [name, callback, args] = queue.items[queue.at++];
-      invoke(node, name, callback, args);
+  const queueUpgrade = (node, prepared) => {
+    const definition = prepared === undefined ? upgradeDefinition(node) : prepared;
+    if (!definition) return;
+    enqueueReaction(node, () => withReactions(() => upgradeInserted(node, isConnected, enqueue, onError, true, definition)));
+  };
+  setReactionErrorHandler(onError);
+  const includes = Function.prototype.call.bind(Array.prototype.includes);
+  installCEHooks((node, name, oldValue, value) => {
+    const definition = elementDefinition(node);
+    if (definition && includes(definition.observed, name)) withReactions(() => enqueue(node, 'attributeChangedCallback', [name, oldValue, value, null]));
+  }, root => {
+    const nodes = shadowTreeNodes(root);
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i], info = customElement(node);
+      if (!info) continue;
+      const now = isConnected(node);
+      if (now !== info.connected) {
+        info.connected = now;
+        enqueue(node, now ? 'connectedCallback' : 'disconnectedCallback');
+      }
     }
-    queue.items.length = queue.at = 0;
-  };
+  });
   parent.insertBefore = function (node, before = null) {
     // Preserve the native no-op and self-insertion error. All ParentNode
     // and ChildNode insertion methods converge on this operation.
@@ -86,7 +89,7 @@ export function installAdoption(Element, shareObservers, onError) {
     // leaving its end marker, attributes and descendants in the old document.
     if (node.ownerDocument === document && (!node[END] || node[END].ownerDocument === document)) {
       const result = insert.call(this, node, before);
-      for (const { node } of nodes) { upgradeInserted(node, isConnected, enqueue, onError); flush(node); }
+      for (const { node } of nodes) if (isConnected(node)) queueUpgrade(node);
       return result;
     }
     const reactions = [];
@@ -119,18 +122,16 @@ export function installAdoption(Element, shareObservers, onError) {
         if (newDocument !== oldDocument) enqueue(element, 'adoptedCallback', [oldDocument, newDocument]);
         if (inserting && isConnected) enqueue(element, 'connectedCallback');
       }
-      for (const { node } of nodes) { if (inserting) upgradeInserted(node, isConnected, enqueue, onError); flush(node); }
+      for (const { node } of nodes) if (inserting && isConnected(node)) queueUpgrade(node);
     }
   };
   // cloneNode/importNode queue upgrades as they create elements, then run
   // them only after the complete detached copy has its attributes/children.
-  return nodes => {
+  const upgradeCopies = (nodes, registry) => withReactions(() => {
     const definitions = [];
-    for (let i = 0; i < nodes.length; i++) definitions[i] = upgradeDefinition(nodes[i]);
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i];
-      upgradeInserted(node, isConnected, enqueue, onError, true, definitions[i]);
-      flush(node);
-    }
-  };
+    for (let i = 0; i < nodes.length; i++) definitions[i] = upgradeDefinition(nodes[i], registry);
+    for (let i = 0; i < nodes.length; i++) queueUpgrade(nodes[i], definitions[i]);
+  });
+  upgradeCopies.tree = (root, registry) => upgradeCopies(shadowTreeNodes(root), registry);
+  return upgradeCopies;
 }
