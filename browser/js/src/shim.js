@@ -46,7 +46,7 @@ const CAP = 200;
 const nativeString = String, diagnosticSlice = Function.prototype.call.bind(String.prototype.slice);
 
 const S = {
-  start: 0, now: 0, seq: 0, timers: new Map(), nesting: 0, horizon: 0,
+  start: 0, now: 0, seq: 0, timerOrder: 0, timers: new Map(), nesting: 0, horizon: 0,
   gesture: false, trusted: false, ended: null, steps: 0, latency: 5, throttle: 0,
   url: null, origin: '', document: null, files: {}, responses: {}, cookies: new CookieJar(() => S.now),
   errors: [], console: [], requests: [], navigations: [], code: [],
@@ -75,9 +75,12 @@ const rejections = new Map(), notifiedRejections = new WeakMap();
 const notified = notifiedRejections.get.bind(notifiedRejections), rememberNotified = notifiedRejections.set.bind(notifiedRejections), forgetNotified = notifiedRejections.delete.bind(notifiedRejections);
 const mapGet = Function.prototype.call.bind(Map.prototype.get), mapSet = Function.prototype.call.bind(Map.prototype.set), mapDelete = Function.prototype.call.bind(Map.prototype.delete), mapEach = Function.prototype.call.bind(Map.prototype.forEach);
 const nativeResolve = Promise.resolve.bind(Promise), nativeThen = Function.prototype.call.bind(Promise.prototype.then);
-const nativeApply = Reflect.apply, NativeTypeError = TypeError;
+const nativeApply = Reflect.apply, nativeConstruct = Reflect.construct, NativeTypeError = TypeError;
+const nativeMax = Math.max, nativeFloor = Math.floor, nativeImul = Math.imul;
+const mapSize = Function.prototype.call.bind(Object.getOwnPropertyDescriptor(Map.prototype, 'size').get);
+const setEach = Function.prototype.call.bind(Set.prototype.forEach), setHas = Function.prototype.call.bind(Set.prototype.has);
 let handledRejections = [];
-const unmodelled = (name) => S.unmodelled.add(name);
+const unmodelled = (name) => nativeSetAdd(S.unmodelled, name);
 
 // The host: appfuzz's browser guest binds a private bridge to the
 // `appfuzz:browser` imports. Requests go to it and it answers them; markup,
@@ -94,21 +97,25 @@ const toCode = (where, value) => { const h = host(); if (h) h.code(String(where)
 let seed = 1;
 const rand = () => {
   seed = (seed + 0x6d2b79f5) | 0;
-  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  let t = nativeImul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + nativeImul(t ^ (t >>> 7), 61 | t)) ^ t;
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 };
 Math.random = rand;
 
 const RealDate = Date;
-function VDate(...a) {
-  if (!new.target) return new RealDate(S.now).toString();
-  return a.length ? new RealDate(...a) : new RealDate(S.now);
+const dateString = Function.prototype.call.bind(RealDate.prototype.toString);
+const VDate = function Date(...args) {
+  if (!new.target) return dateString(new RealDate(S.now));
+  return nativeConstruct(RealDate, args.length ? args : [S.now], new.target);
+};
+Object.defineProperty(VDate, 'prototype', { value: RealDate.prototype, writable: false });
+Object.defineProperty(VDate, 'length', { value: 7 });
+Object.defineProperty(VDate, 'name', { value: 'Date' });
+Object.defineProperty(RealDate.prototype, 'constructor', { value: VDate, writable: true, configurable: true });
+for (const [name, value] of [['now', { now() { return S.now; } }.now], ['parse', RealDate.parse], ['UTC', RealDate.UTC]]) {
+  Object.defineProperty(VDate, name, { value, writable: true, configurable: true });
 }
-VDate.prototype = RealDate.prototype;
-VDate.now = () => S.now;
-VDate.parse = RealDate.parse;
-VDate.UTC = RealDate.UTC;
 G.Date = VDate;
 
 G.performance = {
@@ -155,27 +162,45 @@ for (const [f, where] of [[async function () {}, 'AsyncFunction'], [function* ()
   Object.defineProperty(proto, 'constructor', { value: watched(proto.constructor, where), writable: true, configurable: true });
 }
 
+function timerDelay(timeout, nesting) {
+  return nativeMax(0, timeout, S.throttle, nesting > 5 ? 4 : 0);
+}
 function addTimer(fn, delay, args, repeat, kind, clamp = true) {
   if (typeof fn !== 'function') {
-    const code = String(fn);
+    const code = nativeString(fn);
     fn = () => runCode(code, kind);
   }
-  delay = Math.max(0, Number(delay) || 0, S.throttle);
-  if (clamp && S.nesting > 4 && delay < 4) delay = 4;
-  const id = ++S.seq;
-  S.timers.set(id, { id, due: S.now + delay, fn, args, repeat: repeat ? Math.max(delay, 1) : 0, nesting: S.nesting + 1, kind });
+  const timeout = clamp ? nativeMax(0, delay) : delay;
+  const id = ++S.seq, nesting = clamp ? S.nesting + 1 : 0;
+  mapSet(S.timers, id, { id, order: ++S.timerOrder, due: S.now + timerDelay(timeout, clamp ? S.nesting : 0), fn, args, repeat, timeout, nesting, kind });
   return id;
 }
-G.setTimeout = (fn, d, ...a) => addTimer(fn, d, a, false, 'setTimeout');
-G.setInterval = (fn, d, ...a) => addTimer(fn, d, a, true, 'setInterval');
-G.clearTimeout = G.clearInterval = (id) => { S.timers.delete(id); };
-G.requestAnimationFrame = (cb) => {
-  const t = S.now - S.start;
-  return addTimer(() => cb(G.performance.now()), 16 - (t % 16), [], false, 'requestAnimationFrame', false);
+function timerReceiver(value) { if (value != null && value !== G) throw new NativeTypeError('A Window is required'); }
+function scheduleTimer(handler, timeout, args, repeat, count) {
+  if (!count) throw new NativeTypeError('A timer handler is required');
+  const converted = runDOMCallback(() => [typeof handler === 'function' ? handler : domString(handler), +timeout >> 0]);
+  return addTimer(converted[0], converted[1], args, repeat, repeat ? 'setInterval' : 'setTimeout');
+}
+function frameCallback(callback, count) { if (!count || typeof callback !== 'function') throw new NativeTypeError('A callback is required'); }
+const timerAPI = {
+  setTimeout(handler, timeout = 0, ...args) { timerReceiver(this); return scheduleTimer(handler, timeout, args, false, arguments.length); },
+  setInterval(handler, timeout = 0, ...args) { timerReceiver(this); return scheduleTimer(handler, timeout, args, true, arguments.length); },
+  clearTimeout(id = 0) { timerReceiver(this); mapDelete(S.timers, runDOMCallback(() => +id >> 0)); },
+  clearInterval(id = 0) { timerReceiver(this); mapDelete(S.timers, runDOMCallback(() => +id >> 0)); },
+  requestAnimationFrame(callback) {
+    timerReceiver(this); frameCallback(callback, arguments.length);
+    const t = S.now - S.start;
+    return addTimer(() => nativeApply(callback, G, [S.now - S.start]), 16 - (t % 16), [], false, 'requestAnimationFrame', false);
+  },
+  cancelAnimationFrame(id) { timerReceiver(this); if (!arguments.length) throw new NativeTypeError('An animation handle is required'); mapDelete(S.timers, runDOMCallback(() => +id >>> 0)); },
+  requestIdleCallback(callback) {
+    timerReceiver(this); frameCallback(callback, arguments.length);
+    return addTimer(() => nativeApply(callback, G, [{ didTimeout: false, timeRemaining: () => 50 }]), 1, [], false, 'requestIdleCallback', false);
+  },
+  cancelIdleCallback(id) { timerReceiver(this); if (!arguments.length) throw new NativeTypeError('An idle handle is required'); mapDelete(S.timers, runDOMCallback(() => +id >>> 0)); },
 };
-G.cancelAnimationFrame = G.clearTimeout;
-G.requestIdleCallback = (cb) => addTimer(() => cb({ didTimeout: false, timeRemaining: () => 50 }), 1, [], false, 'requestIdleCallback', false);
-G.cancelIdleCallback = G.clearTimeout;
+for (const name of Object.keys(timerAPI)) G[name] = timerAPI[name];
+
 G.queueMicrotask = (fn) => {
   if (typeof fn !== 'function') throw new NativeTypeError('queueMicrotask requires a callback');
   nativeThen(nativeResolve(), () => { try { runDOMCallback(() => nativeApply(fn, undefined, [])); } catch (e) { error('queueMicrotask', e); } });
@@ -184,16 +209,20 @@ G.queueMicrotask = (fn) => {
 // The next due task, if it is due by the horizon.
 function step() {
   let next = null;
-  for (const t of S.timers.values()) {
-    if (!next || t.due < next.due || (t.due === next.due && t.id < next.id)) next = t;
-  }
+  mapEach(S.timers, t => {
+    if (!next || t.due < next.due || (t.due === next.due && t.order < next.order)) next = t;
+  });
   if (!next || next.due > S.horizon || S.ended) return false;
   if (next.due > S.now) S.now = next.due;
-  if (next.repeat) next.due = S.now + Math.max(next.repeat, S.throttle);
-  else S.timers.delete(next.id);
+  if (!next.repeat) mapDelete(S.timers, next.id);
   const saved = S.nesting;
   S.nesting = next.nesting;
-  try { next.fn(...next.args); } catch (e) { error(next.kind, e); }
+  try { runDOMCallback(() => nativeApply(next.fn, G, next.args)); } catch (e) { error(next.kind, e); }
+  if (next.repeat && mapGet(S.timers, next.id) === next) {
+    next.due = S.now + timerDelay(next.timeout, next.nesting);
+    next.nesting++;
+    next.order = ++S.timerOrder;
+  }
   S.nesting = saved;
   S.steps++;
   return true;
@@ -271,7 +300,7 @@ setObjectURLHooks(blob => {
 }, url => { mapDelete(blobs, url); });
 
 function uuid() {
-  const h = [...Array(16)].map(() => Math.floor(rand() * 256));
+  const h = [...Array(16)].map(() => nativeFloor(rand() * 256));
   h[6] = (h[6] & 15) | 64;
   h[8] = (h[8] & 63) | 128;
   const x = h.map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -280,7 +309,7 @@ function uuid() {
 G.crypto = {
   getRandomValues(a) {
     const bytes = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
-    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(rand() * 256);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = nativeFloor(rand() * 256);
     return a;
   },
   randomUUID: uuid,
@@ -1427,7 +1456,7 @@ const CLICKISH = new Set(['click', 'mousedown', 'mouseup', 'pointerdown', 'point
 const NATIVE = new Set(['button', 'input', 'select', 'textarea', 'summary']);
 const interactive = (el) => {
   const t = el.localName;
-  if (NATIVE.has(t)) return true;
+  if (setHas(NATIVE, t)) return true;
   if ((t === 'a' || t === 'area') && el.hasAttribute('href')) return true;
   return el.hasAttribute('onclick') || el.getAttribute('role') === 'button' || el.hasAttribute('contenteditable') || el.hasAttribute('tabindex');
 };
@@ -1449,15 +1478,16 @@ function candidates() {
   const doc = G.document;
   for (const el of doc.querySelectorAll('*')) {
     if (el.hasAttribute('disabled') || el.hasAttribute('hidden')) continue;
-    const types = S.listened.get(el);
-    const own = types && [...types].some((t) => CLICKISH.has(t));
+    const types = mapGet(S.listened, el);
+    let own = false;
+    if (types) setEach(types, type => { if (setHas(CLICKISH, type)) own = true; });
     if (own || interactive(el) || delegated(el)) out.push(el);
   }
   S.cands = out;
   return out.map((el, i) => {
     const tag = el.localName;
     const type = (el.getAttribute('type') || '').toLowerCase();
-    const kind = (tag === 'input' && TYPED.has(type)) || tag === 'textarea' || el.isContentEditable ? 'type' : tag === 'select' ? 'select' : 'click';
+    const kind = (tag === 'input' && setHas(TYPED, type)) || tag === 'textarea' || el.isContentEditable ? 'type' : tag === 'select' ? 'select' : 'click';
     return { i, tag, id: el.id || '', kind, text: clip((el.textContent || '').trim().replace(/\s+/g, ' '), 60) };
   });
 }
@@ -1577,7 +1607,7 @@ function act(i, value) {
   try {
     const tag = el.localName;
     const type = (el.getAttribute('type') || '').toLowerCase();
-    if ((tag === 'input' && TYPED.has(type)) || tag === 'textarea' || el.isContentEditable) {
+    if ((tag === 'input' && setHas(TYPED, type)) || tag === 'textarea' || el.isContentEditable) {
       const v = value == null ? 'x' : String(value);
       el.focus();
       if (el.isContentEditable) el.textContent = v; else el.value = v;
@@ -1762,6 +1792,7 @@ function scriptDone(ok) {
 
 function consoleArgument(value) {
   if (typeof value === 'string') return value;
+  if (typeof value === 'number' && !finiteNumber(value)) return nativeString(value);
   try { const encoded = reportJSON(value); if (encoded !== undefined) return encoded; } catch {}
   try { return nativeString(value); } catch { return '[unprintable]'; }
 }
@@ -1772,6 +1803,7 @@ G.console = Object.fromEntries(['log', 'info', 'warn', 'error', 'debug', 'trace'
 }]));
 Object.assign(G.console, { group() {}, groupCollapsed() {}, groupEnd() {}, time() {}, timeEnd() {}, timeLog() {}, count() {}, countReset() {}, assert(c, ...a) { if (!c) G.console.error('Assertion failed:', ...a); } });
 
+function unsupportedAPIs() { const result = []; setEach(S.unmodelled, value => { result[result.length] = value; }); return result; }
 const pageText = () => (G.document.body ? G.document.body.textContent.replace(/\s+/g, ' ').trim() : '');
 G.__af = {
   bindClassic(run) { S.runClassic = run; },
@@ -1862,17 +1894,17 @@ G.__af = {
   // once per `ms`, so days pass in a few steps.
   throttle(ms) {
     S.throttle = ms;
-    for (const t of S.timers.values()) if (t.repeat) t.repeat = Math.max(t.repeat, ms);
+    mapEach(S.timers, t => { if (t.repeat) t.timeout = nativeMax(t.timeout, ms); });
   },
   step,
   now: () => S.now,
   // When the next task is due, or -1 when none is.
   next() {
     let due = -1;
-    for (const t of S.timers.values()) if (due < 0 || t.due < due) due = t.due;
+    mapEach(S.timers, t => { if (due < 0 || t.due < due) due = t.due; });
     return due;
   },
-  idle() { S.now = Math.max(S.now, S.horizon); },
+  idle() { S.now = nativeMax(S.now, S.horizon); },
   ended: () => !!S.ended,
   candidates: () => reportJSON(candidates()),
   count: () => candidates().length,
@@ -1880,10 +1912,10 @@ G.__af = {
   text: pageText,
   report() {
     return reportJSON({
-      url: urlPart(S.url, 'href'), ended: S.ended, now_ms: S.now - S.start, steps: S.steps, timers: S.timers.size,
+      url: urlPart(S.url, 'href'), ended: S.ended, now_ms: S.now - S.start, steps: S.steps, timers: mapSize(S.timers),
       errors: S.errors, console: S.console, requests: S.requests, navigations: S.navigations,
       code: S.code, cookies: S.cookieWrites, storage: S.storage, dialogs: S.dialogs, history: S.history,
-      unmodelled: [...S.unmodelled], actions: S.actions,
+      unmodelled: unsupportedAPIs(), actions: S.actions,
       text: stringSlice(pageText(), 0, 2000),
     });
   },

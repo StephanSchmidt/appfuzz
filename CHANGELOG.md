@@ -134,6 +134,12 @@
 
 **Apps that ship JavaScript**
 
+- Timers use browser argument conversion, callback receivers, cancellation,
+  nesting and repeat ordering. Page changes to collection or arithmetic
+  helpers cannot disable scheduled work or erase unsupported API markers.
+  Date subclasses retain the virtual clock, and timer timestamps and seeded
+  randomness no longer depend on replaceable page helpers.
+
 - Page scripts cannot replace the browser driver's private hooks, host bridge,
   or native parser. Replacing JSON functions or adding `toJSON` methods to
   built-in prototypes no longer alters the browser's evidence report.
