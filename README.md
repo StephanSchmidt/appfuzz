@@ -32,6 +32,8 @@ appfuzz --human https://appfuzz.dev/demo/chatty.wasm
 That downloads a small demo app with a bug and reviews it. Four more are on
 [appfuzz.dev/demo](https://appfuzz.dev/demo/): an XSS, two crashes and one
 that passes. On your own app, run `appfuzz review` next to its `.wasm`.
+If your shell can't find `appfuzz` yet, use the command the installer
+printed last: it has the full path.
 
 **Who it's for:** platforms that run code other people wrote (plugins,
 extensions, customer scripts), teams whose agents write more code than anyone
@@ -83,7 +85,7 @@ TypeScript, JavaScript, Go, C# and Python gets the same findings
 
 ## Install
 
-On Linux or macOS (x86_64 or arm64):
+On Linux (Alpine too) or macOS, x86_64 or arm64:
 
 ```sh
 curl -fsSL https://appfuzz.dev/install.sh | sh
@@ -91,8 +93,11 @@ curl -fsSL https://appfuzz.dev/install.sh | sh
 
 The script ([website/install.sh](website/install.sh)) downloads the binary
 from the latest [GitHub release](https://github.com/StephanSchmidt/appfuzz/releases),
-checks its SHA-256 and puts it in `~/.local/bin`. Set `APPFUZZ_VERSION=v0.5.0`
-for a specific release or `APPFUZZ_INSTALL_DIR` for another directory.
+checks its SHA-256 and that it runs, and puts it in `~/.local/bin`
+(`/usr/local/bin` as root, for example in a container). Alpine, and Linux
+older than Ubuntu 22.04 or Debian 12, get a static build. Set
+`APPFUZZ_VERSION=v0.5.0` for a specific release or `APPFUZZ_INSTALL_DIR` for
+another directory.
 
 Or with Homebrew: `brew install stephanschmidt/appfuzz/appfuzz`
 

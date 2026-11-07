@@ -17,6 +17,10 @@ jobs:
         include:
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          # Static builds for Alpine and for Linux older than the glibc builds
+          # need; website/install.sh picks them.
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04-arm }
           - { target: aarch64-apple-darwin, os: macos-15 }
           - { target: x86_64-apple-darwin, os: macos-15 }
     runs-on: ${{ matrix.os }}
@@ -28,6 +32,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      # ring, zstd and mimalloc have C code, compiled here against musl.
+      - if: endsWith(matrix.target, '-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          target=${{ matrix.target }}
+          echo "CC_${target//-/_}=musl-gcc" >> "$GITHUB_ENV"
       - run: cargo build --release --locked -p appfuzz --target ${{ matrix.target }}
       - name: package
         shell: bash

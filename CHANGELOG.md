@@ -76,6 +76,16 @@
   `</script><script>alert(1)</script>`, `${alert(1)}` and
   `' onmouseover='alert(1)`.
 
+**Install**
+
+- Static Linux builds (`x86_64-unknown-linux-musl`,
+  `aarch64-unknown-linux-musl`) run on Alpine and on Linux older than
+  Ubuntu 22.04 or Debian 12. `install.sh` picks them there.
+- `install.sh` runs the binary before it installs it: one that can't run
+  never replaces one that works. As root it installs to `/usr/local/bin`,
+  and its last lines are commands that work as printed, with the full path
+  when the directory is not on PATH.
+
 ## 0.6.0
 
 **Forged credentials**
