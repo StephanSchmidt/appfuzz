@@ -4,6 +4,7 @@
 // that leaves the page (requests, navigations, cookies, code it builds)
 // is recorded.
 import * as L from 'linkedom';
+import { Headers, convertHeadersInit, headersFromConverted, setHeadersGuard, copyHeaders, filterHeaders, headerObject, headerValue, appendNativeHeader } from './headers.js';
 import { CookieJar } from './cookies.js';
 import { parseHTML, parseHTMLFragment, fragmentElements, documentMode } from './document.js';
 import { qualifiedName, nameIdentity } from './names.js';
@@ -600,57 +601,43 @@ G.MessageChannel = class MessageChannel {
 
 // --- Network: every request is recorded; answers come from the session -----
 
-const NativeMap = Map, NativePromise = Promise, createFetchObject = Object.create, objectKeys = Object.keys;
+const NativePromise = Promise, createFetchObject = Object.create;
 const rejectPromise = Promise.reject.bind(Promise), parseBodyJSON = JSON.parse;
-const headerTables = new WeakMap(), headerTable = headerTables.get.bind(headerTables), rememberHeaders = headerTables.set.bind(headerTables);
-const mapHas = Function.prototype.call.bind(Map.prototype.has);
-const sorted = Function.prototype.call.bind(Array.prototype.sort), stringLower = Function.prototype.call.bind(String.prototype.toLowerCase), stringUpper = Function.prototype.call.bind(String.prototype.toUpperCase);
-function requireHeaders(value) { const result = headerTable(value); if (!result) throw new NativeTypeError('A Headers object is required'); return result; }
-function headerPairs(headers) {
-  const pairs = []; mapEach(requireHeaders(headers), (value, key) => { pairs[pairs.length] = [key, value]; });
-  return sorted(pairs, (a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+const stringUpper = Function.prototype.call.bind(String.prototype.toUpperCase);
+const blobRecords = new WeakMap(), blobRecord = blobRecords.get.bind(blobRecords), saveBlob = blobRecords.set.bind(blobRecords);
+const formRecords = new WeakMap(), formRecord = formRecords.get.bind(formRecords), saveForm = formRecords.set.bind(formRecords);
+const nativeEncode = N.formSerialize, NativeTextDecoder = TextDecoder;
+function requireBlob(value) { const data = blobRecord(value); if (!data) throw new NativeTypeError('A Blob is required'); return data; }
+function requireForm(value) { const data = formRecord(value); if (!data) throw new NativeTypeError('A FormData object is required'); return data; }
+function crlf(value) {
+  let result = '';
+  for (let i = 0; i < value.length; i++) { const c = value[i]; if (c === '\r') { result += '\r\n'; if (value[i + 1] === '\n') i++; } else if (c === '\n') result += '\r\n'; else result += c; }
+  return result;
 }
-function appendHeader(headers, name, value) {
-  name = stringLower(domString(name)); value = domString(value);
-  const table = requireHeaders(headers), old = mapGet(table, name); mapSet(table, name, old == null ? value : old + ', ' + value);
+function multipartName(value) {
+  value = crlf(value); let result = '';
+  for (let i = 0; i < value.length; i++) result += value[i] === '\r' ? '%0D' : value[i] === '\n' ? '%0A' : value[i] === '"' ? '%22' : value[i];
+  return result;
 }
-function copyHeaders(headers) {
-  const result = new Headers(); mapEach(requireHeaders(headers), (value, key) => { mapSet(requireHeaders(result), key, value); }); return result;
-}
-class Headers {
-  constructor(init) {
-    rememberHeaders(this, new NativeMap());
-    if (init == null) return;
-    if (typeof init !== 'object' && typeof init !== 'function') throw new NativeTypeError('Header initialization must be an object');
-    if (init[iteratorSymbol] !== undefined) {
-      for (const pair of init) {
-        if (pair === null || (typeof pair !== 'object' && typeof pair !== 'function')) throw new NativeTypeError('A header pair must be a sequence');
-        const values = []; for (const value of pair) values[values.length] = value;
-        if (values.length !== 2) throw new NativeTypeError('A header pair requires two values');
-        appendHeader(this, values[0], values[1]);
-      }
-    } else for (const key of objectKeys(init)) appendHeader(this, key, init[key]);
+function extractBody(body) {
+  if (body == null) return { text: null, type: null };
+  const blob = blobRecord(body);
+  if (blob) return { text: blob.text, type: blob.type || null };
+  const fields = formRecord(body);
+  if (fields) {
+    const boundary = '----appfuzz-' + uuid(); let text = '';
+    for (let i = 0; i < fields.length; i++) {
+      const entry = fields[i], name = entry[0], value = entry[1], file = blobRecord(value);
+      text += '--' + boundary + '\r\nContent-Disposition: form-data; name="' + multipartName(name) + '"';
+      if (file) text += '; filename="' + multipartName(file.name ?? 'blob') + '"\r\nContent-Type: ' + (file.type || 'application/octet-stream');
+      text += '\r\n\r\n' + (file ? file.text : crlf(value)) + '\r\n';
+    }
+    return { text: text + '--' + boundary + '--\r\n', type: 'multipart/form-data; boundary=' + boundary };
   }
-  append(name, value) { appendHeader(this, name, value); }
-  set(name, value) { mapSet(requireHeaders(this), stringLower(domString(name)), domString(value)); }
-  get(name) { const value = mapGet(requireHeaders(this), stringLower(domString(name))); return value == null ? null : value; }
-  has(name) { return mapHas(requireHeaders(this), stringLower(domString(name))); }
-  delete(name) { mapDelete(requireHeaders(this), stringLower(domString(name))); }
-  forEach(callback, receiver) { const pairs = headerPairs(this); for (let i = 0; i < pairs.length; i++) nativeApply(callback, receiver, [pairs[i][1], pairs[i][0], this]); }
-  *entries() { const pairs = headerPairs(this); for (let i = 0; i < pairs.length; i++) yield pairs[i]; }
-  *keys() { const pairs = headerPairs(this); for (let i = 0; i < pairs.length; i++) yield pairs[i][0]; }
-  *values() { const pairs = headerPairs(this); for (let i = 0; i < pairs.length; i++) yield pairs[i][1]; }
-  getSetCookie() { requireHeaders(this); return []; }
-  [Symbol.iterator]() { const pairs = headerPairs(this); return (function* () { for (let i = 0; i < pairs.length; i++) yield pairs[i]; })(); }
+  if (body instanceof URLSearchParams) return { text: nativeEncode(body._l), type: 'application/x-www-form-urlencoded;charset=UTF-8' };
+  return { text: wellFormed(domString(body)), type: 'text/plain;charset=UTF-8' };
 }
-const bodyText = (b) => {
-  if (b == null) return null;
-  if (typeof b === 'string') return b;
-  if (b instanceof URLSearchParams) return b.toString();
-  if (b instanceof FormData) return new URLSearchParams([...b].map(([k, v]) => [k, typeof v === 'string' ? v : '[file]'])).toString();
-  if (b instanceof Blob) return b._text;
-  return String(b);
-};
+const bodyText = body => extractBody(body).text;
 const requests = new WeakMap(), requestData = requests.get.bind(requests), saveRequest = requests.set.bind(requests);
 const responses = new WeakMap(), responseData = responses.get.bind(responses), saveResponse = responses.set.bind(responses);
 const bodies = new WeakMap(), bodyData = bodies.get.bind(bodies), saveBody = bodies.set.bind(bodies);
@@ -689,8 +676,8 @@ function convertRequest(input, init, argumentCount) {
     const key = requestMembers[i], value = init[key];
     if (value === undefined) continue;
     if (key === 'signal') { if (value !== null) signalState(value); options.signal = value; }
-    else if (key === 'body') options.body = bodyText(value);
-    else if (key === 'headers') options.headers = new Headers(value);
+    else if (key === 'body') { const extracted = extractBody(value); options.body = extracted.text; options.bodyType = extracted.type; }
+    else if (key === 'headers') options.headers = convertHeadersInit(value);
     else if (key === 'keepalive') options.keepalive = !!value;
     else if (key === 'window') { if (value !== null) throw new NativeTypeError('Request window must be null'); options.window = null; }
     else options[key] = domString(value);
@@ -711,7 +698,10 @@ function convertRequest(input, init, argumentCount) {
   if (sourceBody && body !== null && options.body == null && sourceBody.used) throw new NativeTypeError('Body has already been consumed.');
   const source = options.signal === undefined ? src?.signal : options.signal;
   const signal = new AbortSignal(signalToken); if (source) dependSignal(signal, [source]);
-  return { url, method, headers: options.headers || (src ? copyHeaders(src.headers) : new Headers()), signal, credentials, mode, cache, redirect, body, sourceBody: options.body == null ? sourceBody : null };
+  const guard = mode === 'no-cors' ? 'request-no-cors' : 'request';
+  const headers = options.headers !== undefined ? headersFromConverted(options.headers, guard) : src ? filterHeaders(src.headers, guard) : headersFromConverted([], guard);
+  if (options.body != null && options.bodyType !== null && headerValue(headers, 'content-type') === null) appendNativeHeader(headers, 'content-type', options.bodyType);
+  return { url, method, headers, signal, credentials, mode, cache, redirect, body, sourceBody: options.body == null ? sourceBody : null };
 }
 class Request {
   constructor(input, init = undefined) {
@@ -742,9 +732,11 @@ class Request {
 class Response {
   constructor(body = null, init = undefined) {
     if (init == null) init = { __proto__: null };
-    const text = bodyText(body), status = init.status ?? 200;
-    saveResponse(this, { status, statusText: init.statusText ?? (status === 200 ? 'OK' : ''), headers: new Headers(init.headers), url: init.url || '', redirected: false, type: 'basic' });
-    initializeBody(this, text);
+    const extracted = extractBody(body), headerInit = init.headers, pairs = headerInit === undefined ? [] : convertHeadersInit(headerInit), status = init.status ?? 200, statusText = init.statusText ?? '';
+    const headers = headersFromConverted(pairs, 'response');
+    if (extracted.type !== null && headerValue(headers, 'content-type') === null) appendNativeHeader(headers, 'content-type', extracted.type);
+    saveResponse(this, { status, statusText, headers, url: '', redirected: false, type: 'basic' });
+    initializeBody(this, extracted.text);
   }
   get status() { return requireResponse(this).status; }
   get statusText() { return requireResponse(this).statusText; }
@@ -765,9 +757,16 @@ class Response {
     const data = requireResponse(this), result = createFetchObject(Response.prototype);
     cloneBody(this, result); saveResponse(result, { ...data, headers: copyHeaders(data.headers) }); return result;
   }
-  static json(value, init) { return new Response(JSON.stringify(value), { ...init, headers: { 'content-type': 'application/json' } }); }
-  static error() { return new Response(null, { status: 0 }); }
-  static redirect(url, status = 302) { return new Response(null, { status, headers: { location: url } }); }
+  static json(value, init) {
+    const response = new Response(null, init), text = JSON.stringify(value);
+    if (text === undefined) throw new NativeTypeError('The value cannot be serialized as JSON');
+    initializeBody(response, text);
+    const headers = requireResponse(response).headers;
+    if (headerValue(headers, 'content-type') === null) appendNativeHeader(headers, 'content-type', 'application/json');
+    return response;
+  }
+  static error() { const response = new Response(null, { status: 0 }); setHeadersGuard(requireResponse(response).headers, 'immutable'); return response; }
+  static redirect(url, status = 302) { const response = new Response(null, { status, headers: { location: url } }); setHeadersGuard(requireResponse(response).headers, 'immutable'); return response; }
 }
 Object.assign(G, { Headers, Request, Response });
 
@@ -827,7 +826,7 @@ G.fetch = function fetch(input, init = undefined) {
   try { if (!arguments.length) throw new NativeTypeError('fetch requires an input'); request = new Request(input, init); } catch (e) { return rejectPromise(e); }
   const req = requireRequest(request), body = requireBody(request), signal = signalState(req.signal);
   if (signal.aborted) return rejectPromise(signal.reason);
-  const headers = {}; mapEach(requireHeaders(req.headers), (value, key) => { headers[key] = value; });
+  const headers = headerObject(req.headers);
   return new NativePromise((resolve, reject) => {
     let timer = null, settled = false;
     const unsubscribe = onSignalAbort(req.signal, () => {
@@ -840,11 +839,14 @@ G.fetch = function fetch(input, init = undefined) {
       if (settled) return;
       settled = true; unsubscribe();
       if (answer.error != null) { reject(new NativeTypeError('Failed to fetch')); return; }
-      receive(answer);
-      const noBody = req.method === 'HEAD' || answer.status === 204 || answer.status === 205 || answer.status === 304;
-      const response = new Response(noBody ? null : answer.body, { status: answer.status, headers: answer.headers, url: answer.url });
-      requireBody(response).signal = req.signal;
-      resolve(response);
+      try {
+        const noBody = req.method === 'HEAD' || answer.status === 204 || answer.status === 205 || answer.status === 304;
+        const response = new Response(null, { status: answer.status, headers: answer.headers });
+        initializeBody(response, noBody ? null : answer.body); requireResponse(response).url = answer.url;
+        setHeadersGuard(requireResponse(response).headers, 'immutable');
+        requireBody(response).signal = req.signal;
+        receive(answer); resolve(response);
+      } catch (e) { reject(e); }
     }, answer.latency, [], false, 'fetch', false);
   });
 };
@@ -918,16 +920,24 @@ G.SharedWorker = class SharedWorker extends Inert { constructor(u) { super('Shar
 G.BroadcastChannel = class BroadcastChannel extends Inert { constructor() { super('BroadcastChannel'); } };
 
 class Blob {
-  constructor(parts = [], o = {}) {
-    this._text = parts.map((p) => (p instanceof Blob ? p._text : typeof p === 'string' ? p : new TextDecoder().decode(p))).join('');
-    this.type = o.type || '';
+  constructor(parts = [], options = {}) {
+    let text = '';
+    for (const part of parts) { const data = blobRecord(part); text += data ? data.text : typeof part === 'string' ? wellFormed(part) : ArrayBuffer.isView(part) || part instanceof ArrayBuffer ? new NativeTextDecoder().decode(part) : wellFormed(domString(part)); }
+    let type = options.type === undefined ? '' : domString(options.type);
+    for (let i = 0; i < type.length; i++) if (type.charCodeAt(i) < 32 || type.charCodeAt(i) > 126) { type = ''; break; }
+    saveBlob(this, { text, type: type.toLowerCase(), name: undefined, lastModified: undefined });
   }
-  get size() { return this._text.length; }
-  text() { return Promise.resolve(this._text); }
-  arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._text).buffer); }
-  slice(a, b) { return new Blob([this._text.slice(a, b)], { type: this.type }); }
+  get size() { return new TextEncoder().encode(requireBlob(this).text).length; }
+  get type() { return requireBlob(this).type; }
+  text() { return nativeResolve(requireBlob(this).text); }
+  arrayBuffer() { return nativeResolve(new TextEncoder().encode(requireBlob(this).text).buffer); }
+  slice(a, b, type = '') { return new Blob([requireBlob(this).text.slice(a, b)], { type }); }
 }
-class File extends Blob { constructor(parts, name, o = {}) { super(parts, o); this.name = String(name); this.lastModified = S.now; } }
+class File extends Blob {
+  constructor(parts, name, options = {}) { super(parts, options); const data = requireBlob(this); data.name = wellFormed(domString(name)); data.lastModified = options.lastModified ?? S.now; }
+  get name() { const data = requireBlob(this); if (data.name === undefined) throw new NativeTypeError('A File is required'); return data.name; }
+  get lastModified() { const data = requireBlob(this); if (data.name === undefined) throw new NativeTypeError('A File is required'); return data.lastModified; }
+}
 class FileReader extends L.EventTarget {
   constructor() { super(); this.result = null; this.readyState = 0; this.onload = null; this.onloadend = null; this.onerror = null; }
   _read(f) {
@@ -937,9 +947,9 @@ class FileReader extends L.EventTarget {
       for (const t of ['load', 'loadend']) fireEvent(this, new ProgressEvent(t));
     }, 0, [], false, 'FileReader', false);
   }
-  readAsText(b) { this._read(() => b._text); }
-  readAsDataURL(b) { this._read(() => 'data:' + (b.type || 'application/octet-stream') + ';base64,' + btoa(unescape(encodeURIComponent(b._text)))); }
-  readAsArrayBuffer(b) { this._read(() => new TextEncoder().encode(b._text).buffer); }
+  readAsText(b) { this._read(() => requireBlob(b).text); }
+  readAsDataURL(b) { this._read(() => 'data:' + (requireBlob(b).type || 'application/octet-stream') + ';base64,' + btoa(unescape(encodeURIComponent(requireBlob(b).text)))); }
+  readAsArrayBuffer(b) { this._read(() => new TextEncoder().encode(requireBlob(b).text).buffer); }
   abort() {}
 }
 Object.assign(G, { Blob, File, FileReader });
@@ -953,7 +963,7 @@ for (const [Class, types] of [[MessagePort, ['message', 'messageerror']], [XMLHt
 
 class FormData {
   constructor(form, submitter) {
-    this._l = [];
+    saveForm(this, []);
     if (!form) return;
     for (const el of form.querySelectorAll('input,select,textarea,button')) {
       const name = el.getAttribute('name');
@@ -961,28 +971,33 @@ class FormData {
       const tag = el.localName;
       const type = (el.getAttribute('type') || '').toLowerCase();
       if (tag === 'button' || ['submit', 'image', 'reset', 'button'].includes(type)) {
-        if (el === submitter) this._l.push([name, el.getAttribute('value') || '']);
+        if (el === submitter) requireForm(this).push([name, el.getAttribute('value') || '']);
         continue;
       }
       if ((type === 'checkbox' || type === 'radio') && !el.checked) continue;
       if (type === 'file') continue;
       if (tag === 'select') {
-        for (const o of el.querySelectorAll('option')) if (o.selected) this._l.push([name, o.value ?? o.textContent]);
+        for (const o of el.querySelectorAll('option')) if (o.selected) requireForm(this).push([name, o.value ?? o.textContent]);
         continue;
       }
-      this._l.push([name, type === 'checkbox' || type === 'radio' ? el.getAttribute('value') ?? 'on' : String(el.value ?? '')]);
+      requireForm(this).push([name, type === 'checkbox' || type === 'radio' ? el.getAttribute('value') ?? 'on' : String(el.value ?? '')]);
     }
   }
-  append(k, v) { this._l.push([String(k), v instanceof Blob ? v : String(v)]); }
-  delete(k) { this._l = this._l.filter((p) => p[0] !== k); }
-  get(k) { const p = this._l.find((p) => p[0] === k); return p ? p[1] : null; }
-  getAll(k) { return this._l.filter((p) => p[0] === k).map((p) => p[1]); }
-  has(k) { return this._l.some((p) => p[0] === k); }
-  set(k, v) { this.delete(k); this.append(k, v); }
-  forEach(f, t) { for (const [k, v] of this._l) f.call(t, v, k, this); }
-  *entries() { yield* this._l.map((p) => [...p]); }
-  *keys() { for (const p of this._l) yield p[0]; }
-  *values() { for (const p of this._l) yield p[1]; }
+  append(k, v, filename) {
+    const list = requireForm(this), name = wellFormed(domString(k)), data = blobRecord(v);
+    if (filename !== undefined && !data) throw new NativeTypeError('A filename requires a Blob');
+    const value = data ? filename === undefined && data.name !== undefined ? v : new File([v], filename === undefined ? 'blob' : filename, { type: data.type }) : wellFormed(domString(v));
+    list[list.length] = [name, value];
+  }
+  delete(k) { k = wellFormed(domString(k)); saveForm(this, requireForm(this).filter((p) => p[0] !== k)); }
+  get(k) { const p = requireForm(this).find((p) => p[0] === k); return p ? p[1] : null; }
+  getAll(k) { return requireForm(this).filter((p) => p[0] === k).map((p) => p[1]); }
+  has(k) { return requireForm(this).some((p) => p[0] === k); }
+  set(k, v, filename) { this.delete(k); this.append(k, v, filename); }
+  forEach(f, t) { for (const [k, v] of requireForm(this)) f.call(t, v, k, this); }
+  *entries() { yield* requireForm(this).map((p) => [...p]); }
+  *keys() { for (const p of requireForm(this)) yield p[0]; }
+  *values() { for (const p of requireForm(this)) yield p[1]; }
   [Symbol.iterator]() { return this.entries(); }
 }
 G.FormData = FormData;

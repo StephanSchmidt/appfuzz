@@ -1051,6 +1051,12 @@ rejects promptly, and cancels pending response delivery; pre-aborted requests
 never call the host. Unread response bodies and clones preserve cancellation.
 Request routing, headers and body consumption also use private state rather
 than public property shadows.
+Header lists validate HTTP names and byte strings, normalize whitespace, and
+apply native request, response, immutable and no-CORS guards. Iteration stays
+live and sorted; `Set-Cookie` values remain separate on ordinary `Headers`
+objects and are filtered from response headers. Request and response bodies
+supply their default content types, including matching multipart boundaries
+for FormData. `Response.json()` retains caller headers.
 
 **Requests.** A request to the app's own origin is a run of the app,
 with the same host plan. A request for data from another host gets text
