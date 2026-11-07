@@ -112,7 +112,9 @@ fn sniffs_html(body: &str) -> bool {
 }
 
 static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*?(/?)>").unwrap());
-static COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->|<!(?i:doctype)[^>]*>").unwrap());
+/// Comments, the doctype, and bogus comments such as the empty `<!>` that
+/// Leptos puts between adjacent text nodes: a browser shows `18<!>%` as `18%`.
+pub(crate) static COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->|<![^>]*>").unwrap());
 static PERCENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(-?\d+(?:[.,]\d+)?)\s*%").unwrap());
 
 /// Elements without an end tag.
@@ -233,8 +235,9 @@ pub(crate) fn strings(v: &Value, out: &mut BTreeSet<String>) {
 
 /// Percentages outside 0–100 in a text (`400 %`, `-5%`).
 pub fn impossible_percentages(text: &str) -> Vec<String> {
+    let text = COMMENT.replace_all(text, "");
     PERCENT
-        .captures_iter(text)
+        .captures_iter(&text)
         .filter(|c| c[1].replace(',', ".").parse::<f64>().is_ok_and(|x| !(0.0..=100.0).contains(&x)))
         .map(|c| c[0].to_string())
         .take(5)
@@ -850,8 +853,9 @@ static TAGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]*>").unwrap())
 /// kept (a `title` or `value` shows text too).
 fn visible_text(body: &str) -> String {
     static VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap());
-    let mut out = TAGS.replace_all(body, " ").into_owned();
-    for tag in TAGS.find_iter(body) {
+    let body = COMMENT.replace_all(body, "");
+    let mut out = TAGS.replace_all(&body, " ").into_owned();
+    for tag in TAGS.find_iter(&body) {
         for c in VALUE.captures_iter(tag.as_str()) {
             out.push(' ');
             out.push_str(c.get(1).or(c.get(2)).map_or("", |m| m.as_str()));
@@ -863,7 +867,7 @@ fn visible_text(body: &str) -> String {
 /// The visible text of a body as a bag of words, for order-insensitive
 /// comparison.
 pub fn word_bag(body: &str) -> Vec<String> {
-    let text = TAGS.replace_all(body, " ");
+    let text = TAGS.replace_all(&COMMENT.replace_all(body, ""), " ").into_owned();
     let mut w: Vec<String> = text.split_whitespace().map(str::to_string).collect();
     w.sort();
     w
@@ -972,11 +976,15 @@ mod tests {
         let t = visible_text(r#"<progress value="2" max="9"></progress><p title='Name is required'>ok</p>"#);
         assert!(!t.contains("progress"));
         assert!(t.contains("Name is required") && t.contains("ok"));
+        // Server renderers mark text node boundaries with comments.
+        assert!(visible_text("<p>Booked by <!>Ann<!-- x > y --></p>").contains("Booked by Ann"));
+        assert_eq!(word_bag("<span>#<!>1</span> x"), word_bag("<span>#1</span> x"));
     }
 
     #[test]
     fn percentages() {
         assert_eq!(impossible_percentages("used 40 % of 400% and -5%"), vec!["400%".to_string(), "-5%".to_string()]);
+        assert_eq!(impossible_percentages("<p>200<!>%<span> booked</span></p>"), vec!["200%".to_string()]);
     }
 
     #[test]

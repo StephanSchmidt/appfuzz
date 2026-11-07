@@ -342,6 +342,8 @@ impl Selector {
             return r.result.as_ref().and_then(|v| field(v, p)).map(|v| vec![v.as_str().map_or_else(|| v.to_string(), str::to_string)]).unwrap_or_default();
         }
         let Some(body) = response(r, m).body else { return vec![] };
+        // What a browser shows: `18<!>%` reads as `18%`.
+        let body = crate::output::COMMENT.replace_all(&body, "").into_owned();
         if let SelKind::Pattern(re) = &self.kind {
             return re.captures_iter(&body).map(|c| c.get(1).or(c.get(0)).map_or("", |x| x.as_str()).to_string()).collect();
         }
