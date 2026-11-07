@@ -15,3 +15,8 @@ regexes = [
   '''eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0\.eyJzdWIiOiIxIiwibmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiYWRtaW4iOnRydWUsImlhdCI6MTc2NzIyNTYwMCwiZXhwIjo0MTAyNDQ0ODAwfQ\.''',
   '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxIiwibmFtZSI6ImFkbWluIiwicm9sZSI6ImFkbWluIiwiYWRtaW4iOnRydWUsImlhdCI6MTc2NzIyNTYwMCwiZXhwIjo0MTAyNDQ0ODAwfQ\.YWZ6LWZvcmdlZC1zaWduYXR1cmUtMDAwMDAwMDAwMA''',
 ]
+
+[[allowlists]]
+description = "finding ids that tests compare with (hashes, not keys)"
+regexTarget = "match"
+regexes = ['''f4a3de7ef2287523b1e5a4f215486b038''']
