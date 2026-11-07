@@ -1296,3 +1296,212 @@ fn cloned_template_contents_keep_svg_owners_namespaces_and_executable_script_ide
         assert_eq!(paths, ["/svg-cloned"], "{kind}");
     }
 }
+
+#[test]
+fn imported_subtrees_belong_to_the_destination_before_insertion() {
+    let (_, report) = visit(
+        r#"<script>
+    const foreign=new DOMParser().parseFromString('<section data-a=v><span data-b=w>text<!--c--></span><template><i data-c=x>nested</i></template></section>','text/html'),source=foreign.querySelector('section');
+    for(const deep of [false,true]){const copy=document.importNode(source,deep);console.log(deep,copy.ownerDocument===document,copy.attributes[0].ownerDocument===document,copy.childNodes.length,deep?copy.firstChild.firstChild.ownerDocument===document:true,deep?copy.firstChild.lastChild.ownerDocument===document:true,deep?copy.firstChild.attributes[0].ownerDocument===document:true,deep?copy.querySelector('template').content.ownerDocument===document.createElement('template').content.ownerDocument:true);}
+    console.log(source.ownerDocument===foreign,source.parentNode!==null,source.attributes[0].ownerDocument===foreign);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["false true true 0 true true true true", "true true true 2 true true true true", "true true true"]);
+}
+
+#[test]
+fn importing_fragments_and_plain_nodes_preserves_types_values_and_source_ownership() {
+    let (_, report) = visit(
+        r#"<script>
+    const foreign=new DOMParser().parseFromString('<p data-a=v>text<!--c--></p>','text/html'),p=foreign.querySelector('p'),f=foreign.createDocumentFragment();f.append(p);
+    const copy=document.importNode(f,true);console.log(copy.ownerDocument===document,copy.firstChild.ownerDocument===document,copy.firstChild.attributes[0].ownerDocument===document,copy.firstChild.firstChild.ownerDocument===document,f.childNodes.length);
+    for(const source of [p.attributes[0],p.firstChild,p.lastChild,foreign.createDocumentType('html')]){const n=document.importNode(source);console.log(n.nodeType,n.ownerDocument===document,n.ownerElement??n.parentNode,n.value??n.nodeValue??n.name,source.ownerDocument===foreign);}
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["true true true true 1", "2 true null v true", "3 true null text true", "8 true null c true", "10 true null html true"]);
+}
+
+#[test]
+fn imported_custom_elements_construct_with_the_completed_copy_and_destination_registry() {
+    let (_, report) = visit(
+        r#"<script>
+    const foreign=new DOMParser().parseFromString('','text/html');
+    customElements.define('x-import',class extends HTMLElement{constructor(){super();console.log('constructor',this.getAttribute('data-a'),this.childNodes.length,this.ownerDocument===document,this.isConnected);}static observedAttributes=['data-a'];attributeChangedCallback(name,oldValue,value){console.log('attribute',name,oldValue,value);}adoptedCallback(){console.log('adopted');}connectedCallback(){console.log('connected');}});
+    const source=foreign.createElement('x-import');source.setAttribute('data-a','v');source.append(foreign.createElement('b'));const copy=document.importNode(source,true);console.log('imported',copy instanceof customElements.get('x-import'));
+    const inert=foreign.importNode(copy,true);console.log('inert',inert instanceof customElements.get('x-import'),inert.ownerDocument===foreign);const cloned=copy.cloneNode(true);console.log('cloned',cloned instanceof customElements.get('x-import'));document.body.append(copy);console.log('inserted');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        logs,
+        [
+            "constructor v 1 true false",
+            "attribute data-a null v",
+            "imported true",
+            "inert false true",
+            "constructor v 1 true false",
+            "attribute data-a null v",
+            "cloned true",
+            "connected",
+            "inserted"
+        ]
+    );
+}
+
+#[test]
+fn import_does_not_use_the_sources_public_clone_method_or_adopt_its_original_nodes() {
+    let (_, report) = visit(
+        r#"<script>
+    const other=new DOMParser().parseFromString('<p data-a=v>real</p>','text/html'),source=other.querySelector('p');let calls=0;
+    Object.defineProperty(source,'cloneNode',{get(){calls++;throw Error('page clone getter');}});
+    const n=document.importNode(source,true);console.log(calls,n.localName,n.textContent,n.ownerDocument===document,n.attributes[0].ownerDocument===document,source.ownerDocument===other,source.parentNode===other.body);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "0 p real true true true true");
+}
+
+#[test]
+fn import_rejects_documents_shadow_roots_and_non_nodes_without_calling_guest_methods() {
+    let (_, report) = visit(
+        r#"<script>
+    const shadow=document.createElement('div').attachShadow({mode:'open'});let calls=0;
+    for(const n of [document,shadow]){Object.defineProperty(n,'cloneNode',{get(){calls++;throw Error('page getter');}});Object.defineProperty(n,'nodeType',{value:1});try{document.importNode(n,true);console.log('accepted');}catch(e){console.log(e.name);}}
+    for(const n of [null,{},'text']){try{document.importNode(n,true);console.log('accepted');}catch(e){console.log(e.name);}}
+    try{document.importNode();}catch(e){console.log(e.name);}console.log('calls',calls,document.importNode.length);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["NotSupportedError", "NotSupportedError", "TypeError", "TypeError", "TypeError", "TypeError", "calls 0 1"]);
+}
+
+#[test]
+fn imported_scripts_keep_their_preparation_state_while_fresh_scripts_execute_after_insertion() {
+    let (r, report) = visit(
+        r#"<script id=ran>console.log('original');</script><script>
+    document.body.append(document.importNode(document.getElementById('ran'),true));
+    const other=new DOMParser().parseFromString('<script>fetch("/parsed-reran");</'+'script>','text/html');document.body.append(document.importNode(other.querySelector('script'),true));
+    const fresh=other.createElement('script');fresh.text='fetch("/fresh-import");';const copy=document.importNode(fresh,true);console.log(copy.ownerDocument===document,copy.firstChild.ownerDocument===document);document.body.append(copy);
+    </script>"#,
+    );
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["/fresh-import"]);
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["original", "true true"]);
+}
+
+#[test]
+fn import_options_follow_boolean_and_dictionary_semantics_and_validate_registries() {
+    let (_, report) = visit(
+        r#"<script>
+    const source=document.createElement('div');source.append(document.createElement('b'));
+    for(const [name,value] of [['default',undefined],['false',false],['true',true],['null',null],['empty',{}],['self',{selfOnly:true}],['deep',{selfOnly:false}],['zero',0],['one',1]])console.log(name,document.importNode(source,value).childNodes.length);
+    const order=[];console.log('options',document.importNode(source,{get customElementRegistry(){order.push('registry');return customElements;},get selfOnly(){order.push('self');return true;}}).childNodes.length,order.join(','));
+    try{document.importNode(source,{customElementRegistry:{}});}catch(e){console.log(e.name);}
+    const other=new DOMParser().parseFromString('','text/html');try{other.importNode(source,{customElementRegistry:customElements});}catch(e){console.log(e.name);}
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        logs,
+        [
+            "default 0",
+            "false 0",
+            "true 1",
+            "null 1",
+            "empty 1",
+            "self 0",
+            "deep 1",
+            "zero 0",
+            "one 1",
+            "options 0 registry,self",
+            "TypeError",
+            "NotSupportedError"
+        ]
+    );
+}
+
+#[test]
+fn import_ignores_frozen_descendant_clone_methods_and_destination_factory_overrides() {
+    let (_, report) = visit(
+        r#"<script>
+    const other=new DOMParser().parseFromString('<div data-a=v><span>text<!--c--></span></div>','text/html'),source=other.querySelector('div');let calls=0;
+    const bad=()=>{calls++;throw Error('page method');};
+    for(const node of [source.attributes[0],source.firstChild.firstChild,source.firstChild.lastChild])Object.defineProperty(node,'cloneNode',{value:bad});
+    Object.defineProperty(source.firstChild,'localName',{get:bad});
+    Object.defineProperty(document,'createElement',{value:bad});Object.defineProperty(document,'createElementNS',{value:bad});
+    const copy=document.importNode(source,true);console.log(calls,copy.localName,copy.firstChild.localName,copy.textContent,copy.attributes[0].value);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "0 div span text v");
+}
+
+#[test]
+fn importing_template_contents_upgrades_only_the_copies_in_the_destination_document() {
+    let (_, report) = visit(
+        r#"<template id=t><x-import data-a=v><b>text</b></x-import><template><x-import></x-import></template></template><script>
+    let count=0;customElements.define('x-import',class extends HTMLElement{constructor(){super();count++;console.log('constructor',this.getAttribute('data-a'),this.childNodes.length,this.isConnected);}adoptedCallback(){console.log('adopted');}});
+    const t=document.getElementById('t'),copy=document.importNode(t.content,true);console.log('import',count,copy.firstChild.ownerDocument===document,copy.firstChild.attributes[0].ownerDocument===document,copy.lastChild.content.ownerDocument!==document,t.content.firstChild instanceof customElements.get('x-import'));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["constructor v 1 false", "import 1 true true true false"]);
+}
+
+#[test]
+fn custom_element_attributes_and_children_can_drive_behavior_during_import_construction() {
+    let (r, report) = visit(
+        r#"<script>
+    customElements.define('x-effect',class extends HTMLElement{constructor(){super();const s=document.createElement('script');s.text='console.log("inline");';document.head.append(s);document.head.append(s.cloneNode(true));if(this.getAttribute('data-run')==='yes'&&this.firstChild?.textContent==='ready')fetch('/import-constructor');console.log('constructor-after');}});
+    const other=new DOMParser().parseFromString('<x-effect data-run=yes><b>ready</b></x-effect>','text/html');document.importNode(other.body.firstChild,true);console.log('returned');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["inline", "constructor-after", "returned"]);
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["/import-constructor"]);
+}
+
+#[test]
+fn queued_import_upgrades_keep_their_definition_when_a_parent_constructor_moves_the_child() {
+    let (_, report) = visit(
+        r#"<script>
+    window.other=new DOMParser().parseFromString('<x-parent><x-child data-a=v></x-child></x-parent>','text/html');
+    customElements.define('x-child',class extends HTMLElement{constructor(){super();console.log('child',this.ownerDocument===other,this.getAttribute('data-a'));}connectedCallback(){console.log('connected',this.ownerDocument===other);}});
+    customElements.define('x-parent',class extends HTMLElement{constructor(){super();window.moved=this.firstChild;other.body.append(moved);console.log('parent');}});
+    const copy=document.importNode(other.querySelector('x-parent'),true);console.log('returned',copy.childNodes.length,moved instanceof customElements.get('x-child'));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["parent", "child true v", "connected true", "returned 0 true"]);
+}
+
+#[test]
+fn nested_import_before_super_does_not_consume_an_outer_upgrade_construction_token() {
+    let (_, report) = visit(
+        r#"<script>
+    window.other=new DOMParser().parseFromString('<x-parent data-a=v></x-parent>','text/html');
+    customElements.define('x-parent',class extends HTMLElement{constructor(){const n=document.importNode(other.createElement('b'));super();console.log(n.localName,n.ownerDocument===document,this.localName,this.getAttribute('data-a'));}});
+    const copy=document.importNode(other.body.firstChild,true);console.log(copy.localName,copy.ownerDocument===document);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["b true x-parent v", "x-parent true"]);
+}
+
+#[test]
+fn failed_import_constructors_do_not_throw_from_import_or_cancel_later_child_upgrades() {
+    let (_, report) = visit_unchecked(
+        r#"<script>
+    customElements.define('x-parent',class extends HTMLElement{constructor(){super();console.log('parent');throw Error('import failed');}connectedCallback(){console.log('failed-connected');}});
+    customElements.define('x-child',class extends HTMLElement{constructor(){super();console.log('child',this.ownerDocument===document,this.isConnected);}connectedCallback(){console.log('child-connected');}});
+    const other=new DOMParser().parseFromString('<x-parent><x-child></x-child></x-parent>','text/html');const copy=document.importNode(other.body.firstChild,true);console.log('returned',copy.firstChild instanceof customElements.get('x-child'));document.body.append(copy);
+    </script>"#,
+        json!({}),
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["parent", "child true false", "returned true", "child-connected"]);
+    assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["errors"][0]["message"], "import failed");
+}

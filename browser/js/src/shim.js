@@ -937,7 +937,7 @@ function installWindow(doc) {
   const shareObservers = installObservers(doc);
   shareTemplateObservers(shareObservers);
   shareObservers(templateOwner(doc));
-  installAdoption(L.Element, shareObservers, (name, e) => error('custom-element:' + name, e));
+  const upgradeCopies = installAdoption(L.Element, shareObservers, (name, e) => error('custom-element:' + name, e));
   const view = doc.defaultView;
   for (const [k, v] of Object.entries(L)) {
     if (/^[A-Z]/.test(k) && typeof v === 'function') G[k] = v;
@@ -1052,7 +1052,7 @@ function installWindow(doc) {
   L.Document.prototype.createElement = createElement;
   installCloning(L, { html: create, xml: createXML, svg: createNS }, shareObservers, (copy, identity, original) => {
     rememberScript(copy, identity, scriptRecord(original)?.alreadyStarted || false);
-  });
+  }, upgradeCopies, BrowserDOMException);
   L.Document.prototype.createElementNS = function (ns, name, o) {
     const identity = qualifiedName(ns, name, arguments.length, BrowserDOMException);
     const { namespace, local } = identity;

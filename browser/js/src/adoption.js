@@ -6,7 +6,7 @@ import { remove as unlink } from '../node_modules/linkedom/esm/mixin/child-node.
 import { shadowRoots } from '../node_modules/linkedom/esm/shared/shadow-roots.js';
 import { customElements } from '../node_modules/linkedom/esm/interface/custom-element-registry.js';
 import { templateContent, templateOwner } from './templates.js';
-import { upgradeInserted } from './upgrading.js';
+import { upgradeInserted, upgradeDefinition } from './upgrading.js';
 import { runDOMCallback } from './dom-callbacks.js';
 
 // Takes any node out of its parent, as Element and CharacterData's own
@@ -120,6 +120,17 @@ export function installAdoption(Element, shareObservers, onError) {
         if (inserting && isConnected) enqueue(element, 'connectedCallback');
       }
       for (const { node } of nodes) { if (inserting) upgradeInserted(node, isConnected, enqueue, onError); flush(node); }
+    }
+  };
+  // cloneNode/importNode queue upgrades as they create elements, then run
+  // them only after the complete detached copy has its attributes/children.
+  return nodes => {
+    const definitions = [];
+    for (let i = 0; i < nodes.length; i++) definitions[i] = upgradeDefinition(nodes[i]);
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      upgradeInserted(node, isConnected, enqueue, onError, true, definitions[i]);
+      flush(node);
     }
   };
 }
