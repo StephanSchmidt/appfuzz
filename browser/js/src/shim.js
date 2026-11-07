@@ -1,11 +1,12 @@
 // The page's world: linkedom's DOM plus the Web APIs a page's scripts
-// expect, on virtual time. The guest drives it through globalThis.__af:
-// init, scripts, step, candidates, act, report. Everything a page does
+// expect, on virtual time. The guest retains the bootstrap control handle
+// privately: init, scripts, step, candidates, act, report. Everything a page does
 // that leaves the page (requests, navigations, cookies, code it builds)
 // is recorded.
 import * as L from 'linkedom';
 import { Headers, convertHeadersInit, headersFromConverted, setHeadersGuard, copyHeaders, filterHeaders, headerObject, headerValue, appendNativeHeader } from './headers.js';
 import { URL, URLSearchParams, urlPart, setURLPart, serializeParams, setObjectURLHooks } from './urls.js';
+import { reportJSON } from './report-json.js';
 import { CookieJar } from './cookies.js';
 import { parseHTML, parseHTMLFragment, fragmentElements, documentMode } from './document.js';
 import { qualifiedName, nameIdentity } from './names.js';
@@ -42,6 +43,7 @@ const nodeRoot = Function.prototype.call.bind(L.Node.prototype.getRootNode);
 const isShadowRoot = Object.prototype.isPrototypeOf.bind(L.ShadowRoot.prototype);
 const isDocument = Object.prototype.isPrototypeOf.bind(L.Document.prototype);
 const CAP = 200;
+const nativeString = String, diagnosticSlice = Function.prototype.call.bind(String.prototype.slice);
 
 const S = {
   start: 0, now: 0, seq: 0, timers: new Map(), nesting: 0, horizon: 0,
@@ -57,7 +59,7 @@ setEventClock(() => S.now - S.start);
 installControlState(queueDetailsToggle);
 
 const push = (list, v) => { if (list.length < CAP) list[list.length] = v; };
-const clip = (s, n = 400) => { s = String(s); return s.length > n ? s.slice(0, n) + '…' : s; };
+const clip = (s, n = 400) => { s = nativeString(s); return s.length > n ? diagnosticSlice(s, 0, n) + '…' : s; };
 let dispatchGlobalError = null, dispatchGlobalEvent = null, reportingError = false;
 const error = (where, value, notify = true) => {
   const info = exceptionInfo(value);
@@ -77,12 +79,13 @@ const nativeApply = Reflect.apply, NativeTypeError = TypeError;
 let handledRejections = [];
 const unmodelled = (name) => S.unmodelled.add(name);
 
-// The host: appfuzz's browser guest installs globalThis.__host, the
+// The host: appfuzz's browser guest binds a private bridge to the
 // `appfuzz:browser` imports. Requests go to it and it answers them; markup,
 // code and navigations the page makes are reported to it. Without one (the
 // native runner) requests are answered from the session's files and
 // responses.
-const host = () => G.__host;
+let browserHost = null;
+const host = () => browserHost;
 const toMarkup = (where, value) => { const h = host(); if (h) h.html(String(where), String(value)); };
 const toCode = (where, value) => { const h = host(); if (h) h.code(String(where), String(value)); };
 
@@ -1757,13 +1760,22 @@ function scriptDone(ok) {
 
 // --- The driver's handle ---------------------------------------------------------
 
-G.console = Object.fromEntries(['log', 'info', 'warn', 'error', 'debug', 'trace', 'dir', 'table'].map((level) => [level, (...a) => {
-  push(S.console, { level, at: S.now - S.start, text: clip(a.map((x) => { if (typeof x === 'string') return x; try { return JSON.stringify(x); } catch { return String(x); } }).join(' ')) });
+function consoleArgument(value) {
+  if (typeof value === 'string') return value;
+  try { const encoded = reportJSON(value); if (encoded !== undefined) return encoded; } catch {}
+  try { return nativeString(value); } catch { return '[unprintable]'; }
+}
+G.console = Object.fromEntries(['log', 'info', 'warn', 'error', 'debug', 'trace', 'dir', 'table'].map(level => [level, (...args) => {
+  let text = '';
+  for (let i = 0; i < args.length; i++) text += (i ? ' ' : '') + consoleArgument(args[i]);
+  push(S.console, { level, at: S.now - S.start, text: clip(text) });
 }]));
 Object.assign(G.console, { group() {}, groupCollapsed() {}, groupEnd() {}, time() {}, timeEnd() {}, timeLog() {}, count() {}, countReset() {}, assert(c, ...a) { if (!c) G.console.error('Assertion failed:', ...a); } });
 
+const pageText = () => (G.document.body ? G.document.body.textContent.replace(/\s+/g, ' ').trim() : '');
 G.__af = {
-  bindClassic(run) { S.runClassic = run; delete G.__af.bindClassic; },
+  bindClassic(run) { S.runClassic = run; },
+  bindHost(bridge) { browserHost = bridge; },
   // `now` and `hostSeed`: the host's clock and randomness, when it has them.
   init(json, now, hostSeed) {
     const s = JSON.parse(json);
@@ -1862,17 +1874,17 @@ G.__af = {
   },
   idle() { S.now = Math.max(S.now, S.horizon); },
   ended: () => !!S.ended,
-  candidates: () => JSON.stringify(candidates()),
+  candidates: () => reportJSON(candidates()),
   count: () => candidates().length,
   act,
-  text: () => (G.document.body ? G.document.body.textContent.replace(/\s+/g, ' ').trim() : ''),
+  text: pageText,
   report() {
-    return JSON.stringify({
+    return reportJSON({
       url: urlPart(S.url, 'href'), ended: S.ended, now_ms: S.now - S.start, steps: S.steps, timers: S.timers.size,
       errors: S.errors, console: S.console, requests: S.requests, navigations: S.navigations,
       code: S.code, cookies: S.cookieWrites, storage: S.storage, dialogs: S.dialogs, history: S.history,
       unmodelled: [...S.unmodelled], actions: S.actions,
-      text: G.__af.text().slice(0, 2000),
+      text: stringSlice(pageText(), 0, 2000),
     });
   },
 };

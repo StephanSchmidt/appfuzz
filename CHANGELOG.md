@@ -134,6 +134,10 @@
 
 **Apps that ship JavaScript**
 
+- Page scripts cannot replace the browser driver's private hooks, host bridge,
+  or native parser. Replacing JSON functions or adding `toJSON` methods to
+  built-in prototypes no longer alters the browser's evidence report.
+
 - URL and query state stays private, including native request routing and
   history origin checks when a page replaces URL accessors. Query iterators
   and callbacks see live changes; Web IDL argument conversion and query body

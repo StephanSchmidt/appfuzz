@@ -119,7 +119,14 @@ fn report(results: &[(String, Vec<String>)]) {
 #[ignore = "slow: builds and fuzzes the bench apps"]
 fn bench() {
     let bench = root().join("bench");
-    let status = Command::new("cargo").args(["build", "--release", "--target", "wasm32-wasip2"]).current_dir(&bench).status().expect("cargo");
+    // Fixture manifests name bench/target explicitly. A caller's shared
+    // CARGO_TARGET_DIR must not move these Wasm files elsewhere.
+    let status = Command::new("cargo")
+        .args(["build", "--release", "--target", "wasm32-wasip2", "--target-dir"])
+        .arg(bench.join("target"))
+        .current_dir(&bench)
+        .status()
+        .expect("cargo");
     assert!(status.success(), "building the bench apps failed (is the wasm32-wasip2 target installed?)");
     let only = std::env::var("BENCH_ONLY").ok();
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(bench.join("apps")).unwrap().map(|e| e.unwrap().path()).collect();
@@ -177,7 +184,14 @@ fn appfuzz(manifest: &Path, state: &Path, args: &[&str]) -> Value {
 #[ignore = "slow: builds and reviews a bench app"]
 fn envelope_time_bomb() {
     let bench = root().join("bench");
-    let status = Command::new("cargo").args(["build", "--release", "--target", "wasm32-wasip2"]).current_dir(&bench).status().expect("cargo");
+    // Fixture manifests name bench/target explicitly. A caller's shared
+    // CARGO_TARGET_DIR must not move these Wasm files elsewhere.
+    let status = Command::new("cargo")
+        .args(["build", "--release", "--target", "wasm32-wasip2", "--target-dir"])
+        .arg(bench.join("target"))
+        .current_dir(&bench)
+        .status()
+        .expect("cargo");
     assert!(status.success());
     let manifest = bench.join("apps/time-bomb/appfuzz.toml");
     let state = state_dir("envelope-time-bomb");

@@ -39,7 +39,9 @@ const MAX_ACTIONS: usize = 64;
 const MAX_JOBS: u32 = 1_000_000;
 
 fn call<'js, A: IntoArgs<'js>, R: FromJs<'js>>(ctx: &Ctx<'js>, name: &str, args: A) -> Result<R> {
-    let af: Object = ctx.globals().get("__af")?;
+    // The control handle lives in runtime userdata, outside the page's global
+    // object. Recreated globals and getters cannot replace driver operations.
+    let af = ctx.userdata::<Object>().ok_or(Error::Unknown)?;
     let f: Function = af.get(name)?;
     f.call(args)
 }
@@ -81,7 +83,7 @@ impl Loader for PageLoader {
     }
 }
 
-/// `globalThis.__host`: the shim's way out, the `appfuzz:browser` imports.
+/// The private host bridge: the shim's `appfuzz:browser` imports.
 /// Natively there is none and the shim answers requests from the session's
 /// files and responses.
 #[cfg(target_arch = "wasm32")]
@@ -94,13 +96,13 @@ mod bridge {
     type Headers = Vec<List<(String, String)>>;
     type FetchAnswer = List<(u16, Headers, String, Option<String>, Option<f64>)>;
 
-    pub fn install(ctx: &Ctx<'_>) -> Result<()> {
+    pub fn install<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
         let host = Object::new(ctx.clone())?;
         host.set("fetch", Function::new(ctx.clone(), fetch)?)?;
         host.set("go", Function::new(ctx.clone(), |how: String, url: String, gesture: bool| nav::go(&how, &url, gesture))?)?;
         host.set("html", Function::new(ctx.clone(), |at: String, value: String| sink::html(&at, &value))?)?;
         host.set("code", Function::new(ctx.clone(), |at: String, value: String| sink::code(&at, &value))?)?;
-        ctx.globals().set("__host", host)
+        Ok(host)
     }
 
     std::thread_local! {
@@ -430,13 +432,27 @@ fn boot() -> std::result::Result<Page, String> {
     })));
     let ctx = Context::full(&rt).map_err(|e| format!("context: {e}"))?;
     ctx.with(|ctx| crate::web::install(&ctx).map_err(|e| fail(&ctx, e)))?;
-    ctx.with(|ctx| ctx.eval::<(), _>(SHIM).map_err(|e| fail(&ctx, e)))?;
+    ctx.with(|ctx| {
+        ctx.eval::<(), _>(SHIM).map_err(|e| fail(&ctx, e))?;
+        let handle: Object = ctx.globals().get("__af").map_err(|e| fail(&ctx, e))?;
+        ctx.store_userdata(handle).map_err(|_| "cannot store browser driver".to_string())?;
+        Ok::<_, String>(())
+    })?;
     ctx.with(|ctx| {
         let run = Function::new(ctx.clone(), run_inline).map_err(|e| fail(&ctx, e))?;
         call::<_, ()>(&ctx, "bindClassic", (run,)).map_err(|e| fail(&ctx, e))
     })?;
     #[cfg(target_arch = "wasm32")]
-    ctx.with(|ctx| bridge::install(&ctx).map_err(|e| fail(&ctx, e)))?;
+    ctx.with(|ctx| {
+        let host = bridge::install(&ctx).map_err(|e| fail(&ctx, e))?;
+        call::<_, ()>(&ctx, "bindHost", (host,)).map_err(|e| fail(&ctx, e))
+    })?;
+    ctx.with(|ctx| {
+        for name in ["__af", "__native"] {
+            ctx.globals().remove(name).map_err(|e| fail(&ctx, e))?;
+        }
+        Ok::<_, String>(())
+    })?;
     Ok(Page { compiled: Default::default(), rt, ctx })
 }
 
@@ -512,4 +528,29 @@ pub fn session(input: &str) -> String {
     #[cfg(target_arch = "wasm32")]
     std::mem::forget(page);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_driver_survives_recreated_globals_and_report_serializers() {
+        for _ in 0..3 {
+            let out = session(
+                r#"{"url":"https://app.example/","html":"<script>globalThis.__af={};Object.prototype.toJSON=()=>({});JSON.stringify=()=>'';console.log('sentinel')</script>"}"#,
+            );
+            assert!(out.contains(r#""url":"https://app.example/""#), "{out}");
+            assert!(out.contains(r#""text":"sentinel""#), "{out}");
+        }
+    }
+
+    #[test]
+    fn module_loader_uses_the_private_driver_after_page_globals_change() {
+        let out = session(
+            r#"{"url":"https://app.example/","html":"<script>globalThis.__af={};</script><script type=module>import {value} from '/module.js';console.log(value)</script>","files":{"/module.js":"export const value='module sentinel'"}}"#,
+        );
+        assert!(out.contains(r#""text":"module sentinel""#), "{out}");
+        assert!(out.contains(r#""errors":[]"#), "{out}");
+    }
 }

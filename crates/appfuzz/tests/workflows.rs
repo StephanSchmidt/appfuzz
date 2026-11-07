@@ -3523,15 +3523,26 @@ fn browser_probe_request_errors_do_not_pass_as_inapplicable() {
 }
 
 #[test]
-fn browser_probe_missing_session_reports_are_incomplete() {
+fn browser_probe_page_report_overrides_cannot_hide_the_visit() {
     let f = Fixture::new(true);
-    let page = "<script>globalThis.__af.report=()=>''</script>";
+    let page = "<script>globalThis.__af={report:()=>''};console.log('visible')</script>";
     f.edit("\"safe\"", &toml::Value::String(page.into()).to_string());
     let (code, out) = f.cli(&["probe", "scripts"]);
-    assert_eq!(code, 3, "{out}");
-    assert_eq!(out["status"], "incomplete");
-    assert!(out["pages"].as_array().is_some_and(|ps| ps.iter().all(|p| p["outcome"] == "ok")));
-    assert!(out["errors"].as_array().is_some_and(|es| es.iter().all(|e| e.as_str().unwrap().contains("no complete session report"))));
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out["status"], "complete");
+    assert_eq!(out["errors"], json!([]));
+    assert_eq!(out["findings"], json!([]));
+    let pages = out["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 3);
+    for page in pages {
+        assert_eq!(page["outcome"], "ok");
+        assert_eq!(page["errors"], 0);
+        let record: Value =
+            serde_json::from_slice(&std::fs::read(f.dir.join("state/runs").join(format!("{}.json", page["browser_run"].as_str().unwrap()))).unwrap()).unwrap();
+        let report: Value = serde_json::from_str(record["result"].as_str().unwrap()).unwrap();
+        assert!(report["url"].as_str().unwrap().starts_with("https://app.example/"));
+        assert_eq!(report["console"][0]["text"], "visible");
+    }
 }
 
 fn authenticated_browser_fixture(response_cookie: bool) -> Fixture {
