@@ -1,8 +1,15 @@
 // Linkedom moves node ranges without adopting them. Use its private ranges
 // and shadow-root/element records so attributes and closed trees move too.
-import { CONTENT, END, NEXT } from '../node_modules/linkedom/esm/shared/symbols.js';
+import { CONTENT, END, NEXT, PREV } from '../node_modules/linkedom/esm/shared/symbols.js';
+import { getEnd } from '../node_modules/linkedom/esm/shared/utils.js';
+import { remove as unlink } from '../node_modules/linkedom/esm/mixin/child-node.js';
 import { shadowRoots } from '../node_modules/linkedom/esm/shared/shadow-roots.js';
 import { customElements } from '../node_modules/linkedom/esm/interface/custom-element-registry.js';
+
+// Takes any node out of its parent, as Element and CharacterData's own
+// remove() do: an element ends at its end tag, text and comments at
+// themselves. Element.prototype.remove alone breaks on a text node.
+const detach = (node) => unlink(node[PREV], node, getEnd(node)[NEXT]);
 
 const shadowRoot = shadowRoots.get.bind(shadowRoots);
 const customElement = customElements.get.bind(customElements);
@@ -34,7 +41,6 @@ function treeNodes(root) {
 export function installAdoption(Element, shareObservers, onError) {
   const parent = Object.getPrototypeOf(Element.prototype);
   const insert = parent.insertBefore;
-  const remove = Element.prototype.remove;
   const connected = Object.getOwnPropertyDescriptor(Element.prototype, 'isConnected').get;
   const invoke = (node, name, callback, args) => {
     try {
@@ -84,7 +90,7 @@ export function installAdoption(Element, shareObservers, onError) {
       // observe the completed DOM operation. Removal observers still use
       // the old owner document before ownership changes.
       for (const reaction of reactions) reaction.info.connected = false;
-      if (oldParent) remove.call(node);
+      if (oldParent) detach(node);
       for (const descendant of nodes) descendant.ownerDocument = document;
       for (const reaction of reactions) reaction.info.connected = true;
       inserting = true;

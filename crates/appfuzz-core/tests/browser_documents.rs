@@ -512,6 +512,22 @@ fn inserting_a_foreign_subtree_adopts_elements_attributes_text_and_fragments() {
     );
 }
 
+/// htmx swaps in a response parsed in another document: text and comments
+/// between its elements move with them, out of their old parent.
+#[test]
+fn text_and_comments_move_out_of_another_documents_tree() {
+    let (_, report) = visit(
+        r#"<div id=target></div><script>
+        const parsed=new DOMParser().parseFromString('<body><template><p>a</p> <!--c--><p>b</p></template> tail</body>','text/html');
+        const target=document.getElementById('target'),content=parsed.querySelector('template').content;
+        while(content.firstChild)target.insertBefore(content.firstChild,null);
+        while(parsed.body.lastChild.nodeType===3)target.append(parsed.body.lastChild);
+        console.log(target.innerHTML,[...target.childNodes].every(n=>n.ownerDocument===document),content.childNodes.length);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "<p>a</p> <!--c--><p>b</p> tail true 0");
+}
+
 #[test]
 fn adoption_callbacks_observe_the_destination_document() {
     let (_, report) = visit(
