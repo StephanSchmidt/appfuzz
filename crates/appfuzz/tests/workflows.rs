@@ -1942,6 +1942,77 @@ query = { dataset = "deals", filter = { owner = "owner" }, select = "amount" }
     assert!(leaks(&f).is_empty());
 }
 
+/// `run(id)` sets deal `id`'s amount to 0: any deal, or (`own`) only one
+/// of the caller's, user 1.
+fn deal_update_fixture(f: &Fixture, own: bool) {
+    let wit = "package test:workflow; interface db { set: func(id:u32, amount:u32) -> bool; set-own: func(id:u32, owner:u32, amount:u32) -> bool; } world app { import db; export run: func(id:u32) -> u32; }";
+    let call = if own { "(call $own (local.get $id) (i32.const 1) (i32.const 0))" } else { "(call $set (local.get $id) (i32.const 0))" };
+    let wat = r#"(module
+      (import "test:workflow/db" "set" (func $set (param i32 i32) (result i32)))
+      (import "test:workflow/db" "set-own" (func $own (param i32 i32 i32) (result i32)))
+      (memory (export "memory") 1)
+      (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
+      (func (export "run") (param $id i32) (result i32) CALL))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, &wat.replace("CALL", call))).unwrap();
+}
+
+#[test]
+fn changing_another_users_record_is_a_missing_owner_check() {
+    let f = Fixture::new(false);
+    let manifest = r#"
+[app]
+wasm = "app.wasm"
+[entry]
+export = "run"
+request = 1
+[datasets.users]
+rows = 2
+key = "id"
+template = { id = 1 }
+[datasets.deals]
+rows = 6
+key = "id"
+template = { id = 1, owner = 1, amount = 10 }
+references = { owner = "users" }
+owner = "owner"
+[functions."test:workflow/db#set"]
+effect = "write"
+mutation = { dataset = "deals", operation = "update", filter = { id = "id" }, fields = { amount = "amount" }, response = true, reject = false }
+[functions."test:workflow/db#set-own"]
+effect = "write"
+mutation = { dataset = "deals", operation = "update", filter = { id = "id", owner = "owner" }, fields = { amount = "amount" }, response = true, reject = false }
+"#;
+    std::fs::write(&f.manifest, manifest).unwrap();
+    let changes = |f: &Fixture| {
+        (1..=6)
+            .flat_map(|id| {
+                let (_, r) = f.cli(&["run", "--args", &format!("[{id}]")]);
+                r["findings"].as_array().unwrap().iter().filter(|x| x["kind"] == "missing_owner_check").cloned().collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    deal_update_fixture(&f, false);
+    let found = changes(&f);
+    let finding = found.first().unwrap_or_else(|| panic!("no deal of user 2 changed"));
+    assert_eq!(finding["severity"], "fail", "{finding}");
+    let title = finding["title"].as_str().unwrap();
+    assert!(title.starts_with("test:workflow/db#set changes the deals record") && title.ends_with(r#"which belongs to "2"; the caller is "1""#), "{title}");
+    let (code, confirmed) = f.cli(&["confirm", finding["id"].as_str().unwrap(), "--max-runs", "60"]);
+    assert_eq!((code, &confirmed["confirmed"]), (0, &json!(true)), "{confirmed}");
+    let case = confirmed["case"].as_str().unwrap();
+    let (code, v) = f.cli(&["replay", case]);
+    assert_eq!((code, &v["reproduced"]), (0, &json!(true)), "{v}");
+    // Updating only the caller's deals changes no one else's.
+    deal_update_fixture(&f, true);
+    assert!(changes(&f).is_empty());
+    let (code, v) = f.cli(&["replay", case, "--against-current"]);
+    assert_eq!((code, &v["reproduced"]), (0, &json!(false)), "{v}");
+    // A function the platform declares shared may change anyone's deals.
+    deal_update_fixture(&f, false);
+    f.edit("[functions.\"test:workflow/db#set\"]\neffect = \"write\"", "[functions.\"test:workflow/db#set\"]\neffect = \"write\"\nshared = true");
+    assert!(changes(&f).is_empty());
+}
+
 #[test]
 fn plans_edit_the_world_and_paged_queries_answer_a_page_at_a_time() {
     let f = Fixture::new(false);

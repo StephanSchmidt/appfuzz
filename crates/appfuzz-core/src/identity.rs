@@ -47,6 +47,73 @@ pub fn declared(m: &Manifest) -> bool {
 
 /// Identity findings of one run.
 pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
+    let mut out = writes(r, m);
+    out.extend(reads(r, m));
+    out
+}
+
+/// Records of other users the run changed or deleted: rows of a dataset
+/// with an `owner` whose owner, before the change, was not the caller.
+/// Functions declared `shared` may change anyone's records.
+fn writes(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
+    let changed: Vec<(&crate::record::HostCall, &crate::record::RowChange, String)> = r
+        .events
+        .iter()
+        .filter(|e| !m.functions.get(&e.func).is_some_and(|f| f.shared))
+        .flat_map(|e| e.commit.iter().flat_map(|c| &c.rows).map(move |row| (e, row)))
+        .filter_map(|(e, row)| {
+            let field = m.datasets.get(&row.dataset)?.owner.as_ref()?;
+            let owner = row.before.as_ref()?.get(field).map(id_text)?;
+            Some((e, row, owner))
+        })
+        .collect();
+    if changed.is_empty() {
+        return Vec::new();
+    }
+    // Who the caller is: what the run learns, else what the platform says.
+    let mut known: BTreeSet<String> = request_identity(&r.spec, m).into_iter().collect();
+    for e in &r.events {
+        if let Some(v) = &e.result {
+            for (p, l) in m.call_result_labels(&e.func, &e.args) {
+                if l == Label::Identity {
+                    known.extend(ids_at(v, &p));
+                }
+            }
+        }
+    }
+    if known.is_empty()
+        && let Ok(state) = crate::harness::initial_state(m, &r.spec.plan, r.spec.seed)
+    {
+        known.extend(known_caller(&r.spec, m, &state.tables));
+    }
+    if known.is_empty() {
+        return Vec::new();
+    }
+    let ex = &r.spec.export;
+    let caller = known.iter().map(|k| format!("{k:?}")).collect::<Vec<_>>().join(" or ");
+    let mut reported = BTreeSet::new();
+    let mut out = Vec::new();
+    for (e, row, owner) in changed {
+        if known.contains(&owner) || !reported.insert(e.func.as_str()) {
+            continue;
+        }
+        let (verb, operation) = if row.after.is_some() { ("changes", "update") } else { ("deletes", "delete") };
+        let key = id_text(&row.key);
+        out.push(Finding::new(
+            "missing_owner_check",
+            &format!("{ex}\0{}\0write", e.func),
+            Severity::Fail,
+            format!("{} {verb} the {} record {key:?}, which belongs to {owner:?}; the caller is {caller}", e.func, row.dataset),
+            json!({"func": e.func, "dataset": row.dataset, "key": row.key, "owner": owner, "caller": known, "n": e.n,
+                   "operation": operation, "label": "owner"}),
+            Some(r.id.as_str()),
+        ));
+    }
+    out
+}
+
+/// Ids the run hands to host calls and records it shows.
+fn reads(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     let uses_ids =
         m.functions.values().any(|f| f.params.values().any(|l| *l == Label::UserId) || f.result.iter().flat_map(|r| r.paths()).any(|(_, l)| l == Label::Owner));
     if !uses_ids || !declared(m) {
@@ -356,6 +423,39 @@ mod tests {
         assert_eq!(f.iter().map(|f| f.kind.as_str()).collect::<Vec<_>>(), ["missing_owner_check"]);
         assert!(check(&run(json!([]), "<p>Blue chair</p>", vec![me(), order("1000")]), &m).is_empty());
         assert!(check(&run(json!([]), "<p>Not yours</p>", vec![me(), order("1001")]), &m).is_empty());
+    }
+
+    #[test]
+    fn changing_another_users_record_is_a_missing_owner_check() {
+        let mut m = manifest();
+        m.datasets = serde_json::from_value(json!({
+            "users": {"rows": 2, "key": "id", "template": {"id": "user"}},
+            "deals": {"rows": 3, "key": "id", "template": {"id": 1, "owner": "", "title": "Deal"}, "references": {"owner": "users"}, "owner": "owner"}
+        }))
+        .unwrap();
+        let row = |before: Option<Value>, after: Option<Value>| crate::record::RowChange { dataset: "deals".into(), key: json!(5), before, after };
+        let change = |rows| {
+            let mut c = call(1, "x:y/deals#set-title", json!({"id": 5, "title": "Won"}), json!(true));
+            c.commit = Some(crate::record::Commit { rows, lost: false });
+            c
+        };
+        let deal = |owner: &str| json!({"id": 5, "owner": owner, "title": "Deal"});
+        // The data says the caller is user_1.
+        let f = check(&run(json!([]), "", vec![change(vec![row(Some(deal("user_2")), Some(deal("user_2")))])]), &m);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].kind, "missing_owner_check");
+        assert_eq!(f[0].title, r#"x:y/deals#set-title changes the deals record "5", which belongs to "user_2"; the caller is "user_1""#);
+        let f = check(&run(json!([]), "", vec![change(vec![row(Some(deal("user_2")), None)])]), &m);
+        assert!(f[0].title.contains("deletes"), "{}", f[0].title);
+        // Own records and new records are fine.
+        assert!(check(&run(json!([]), "", vec![change(vec![row(Some(deal("user_1")), Some(deal("user_1")))])]), &m).is_empty());
+        assert!(check(&run(json!([]), "", vec![change(vec![row(None, Some(deal("user_2")))])]), &m).is_empty());
+        // The identity the app asks for wins over the data.
+        let me = call(0, "x:y/users#current", json!({}), json!({"id": "user_2"}));
+        assert!(check(&run(json!([]), "", vec![me, change(vec![row(Some(deal("user_2")), Some(deal("user_2")))])]), &m).is_empty());
+        // A shared function may change anyone's records.
+        m.functions.entry("x:y/deals#set-title".into()).or_default().shared = true;
+        assert!(check(&run(json!([]), "", vec![change(vec![row(Some(deal("user_2")), Some(deal("user_2")))])]), &m).is_empty());
     }
 
     #[test]

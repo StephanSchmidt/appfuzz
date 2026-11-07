@@ -1098,6 +1098,10 @@ query = { dataset = "deals", filter = { owner = "owner" } }
 
 [functions."bench:web/slots#all"]
 query = { dataset = "slots" }
+
+[functions."bench:web/deals#set-title"]
+effect = "write"
+mutation = { dataset = "deals", operation = "update", filter = { id = "id" }, fields = { title = "title" }, response = true, reject = false }
 """
 
 
@@ -1130,6 +1134,32 @@ app("slots-public", "lists the booked times of every user's slots, which anyone 
         }
         html(out + "</ul>")
     """), [], grants=[SLOTS], extra=TENANTS)
+
+app("deal-archive-any-owner", "archives the first pilot it finds, whoever's deal it is",
+    tenant("""
+        if req.method != "POST" || req.path != "/archive" {
+            return html(r#"<form method="post" action="/archive"><button>Archive my first pilot</button></form>"#.into());
+        }
+        let me = users::current();
+        let Some(d) = deals::all().into_iter().find(|d| d.title == "Pilot") else {
+            return html(format!("<p>No pilot to archive, {}</p>", esc(&me.name)));
+        };
+        deals::set_title(d.id, "Archived");
+        html(format!("<p>Archived deal {} for {}</p>", d.id, esc(&me.name)))
+    """), [("missing_owner_check", "fail")], allow=["tenant_leak"], grants=[USERS_, DEALS], extra=TENANTS)
+
+app("deal-archive-own", "archives the first of the signed-in user's own pilots",
+    tenant("""
+        if req.method != "POST" || req.path != "/archive" {
+            return html(r#"<form method="post" action="/archive"><button>Archive my first pilot</button></form>"#.into());
+        }
+        let me = users::current();
+        let Some(d) = deals::for_owner(&me.id).into_iter().find(|d| d.title == "Pilot") else {
+            return html(format!("<p>No pilot to archive, {}</p>", esc(&me.name)));
+        };
+        deals::set_title(d.id, "Archived");
+        html(format!("<p>Archived deal {} for {}</p>", d.id, esc(&me.name)))
+    """), [], grants=[USERS_, DEALS], extra=TENANTS)
 
 MANIFEST = """\
 # appfuzz bench app: {name} ({what}).

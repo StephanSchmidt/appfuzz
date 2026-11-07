@@ -138,6 +138,18 @@ enum Pre {
     },
 }
 
+/// The datasets a run with this plan and seed starts from.
+pub fn initial_state(m: &crate::manifest::Manifest, plan: &Plan, seed: u64) -> Result<crate::dataset::State> {
+    let defaults = plan.0.get("_defaults");
+    let seed = defaults.and_then(|p| p.dataset_seed).unwrap_or(seed);
+    let mut state = crate::dataset::State::new(crate::dataset::build(&m.datasets, &defaults.map(|p| p.dataset_rows.clone()).unwrap_or_default(), seed)?);
+    // Edits keep the key counters, so a request creates the same keys in an edited world.
+    if let Some(edits) = defaults.map(|p| &p.dataset_edits).filter(|e| !e.is_empty()) {
+        crate::dataset::apply(&m.datasets, &mut state, edits, seed)?;
+    }
+    Ok(state)
+}
+
 impl Pre {
     /// A plain module with WASI preview 1.
     fn plain(&self) -> bool {
@@ -702,15 +714,7 @@ impl App {
     }
 
     pub fn initial_state(&self, plan: &Plan, seed: u64) -> Result<crate::dataset::State> {
-        let defaults = plan.0.get("_defaults");
-        let seed = defaults.and_then(|p| p.dataset_seed).unwrap_or(seed);
-        let mut state =
-            crate::dataset::State::new(crate::dataset::build(&self.manifest.datasets, &defaults.map(|p| p.dataset_rows.clone()).unwrap_or_default(), seed)?);
-        // Edits keep the key counters, so a request creates the same keys in an edited world.
-        if let Some(edits) = defaults.map(|p| &p.dataset_edits).filter(|e| !e.is_empty()) {
-            crate::dataset::apply(&self.manifest.datasets, &mut state, edits, seed)?;
-        }
-        Ok(state)
+        initial_state(&self.manifest, plan, seed)
     }
 
     pub fn run(&self, spec: &RunSpec) -> RunRecord {

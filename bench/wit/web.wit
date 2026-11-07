@@ -84,6 +84,7 @@ interface deals {
     record deal { id: u64, owner: string, title: string, amount: u32 }
     all: func() -> list<deal>;
     for-owner: func(owner: string) -> list<deal>;
+    set-title: func(id: u64, title: string) -> bool;
 }
 
 interface slots {

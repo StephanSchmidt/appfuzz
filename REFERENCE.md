@@ -556,6 +556,13 @@ another status or headers only, a warn. Without a known caller (an identity
 field, `_defaults.identity` or an owner) there is no such pair. Confirmation
 shrinks the collections to the fewest records that still show the leak.
 
+A mutation binding that changes or deletes a record whose owner, before the
+change, is not the caller is a `missing_owner_check` fail: "deals#set-title
+changes the deals record "5", which belongs to "user_2"; the caller is
+"user_1"". The caller is whom the run's identity-labelled results name, else
+the caller above. Creating records is not checked, and a function declared
+`shared = true` may change anyone's records.
+
 ### Edited worlds
 
 A plan can change the generated world before the run, in order:

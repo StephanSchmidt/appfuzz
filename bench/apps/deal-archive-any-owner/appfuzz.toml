@@ -1,0 +1,59 @@
+# appfuzz bench app: deal-archive-any-owner (archives the first pilot it finds, whoever's deal it is).
+[app]
+wasm = "../../target/wasm32-wasip2/release/deal_archive_any_owner.wasm"
+name = "deal-archive-any-owner"
+
+[entry]
+export = "bench:web/handler#handle"
+request = { method = "GET", path = "/", query = [], form = [], today = "", now = "" }
+fields = { today = "clock.date", now = "clock.time" }
+output = { status = "status", body = "body", headers = "headers", body_format = "html" }
+now = "2026-11-02T10:00:00"
+
+[grants]
+imports = ["bench:web/users", "bench:web/deals"]
+wasi = ["wasi:cli", "wasi:clocks", "wasi:io", "wasi:random"]
+
+[limits]
+fuel = 200_000_000
+memory = "64MiB"
+cost_per_request = 100
+max_latency_ms = 200
+
+[datasets.users]
+rows = 3
+key = "id"
+template = { id = "user", name = "User" }
+
+[datasets.deals]
+rows = 9
+key = "id"
+template = { id = 1, owner = "user_1", title = "Deal", amount = 100 }
+references = { owner = "users" }
+owner = "owner"
+choices = { title = ["Renewal", "Upsell", "Pilot"], amount = [1015, 925, 4000, 60] }
+
+[datasets.slots]
+rows = 6
+key = "id"
+template = { id = 1, owner = "user_1", time = "09:00", note = "Note" }
+references = { owner = "users" }
+owner = "owner"
+public = ["time"]
+choices = { time = ["09:00", "10:30", "14:00"], note = ["Call me first", "Bring the contract"] }
+
+[functions."bench:web/users#current"]
+result = { id = "identity" }
+
+[functions."bench:web/deals#all"]
+query = { dataset = "deals" }
+
+[functions."bench:web/deals#for-owner"]
+query = { dataset = "deals", filter = { owner = "owner" } }
+
+[functions."bench:web/slots#all"]
+query = { dataset = "slots" }
+
+[functions."bench:web/deals#set-title"]
+effect = "write"
+mutation = { dataset = "deals", operation = "update", filter = { id = "id" }, fields = { title = "title" }, response = true, reject = false }

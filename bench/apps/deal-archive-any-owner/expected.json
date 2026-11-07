@@ -1,0 +1,13 @@
+{
+  "app": "deal-archive-any-owner",
+  "bug": "archives the first pilot it finds, whoever's deal it is",
+  "expect": [
+    {
+      "kind": "missing_owner_check",
+      "min": "fail"
+    }
+  ],
+  "allow": [
+    "tenant_leak"
+  ]
+}

@@ -53,3 +53,7 @@ query = { dataset = "deals", filter = { owner = "owner" } }
 
 [functions."bench:web/slots#all"]
 query = { dataset = "slots" }
+
+[functions."bench:web/deals#set-title"]
+effect = "write"
+mutation = { dataset = "deals", operation = "update", filter = { id = "id" }, fields = { title = "title" }, response = true, reject = false }

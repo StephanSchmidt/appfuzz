@@ -22,6 +22,9 @@
   without `public` fields, drops half and adds one). Status or headers
   alone are a warn. `shared = true` on a changing function exempts its
   arguments.
+- `missing_owner_check` also covers writes: a mutation binding that
+  changes or deletes a record whose dataset `owner` is not the caller is a
+  fail. Creates and functions declared `shared = true` are not checked.
 
 **Pagination**
 

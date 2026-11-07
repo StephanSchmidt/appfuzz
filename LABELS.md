@@ -58,7 +58,7 @@ result.
 | `secret` | a secret | `secret_leak`: fail anywhere in the output, logs, or host parameters not labelled `secret` |
 
 | `identity` | who the caller is (a user id) | the run's caller for `user-id` and `owner` |
-| `owner` | who the record that holds this field belongs to | `missing_owner_check` (fail): another user's record shows in a page with a status below 400 |
+| `owner` | who the record that holds this field belongs to | `missing_owner_check` (fail): another user's record shows in a page with a status below 400, or the app changes or deletes it |
 
 Generated values at `pii` and `secret` paths are traceable markers
 (`p…@mail.example`, `sk_…`). `identity` and `owner` paths hold text or
@@ -106,7 +106,7 @@ identity labels do nothing.
 | Finding | When |
 |---------|------|
 | `foreign_user_access` (fail) | a `user-id` argument is not the caller: it comes from a request field, or the app never asked who the caller is |
-| `missing_owner_check` (fail) | a page with status below 400 shows text of a record whose `owner` is not the caller (text the caller's own records also hold doesn't count) |
+| `missing_owner_check` (fail) | a page with status below 400 shows text of a record whose `owner` is not the caller (text the caller's own records also hold doesn't count), or a mutation binding changes or deletes such a record (dataset `owner`; not for functions declared `shared`) |
 
 ```toml
 [functions."acme:web/users#current"]

@@ -1,0 +1,6 @@
+{
+  "app": "deal-archive-own",
+  "bug": "archives the first of the signed-in user's own pilots",
+  "expect": [],
+  "allow": []
+}
