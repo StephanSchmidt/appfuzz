@@ -7,6 +7,7 @@ import { XMLDocument } from '../node_modules/linkedom/esm/xml/document.js';
 import { END, NEXT } from '../node_modules/linkedom/esm/shared/symbols.js';
 import { installName, nameIdentity } from './names.js';
 import { documentMode, rememberDocumentMode } from './document.js';
+import { templateContent } from './templates.js';
 
 const HTML = 'http://www.w3.org/1999/xhtml';
 const SVG = 'http://www.w3.org/2000/svg';
@@ -42,7 +43,7 @@ export function installCloning(L, factories, shareObservers, onScript) {
     namespace: isSVG(node) ? SVG : HTML,
     prefix: null, local: node.localName, qualified: node.localName,
   };
-  const elementInto = (original, deep, owner) => {
+  const elementInto = (original, deep, owner, templateJobs) => {
     const originals = [original];
     if (deep) {
       for (let node = original[NEXT]; node !== original[END]; node = node[NEXT]) {
@@ -75,14 +76,39 @@ export function installCloning(L, factories, shareObservers, onScript) {
     const nearestSVG = new NativeWeakMap();
     for (let i = 0; i < copies.length; i++) {
       const copy = copies[i], identity = identities[i];
+      const content = templateContent(copy);
+      if (content && deep) templateJobs.push([templateContent(originals[i]), content]);
       const svg = weakGet(nearestSVG, copy.parentNode) || null;
       if (identity.namespace === SVG) copy.ownerSVGElement = svg;
       weakSet(nearestSVG, copy, identity.namespace === SVG && identity.local === 'svg' ? copy : svg);
     }
     return clone;
   };
+  const nodeInto = (node, deep, owner, jobs) => {
+    if (nameIdentity(node) || isElement(node)) return elementInto(node, deep, owner, jobs);
+    let method;
+    for (let i = 0; i < plainCloners.length; i++) {
+      if (plainCloners[i].matches(node)) { method = plainCloners[i].clone; break; }
+    }
+    const copy = method.call(node);
+    ownNodes(copy, owner);
+    return copy;
+  };
+  const treeInto = (node, deep, owner) => {
+    const jobs = [];
+    const clone = nodeInto(node, deep, owner, jobs);
+    // A work list also handles deeply nested template contents without
+    // recursing through the JavaScript stack.
+    for (let i = 0; i < jobs.length; i++) {
+      const [source, target] = jobs[i];
+      for (let child = source[NEXT]; child !== source[END]; child = (child[END] || child)[NEXT]) {
+        insert.call(target, nodeInto(child, true, target.ownerDocument, jobs));
+      }
+    }
+    return clone;
+  };
   L.Element.prototype.cloneNode = function (deep = false) {
-    return elementInto(this, deep, this.ownerDocument);
+    return treeInto(this, deep, this.ownerDocument);
   };
   L.Document.prototype.cloneNode = function (deep = false) {
     const clone = isHTMLDocument(this) ? new HTMLDocument() : isSVGDocument(this) ? new SVGDocument() : new XMLDocument();
@@ -100,16 +126,7 @@ export function installCloning(L, factories, shareObservers, onScript) {
     } });
     if (deep) {
       for (let node = this[NEXT]; node !== this[END]; node = (node[END] || node)[NEXT]) {
-        let copy;
-        if (nameIdentity(node) || isElement(node)) copy = elementInto(node, true, clone);
-        else {
-          let method;
-          for (let i = 0; i < plainCloners.length; i++) {
-            if (plainCloners[i].matches(node)) { method = plainCloners[i].clone; break; }
-          }
-          copy = method.call(node);
-          ownNodes(copy, clone);
-        }
+        const copy = treeInto(node, true, clone);
         // Cloning does not run insertion's script preparation steps.
         insert.call(clone, copy);
       }

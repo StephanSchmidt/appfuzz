@@ -9,6 +9,9 @@ import { Element } from '../node_modules/linkedom/esm/interface/element.js';
 import { NEXT, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
 import { installName, nameIdentity } from './names.js';
 import { rememberScript } from './script-state.js';
+import { templateContent } from './templates.js';
+import { rememberDocumentMode } from './document-state.js';
+export { documentMode, rememberDocumentMode } from './document-state.js';
 
 const nativeParse = DOMParser.prototype.parseFromString;
 const HTML = 'http://www.w3.org/1999/xhtml';
@@ -24,9 +27,6 @@ const insert = Object.getPrototypeOf(Element.prototype).insertBefore;
 const setAttribute = Element.prototype.setAttribute;
 const setAttributeNS = Element.prototype.setAttributeNS;
 const isHTMLDocument = Object.prototype.isPrototypeOf.bind(HTMLDocument.prototype);
-const modes = new WeakMap();
-export const documentMode = modes.get.bind(modes);
-export const rememberDocumentMode = modes.set.bind(modes);
 
 export function parseHTML(markup, scriptingEnabled) {
   const tree = parse(String(markup), { scriptingEnabled });
@@ -43,21 +43,21 @@ export function parseHTML(markup, scriptingEnabled) {
 
 function appendTree(doc, target, nodes, inertScripts, svg = null) {
   const stack = [];
-  const children = (parent, nodes, svg = null) => {
-    for (let i = nodes.length - 1; i >= 0; i--) stack.push([parent, nodes[i], svg]);
+  const children = (parent, nodes, svg = null, owner = doc) => {
+    for (let i = nodes.length - 1; i >= 0; i--) stack.push([parent, nodes[i], svg, owner]);
   };
   children(target, nodes, svg);
   while (stack.length) {
-    const [parent, source, svg] = stack.pop();
+    const [parent, source, svg, owner] = stack.pop();
     let node;
     switch (source.nodeName) {
-      case '#text': node = text.call(doc, source.value); break;
-      case '#comment': node = comment.call(doc, source.data); break;
-      case '#documentType': node = doctype.call(doc, source.name, source.publicId, source.systemId); break;
+      case '#text': node = text.call(owner, source.value); break;
+      case '#comment': node = comment.call(owner, source.data); break;
+      case '#documentType': node = doctype.call(owner, source.name, source.publicId, source.systemId); break;
       default: {
         const is = source.attrs.find(attr => attr.name === 'is' && !attr.namespace)?.value;
-        node = source.namespaceURI === SVG ? createNS.call(doc, SVG, source.tagName)
-          : (source.namespaceURI === HTML ? createHTML : createXML).call(doc, source.tagName, is == null ? undefined : { is });
+        node = source.namespaceURI === SVG ? createNS.call(owner, SVG, source.tagName)
+          : (source.namespaceURI === HTML ? createHTML : createXML).call(owner, source.tagName, is == null ? undefined : { is });
         installName(node, { namespace: source.namespaceURI, prefix: null, local: source.tagName, qualified: source.tagName }, isHTMLDocument);
         if (source.tagName === 'script') rememberScript(node, { namespace: source.namespaceURI, local: source.tagName }, inertScripts);
         if (source.namespaceURI === SVG) node.ownerSVGElement = svg;
@@ -66,8 +66,9 @@ function appendTree(doc, target, nodes, inertScripts, svg = null) {
           if (attr.namespace) setAttributeNS.call(node, attr.namespace, name, attr.value);
           else setAttribute.call(node, name, attr.value);
         }
-        if (source.content) children(node.content, source.content.childNodes);
-        else children(node, source.childNodes, source.namespaceURI === SVG && source.tagName === 'svg' ? node : svg);
+        const content = templateContent(node);
+        if (source.content) children(content, source.content.childNodes, null, content.ownerDocument);
+        else children(node, source.childNodes, source.namespaceURI === SVG && source.tagName === 'svg' ? node : svg, owner);
       }
     }
     insert.call(parent, node);

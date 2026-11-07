@@ -5,6 +5,7 @@ import { END, NEXT, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js
 import { shadowRoots } from '../node_modules/linkedom/esm/shared/shadow-roots.js';
 import { scriptRecord } from './script-state.js';
 import { documentMode } from './document.js';
+import { setDOMCallbackBoundary } from './dom-callbacks.js';
 
 const shadow = shadowRoots.get.bind(shadowRoots);
 const apply = Reflect.apply;
@@ -34,6 +35,12 @@ export function scriptText(node) {
 
 export function installScriptMutations(L, changed) {
   let depth = 0, candidates = [];
+  setDOMCallbackBoundary(callback => {
+    const outerDepth = depth, outerCandidates = candidates;
+    depth = 0; candidates = [];
+    try { return callback(); }
+    finally { depth = outerDepth; candidates = outerCandidates; }
+  });
   const note = node => { if (node && scriptRecord(node)) add(candidates, node); };
   const collect = node => {
     if (!node || !node[NEXT]) { note(node); return; }

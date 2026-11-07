@@ -10,6 +10,8 @@ import { qualifiedName, installName } from './names.js';
 import { installCloning } from './cloning.js';
 import { installAdoption } from './adoption.js';
 import { installObservers } from './observers.js';
+import { templateContent, templateOwner, templateInnerHTML, shareTemplateObservers } from './templates.js';
+import { installSelectors } from './selectors.js';
 import { scriptRecord, rememberScript, scriptOwner } from './script-state.js';
 import { installScriptMutations, scriptAttribute, scriptText, scriptShadowHost } from './script-mutations.js';
 
@@ -903,20 +905,6 @@ class IntersectionObserver extends Observer {
 class ResizeObserver extends Observer {}
 class PerformanceObserver extends Observer { static get supportedEntryTypes() { return []; } }
 
-// A template's parsed children belong to its content, as in a browser:
-// linkedom leaves them as children, where frameworks would find them.
-function templates(root) {
-  if (!root || !root.querySelectorAll) return;
-  for (const t of root.querySelectorAll('template')) {
-    if (!t.hasChildNodes()) continue;
-    const kids = [...t.childNodes];
-    t.replaceChildren();
-    const c = t.content;
-    c.replaceChildren(...kids);
-    templates(c);
-  }
-}
-
 // XPath, as far as htmx uses it: descendants with an attribute whose name
 // starts with one of some prefixes.
 class XPathExpression {
@@ -945,7 +933,10 @@ G.XPathEvaluator = class XPathEvaluator {
 G.XPathResult = { ANY_TYPE: 0, NUMBER_TYPE: 1, STRING_TYPE: 2, BOOLEAN_TYPE: 3, UNORDERED_NODE_ITERATOR_TYPE: 4, ORDERED_NODE_ITERATOR_TYPE: 5, UNORDERED_NODE_SNAPSHOT_TYPE: 6, ORDERED_NODE_SNAPSHOT_TYPE: 7, ANY_UNORDERED_NODE_TYPE: 8, FIRST_ORDERED_NODE_TYPE: 9 };
 
 function installWindow(doc) {
+  installSelectors();
   const shareObservers = installObservers(doc);
+  shareTemplateObservers(shareObservers);
+  shareObservers(templateOwner(doc));
   installAdoption(L.Element, shareObservers, (name, e) => error('custom-element:' + name, e));
   const view = doc.defaultView;
   for (const [k, v] of Object.entries(L)) {
@@ -1049,6 +1040,7 @@ function installWindow(doc) {
     const el = (html ? create : createXML).call(this, local, o);
     const identity = { namespace, prefix: null, local, qualified: local };
     installName(el, identity, isHTMLDocument);
+    templateContent(el);
     if (local === 'script') {
       rememberScript(el, identity);
     }
@@ -1070,37 +1062,34 @@ function installWindow(doc) {
     const el = namespace === SVG_NS ? createNS.call(this, namespace, local, o)
       : (namespace === HTML_NS ? create : createXML).call(this, local, o);
     installName(el, identity, isHTMLDocument);
+    templateContent(el);
     if (local === 'script') {
       rememberScript(el, identity);
     }
     return el;
   };
-  const self = t => t;
-  const parent = t => t.parentNode || t;
-  const parsing = (f, root, sink, at = 0) => function (...a) {
+  const parsing = (f, sink, at = 0) => function (...a) {
     if (sink) { a[at] = String(a[at]); toMarkup(sink, a[at]); }
-    const r = f.apply(this, a);
-    templates(root(this, r));
-    return r;
+    return f.apply(this, a);
   };
-  const isTemplate = Object.prototype.isPrototypeOf.bind(L.HTMLTemplateElement.prototype);
   const htmlFragment = (node, markup, inert = true) => {
     const context = isShadowRoot(node) ? scriptShadowHost(node) : node;
     return parseHTMLFragment(markup, context, node.ownerDocument, inert);
   };
   for (const proto of [L.Element.prototype, L.ShadowRoot.prototype, L.DocumentFragment.prototype]) {
-    for (const [key, root] of [['innerHTML', self], ['outerHTML', parent]]) {
+    for (const key of ['innerHTML', 'outerHTML']) {
       const d = Object.getOwnPropertyDescriptor(proto, key);
       if (!d?.set) continue;
       Object.defineProperty(proto, key, { ...d, set: parsing(function (markup) {
-        if (documentMode(this.ownerDocument) === undefined) return d.set.call(this, markup);
+        if (documentMode(this.ownerDocument) === undefined) return d.set.call(key === 'innerHTML' ? (templateContent(this) || this) : this, markup);
         if (key === 'outerHTML') {
           if (this.parentNode) this.replaceWith(htmlFragment(this.parentNode, markup));
         } else {
-          const content = htmlFragment(this, markup);
-          (isTemplate(this) ? this.content : this).replaceChildren(content);
+          const target = templateContent(this) || this;
+          const content = parseHTMLFragment(markup, this, target.ownerDocument);
+          target.replaceChildren(content);
         }
-      }, root, key) });
+      }, key) });
     }
   }
   const adjacentHTML = L.Element.prototype.insertAdjacentHTML;
@@ -1115,11 +1104,11 @@ function installWindow(doc) {
       const content = htmlFragment(this, markup);
       if (position === 'afterbegin') this.prepend(content); else this.append(content);
     } else throw new BrowserDOMException('Invalid insertion position', 'SyntaxError');
-  }, parent, 'insertAdjacentHTML', 1);
+  }, 'insertAdjacentHTML', 1);
   const parseDocument = L.DOMParser.prototype.parseFromString;
   L.DOMParser.prototype.parseFromString = parsing(function (markup, mime, ...rest) {
     return mime === 'text/html' ? parseHTML(markup, false) : parseDocument.call(this, markup, mime, ...rest);
-  }, (t, r) => r);
+  });
   const rangePrototype = Object.getPrototypeOf(doc.createRange());
   const contextualFragment = rangePrototype.createContextualFragment;
   rangePrototype.createContextualFragment = function (markup) {
@@ -1133,7 +1122,7 @@ function installWindow(doc) {
   define(L.HTMLScriptElement.prototype, 'noModule', noModule);
   const setInner = Object.getOwnPropertyDescriptor(L.Element.prototype, 'innerHTML').set;
   define(T, 'innerHTML', {
-    get() { const d = doc.createElement('div'); d.appendChild(this.content.cloneNode(true)); return d.innerHTML; },
+    get() { return templateInnerHTML(this); },
     set(v) { setInner.call(this, v); },
   });
   doc.evaluate = (expr, node) => new XPathExpression(expr).evaluate(node);
@@ -1581,7 +1570,6 @@ G.__af = {
     const doc = parseHTML(s.html || '', true);
     S.document = doc;
     installWindow(doc);
-    templates(doc);
     return pageScripts();
   },
   scriptAt,

@@ -1058,3 +1058,241 @@ fn public_document_type_and_script_owner_shadows_do_not_change_preparation_or_ex
     let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
     assert_eq!(logs, ["first", "second", "real-document"]);
 }
+
+#[test]
+fn template_cloning_copies_nested_contents_only_when_deep_and_keeps_them_independent() {
+    let (_, report) = visit(
+        r#"<template id=t data-x=a>start<!--c--><p data-p=v>text</p><template id=n><b>nested</b></template></template><script>
+    const t=document.getElementById('t');
+    for(const deep of [false,true]){const copy=t.cloneNode(deep);console.log(deep,copy.childNodes.length,copy.content.childNodes.length,copy.getAttribute('data-x'),copy.content.querySelector('#n')?.content.textContent||'');}
+    const copy=t.cloneNode(true),p=copy.content.querySelector('p');if(p){p.textContent='changed';p.setAttribute('data-p','changed');}console.log(t.content.querySelector('p').textContent,t.content.querySelector('p').getAttribute('data-p'));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["false 0 0 a ", "true 0 4 a nested", "text v"]);
+}
+
+#[test]
+fn template_light_children_and_contents_remain_separate_when_read_cloned_and_inserted() {
+    let (_, report) = visit(
+        r#"<script>
+    const t=document.createElement('template'),light=document.createElement('i');light.textContent='light';t.append(light);
+    console.log(t.childNodes.length,t.content.childNodes.length);t.innerHTML='<b>content</b>';const content=t.content;
+    const copy=t.cloneNode(true);console.log(copy.childNodes.length,copy.content.childNodes.length,copy.firstChild?.textContent,copy.content.firstChild?.textContent,copy.content===copy.content);
+    document.body.append(content);console.log(t.childNodes.length,t.firstChild===light,content.childNodes.length,content===t.content);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["1 0", "1 1 light content true", "1 true 0 true"]);
+}
+
+#[test]
+fn template_contents_use_a_shared_inert_document_and_document_clones_get_their_own() {
+    let (_, report) = visit(
+        r#"<template id=t><p data-p=v>text</p><template id=n><i>nested</i></template></template><script>
+    const t=document.getElementById('t'),owner=t.content.ownerDocument,n=t.content.querySelector('#n');
+    console.log(owner!==document,owner===document.createElement('template').content.ownerDocument,owner===n.content.ownerDocument,t.content.firstChild.ownerDocument===owner,t.content.firstChild.attributes[0].ownerDocument===owner,owner.documentElement===null,owner.defaultView===null,owner.compatMode);
+    const copy=document.cloneNode(true),tc=copy.getElementById('t');console.log(tc.content.childNodes.length,tc.content.ownerDocument!==owner,tc.content.ownerDocument!==copy,tc.content.ownerDocument===copy.createElement('template').content.ownerDocument,tc.content.querySelector('#n')?.content.ownerDocument===tc.content.ownerDocument);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["true true true true true true true CSS1Compat", "2 true true true true"]);
+}
+
+#[test]
+fn cloned_template_contents_preserve_script_preparation_state() {
+    let (r, report) = visit(
+        r#"<template id=t><script>fetch('/template-ran');</script></template><script>
+    const t=document.getElementById('t'),copy=t.cloneNode(true);document.body.append(copy);console.log('connected-template');document.body.append(copy.content);
+    const parsed=new DOMParser().parseFromString('<template><script>fetch("/parsed-reran");</'+'script></template>','text/html');document.body.append(parsed.querySelector('template').cloneNode(true).content);
+    const ran=document.createElement('script');ran.text='console.log("ran");';document.body.append(ran);const saved=document.createElement('template');saved.content.append(ran);document.body.append(saved.cloneNode(true).content);
+    </script>"#,
+    );
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["/template-ran"]);
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["connected-template", "ran"]);
+}
+
+#[test]
+fn template_contents_survive_cloning_through_elements_fragments_and_documents() {
+    for kind in ["element", "fragment", "document"] {
+        let html = format!(
+            r#"<section id=source><template><span>outer</span><template><em>inner</em></template></template></section><script>
+        const section=document.getElementById('source');let copy;
+        if('{kind}'==='element')copy=section.cloneNode(true);else if('{kind}'==='document')copy=document.cloneNode(true).getElementById('source');else{{const fragment=document.createDocumentFragment();fragment.append(section);copy=fragment.cloneNode(true);}}
+        const t=copy.querySelector('template');console.log(t.content.childNodes.length,t.content.querySelector('span')?.textContent||'',t.content.querySelector('template')?.content.textContent||'');
+        </script>"#
+        );
+        let (_, report) = visit(&html);
+        assert_eq!(report["console"][0]["text"], "2 outer inner", "{kind}");
+    }
+}
+
+#[test]
+fn template_parsing_and_cloning_delay_custom_element_construction_until_insertion() {
+    let (_, report) = visit(
+        r#"<template id=t><x-probe data-a=v></x-probe></template><script>
+    let constructed=0;customElements.define('x-probe',class extends HTMLElement{constructor(){super();constructed++;}connectedCallback(){console.log('connected');}});
+    const t=document.getElementById('t'),copy=t.cloneNode(true);console.log('cloned',constructed,copy.content.childNodes.length);document.body.append(copy.content);console.log('inserted',constructed);
+    const fresh=document.createElement('template');fresh.innerHTML='<x-probe></x-probe>';console.log('parsed',constructed);const fragment=fresh.content.cloneNode(true);console.log('content-cloned',constructed);document.body.append(fragment);console.log('content-inserted',constructed);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["cloned 0 1", "connected", "inserted 1", "parsed 1", "content-cloned 1", "connected", "content-inserted 2"]);
+}
+
+#[test]
+fn upgrading_inserted_template_contents_preserves_attributes_and_only_reports_real_mutations() {
+    let (_, report) = visit(
+        r#"<template id=t><x-probe data-a=v></x-probe></template><script>
+    customElements.define('x-probe',class extends HTMLElement{static observedAttributes=['data-a'];constructor(){super();console.log('constructor',this.isConnected,this.getAttribute('data-a'));this.setAttribute('data-a','changed');}attributeChangedCallback(name,oldValue,value){console.log('attribute',name,oldValue,value);}connectedCallback(){console.log('connected');}});
+    const copy=document.getElementById('t').cloneNode(true),child=copy.content.firstChild;
+    if(child){const observer=new MutationObserver(()=>{});observer.observe(child,{attributes:true});document.body.append(copy.content);console.log('records',observer.takeRecords().map(r=>r.type+':'+r.attributeName).join(','));observer.disconnect();}
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["constructor true v", "attribute data-a null v", "connected", "records attributes:data-a"]);
+}
+
+#[test]
+fn template_serialization_includes_nested_contents_without_copying_its_light_children_or_running_code() {
+    let (r, report) = visit(
+        r#"<div id=holder><template id=t><p>outer</p><template><b>inner</b></template></template></div><script>
+    const t=document.getElementById('t'),light=document.createElement('i');light.textContent='light';t.append(light);
+    console.log(t.innerHTML);console.log(t.outerHTML);console.log(document.getElementById('holder').innerHTML);console.log(t.cloneNode(true).innerHTML);
+    const fresh=document.createElement('template');fresh.innerHTML='<script>fetch("/serialized");</'+'script>';console.log(fresh.innerHTML.includes('fetch'));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        logs,
+        [
+            "<p>outer</p><template><b>inner</b></template>",
+            "<template id=\"t\"><p>outer</p><template><b>inner</b></template></template>",
+            "<template id=\"t\"><p>outer</p><template><b>inner</b></template></template>",
+            "<p>outer</p><template><b>inner</b></template>",
+            "true"
+        ]
+    );
+    assert!(r.events.iter().all(|e| e.func != FETCH_OWN));
+}
+
+// HTML's template adopting steps retarget contents to the destination's
+// associated inert document, including nested templates and attributes.
+#[test]
+fn adopting_templates_retargets_nested_contents_to_the_destinations_inert_document() {
+    let (_, report) = visit(
+        r#"<script>
+    const foreign=new DOMParser().parseFromString('<template id=t><template><p data-p=v>text</p></template></template>','text/html');
+    const t=foreign.getElementById('t'),old=t.content.ownerDocument,content=t.content,nested=content.firstChild;
+    const expected=document.createElement('template').content.ownerDocument,light=foreign.createElement('i');light.textContent='light';t.append(light);document.body.append(t);
+    console.log(t.ownerDocument===document,light.ownerDocument===document,content===t.content,content.ownerDocument===expected,content.ownerDocument!==old,nested.ownerDocument===expected,nested.content.ownerDocument===expected,nested.content.firstChild.attributes[0].ownerDocument===expected);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "true true true true true true true true");
+}
+
+#[test]
+fn cloning_and_serializing_templates_do_not_consult_public_content_getters() {
+    let (_, report) = visit(
+        r#"<template id=t><span>real</span></template><script>
+    const t=document.getElementById('t');let reads=0;Object.defineProperty(t,'content',{get(){reads++;throw Error('page getter');}});
+    const copy=t.cloneNode(true);console.log(reads,copy.content.childNodes.length,copy.content.textContent,t.innerHTML);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "0 1 real <span>real</span>");
+}
+
+#[test]
+fn template_upgrade_callbacks_run_fresh_inline_scripts_before_the_callback_returns() {
+    let (r, report) = visit(
+        r#"<template id=t><x-script></x-script></template><script>
+    customElements.define('x-script',class extends HTMLElement{constructor(){super();const s=document.createElement('script');s.text='console.log("constructor-script");fetch("/constructor");';document.head.append(s);document.head.append(s.cloneNode(true));console.log('constructor-after');}connectedCallback(){const s=document.createElement('script');s.text='console.log("connected-script");';document.head.append(s);console.log('connected-after');}});
+    document.body.append(document.getElementById('t').cloneNode(true).content);console.log('inserted');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["constructor-script", "constructor-after", "connected-script", "connected-after", "inserted"]);
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["/constructor"]);
+}
+
+#[test]
+fn deeply_nested_template_contents_clone_without_losing_inner_trees() {
+    let (_, report) = visit(
+        r#"<script>
+    const root=document.createElement('template');let current=root;
+    for(let i=0;i<500;i++){const next=document.createElement('template');current.content.append(next);current=next;}
+    current.content.append('leaf');const copy=root.cloneNode(true);let count=0,node=copy;
+    while(node.content.firstChild instanceof HTMLTemplateElement){count++;node=node.content.firstChild;}
+    console.log(count,node.content.textContent,copy.content.ownerDocument===node.content.ownerDocument);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "500 leaf true");
+}
+
+#[test]
+fn failed_template_custom_element_upgrades_report_once_and_do_not_throw_from_insertion() {
+    let (_, report) = visit_unchecked(
+        r#"<template id=t><x-fail></x-fail></template><script>
+    customElements.define('x-fail',class extends HTMLElement{constructor(){super();console.log('constructor');throw Error('upgrade failed');}connectedCallback(){console.log('connected');}});
+    const fragment=document.getElementById('t').cloneNode(true).content,child=fragment.firstChild;
+    document.body.append(fragment);console.log('returned');child.remove();document.body.append(child);console.log('reinserted');
+    </script>"#,
+        json!({}),
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["constructor", "returned", "reinserted"]);
+    assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["errors"][0]["message"], "upgrade failed");
+}
+
+#[test]
+fn queries_include_template_light_children_but_do_not_enter_template_contents() {
+    let (_, report) = visit(
+        r#"<template id=t><b id=inert>content</b></template><script>
+    const t=document.getElementById('t'),light=document.createElement('i');light.id='light';t.append(light);
+    console.log(t.querySelector('#light')===light,document.querySelector('#light')===light,document.querySelectorAll('template i').length,document.querySelector('#inert')===null,t.content.querySelector('#inert')?.textContent);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "true true 1 true content");
+}
+
+#[test]
+fn svg_elements_named_template_do_not_hide_executable_scripts() {
+    let (r, _) =
+        visit(r#"<svg><template><script>fetch('/svg-template');</script></template></svg><template><script>fetch('/html-template');</script></template>"#);
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["/svg-template"]);
+}
+
+#[test]
+fn html_templates_in_xml_documents_keep_xml_inert_owners_and_clone_their_contents() {
+    let (_, report) = visit(
+        r#"<script>
+    const xml=new DOMParser().parseFromString('<root/>','text/xml'),t=xml.createElementNS('http://www.w3.org/1999/xhtml','h:template'),owner=t.content.ownerDocument;
+    t.innerHTML='<child data-x="v">text</child>';const source=t.content.firstChild;console.log('source',source.ownerDocument===owner,source.attributes[0].ownerDocument===owner);const copy=t.cloneNode(true),child=copy.content.firstChild;
+    console.log(owner!==xml,owner.contentType,owner.defaultView===null,owner===xml.createElementNS('http://www.w3.org/1999/xhtml','template').content.ownerDocument,t.childNodes.length,copy.content.childNodes.length,child?.namespaceURI,child?.ownerDocument===owner,child?.attributes[0].ownerDocument===owner,copy.prefix,copy.localName);
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "source true true");
+    assert_eq!(report["console"][1]["text"], "true application/xml true true 0 1 null true true h template");
+}
+
+#[test]
+fn cloned_template_contents_keep_svg_owners_namespaces_and_executable_script_identity() {
+    for kind in ["template", "document"] {
+        let html = format!(
+            r#"<template id=t><svg><g><circle/></g><script>fetch('/svg-cloned');</script></svg><math><script>fetch('/math-cloned');</script></math></template><script>
+        const original=document.getElementById('t'),copy='{kind}'==='template'?original.cloneNode(true):document.cloneNode(true).getElementById('t'),svg=copy.content.firstChild,g=svg.firstChild;
+        console.log(svg.ownerSVGElement,g.ownerSVGElement===svg,g.firstChild.ownerSVGElement===svg,svg.lastChild.ownerSVGElement===svg,copy.content.lastChild.namespaceURI);
+        document.body.append(copy.content);
+        </script>"#
+        );
+        let (r, report) = visit(&html);
+        assert_eq!(report["console"][0]["text"], "null true true true http://www.w3.org/1998/Math/MathML", "{kind}");
+        let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+        assert_eq!(paths, ["/svg-cloned"], "{kind}");
+    }
+}

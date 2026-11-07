@@ -1,10 +1,13 @@
 // Linkedom moves node ranges without adopting them. Use its private ranges
 // and shadow-root/element records so attributes and closed trees move too.
-import { CONTENT, END, NEXT, PREV } from '../node_modules/linkedom/esm/shared/symbols.js';
+import { END, NEXT, PREV } from '../node_modules/linkedom/esm/shared/symbols.js';
 import { getEnd } from '../node_modules/linkedom/esm/shared/utils.js';
 import { remove as unlink } from '../node_modules/linkedom/esm/mixin/child-node.js';
 import { shadowRoots } from '../node_modules/linkedom/esm/shared/shadow-roots.js';
 import { customElements } from '../node_modules/linkedom/esm/interface/custom-element-registry.js';
+import { templateContent, templateOwner } from './templates.js';
+import { upgradeInserted } from './upgrading.js';
+import { runDOMCallback } from './dom-callbacks.js';
 
 // Takes any node out of its parent, as Element and CharacterData's own
 // remove() do: an element ends at its end tag, text and comments at
@@ -17,19 +20,19 @@ const queues = new WeakMap();
 const reactionQueue = queues.get.bind(queues);
 const rememberQueue = queues.set.bind(queues);
 
-function treeNodes(root) {
+function treeNodes(root, document) {
   const nodes = [];
-  const pending = [[root, (root[END] || root)[NEXT]]];
+  const pending = [[root, (root[END] || root)[NEXT], document]];
   while (pending.length) {
-    let [node, stop] = pending.pop();
+    let [node, stop, document] = pending.pop();
     while (node !== stop) {
-      nodes.push(node);
-      const content = node[CONTENT];
+      nodes.push({ node, document });
+      const content = templateContent(node);
       const shadow = shadowRoot(node)?.shadowRoot;
       if (content || shadow) {
-        pending.push([node[NEXT], stop]);
-        if (content) pending.push([content, content[END][NEXT]]);
-        if (shadow) pending.push([shadow, shadow[END][NEXT]]);
+        pending.push([node[NEXT], stop, document]);
+        if (content) pending.push([content, content[END][NEXT], templateOwner(document)]);
+        if (shadow) pending.push([shadow, shadow[END][NEXT], document]);
         break;
       }
       node = node[NEXT];
@@ -42,14 +45,15 @@ export function installAdoption(Element, shareObservers, onError) {
   const parent = Object.getPrototypeOf(Element.prototype);
   const insert = parent.insertBefore;
   const connected = Object.getOwnPropertyDescriptor(Element.prototype, 'isConnected').get;
+  const isConnected = Function.prototype.call.bind(connected);
   const invoke = (node, name, callback, args) => {
     try {
-      callback.apply(node, args);
+      runDOMCallback(() => callback.apply(node, args));
     } catch (e) { onError(name, e); }
   };
-  const enqueue = (node, name, args = []) => {
+  const enqueue = (node, name, args = [], selected) => {
     try {
-      const callback = node[name];
+      const callback = selected === undefined ? node[name] : selected;
       if (typeof callback !== 'function') return;
       let queue = reactionQueue(node);
       if (!queue) rememberQueue(node, queue = { items: [], at: 0 });
@@ -74,12 +78,19 @@ export function installAdoption(Element, shareObservers, onError) {
     const document = this.nodeType === 9 ? this : this.ownerDocument;
     shareObservers(document);
     shareObservers(node?.ownerDocument);
-    if (!document || !node || node.ownerDocument === document) {
+    if (!document || !node) {
       return insert.call(this, node, before);
     }
-    const nodes = treeNodes(node);
+    const nodes = treeNodes(node, document);
+    // A native XML setter/import can update just the public root owner,
+    // leaving its end marker, attributes and descendants in the old document.
+    if (node.ownerDocument === document && (!node[END] || node[END].ownerDocument === document)) {
+      const result = insert.call(this, node, before);
+      for (const { node } of nodes) { upgradeInserted(node, isConnected, enqueue, onError); flush(node); }
+      return result;
+    }
     const reactions = [];
-    for (const descendant of nodes) {
+    for (const { node: descendant } of nodes) {
       const info = customElement(descendant);
       if (info) reactions.push({ node: descendant, info, oldDocument: descendant.ownerDocument, wasConnected: connected.call(descendant) });
     }
@@ -91,7 +102,7 @@ export function installAdoption(Element, shareObservers, onError) {
       // the old owner document before ownership changes.
       for (const reaction of reactions) reaction.info.connected = false;
       if (oldParent) detach(node);
-      for (const descendant of nodes) descendant.ownerDocument = document;
+      for (const { node: descendant, document: owner } of nodes) { shareObservers(owner); descendant.ownerDocument = owner; }
       for (const reaction of reactions) reaction.info.connected = true;
       inserting = true;
       return insert.call(this, node, before);
@@ -108,7 +119,7 @@ export function installAdoption(Element, shareObservers, onError) {
         if (newDocument !== oldDocument) enqueue(element, 'adoptedCallback', [oldDocument, newDocument]);
         if (inserting && isConnected) enqueue(element, 'connectedCallback');
       }
-      for (const reaction of reactions) flush(reaction.node);
+      for (const { node } of nodes) { if (inserting) upgradeInserted(node, isConnected, enqueue, onError); flush(node); }
     }
   };
 }
