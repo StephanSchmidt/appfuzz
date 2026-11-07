@@ -1,0 +1,13 @@
+[package]
+name = "spin_sort"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+spin-sdk = "7.0.0"
+anyhow = "1"
+http = "1"

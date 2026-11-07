@@ -35,6 +35,7 @@ wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 wiggle.workspace = true
 wasmtime-wasi-http.workspace = true
+wasi-preview1-component-adapter-provider.workspace = true
 bytes.workspace = true
 http.workspace = true
 http-body-util.workspace = true

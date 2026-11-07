@@ -100,6 +100,10 @@ pub struct AppSection {
     /// (one per app on a platform whose apps export different functions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub world: Option<String>,
+    /// Environment variables the platform gives the app (Spin's
+    /// `environment`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 /// What a host function does to the world.
@@ -511,7 +515,16 @@ impl Manifest {
     /// A manifest for a bare `.wasm` without `appfuzz.toml`.
     pub fn for_wasm(wasm: &Path) -> Self {
         Manifest {
-            app: AppSection { wasm: wasm.to_path_buf(), name: None, description: None, labels: None, base: None, platform: None, world: None },
+            app: AppSection {
+                wasm: wasm.to_path_buf(),
+                name: None,
+                description: None,
+                labels: None,
+                base: None,
+                platform: None,
+                world: None,
+                env: BTreeMap::new(),
+            },
             entry: None,
             grants: Grants::default(),
             limits: Limits::default(),

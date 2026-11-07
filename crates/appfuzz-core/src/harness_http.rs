@@ -44,7 +44,7 @@ use crate::wasi_http::CLIENT_KEY;
 const VERSION: &str = "0.2.12";
 /// The most one body may hold. A guest can write the same buffer forever;
 /// host memory is not fuel.
-const MAX_BODY: usize = 64 << 20;
+pub(super) const MAX_BODY: usize = 64 << 20;
 /// What one write may carry (`check-write`).
 const WRITE_BUDGET: usize = 64 << 10;
 
@@ -308,7 +308,7 @@ pub(super) fn link(linker: &mut Linker<Host>) -> Result<()> {
     Ok(())
 }
 
-fn response_deadline_ns(first_byte: Duration, connect: Duration) -> Natural {
+pub(super) fn response_deadline_ns(first_byte: Duration, connect: Duration) -> Natural {
     Natural::from(first_byte.as_nanos()) + Natural::from(connect.as_nanos())
 }
 
@@ -502,8 +502,19 @@ type SendResult = wasmtime_wasi_http::Result<(http::Response<WasiBody>, wasmtime
 
 /// The host call's answer as the response the guest reads.
 fn incoming(v: &Value) -> Result<SendResult> {
+    Ok(match answer_of(v)? {
+        Err(text) => Err(error_of(&text)),
+        Ok(response) => {
+            let response = response.map(|b| b.map_err(|e: Infallible| -> wasmtime_wasi_http::Error { match e {} }).boxed_unsync());
+            Ok((response, wasmtime_wasi::runtime::spawn(async {})))
+        }
+    })
+}
+
+/// The simulated outbound call's result: the response, or the error text.
+pub(super) fn answer_of(v: &Value) -> Result<Result<http::Response<Full<Bytes>>, String>> {
     if let Some(e) = v.get("err") {
-        return Ok(Err(error_of(e.as_str().unwrap_or_default())));
+        return Ok(Err(e.as_str().unwrap_or_default().to_string()));
     }
     let ok = v.get("ok").ok_or_else(|| anyhow!("not a result: {v}"))?;
     let status = ok.get("status").and_then(Value::as_u64).unwrap_or(0);
@@ -516,12 +527,10 @@ fn incoming(v: &Value) -> Result<SendResult> {
         }
     }
     let body = ok.get("body").and_then(Value::as_str).unwrap_or_default().to_string();
-    let body = Full::new(Bytes::from(body)).map_err(|e: Infallible| -> wasmtime_wasi_http::Error { match e {} }).boxed_unsync();
-    let response = builder.body(body).context("response")?;
-    Ok(Ok((response, wasmtime_wasi::runtime::spawn(async {}))))
+    Ok(Ok(builder.body(Full::new(Bytes::from(body))).context("response")?))
 }
 
-fn pairs(v: Option<&Value>) -> Vec<(String, String)> {
+pub(super) fn pairs(v: Option<&Value>) -> Vec<(String, String)> {
     v.and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|p| Some((p.get(0)?.as_str()?.to_string(), p.get(1)?.as_str()?.to_string()))).collect())
         .unwrap_or_default()
@@ -597,20 +606,14 @@ fn deliver_uri(text: &str) -> Option<http::Uri> {
     })
 }
 
-/// Calls `wasi:http/incoming-handler#handle` with the request record and
-/// captures any response sent. The outer error is appfuzz's (a request
-/// the platform would not deliver), the inner one the guest's.
-pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value) -> Result<std::result::Result<(), wasmtime::Error>> {
+/// The request record as the HTTP request the platform delivers. The
+/// error is appfuzz's: a request the platform would not deliver.
+pub(super) fn incoming_request(request: &Value) -> Result<http::Request<Full<Bytes>>> {
     let text = |k: &str| request.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
     let method = text("method");
     let method = http::Method::from_bytes(method.as_bytes()).map_err(|_| anyhow!("the platform does not deliver method {method:?}"))?;
     let uri_text = text("uri");
     let uri = deliver_uri(&uri_text).ok_or_else(|| anyhow!("the platform does not deliver uri {uri_text:?}"))?;
-    let scheme = match uri.scheme_str() {
-        Some("https") => wt::Scheme::Https,
-        Some("http") | None => wt::Scheme::Http,
-        Some(other) => wt::Scheme::Other(other.to_string()),
-    };
     let mut builder = http::Request::builder().method(method).uri(uri.clone());
     let headers = pairs(request.get("headers"));
     for (k, v) in &headers {
@@ -622,8 +625,20 @@ pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value)
     if uri.authority().is_none() && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("host")) {
         builder = builder.header(http::header::HOST, "app.example");
     }
-    let body = Full::new(Bytes::from(text("body"))).map_err(|e: Infallible| -> wasmtime_wasi_http::Error { match e {} });
-    let req = builder.body(body).context("request")?;
+    builder.body(Full::new(Bytes::from(text("body")))).context("request")
+}
+
+/// Calls `wasi:http/incoming-handler#handle` with the request record and
+/// captures any response sent. The outer error is appfuzz's (a request
+/// the platform would not deliver), the inner one the guest's.
+pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value) -> Result<std::result::Result<(), wasmtime::Error>> {
+    let req = incoming_request(request)?;
+    let scheme = match req.uri().scheme_str() {
+        Some("https") => wt::Scheme::Https,
+        Some("http") | None => wt::Scheme::Http,
+        Some(other) => wt::Scheme::Other(other.to_string()),
+    };
+    let req = req.map(|b| b.map_err(|e: Infallible| -> wasmtime_wasi_http::Error { match e {} }));
 
     let slot = store.data().http.response.clone();
     let (req, out) = {

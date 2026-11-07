@@ -1145,6 +1145,11 @@ a path). `appfuzz platform docs` prints the host API reference;
 `appfuzz platform check` checks a `platform.toml` against its WIT or witx and
 lists functions without a description.
 
+A `wasm32-wasip1` module built with wit-bindgen carries its WIT world in a
+`component-type` section. appfuzz makes it a component with the WASI
+preview 1 adapter, as Spin and `wasm-tools component new` do, so it needs no
+platform file (Spin's `http-rust-p2` template builds this way).
+
 WASI's clocks, streams, files, sockets, random numbers and HTTP run in the
 sandbox. Other `wasi:` interfaces, such as `wasi:keyvalue`, `wasi:config` and
 `wasi:blobstore`, are services of the platform: each function is a host call
@@ -1204,8 +1209,9 @@ used only when necessary.
 
 ### wasi:http handlers
 
-A component that exports `wasi:http/incoming-handler` (0.2.x) needs no
-platform file. appfuzz shows the handler as one function:
+A component that exports `wasi:http/incoming-handler` (0.2.x) or
+`wasi:http/handler` (0.3) needs no platform file. appfuzz shows the handler
+as one function:
 
 ```wit
 handle: func(request: record { method: string, uri: string,
@@ -1253,6 +1259,13 @@ handle: func(request: record { method: string, uri: string,
 - Binary body capture checks the remaining trace capacity before allocating
   JSON byte values. Exceeding that reviewer guard is explicitly incomplete
   evidence, never a truncated body reported as a complete run.
+- A 0.3 handler is an `async func` (Spin 4's `http-rust` template). It may
+  keep writing the response body after `handle` returns; the result holds
+  the whole body. appfuzz runs wasi:http 0.3.0, as Spin 4.1 and later do
+  (spin-sdk 7). A component built against a 0.3 release candidate (Spin
+  4.0's spin-sdk 6) is an error that says to rebuild it with spin-sdk 7. A handler that waits for something nothing will ever
+  deliver (a stream nobody writes, its own unfinished body) is a `hang`,
+  the same on every run.
 
 `probe web` (part of `review`) sends the request as another website
 would and as a request naming another host would:
@@ -1307,7 +1320,9 @@ later, a constant otherwise. The run with the whole secret is checked too.
 Outbound requests are the host function
 `wasi:http/outgoing-handler#handle(method: string, url: string, headers,
 body: string) -> result<response, string>`, where `response` is
-`{status, headers, body}`. The call is prepared when the guest probes or waits
+`{status, headers, body}`. 0.3's `wasi:http/client#send` is the same host
+function under the same key: one plan and one manifest section serve both,
+and the body the guest streams is read to its end before the call. The call is prepared when the guest probes or waits
 for the response, so a body written after `handle` is part of `body`.
 Subscriptions only register readiness; `get` returns `none` while pending,
 and readiness checks do not advance time. Nonblocking probes leave an open
@@ -1322,7 +1337,9 @@ selected deadline wins unless another selected resource is already ready.
 Only time spent blocking for a response is charged to `host_ns`.
 Requests sent together overlap, so four 60 ms requests awaited together
 take 60 ms; awaited one by one, each after the previous answer, they take
-240. A `first-byte-timeout` in the request options (plus the
+240. 0.3 requests, and other async host calls (Spin 4's), overlap the same
+way: each answer is ready at the time it was sent plus its latency. A
+`first-byte-timeout` in the request options (plus the
 `connect-timeout`, if set) is honoured: a request whose latency is longer
 fails at that time with `connection-read-timeout`. A `connect-timeout`
 alone does not limit a response.
@@ -1362,15 +1379,30 @@ else the only one. Its `source` must be a local path.
 | `source` | `[app] wasm` |
 | `[application] name`, `description` | `[app] name`, `description` |
 | HTTP trigger `route` (`/shop/...`) | `[app] base = "/shop"`; the request is `GET https://app.example/shop/` |
+| `environment` | `[app] env`: the component's environment variables |
 | `allowed_outbound_hosts` | `[grants] hosts`: the host of each entry, `*.example.com` as `example.com` and its subdomains, `*` as any host; `self` and `localhost` are skipped, `{{ var }}` is filled from the component's variables or the entry skipped |
 | `[component.X.variables]` | rules on `fermyon:spin/variables#get`, `spin:variables/variables#get` (`name`) and `wasi:config/store#get` (`key`): a variable whose template uses an application variable with `secret = true` has `result = "secret"` and a generated value; one whose template resolves through defaults returns that text; an undeclared name is `undefined` (`ok(none)` for `wasi:config`) |
 | `key_value_stores` | rules on `store.open` (`label`) and `wasi:keyvalue/store#open` (`identifier`): any other store is `access-denied` |
-| `sqlite_databases` | rules on `connection.open` (`database`): any other database is `access-denied` |
+| `sqlite_databases` | rules on `connection.open` and `connection.open-async` (`database`): any other database is `access-denied` |
 
 No `[grants] imports` or `wasi`: Spin links all of WASI and its own
 interfaces. The limits are appfuzz's defaults. Built-in labels for Spin's
 SQL, key-value, Redis and MQTT functions and for `wasi:keyvalue` apply to
-every component, with or without `spin.toml`.
+every component, with or without `spin.toml`, Spin 3's interfaces and Spin
+4's async ones alike.
+
+Generated answers of Spin's SQL queries (SQLite `execute`, PostgreSQL
+`query`, MySQL `query`, and their async forms) keep the database's promise:
+when the statement is a `SELECT` that names its columns, the answer has
+those columns, and every row has one value per column. Column types and
+values are still generated; a plan supplies real rows. A plan's or a rule's
+answer is used as written.
+
+Spin 4's async functions return `stream<T>` and `future<T>`. In plans, rules
+and run records a stream is a list of its items and a future is its value:
+`{"return": {"ok": [["id", "name"], [{"values": [...]}], {"ok": null}]}}`
+for SQLite's `execute-async`. The app receives them as a real stream and
+future.
 
 `allowed_outbound_hosts` is also a rule on
 `wasi:http/outgoing-handler#handle`: a URL no entry allows (scheme, host and

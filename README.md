@@ -14,7 +14,8 @@ It tests what you deploy, not your source:
 
 - **WebAssembly components**, in any language that builds one. Tested with
   Rust, Zig, TypeScript, JavaScript, Go (TinyGo), C# and Python.
-- **HTTP handlers on `wasi:http`**: Spin, wasmCloud, `wasmtime serve`.
+- **HTTP handlers on `wasi:http`** 0.2 and 0.3: Spin 3 and 4, wasmCloud,
+  `wasmtime serve`.
 - **Fastly Compute apps** (wasm32-wasip1 modules).
 - **[Extism](https://extism.org/) plugins**, from any PDK.
 
@@ -29,11 +30,11 @@ appfuzz --human https://appfuzz.dev/demo/chatty.wasm
 
 ![appfuzz reviewing the chatty demo: FAIL, an n+1 query and a cost over budget](https://appfuzz.dev/demo.gif)
 
-That downloads a small demo app with a bug and reviews it. Four more are on
-[appfuzz.dev/demo](https://appfuzz.dev/demo/): an XSS, two crashes and one
-that passes. On your own app, run `appfuzz review` next to its `.wasm`.
-If your shell can't find `appfuzz` yet, use the command the installer
-printed last: it has the full path.
+That downloads a small demo app with a bug and reviews it. Five more are on
+[appfuzz.dev/demo](https://appfuzz.dev/demo/): an XSS, a SQL injection in a
+Spin app, two crashes and one that passes. On your own app, run
+`appfuzz review` next to its `.wasm`. If your shell can't find `appfuzz`
+yet, use the command the installer printed last: it has the full path.
 
 **Who it's for:** platforms that run code other people wrote (plugins,
 extensions, customer scripts), teams whose agents write more code than anyone
@@ -433,7 +434,7 @@ too. Details: [REFERENCE.md](REFERENCE.md#request-sequences).
 | Your app | Where the types come from | What you write |
 |----------|---------------------------|----------------|
 | **Component** (wasm32-wasip2, jco, componentize-*) | the WIT inside it | nothing |
-| **HTTP handler** on `wasi:http` (Spin, wasmCloud, `wasmtime serve`) | built in | nothing |
+| **HTTP handler** on `wasi:http` 0.2 or 0.3 (Spin, wasmCloud, `wasmtime serve`) | built in | nothing |
 | **Spin app** | built in, plus your `spin.toml` | nothing |
 | **Shopify Function** (Rust or JavaScript) | your `schema.graphql` and input query | nothing |
 | **Fastly Compute app** (wasm32-wasip1) | Fastly's witx, bundled | `platform = "fastly"` |
@@ -447,9 +448,9 @@ for whoever writes apps for it.
 
 ### HTTP handlers (`wasi:http`)
 
-A component that exports `wasi:http/incoming-handler` is tested like a web
-app: a run is one request, and the result is the response your handler
-sends. `appfuzz --wasm app.wasm review` works without a manifest. To choose
+A component that exports `wasi:http/incoming-handler` (0.2) or
+`wasi:http/handler` (0.3) is tested like a web app: a run is one request,
+and the result is the response your handler sends. `appfuzz --wasm app.wasm review` works without a manifest. To choose
 the request yourself:
 
 ```toml
@@ -462,7 +463,9 @@ The fuzzer varies the method, URL, query, headers and body.
 
 Outgoing requests don't leave the sandbox. Each one is a call to
 `wasi:http/outgoing-handler#handle` with `method`, `url`, `headers` and
-`body`. Script the answer in a plan, or make it fail:
+`body`, also 0.3's `wasi:http/client#send`. Requests your handler sends
+together overlap in time, as they would in production. Script the answer
+in a plan, or make it fail:
 
 ```sh
 appfuzz run --plan '{"wasi:http/outgoing-handler#handle": {"return": {"ok": {"status": 503, "headers": [], "body": ""}}}}'
@@ -487,21 +490,30 @@ at a time) and session ids made from the clock instead of random bytes.
 
 Run `appfuzz review` next to your `spin.toml`. It needs no `appfuzz.toml`:
 appfuzz reads your component's settings and tests it with what Spin would
-give it.
+give it. Spin 4's `http-rust` template (async, WASI 0.3; Spin 4.1 and
+later) and Spin 3's `http-rust-p2` (a wasm32-wasip1 module) work as built:
+
+```sh
+spin new -t http-rust hello --accept-defaults && cd hello
+spin build
+appfuzz review
+```
 
 | In `spin.toml` | What the review does with it |
 |----------------|------------------------------|
 | `allowed_outbound_hosts` | the hosts your app may call; a call your code makes to any other host is reported, and a request to any other host is refused, as on Spin. A client that picks the host can then only reach the hosts you allow: a warning, not a fail |
 | `variables` marked `secret = true` | traced: a token that shows up in a page, a log or a request to the wrong host fails the review |
 | other variables | answered with their default value |
+| `environment` | the environment variables your component sees |
 | `key_value_stores`, `sqlite_databases` | opening any other store or database fails, as on Spin |
 | the HTTP trigger's `route` | the path the requests go to |
 
 The review also knows Spin's own APIs: a SQL statement built from request
 text is SQL injection, and a key-value or Redis write on a GET request is
-reported. If your app has several HTTP components, pick one with
-`--component NAME`. Add an `appfuzz.toml` when you want limits or your own
-labels; it replaces `spin.toml` for appfuzz.
+reported. Rows from SQLite, PostgreSQL and MySQL have the columns your
+`SELECT` names, also when Spin 4 streams them. If your app has several HTTP
+components, pick one with `--component NAME`. Add an `appfuzz.toml` when you
+want limits or your own labels; it replaces `spin.toml` for appfuzz.
 
 ### Shopify Functions
 
@@ -628,8 +640,8 @@ adds a feature, and the review refuses it.
   ([LABELS.md](LABELS.md)).
 - Requests run one at a time. Sequences share backend state between them,
   but concurrent requests and live services are out of reach.
-- Not yet supported: WASI 0.3 HTTP handlers (`wasi:http/handler`, Spin 4),
-  outbound HTTP from Extism plugins, Proxy-Wasm filters and browser Wasm.
+- Not yet supported: outbound HTTP from Extism plugins, Proxy-Wasm filters
+  and browser Wasm.
 - Detecting hostile apps (hidden text, notes to the reviewer, data in
   disguise, time bombs) and runtime envelopes are **experimental**. A pass
   doesn't prove an app is benign.
@@ -643,7 +655,7 @@ adds a feature, and the review refuses it.
 | `crates/appfuzz-core` | engine: harness, simulated host, fuzzer, detectors |
 | `crates/appfuzz-core/platforms` | bundled platforms (Fastly) |
 | `crates/appfuzz` | the CLI |
-| `bench/apps` | 91 small apps, each with one bad pattern (or none) and its expected findings |
+| `bench/apps` | 131 small apps, each with one bad pattern (or none) and its expected findings |
 | `bench/lang` | the same app in Zig, TypeScript, JavaScript, Go, C# and Python |
 | `demos/fastly-hello` | Fastly's Rust starter kit, with a `Makefile` to build, serve and deploy it |
 | `install.sh` | the installer behind `curl -fsSL https://appfuzz.dev/install.sh \| sh` |

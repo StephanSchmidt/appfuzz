@@ -38,7 +38,9 @@ wasm-encoder = { version = "0.262", features = ["wasmparser"] }
 wasmtime = { version = "50.0.0", features = ["anyhow", "call-hook"] }
 wasmtime-wasi = "50.0.0"
 wiggle = { version = "50.0.0", default-features = false }
-wasmtime-wasi-http = { version = "50.0.0", default-features = false, features = ["p2"] }
+wasmtime-wasi-http = { version = "50.0.0", default-features = false, features = ["p2", "p3", "component-model-async"] }
+# Spin builds wasm32-wasip1 modules into components with this adapter; appfuzz does the same.
+wasi-preview1-component-adapter-provider = "50.0.1"
 bytes = "1"
 http = "1"
 http-body-util = "0.1"

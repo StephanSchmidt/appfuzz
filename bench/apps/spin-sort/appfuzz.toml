@@ -1,0 +1,8 @@
+# appfuzz bench app: spin-sort (a Spin 4 search that pastes ?sort into ORDER BY).
+[app]
+wasm = "../../target/wasm32-wasip2/release/spin_sort.wasm"
+name = "spin-sort"
+
+[entry]
+export = "wasi:http/handler#handle"
+request = { method = "GET", uri = "https://app.example/?q=lamp&sort=price", headers = [], body = "" }

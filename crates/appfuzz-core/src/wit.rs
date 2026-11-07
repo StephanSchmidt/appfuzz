@@ -178,8 +178,8 @@ pub fn type_str(ty: &Type) -> String {
         Type::Flags(f) => format!("flags {{ {} }}", f.names().collect::<Vec<_>>().join(", ")),
         Type::Own(_) => "own<resource>".into(),
         Type::Borrow(_) => "borrow<resource>".into(),
-        Type::Future(_) => "future".into(),
-        Type::Stream(_) => "stream".into(),
+        Type::Future(f) => f.ty().map_or_else(|| "future".into(), |t| format!("future<{}>", type_str(&t))),
+        Type::Stream(s) => s.ty().map_or_else(|| "stream".into(), |t| format!("stream<{}>", type_str(&t))),
         Type::ErrorContext => "error-context".into(),
     }
 }

@@ -1,0 +1,11 @@
+{
+  "app": "spin-sort",
+  "bug": "a Spin 4 search that binds the search term but pastes ?sort into ORDER BY: SQL injection",
+  "expect": [
+    {
+      "kind": "sql_injection",
+      "min": "fail"
+    }
+  ],
+  "allow": []
+}

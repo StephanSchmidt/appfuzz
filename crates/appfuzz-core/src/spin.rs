@@ -62,6 +62,8 @@ struct Component {
     sqlite_databases: Vec<String>,
     #[serde(default)]
     variables: BTreeMap<String, String>,
+    #[serde(default)]
+    environment: BTreeMap<String, String>,
 }
 
 /// Whether a manifest path is a Spin manifest.
@@ -109,6 +111,7 @@ fn from_str(text: &str, dir: &Path, component: Option<&str>) -> Result<Manifest>
     m.dir = dir.to_path_buf();
     m.app.name = Some(spin.application.name.clone().unwrap_or_else(|| id.clone()));
     m.app.description.clone_from(&spin.application.description);
+    m.app.env.clone_from(&c.environment);
     let route = routes.get(&id).cloned().unwrap_or_else(|| "/...".into());
     let base = route.trim_end_matches("...").trim_end_matches('/').to_string();
     if !base.is_empty() {
@@ -173,7 +176,8 @@ fn from_str(text: &str, dir: &Path, component: Option<&str>) -> Result<Manifest>
         m.functions.insert(key.into(), FunctionSpec { rules: denied("label", &c.key_value_stores), ..Default::default() });
     }
     m.functions.insert("wasi:keyvalue/store#open".into(), FunctionSpec { rules: denied("identifier", &c.key_value_stores), ..Default::default() });
-    for key in ["fermyon:spin/sqlite#[static]connection.open", "spin:sqlite/sqlite#[static]connection.open"] {
+    for key in ["fermyon:spin/sqlite#[static]connection.open", "spin:sqlite/sqlite#[static]connection.open", "spin:sqlite/sqlite#[static]connection.open-async"]
+    {
         m.functions.insert(key.into(), FunctionSpec { rules: denied("database", &c.sqlite_databases), ..Default::default() });
     }
 
@@ -329,6 +333,7 @@ source = "target/wasm32-wasip2/release/web.wasm"
 allowed_outbound_hosts = ["https://{{ host }}", "https://*.cdn.example:443", "http://self", "redis://cache.internal:6379"]
 key_value_stores = ["default"]
 sqlite_databases = ["default"]
+environment = { DB_URL = "host=localhost dbname=shop" }
 
 [component.web.variables]
 token = "Bearer {{ api_token }}"
@@ -342,6 +347,7 @@ greeting = "{{ greeting }}, world"
         assert_eq!(m.wasm_path(), PathBuf::from("/app/target/wasm32-wasip2/release/web.wasm"));
         assert_eq!(m.app.name.as_deref(), Some("shop"));
         assert_eq!(m.app.base.as_deref(), Some("/shop"));
+        assert_eq!(m.app.env["DB_URL"], "host=localhost dbname=shop");
         assert_eq!(m.grants.hosts.unwrap(), vec!["*.cdn.example", "api.example.com", "cache.internal"]);
         let get = |name: &str| vec![("name".to_string(), json!(name))];
         let vars = &m.functions["fermyon:spin/variables#get"];

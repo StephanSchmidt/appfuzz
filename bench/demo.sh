@@ -7,7 +7,7 @@
 set -eu
 cd "$(dirname "$0")"
 out=${1:?usage: bench/demo.sh OUT_DIR}
-apps="chatty reflect-query empty-panic utf8-slice clean"
+apps="chatty reflect-query empty-panic utf8-slice spin-sort clean"
 mkdir -p "$out"
 pkgs=""
 for a in $apps; do pkgs="$pkgs -p $(echo "$a" | tr - _)"; done

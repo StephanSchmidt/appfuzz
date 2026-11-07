@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+**Spin 4 and WASI 0.3**
+
+- HTTP handlers on `wasi:http` 0.3 (`wasi:http/handler`, an `async func`)
+  are reviewed like 0.2 handlers. Spin 4's `http-rust` template (Spin 4.1
+  and later, spin-sdk 7) works as `spin new` makes it: `spin build`, then
+  `appfuzz review`. A component built against a 0.3 release candidate
+  (Spin 4.0's spin-sdk 6) gets an error that says to rebuild it. Outgoing
+  requests through `wasi:http/client#send` are the same host function as
+  0.2's, under the same plan key. A handler that waits for something that
+  never comes is a `hang`.
+- Spin 4's async APIs work: SQLite `execute-async`, PostgreSQL
+  `query-async`, MySQL, key-value `get-keys`. Their streams and futures are
+  lists and values in plans and run records; the app receives real ones.
+  The built-in SQL, key-value and Redis labels cover them.
+- Async host calls sent together overlap in virtual time, as they would in
+  production: two 60 ms requests awaited together take 60 ms.
+- `wasm32-wasip1` modules built with wit-bindgen (Spin 3's `http-rust-p2`
+  template) are made components with the WASI preview 1 adapter, as Spin
+  does.
+- Generated answers of Spin's SQL queries have the columns the `SELECT`
+  names and one value per column in each row, so an app that looks up a
+  column by name gets past it.
+- `spin.toml`'s `environment` sets the component's environment variables;
+  in `appfuzz.toml` it is `[app] env`.
+
 **What host calls did**
 
 - Run records say how much each host call returned: `result_items` (list

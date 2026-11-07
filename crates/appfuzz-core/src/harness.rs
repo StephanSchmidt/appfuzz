@@ -37,6 +37,8 @@ use core::CoreApp;
 mod extism;
 #[path = "harness_http.rs"]
 mod http;
+#[path = "harness_http3.rs"]
+mod http3;
 use extism::ExtismApp;
 #[path = "harness_p1.rs"]
 mod p1;
@@ -175,6 +177,8 @@ pub struct App {
     platform: Arc<Platform>,
     ticker_stop: Arc<AtomicBool>,
     feedback_readers: Vec<String>,
+    /// Instantiated and called as concurrent tasks (wasi:http 0.3).
+    concurrent: bool,
 }
 
 // Runs share an `App` across threads; each run has its own store.
@@ -217,6 +221,8 @@ struct Host {
     /// outgoing HTTP request is in flight from `handle` until the guest
     /// waits for it, alongside the guest's work and other requests.
     call_started_ns: Option<Natural>,
+    /// Answers of async host calls (wasi:http 0.3, Spin 4) on their way.
+    in_flight: http3::InFlight,
     /// How long the next host call may take before it times out (an
     /// outgoing request's `first-byte-timeout`).
     call_deadline_ns: Option<Natural>,
@@ -446,6 +452,12 @@ impl App {
         let state_key = manifest.state_key(&hash);
         let written: Vec<String> = manifest.functions.keys().cloned().collect();
         let extism_abi = manifest.host.as_ref().is_some_and(|h| h.platform.abi.as_deref() == Some("extism"));
+        // A wasm32-wasip1 build of a component runs as the component the
+        // platform makes of it. The build's identity stays the file's hash.
+        let bytes = match manifest.host {
+            None => crate::adapt::componentize(&bytes)?.unwrap_or(bytes),
+            Some(_) => bytes,
+        };
         let mut plugin = None;
         let mut function = None;
         let (component, core, imports, exports) = if wasmparser::Parser::is_core_wasm(&bytes) && manifest.shopify.is_some() {
@@ -641,11 +653,22 @@ impl App {
             }
             platform.handles = Some(spec);
         }
+        crate::wasi_http::check_version(&imports, &exports)?;
+        // wasi:http 0.3 and `async func` imports run as concurrent tasks,
+        // which wasmtime only instantiates and calls the async way.
+        let concurrent =
+            component.is_some() && (crate::wasi_http::uses_http3(&imports, &exports) || imports.iter().flat_map(|i| &i.funcs).any(|f| f.ty.async_()));
         let pre = match (component, core, plugin) {
             _ if let Some(f) = function => Pre::Shopify(Arc::new(f.link(&engine)?)),
             (_, _, Some(p)) => Pre::Extism { pre: p.link(&engine)?, kernel: p.kernel.clone(), abi: p.abi.clone(), names: p.names.clone() },
             (_, Some(core), _) => Pre::Core { pre: core.link(&engine)?, start: core.start },
-            (Some(component), None, None) => Pre::Component(link_component(&engine, &component, &imports, crate::wasi_http::uses_http(&imports, &exports))?),
+            (Some(component), None, None) => Pre::Component(link_component(
+                &engine,
+                &component,
+                &imports,
+                crate::wasi_http::uses_http(&imports, &exports),
+                crate::wasi_http::uses_http3(&imports, &exports),
+            )?),
             (None, None, None) => unreachable!("one of them"),
         };
 
@@ -674,6 +697,7 @@ impl App {
             platform: Arc::new(platform),
             ticker_stop,
             feedback_readers: vec![],
+            concurrent,
         })
     }
 
@@ -852,6 +876,7 @@ impl App {
         let drawn = Arc::new(Mutex::new(0u64));
         let stdout = MemoryOutputPipe::new(OUTPUT_CAPACITY);
         let stderr = MemoryOutputPipe::new(OUTPUT_CAPACITY);
+        let env: Vec<_> = self.manifest.app.env.iter().collect();
         let mut builder = WasiCtx::builder();
         let shopify_input = self.shopify_start(&export, &spec.args, &mut builder)?;
         let mut shopify_written = None;
@@ -862,7 +887,8 @@ impl App {
             .insecure_random(CountingRng::new(spec.seed ^ 0x5eed, drawn.clone()))
             .insecure_random_seed(spec.seed as u128)
             .stdout(stdout.clone())
-            .stderr(stderr.clone());
+            .stderr(stderr.clone())
+            .envs(&env);
         // Plain modules use WASI preview 1, made the same way.
         let (ctx, p1) = if self.pre.plain() { (WasiCtx::builder().build(), Some(builder.build_p1())) } else { (builder.build(), None) };
         let memory = crate::memory::Budget::new(spec.memory);
@@ -899,6 +925,7 @@ impl App {
             trace_bytes: 0,
             production_limits: crate::constraints::broken_request_for(record, &self.manifest).is_empty().then(|| self.manifest.limits.clone()),
             call_started_ns: None,
+            in_flight: Default::default(),
             call_deadline_ns: None,
             plan_error: None,
             host_trap: None,
@@ -934,22 +961,12 @@ impl App {
         let mut instance = None;
         let mut initializing = true;
         let mut call = match &self.pre {
-            Pre::Component(pre) => match pre.instantiate(&mut store) {
+            Pre::Component(pre) => match instantiate(pre, &mut store, self.concurrent) {
                 Err(error) => Err(error.context("instantiating the component")),
                 Ok(inst) => {
                     initializing = false;
                     let func = lookup_export(&inst, &mut store, &export)?;
-                    let call = if crate::wasi_http::is_handler(&export) {
-                        // The request record becomes an incoming request; the
-                        // response set on the outparam becomes the result.
-                        let request = spec.args.first().cloned().unwrap_or(Value::Null);
-                        // The response JSON is the result as it is: the carrier
-                        // type has no place for binary bodies or trailers.
-                        http::call_handler(&mut store, func, &request)?.map(|()| vec![])
-                    } else {
-                        let mut results = vec![Val::Bool(false); export.ty.results().len()];
-                        func.call(&mut store, &args, &mut results).map(|()| results)
-                    };
+                    let call = call_export(&mut store, func, &export, &spec.args, &args)?;
                     instance = Some(inst);
                     call
                 }
@@ -1108,7 +1125,12 @@ impl App {
             store.set_epoch_deadline(100);
             for (module, name) in self.feedback_readers.iter().enumerate() {
                 let read = instance.get_typed_func::<(), (Vec<u8>,)>(&mut store, name)?;
-                let (bytes,) = read.call(&mut store, ())?;
+                let (bytes,) = if self.concurrent {
+                    let (in_flight, clock) = (store.data().in_flight.clone(), store.data().clock.clone());
+                    http3::until_stuck(read.call_async(&mut store, ()), &in_flight, &clock).unwrap_or_else(|| Err(Trap::AsyncDeadlock.into()))?
+                } else {
+                    read.call(&mut store, ())?
+                };
                 feedback.decode(&bytes, module as u32)?;
             }
         }
@@ -1124,14 +1146,50 @@ impl App {
     }
 }
 
+/// Instantiates a component. One with concurrent tasks (wasi:http 0.3,
+/// `async func` imports) is instantiated the async way, until it is done
+/// or stuck: stuck is a deadlock.
+fn instantiate(pre: &InstancePre<Host>, store: &mut Store<Host>, concurrent: bool) -> wasmtime::Result<wasmtime::component::Instance> {
+    if !concurrent {
+        return pre.instantiate(store);
+    }
+    let (in_flight, clock) = (store.data().in_flight.clone(), store.data().clock.clone());
+    http3::until_stuck(pre.instantiate_async(&mut *store), &in_flight, &clock).unwrap_or_else(|| Err(Trap::AsyncDeadlock.into()))
+}
+
+/// Calls a component's export. An HTTP handler gets the request record as
+/// an incoming request, and the response it sends becomes the result, as it
+/// is: the carrier type has no place for binary bodies or trailers. The
+/// outer error is appfuzz's, the inner one the guest's.
+fn call_export(
+    store: &mut Store<Host>,
+    func: wasmtime::component::Func,
+    export: &FuncInfo,
+    request: &[Value],
+    args: &[Val],
+) -> Result<wasmtime::Result<Vec<Val>>> {
+    let request = || request.first().cloned().unwrap_or(Value::Null);
+    if crate::wasi_http::is_handler3(export) {
+        return Ok(http3::call_handler(store, func, &request())?.map(|()| vec![]));
+    }
+    if crate::wasi_http::is_handler(export) {
+        return Ok(http::call_handler(store, func, &request())?.map(|()| vec![]));
+    }
+    let mut results = vec![Val::Bool(false); export.ty.results().len()];
+    Ok(func.call(store, args, &mut results).map(|()| results))
+}
+
 /// Links a component: wasmtime-wasi made deterministic, and every
 /// platform import routed to the interceptor.
-fn link_component(engine: &Engine, component: &Component, imports: &[Interface], uses_http: bool) -> Result<InstancePre<Host>> {
+fn link_component(engine: &Engine, component: &Component, imports: &[Interface], uses_http: bool, uses_http3: bool) -> Result<InstancePre<Host>> {
     let mut linker: Linker<Host> = Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     linker.allow_shadowing(true);
     if uses_http {
         http::link(&mut linker)?;
+    }
+    if uses_http3 {
+        http3::link(&mut linker)?;
     }
     if uses_http || imports.iter().any(|i| i.name.starts_with("wasi:clocks/monotonic-clock@")) {
         p2::link(&mut linker)?;
@@ -1153,16 +1211,7 @@ fn link_component(engine: &Engine, component: &Component, imports: &[Interface],
     let mut next_resource = 0u32;
     // The outgoing handler is linked by `http::link`.
     for iface in imports.iter().filter(|i| i.kind == ImportKind::Platform && !crate::wasi_http::is_client(&i.name)) {
-        if iface.name.is_empty() {
-            for f in &iface.funcs {
-                let key = f.key.clone();
-                linker.root().func_new(&f.name, move |store, ty, params, results| {
-                    intercept_component(store, &ty, &key, params, results).map_err(wasmtime::Error::from_anyhow)
-                })?;
-            }
-            continue;
-        }
-        let mut inst = linker.instance(&iface.name)?;
+        let mut inst = if iface.name.is_empty() { linker.root() } else { linker.instance(&iface.name)? };
         // Its resources (a database connection, a key-value store): the
         // host hands out handles and gets them back in method calls.
         for name in resources.get(iface.name.as_str()).into_iter().flatten() {
@@ -1171,9 +1220,18 @@ fn link_component(engine: &Engine, component: &Component, imports: &[Interface],
         }
         for f in &iface.funcs {
             let key = f.key.clone();
-            inst.func_new(&f.name, move |store, ty, params, results| {
-                intercept_component(store, &ty, &key, params, results).map_err(wasmtime::Error::from_anyhow)
-            })?;
+            if f.ty.async_() {
+                // An `async func` (spin-sdk 7's key-value, variables, …):
+                // the simulated host answers at once, like any other call.
+                inst.func_new_concurrent(&f.name, move |accessor, ty, params, results| {
+                    let key = key.clone();
+                    Box::pin(async move { intercept_concurrent(accessor, &ty, &key, params, results).await.map_err(wasmtime::Error::from_anyhow) })
+                })?;
+            } else {
+                inst.func_new(&f.name, move |store, ty, params, results| {
+                    intercept_component(store, &ty, &key, params, results).map_err(wasmtime::Error::from_anyhow)
+                })?;
+            }
         }
     }
     // Link as is first. `define_unknown_imports_as_traps` matches names
@@ -1483,6 +1541,13 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
                 }
                 *v = json_to_val(&j, t)?;
             }
+            if let ([v], [t]) = (vals.as_mut_slice(), result_types.as_slice())
+                && crate::known::is_sql_answer(key)
+            {
+                let mut j = val_to_json(v);
+                crate::known::sql_answer(key, event.args.get("statement").and_then(Value::as_str), &mut j);
+                *v = json_to_val(&j, t)?;
+            }
             let answer = match vals.as_slice() {
                 [] => Value::Null,
                 [one] => val_to_json(one),
@@ -1534,6 +1599,44 @@ fn intercept_component(mut store: StoreContextMut<'_, Host>, ty: &ComponentFunc,
         r.resource_drop(&mut store)?;
     }
     answer?;
+    give_results(store, ty, results)
+}
+
+/// The same for an `async func`, whose borrowed handles go back through the
+/// event loop. Its answer comes after its latency, while other tasks run:
+/// calls the app makes together overlap.
+async fn intercept_concurrent(
+    accessor: &wasmtime::component::Accessor<Host>,
+    ty: &ComponentFunc,
+    key: &str,
+    params: &[Val],
+    results: &mut [Val],
+) -> Result<()> {
+    let (answer, ready) = accessor.with(|mut access| {
+        let mut store = wasmtime::AsContextMut::as_context_mut(&mut access);
+        let sent = http3::sent_now(&mut store);
+        let answer = intercept(wasmtime::AsContextMut::as_context_mut(&mut store), key, params, &mut *results);
+        store.data_mut().call_started_ns = None;
+        let ready = http3::ready_at(&store, sent);
+        (answer, ready)
+    });
+    if answer.is_ok() {
+        let (in_flight, clock, at) = ready;
+        in_flight.until(&clock, at).await;
+    }
+    let mut passed = Vec::new();
+    for p in params {
+        resources_in(p, &mut passed);
+    }
+    for r in passed {
+        r.resource_drop_concurrent(accessor).await.map_err(anyhow::Error::from)?;
+    }
+    answer?;
+    accessor.with(|mut access| give_results(wasmtime::AsContextMut::as_context_mut(&mut access), ty, results))
+}
+
+/// Shows the handles of an answer in its record and gives them to the guest.
+fn give_results(mut store: StoreContextMut<'_, Host>, ty: &ComponentFunc, results: &mut [Val]) -> Result<()> {
     let types: Vec<_> = ty.results().collect();
     if let ([t], Some(e)) = (types.as_slice(), store.data_mut().events.last_mut())
         && let Some(r) = e.result.as_mut()
@@ -1603,6 +1706,13 @@ fn give_resources(v: &mut Val, ty: &wasmtime::component::Type, store: &mut Store
             let rep = store.data().resource_rep;
             *v = Val::Resource(wasmtime::component::ResourceDynamic::new_own(rep, payload).try_into_resource_any(&mut *store)?);
         }
+        // Generated and planned as a list and a value; the app gets a stream
+        // and a future.
+        (T::Stream(s), v) => {
+            let Val::List(items) = &*v else { bail!("a stream answer must be a list") };
+            *v = crate::streams::stream(&mut *store, s.ty(), items)?;
+        }
+        (T::Future(f), v) => *v = crate::streams::future(&mut *store, f.ty(), v)?,
         (T::List(l), Val::List(items)) => {
             let t = l.ty();
             for x in items {
@@ -1812,7 +1922,8 @@ fn classify(err: &wasmtime::Error, host: &mut Host, fuel: u64) -> Outcome {
     }
     let kind = match err.downcast_ref::<Trap>() {
         Some(Trap::OutOfFuel) => OutcomeKind::OutOfFuel,
-        Some(Trap::Interrupt) => OutcomeKind::Timeout,
+        // Every task of a wasi:http 0.3 handler waits: the request never ends.
+        Some(Trap::Interrupt | Trap::AsyncDeadlock) => OutcomeKind::Timeout,
         Some(Trap::StackOverflow) => OutcomeKind::StackOverflow,
         Some(Trap::UnreachableCodeReached) => OutcomeKind::Unreachable,
         Some(Trap::MemoryOutOfBounds) => OutcomeKind::MemoryOutOfBounds,

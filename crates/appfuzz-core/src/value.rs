@@ -148,6 +148,14 @@ pub fn json_to_val(v: &Value, ty: &Type) -> Result<Val> {
             let items = v.as_array().ok_or_else(|| expected("array", v))?;
             Val::List(items.iter().enumerate().map(|(i, x)| json_to_val(x, &inner).with_context(|| format!("[{i}]"))).collect::<Result<_>>()?)
         }
+        // A stream is written as the list of its items and a future as its
+        // value; the harness turns them into a real stream or future.
+        Type::Stream(s) if s.ty().is_some() => {
+            let inner = s.ty().expect("checked");
+            let items = v.as_array().ok_or_else(|| expected("array (stream)", v))?;
+            Val::List(items.iter().enumerate().map(|(i, x)| json_to_val(x, &inner).with_context(|| format!("[{i}]"))).collect::<Result<_>>()?)
+        }
+        Type::Future(f) if f.ty().is_some() => json_to_val(v, &f.ty().expect("checked"))?,
         Type::FixedLengthList(l) => {
             let inner = l.ty();
             let items = v.as_array().ok_or_else(|| expected("array", v))?;
@@ -468,6 +476,12 @@ impl Generator {
                 let inner = l.ty();
                 Val::List((0..n).map(|_| self.gen_val(&inner)).collect())
             }
+            Type::Stream(s) if s.ty().is_some() => {
+                let n = self.list_len();
+                let inner = s.ty().expect("checked");
+                Val::List((0..n).map(|_| self.gen_val(&inner)).collect())
+            }
+            Type::Future(f) if f.ty().is_some() => self.gen_val(&f.ty().expect("checked")),
             Type::FixedLengthList(l) => {
                 let inner = l.ty();
                 Val::FixedLengthList((0..l.len()).map(|_| self.gen_val(&inner)).collect())

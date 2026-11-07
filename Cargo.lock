@@ -157,6 +157,7 @@ dependencies = [
  "serde_json",
  "toml 0.8.23",
  "url",
+ "wasi-preview1-component-adapter-provider",
  "wasm-encoder 0.262.0",
  "wasmparser 0.262.0",
  "wasmtime",
@@ -2543,6 +2544,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
+name = "wasi-preview1-component-adapter-provider"
+version = "50.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08af31e188aec735fabb6370000e3c5954eae92d434a63ad22f665b55b01dda4"
+
+[[package]]
 name = "wasm-bindgen"
 version = "0.2.130"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2979,6 +2986,7 @@ dependencies = [
  "pin-project-lite",
  "rustix",
  "tokio",
+ "tokio-util",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
