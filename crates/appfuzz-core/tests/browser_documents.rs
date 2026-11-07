@@ -231,3 +231,165 @@ fn external_script_completion_events_keep_the_original_load_even_if_its_url_attr
         assert_eq!(paths, ["/external.js", "/loaded"], "{html}");
     }
 }
+
+#[test]
+fn prefixed_html_and_svg_scripts_execute_with_their_local_names_and_namespaces() {
+    let (r, report) = visit(
+        r#"<script>
+        for(const [ns,name,path] of [['http://www.w3.org/2000/svg','v:script','svg'],['http://www.w3.org/1999/xhtml','h:script','html'],['http://www.w3.org/1998/Math/MathML','m:script','math']]) {
+            const s=document.createElementNS(ns,name);s.textContent="fetch('/"+path+"');";
+            console.log(JSON.stringify([s.namespaceURI,s.prefix,s.localName,s.tagName,s.nodeName]));document.body.append(s);
+        }
+    </script>"#,
+    );
+    let logs: Vec<Value> = report["console"].as_array().unwrap().iter().map(|v| serde_json::from_str(v["text"].as_str().unwrap()).unwrap()).collect();
+    assert_eq!(
+        logs,
+        vec![
+            json!(["http://www.w3.org/2000/svg", "v", "script", "v:script", "v:script"]),
+            json!(["http://www.w3.org/1999/xhtml", "h", "script", "H:SCRIPT", "H:SCRIPT"]),
+            json!(["http://www.w3.org/1998/Math/MathML", "m", "script", "m:script", "m:script"])
+        ]
+    );
+    let mut paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["/html", "/svg"]);
+}
+
+#[test]
+fn namespace_creation_validates_prefixes_local_names_and_reserved_namespace_pairs() {
+    let (_, report) = visit(
+        r#"<script>
+        const cases=[[null,'p:script','NamespaceError'],['','p:script','NamespaceError'],['urn:test','xml:part','NamespaceError'],['urn:test','xmlns','NamespaceError'],['urn:test','xmlns:p','NamespaceError'],['http://www.w3.org/2000/xmlns/','p:part','NamespaceError'],['urn:test','','InvalidCharacterError'],['urn:test',':part','InvalidCharacterError'],['urn:test','p:','InvalidCharacterError'],['urn:test','p:a b','InvalidCharacterError'],['urn:test','p:a/b','InvalidCharacterError'],['urn:test','p:a>b','InvalidCharacterError'],['urn:test','p:a\0b','InvalidCharacterError'],['urn:test','p:1bad','InvalidCharacterError'],[null,'p:1bad','InvalidCharacterError'],['urn:test','p:script\n','InvalidCharacterError'],['urn:test','p\n:script','InvalidCharacterError']];
+        for(const [ns,name,expected] of cases){let error='none';try{document.createElementNS(ns,name);}catch(e){error=e.name;if(!(e instanceof DOMException)||e.code!==(expected==='NamespaceError'?14:5))error+=':wrong-exception';}console.log(error===expected?'ok':name+':'+error);}
+    </script>"#,
+    );
+    assert_eq!(report["console"].as_array().unwrap().len(), 17, "{report}");
+    assert!(report["console"].as_array().unwrap().iter().all(|v| v["text"] == "ok"), "{report}");
+}
+
+#[test]
+fn namespace_names_follow_current_dom_rules_without_unnecessary_xml_restrictions() {
+    let (_, report) = visit(
+        r#"<script>
+        const cases=[['urn:test','1:part','1','part'],['urn:test','p:part:tail','p','part:tail'],['urn:test','p::part','p',':part'],['urn:test','p:a=b','p','a=b'],['urn:test','p:a"b','p','a"b'],['urn:test','Ä:Élem','Ä','Élem'],['urn:test','💧:part','💧','part'],['urn:test','XML:part','XML','part'],['http://www.w3.org/XML/1998/namespace','xml:lang','xml','lang'],['http://www.w3.org/2000/xmlns/','xmlns',null,'xmlns'],['http://www.w3.org/2000/xmlns/','xmlns:p','xmlns','p'],[null,'local',null,'local'],['','local',null,'local']];
+        for(const [ns,name,prefix,local] of cases){const e=document.createElementNS(ns,name);console.log(e.namespaceURI===(ns||null)&&e.prefix===prefix&&e.localName===local?'ok':JSON.stringify([name,e.namespaceURI,e.prefix,e.localName]));}
+    </script>"#,
+    );
+    assert_eq!(report["console"].as_array().unwrap().len(), 13, "{report}");
+    assert!(report["console"].as_array().unwrap().iter().all(|v| v["text"] == "ok"), "{report}");
+}
+
+#[test]
+fn cloned_namespace_elements_keep_prefixes_and_do_not_activate_literal_colon_or_mathml_tags() {
+    let (r, report) = visit(
+        r#"<svg id=literal><v:script>fetch('/inert-literal');</v:script><v:></v:></svg>
+        <script>
+        for(const ns of ['http://www.w3.org/2000/svg','http://www.w3.org/1999/xhtml','http://www.w3.org/1998/Math/MathML']) {
+            const root=document.createElementNS(ns,'p:root'),s=document.createElementNS(ns,'p:script');
+            s.textContent="fetch('/"+(ns.includes('svg')?'svg':ns.includes('xhtml')?'html':'inert-math')+"');";root.append(s);
+            const copy=root.cloneNode(true),child=copy.firstChild;
+            console.log(JSON.stringify([copy.namespaceURI,copy.prefix,copy.localName,child.namespaceURI,child.prefix,child.localName,copy.ownerDocument===document]));document.body.append(copy);
+        }
+        const literal=document.getElementById('literal').cloneNode(true);console.log(literal.firstChild.localName);document.body.append(literal);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs.len(), 4, "{report}");
+    for (log, namespace) in logs[..3].iter().zip(["http://www.w3.org/2000/svg", "http://www.w3.org/1999/xhtml", "http://www.w3.org/1998/Math/MathML"]) {
+        assert_eq!(serde_json::from_str::<Value>(log).unwrap(), json!([namespace, "p", "root", namespace, "p", "script", true]));
+    }
+    assert_eq!(logs[3], "v:script");
+    let mut paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["/html", "/svg"]);
+}
+
+#[test]
+fn shallow_script_clones_keep_url_attributes_and_parsed_foreign_clones_keep_their_namespace() {
+    let (r, report) = visit_planned(
+        r#"<math id=math><script>fetch('/inert-math');</script></math>
+        <svg id=svg><g><svg><circle></circle></svg></g></svg><script>
+        const s=document.createElementNS('http://www.w3.org/2000/svg','v:script');s.setAttribute('href','/cloned.js');
+        s.textContent="fetch('/inert-child');";Object.defineProperty(s,'namespaceURI',{value:'urn:shadow'});
+        const copy=s.cloneNode(false);console.log(copy.namespaceURI,copy.prefix,copy.localName,copy.childNodes.length,copy.getAttribute('href'));document.body.append(copy);
+        const math=document.getElementById('math').cloneNode(true);console.log(math.namespaceURI,math.firstChild.namespaceURI);document.body.append(math);
+        const svg=document.getElementById('svg').cloneNode(true),g=svg.firstChild,inner=g.firstChild,circle=inner.firstChild;
+        console.log(svg.ownerSVGElement,g.ownerSVGElement===svg,inner.ownerSVGElement===svg,circle.ownerSVGElement===inner);
+    </script>"#,
+        json!({FETCH_OWN:{"return":{"ok":{"status":200,"headers":[],"body":"fetch('/loaded');"}}}}),
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        logs,
+        ["http://www.w3.org/2000/svg v script 0 /cloned.js", "http://www.w3.org/1998/Math/MathML http://www.w3.org/1998/Math/MathML", "null true true true"]
+    );
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["/cloned.js", "/loaded"]);
+}
+
+#[test]
+fn namespace_creation_coerces_each_argument_once_and_checks_required_arguments_first() {
+    let (r, report) = visit(
+        r#"<script>
+        let namespaces=0,names=0;const s=document.createElementNS({toString(){namespaces++;return 'http://www.w3.org/2000/svg';}},{toString(){names++;return 'v:script';}});s.textContent="fetch('/once');";document.body.append(s);console.log(namespaces,names);
+        let missing=0;try{document.createElementNS({toString(){missing++;return 'urn:test';}});}catch(e){console.log(e.name,missing);}
+        for(const [ns,name] of [[{toString(){return '';}},'v:script'],[Symbol('ns'),'script'],['urn:test',Symbol('name')]]){try{document.createElementNS(ns,name);console.log('none');}catch(e){console.log(e.name);}}
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["1 1", "TypeError 0", "NamespaceError", "TypeError", "TypeError"]);
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["/once"]);
+}
+
+#[test]
+fn clones_use_the_owning_documents_element_class() {
+    let (_, report) = visit(
+        r#"<script>
+        for(const [markup,mime] of [['<root><child/></root>','text/xml'],['<p>text</p>','text/html']]) {
+            const d=new DOMParser().parseFromString(markup,mime),root=d.documentElement,copy=root.cloneNode(true);
+            console.log(root.constructor===copy.constructor,root.firstChild.constructor===copy.firstChild.constructor,root.ownerDocument===copy.ownerDocument,copy.ownerDocument===d);
+        }
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["true true true true", "true true true true"]);
+}
+
+#[test]
+fn cloned_scripts_wait_for_the_active_page_and_can_run_after_adoption_or_in_shadow_trees() {
+    for destination in ["detached", "page", "shadow"] {
+        let html = format!(
+            r#"<script>
+            const d=new DOMParser().parseFromString('<div><script>fetch("/cloned");<\/script></div>','text/html');
+            const copy=d.querySelector('div').cloneNode(true);
+            if('{destination}'==='detached'){{
+                Object.defineProperty(copy.firstChild,'isConnected',{{value:true}});copy.firstChild.getRootNode=()=>document;
+                d.body.append(copy);
+            }}else if('{destination}'==='shadow'){{
+                const host=document.createElement('div');document.body.append(host);host.attachShadow({{mode:'closed'}}).append(copy);
+            }}else document.body.append(copy);
+        </script>"#
+        );
+        let (r, _) = visit(&html);
+        let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+        assert_eq!(paths, if destination == "detached" { vec![] } else { vec!["/cloned"] }, "{destination}");
+    }
+}
+
+#[test]
+fn deep_clones_schedule_scripts_in_tree_order() {
+    let (_, report) = visit(
+        r#"<script>
+        const root=document.createElement('div');
+        for(const text of ['a','b','c']) {
+            const container=document.createElement('div'),s=document.createElement('script');
+            s.textContent='console.log('+JSON.stringify(text)+');';container.append(s);root.append(container);
+        }
+        document.body.append(root.cloneNode(true));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["a", "b", "c"]);
+}

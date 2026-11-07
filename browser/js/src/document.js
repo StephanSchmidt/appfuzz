@@ -3,6 +3,7 @@
 // namespaces and inert template contents must keep their parsed meaning.
 import { DOMParser } from 'linkedom';
 import { parse } from 'parse5';
+import { rememberName } from './names.js';
 
 const nativeParse = DOMParser.prototype.parseFromString;
 const HTML = 'http://www.w3.org/1999/xhtml';
@@ -25,6 +26,7 @@ export function parseHTML(markup, scriptingEnabled) {
       case '#documentType': node = doc.createDocumentType(source.name, source.publicId, source.systemId); break;
       default: {
         node = source.namespaceURI === HTML ? doc.createElement(source.tagName) : doc.createElementNS(source.namespaceURI, source.tagName);
+        rememberName(node, { namespace: source.namespaceURI, prefix: null, local: source.tagName, qualified: source.tagName });
         if (source.namespaceURI === SVG) node.ownerSVGElement = svg;
         // linkedom has HTML and SVG element classes; other foreign nodes
         // still need their own namespace, notably MathML.

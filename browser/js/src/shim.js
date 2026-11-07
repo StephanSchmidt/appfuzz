@@ -6,6 +6,7 @@
 import * as L from 'linkedom';
 import { CookieJar } from './cookies.js';
 import { parseHTML } from './document.js';
+import { qualifiedName, installName, nameIdentity, rememberName } from './names.js';
 
 const G = globalThis;
 const HTML_NS = 'http://www.w3.org/1999/xhtml';
@@ -16,12 +17,14 @@ const scriptIdentities = new WeakMap();
 const scriptIdentity = scriptIdentities.get.bind(scriptIdentities);
 const rememberScript = scriptIdentities.set.bind(scriptIdentities);
 const copyScriptBatch = Function.prototype.call.bind(Array.prototype.slice);
+const nodeRoot = Function.prototype.call.bind(L.Node.prototype.getRootNode);
+const isShadowRoot = Object.prototype.isPrototypeOf.bind(L.ShadowRoot.prototype);
 const CAP = 200;
 
 const S = {
   start: 0, now: 0, seq: 0, timers: new Map(), nesting: 0, horizon: 0,
   gesture: false, trusted: false, ended: null, steps: 0, latency: 5, throttle: 0,
-  url: null, origin: '', files: {}, responses: {}, cookies: new CookieJar(() => S.now),
+  url: null, origin: '', document: null, files: {}, responses: {}, cookies: new CookieJar(() => S.now),
   errors: [], console: [], requests: [], navigations: [], code: [],
   cookieWrites: [], storage: [], dialogs: [], history: [], unmodelled: new Set(),
   listened: new Map(), cands: [], scripts: [], created: [], started: new WeakSet(),
@@ -207,9 +210,10 @@ if (typeof G.atob !== 'function') {
   };
 }
 
-G.DOMException = class DOMException extends Error {
-  constructor(message = '', name = 'Error') { super(message); this.name = name; this.code = 0; }
+const BrowserDOMException = class DOMException extends Error {
+  constructor(message = '', name = 'Error') { super(message); this.name = name; this.code = name === 'InvalidCharacterError' ? 5 : name === 'NamespaceError' ? 14 : 0; }
 };
+G.DOMException = BrowserDOMException;
 
 const enc = (s) => encodeURIComponent(s).replace(/%20/g, '+');
 const dec = (s) => { try { return decodeURIComponent(s.replace(/\+/g, ' ')); } catch { return s; } };
@@ -1078,25 +1082,71 @@ function installWindow(doc) {
   // A script the page creates runs once connected; one parsed from markup
   // (innerHTML and the like) never runs.
   const create = doc.createElement;
+  const createNS = doc.createElementNS;
+  const isHTMLDocument = Object.prototype.isPrototypeOf.bind(Object.getPrototypeOf(doc));
   doc.createElement = function (name, o) {
     const local = String(name).replace(/[A-Z]/g, c => c.toLowerCase());
     const el = create.call(this, local, o);
+    rememberName(el, { namespace: HTML_NS, prefix: null, local, qualified: local });
     if (local === 'script') {
       rememberScript(el, { namespace: HTML_NS, local });
       if (!S.parsing) S.created.push(el);
     }
     return el;
   };
-  const createNS = doc.createElementNS;
+  // Native cloning passes local names to document factories. They are not
+  // qualified names: a colon parsed from HTML must remain a literal colon.
+  // Use the native factories privately, then restore namespace identities.
+  const cloneElement = L.Element.prototype.cloneNode;
+  const createXML = L.Document.prototype.createElement;
+  const childNodes = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(L.Element.prototype), 'childNodes').get;
+  const NativeProxy = Proxy, read = Reflect.get;
+  const isSVG = Object.prototype.isPrototypeOf.bind(L.SVGElement.prototype);
+  L.Element.prototype.cloneNode = function (deep = false) {
+    const owner = this.ownerDocument;
+    const ownerCreate = isHTMLDocument(owner) ? create : createXML;
+    const factories = new NativeProxy(owner, {
+      get(target, key) {
+        if (key === 'createElement') return name => ownerCreate.call(owner, name);
+        if (key === 'createElementNS') return (ns, name) => createNS.call(owner, ns, name);
+        return read(target, key, target);
+      },
+    });
+    const source = new NativeProxy(this, {
+      get(target, key) { return key === 'ownerDocument' ? factories : read(target, key, target); },
+    });
+    const clone = cloneElement.call(source, deep);
+    const stack = [[this, clone, null]];
+    while (stack.length) {
+      const [original, copy, svg] = stack.pop();
+      const identity = nameIdentity(original) || {
+        namespace: isSVG(original) ? SVG_NS : HTML_NS,
+        prefix: null, local: original.localName, qualified: original.localName,
+      };
+      copy.localName = identity.local;
+      installName(copy, identity, isHTMLDocument);
+      if (identity.namespace === SVG_NS) copy.ownerSVGElement = svg;
+      if (identity.local === 'script') {
+        rememberScript(copy, identity);
+        if (!S.parsing) S.created.push(copy);
+      }
+      const originals = childNodes.call(original), copies = childNodes.call(copy);
+      const descendantSVG = identity.namespace === SVG_NS && identity.local === 'svg' ? copy : svg;
+      for (let i = copies.length - 1; i >= 0; i--) {
+        if (copies[i].nodeType === 1) stack.push([originals[i], copies[i], descendantSVG]);
+      }
+    }
+    return clone;
+  };
   doc.createElementNS = function (ns, name, o) {
-    const namespace = ns == null || ns === '' ? null : String(ns);
-    const qualified = String(name);
+    const identity = qualifiedName(ns, name, arguments.length, BrowserDOMException);
+    const { namespace, local } = identity;
     // The native non-SVG path calls this.createElement, whose HTML case
     // folding must not change a namespace-qualified name.
-    const el = namespace === SVG_NS ? createNS.call(this, namespace, qualified, o) : create.call(this, qualified, o);
-    if (el.namespaceURI !== namespace) define(el, 'namespaceURI', { value: namespace });
-    if (qualified === 'script') {
-      rememberScript(el, { namespace, local: qualified });
+    const el = namespace === SVG_NS ? createNS.call(this, namespace, local, o) : create.call(this, local, o);
+    installName(el, identity, isHTMLDocument);
+    if (local === 'script') {
+      rememberScript(el, identity);
       if (!S.parsing) S.created.push(el);
     }
     return el;
@@ -1462,10 +1512,19 @@ function pageScripts() {
 }
 
 // Scripts the page created and connected since the last look.
+function connectedToPage(node) {
+  let root = nodeRoot(node);
+  while (isShadowRoot(root)) root = nodeRoot(root.host);
+  return root === S.document;
+}
+
 function newScripts() {
   if (!S.created.length) return 0;
-  const ready = S.created.filter((s) => s.isConnected && !S.started.has(s));
-  S.created = S.created.filter((s) => !s.isConnected && !S.started.has(s));
+  const ready = [], pending = [];
+  for (const s of S.created) {
+    if (!S.started.has(s)) (connectedToPage(s) ? ready : pending).push(s);
+  }
+  S.created = pending;
   S.scripts = ready;
   return ready.length;
 }
@@ -1513,6 +1572,7 @@ G.__af = {
       S.cookies.seed(name, s.probe_cookie.value, S.url.href);
     }
     const doc = parseHTML(s.html || '', true);
+    S.document = doc;
     installWindow(doc);
     templates(doc);
     return pageScripts();
