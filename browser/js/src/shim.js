@@ -6,7 +6,9 @@
 import * as L from 'linkedom';
 import { CookieJar } from './cookies.js';
 import { parseHTML } from './document.js';
-import { qualifiedName, installName, nameIdentity, rememberName } from './names.js';
+import { qualifiedName, installName, nameIdentity } from './names.js';
+import { installAdoption } from './adoption.js';
+import { installObservers } from './observers.js';
 
 const G = globalThis;
 const HTML_NS = 'http://www.w3.org/1999/xhtml';
@@ -993,6 +995,8 @@ G.XPathEvaluator = class XPathEvaluator {
 G.XPathResult = { ANY_TYPE: 0, NUMBER_TYPE: 1, STRING_TYPE: 2, BOOLEAN_TYPE: 3, UNORDERED_NODE_ITERATOR_TYPE: 4, ORDERED_NODE_ITERATOR_TYPE: 5, UNORDERED_NODE_SNAPSHOT_TYPE: 6, ORDERED_NODE_SNAPSHOT_TYPE: 7, ANY_UNORDERED_NODE_TYPE: 8, FIRST_ORDERED_NODE_TYPE: 9 };
 
 function installWindow(doc) {
+  const shareObservers = installObservers(doc);
+  installAdoption(L.Element, shareObservers, (name, e) => error('custom-element:' + name, e));
   const view = doc.defaultView;
   for (const [k, v] of Object.entries(L)) {
     if (/^[A-Z]/.test(k) && typeof v === 'function') G[k] = v;
@@ -1081,24 +1085,34 @@ function installWindow(doc) {
   doc.getSelection = G.getSelection;
   // A script the page creates runs once connected; one parsed from markup
   // (innerHTML and the like) never runs.
-  const create = doc.createElement;
-  const createNS = doc.createElementNS;
-  const isHTMLDocument = Object.prototype.isPrototypeOf.bind(Object.getPrototypeOf(doc));
-  doc.createElement = function (name, o) {
-    const local = String(name).replace(/[A-Z]/g, c => c.toLowerCase());
-    const el = create.call(this, local, o);
-    rememberName(el, { namespace: HTML_NS, prefix: null, local, qualified: local });
+  const htmlPrototype = Object.getPrototypeOf(doc);
+  const create = htmlPrototype.createElement;
+  const createXML = L.Document.prototype.createElement;
+  const createNS = L.Document.prototype.createElementNS;
+  const isHTMLDocument = Object.prototype.isPrototypeOf.bind(htmlPrototype);
+  const createElement = function (name, o) {
+    const html = isHTMLDocument(this);
+    const converted = String(name);
+    const local = html ? converted.replace(/[A-Z]/g, c => c.toLowerCase()) : converted;
+    const namespace = html ? HTML_NS : null;
+    shareObservers(this);
+    const el = (html ? create : createXML).call(this, local, o);
+    const identity = { namespace, prefix: null, local, qualified: local };
+    installName(el, identity, isHTMLDocument);
     if (local === 'script') {
-      rememberScript(el, { namespace: HTML_NS, local });
+      rememberScript(el, identity);
       if (!S.parsing) S.created.push(el);
     }
     return el;
   };
+  // Every document uses the same factories, including inert DOMParser
+  // documents whose newly-created scripts can later join the active page.
+  htmlPrototype.createElement = createElement;
+  L.Document.prototype.createElement = createElement;
   // Native cloning passes local names to document factories. They are not
   // qualified names: a colon parsed from HTML must remain a literal colon.
   // Use the native factories privately, then restore namespace identities.
   const cloneElement = L.Element.prototype.cloneNode;
-  const createXML = L.Document.prototype.createElement;
   const childNodes = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(L.Element.prototype), 'childNodes').get;
   const NativeProxy = Proxy, read = Reflect.get;
   const isSVG = Object.prototype.isPrototypeOf.bind(L.SVGElement.prototype);
@@ -1138,12 +1152,14 @@ function installWindow(doc) {
     }
     return clone;
   };
-  doc.createElementNS = function (ns, name, o) {
+  L.Document.prototype.createElementNS = function (ns, name, o) {
     const identity = qualifiedName(ns, name, arguments.length, BrowserDOMException);
     const { namespace, local } = identity;
+    shareObservers(this);
     // The native non-SVG path calls this.createElement, whose HTML case
     // folding must not change a namespace-qualified name.
-    const el = namespace === SVG_NS ? createNS.call(this, namespace, local, o) : create.call(this, local, o);
+    const el = namespace === SVG_NS ? createNS.call(this, namespace, local, o)
+      : (namespace === HTML_NS ? create : createXML).call(this, local, o);
     installName(el, identity, isHTMLDocument);
     if (local === 'script') {
       rememberScript(el, identity);

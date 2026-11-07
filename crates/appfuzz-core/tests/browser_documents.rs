@@ -393,3 +393,208 @@ fn deep_clones_schedule_scripts_in_tree_order() {
     let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
     assert_eq!(logs, ["a", "b", "c"]);
 }
+
+#[test]
+fn fresh_scripts_from_other_documents_execute_when_inserted_into_the_active_page() {
+    let (r, _) = visit(
+        r#"<script>
+        const html=new DOMParser().parseFromString('','text/html'),xml=new DOMParser().parseFromString('<root/>','text/xml');
+        for(const [owner,ns,name,path] of [[html,undefined,'SCRIPT','html'],[html,'http://www.w3.org/2000/svg','v:script','svg'],[xml,'http://www.w3.org/1999/xhtml','h:script','xml-html']]) {
+            const s=ns===undefined?owner.createElement(name):owner.createElementNS(ns,name);s.textContent="fetch('/"+path+"');";document.body.append(s);
+        }
+        const inert=xml.createElement('script');inert.textContent="fetch('/inert-xml');";document.body.append(inert);
+    </script>"#,
+    );
+    let mut paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["/html", "/svg", "/xml-html"]);
+}
+
+#[test]
+fn documents_created_by_domparser_share_namespace_validation_and_case_rules() {
+    let (_, report) = visit(
+        r#"<script>
+        const html=new DOMParser().parseFromString('','text/html'),xml=new DOMParser().parseFromString('<root/>','text/xml');
+        for(const d of [html,xml]) {
+            let error='none';try{d.createElementNS(null,'p:script');}catch(e){error=e.name;}
+            const plain=d.createElement('Mixed'),qualified=d.createElementNS('http://www.w3.org/2000/svg','p:Mixed');
+            console.log(JSON.stringify([error,plain.localName,plain.namespaceURI,qualified.localName,qualified.prefix,qualified.tagName]));
+        }
+    </script>"#,
+    );
+    let logs: Vec<Value> = report["console"].as_array().unwrap().iter().map(|v| serde_json::from_str(v["text"].as_str().unwrap()).unwrap()).collect();
+    assert_eq!(
+        logs,
+        [
+            json!(["NamespaceError", "mixed", "http://www.w3.org/1999/xhtml", "Mixed", "p", "p:Mixed"]),
+            json!(["NamespaceError", "Mixed", null, "Mixed", "p", "p:Mixed"])
+        ]
+    );
+}
+
+#[test]
+fn inserting_a_foreign_subtree_adopts_elements_attributes_text_and_fragments() {
+    let (_, report) = visit(
+        r#"<script>
+        const foreign=new DOMParser().parseFromString('','text/html');
+        for(const method of ['append','prepend','appendChild','insertBefore','replaceChild','before','after','replaceWith','replaceChildren','insertAdjacentElement','fragment']) {
+            const target=document.createElement('div'),anchor=document.createElement('i');target.append(anchor);document.body.append(target);
+            const root=foreign.createElement('div'),child=foreign.createElement('span'),text=foreign.createTextNode('text'),comment=foreign.createComment('comment');
+            child.setAttribute('data-value','value');root.append(child,text,comment);
+            const fragment=foreign.createDocumentFragment();
+            if(method==='fragment'){fragment.append(root);target.append(fragment);}
+            else if(method==='insertBefore'||method==='replaceChild')target[method](root,anchor);
+            else if(['before','after','replaceWith'].includes(method))anchor[method](root);
+            else if(method==='insertAdjacentElement')anchor.insertAdjacentElement('afterend',root);
+            else target[method](root);
+            console.log(method,[root,child,text,comment,child.attributes[0],...(method==='fragment'?[fragment]:[])].every(n=>n.ownerDocument===document));
+        }
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        logs,
+        [
+            "append true",
+            "prepend true",
+            "appendChild true",
+            "insertBefore true",
+            "replaceChild true",
+            "before true",
+            "after true",
+            "replaceWith true",
+            "replaceChildren true",
+            "insertAdjacentElement true",
+            "fragment true"
+        ]
+    );
+}
+
+#[test]
+fn adoption_callbacks_observe_the_destination_document() {
+    let (_, report) = visit(
+        r#"<script>
+        const foreign=new DOMParser().parseFromString('','text/html');
+        customElements.define('adoption-check',class extends HTMLElement {
+            connectedCallback(){console.log('connected',this.ownerDocument===document?'main':'foreign',this.isConnected);}
+            disconnectedCallback(){console.log('disconnected',this.ownerDocument===document?'main':'foreign',this.isConnected);}
+            adoptedCallback(oldDoc,newDoc){console.log('adopted',oldDoc===document?'main':'foreign',newDoc===document?'main':'foreign',this.isConnected);}
+        });
+        const el=document.createElement('adoption-check');document.body.append(el);foreign.body.append(el);document.body.append(el);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        logs,
+        [
+            "connected main true",
+            "disconnected foreign true",
+            "adopted main foreign true",
+            "connected foreign true",
+            "disconnected main true",
+            "adopted foreign main true",
+            "connected main true"
+        ]
+    );
+}
+
+#[test]
+fn adoption_keeps_the_old_documents_removal_observer_record() {
+    let (_, report) = visit(
+        r#"<script>
+        const foreign=new DOMParser().parseFromString('','text/html'),el=document.createElement('div');document.body.append(el);
+        const observer=new MutationObserver(records=>console.log('removed',records.reduce((n,r)=>n+r.removedNodes.length,0)));
+        observer.observe(document.body,{childList:true});foreign.body.append(el);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["removed 1"]);
+}
+
+#[test]
+fn adoption_updates_closed_shadow_roots_and_their_descendants() {
+    let (_, report) = visit(
+        r#"<script>
+        const foreign=new DOMParser().parseFromString('','text/html'),host=foreign.createElement('div'),shadow=host.attachShadow({mode:'closed'}),child=foreign.createElement('span'),text=foreign.createTextNode('text');
+        child.setAttribute('data-value','value');shadow.append(child,text);document.body.append(host);
+        console.log(host.shadowRoot,[host,shadow,child,text,child.attributes[0]].every(n=>n.ownerDocument===document));
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], "null true");
+}
+
+#[test]
+fn nested_adoption_drains_already_queued_reactions_and_preserves_their_arguments() {
+    let (_, report) = visit(
+        r#"<script>
+        const logs=[],foreign=new DOMParser().parseFromString('','text/html');let moved=false;
+        customElements.define('reaction-node',class extends HTMLElement {
+            connectedCallback(){logs.push([this.id,'connected',this.ownerDocument===document?'main':'foreign']);}
+            disconnectedCallback(){logs.push([this.id,'disconnected',this.ownerDocument===document?'main':'foreign']);}
+            adoptedCallback(oldDoc,newDoc){
+                logs.push([this.id,'adopted',oldDoc===document?'main':'foreign',newDoc===document?'main':'foreign']);
+                if(this.id==='parent'&&newDoc===foreign&&!moved){moved=true;document.body.append(this.firstChild);}
+            }
+        });
+        const parent=document.createElement('reaction-node');parent.id='parent';const child=document.createElement('reaction-node');child.id='child';
+        parent.append(child);document.body.append(parent);logs.length=0;foreign.body.append(parent);console.log(JSON.stringify(logs));
+    </script>"#,
+    );
+    let logs: Value = serde_json::from_str(report["console"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        logs,
+        json!([
+            ["parent", "disconnected", "foreign"],
+            ["parent", "adopted", "main", "foreign"],
+            ["child", "disconnected", "main"],
+            ["child", "adopted", "main", "foreign"],
+            ["child", "connected", "main"],
+            ["child", "disconnected", "main"],
+            ["child", "adopted", "foreign", "main"],
+            ["child", "connected", "main"],
+            ["parent", "connected", "foreign"]
+        ])
+    );
+}
+
+#[test]
+fn queued_adoption_callbacks_keep_the_function_selected_before_earlier_reactions_run() {
+    let (_, report) = visit(
+        r#"<script>
+        const logs=[],foreign=new DOMParser().parseFromString('','text/html');let child;
+        customElements.define('change-callback',class extends HTMLElement {
+            disconnectedCallback(){if(this.id==='parent')child.adoptedCallback=()=>logs.push('replacement');}
+            adoptedCallback(){if(this.id==='child')logs.push('original');}
+        });
+        const parent=document.createElement('change-callback');parent.id='parent';child=document.createElement('change-callback');child.id='child';
+        parent.append(child);document.body.append(parent);foreign.body.append(parent);console.log(JSON.stringify(logs));
+    </script>"#,
+    );
+    assert_eq!(report["console"][0]["text"], r#"["original"]"#);
+}
+
+#[test]
+fn observers_follow_their_target_when_it_moves_to_another_document() {
+    let (_, report) = visit(
+        r#"<script>
+        const foreign=new DOMParser().parseFromString('','text/html'),el=document.createElement('div');document.body.append(el);
+        const observer=new MutationObserver(records=>console.log('attribute',records.length));observer.observe(el,{attributes:true});
+        foreign.body.append(el);el.setAttribute('data-value','changed');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["attribute 1"]);
+}
+
+#[test]
+fn observers_can_watch_other_documents_and_disconnecting_one_keeps_other_observers_active() {
+    let (_, report) = visit(
+        r#"<script>
+        const foreign=new DOMParser().parseFromString('','text/html'),el=foreign.createElement('div');foreign.body.append(el);
+        const survivor=new MutationObserver(records=>console.log('survivor',records.length)),discarded=new MutationObserver(()=>console.log('discarded'));
+        survivor.observe(el,{attributes:true});discarded.observe(el,{attributes:true});discarded.disconnect();el.setAttribute('data-value','changed');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["survivor 1"]);
+}
