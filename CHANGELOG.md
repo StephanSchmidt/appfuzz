@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+**Shopify Functions**
+
+- `appfuzz review` next to a `shopify.extension.toml` reviews the function
+  the way Shopify runs it, in Rust or JavaScript, after
+  `shopify app function build`. appfuzz reads the extension, its
+  `schema.graphql` and its input queries. Shopify's JavaScript runtimes
+  are downloaded from function-runner's release on first use, checked
+  against pinned hashes and cached; nothing of Shopify's is bundled.
+- Shopify's limits are findings: instructions, scaled by the cart as
+  Shopify scales them and naming the cart size; input, output and log
+  sizes; output Shopify would reject, such as a field the schema doesn't
+  have or a missing one.
+- Carts are ones Shopify could send: amounts from 0, quantities from 1,
+  `gid://` ids, real dates. Fuzzing, the default cart and shrinking keep
+  to them. A finding on another cart is info, and `explain` says why.
+- JavaScript errors name the app's line, as Rust panics do.
+- In checks, `out.json` is the function's output under Shopify's names,
+  with decimals as numbers. `[shopify]` alone is enough for an
+  `appfuzz.toml`.
+
 **Spin 4 and WASI 0.3**
 
 - HTTP handlers on `wasi:http` 0.3 (`wasi:http/handler`, an `async func`)
@@ -136,6 +156,16 @@
   or an attribute: `';alert(1)//`, `"-alert(1)-"`, `\';alert(1)//`,
   `</script><script>alert(1)</script>`, `${alert(1)}` and
   `' onmouseover='alert(1)`.
+
+**Search and shrinking**
+
+- The fuzzer changes a request's shape by its WIT type: it empties a
+  list, cuts it to one item, adds one, or switches an option. Empty lists
+  and missing options get tried for every app.
+- `probe times` no longer blames the clock for a crash that happens at
+  every time.
+- Shrinking builds its candidates as it needs them: a big request no
+  longer takes gigabytes.
 
 **Install**
 
