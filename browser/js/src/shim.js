@@ -5,23 +5,24 @@
 // is recorded.
 import * as L from 'linkedom';
 import { CookieJar } from './cookies.js';
-import { parseHTML } from './document.js';
+import { parseHTML, parseHTMLFragment, documentMode } from './document.js';
 import { qualifiedName, installName } from './names.js';
 import { installCloning } from './cloning.js';
 import { installAdoption } from './adoption.js';
 import { installObservers } from './observers.js';
+import { scriptRecord, rememberScript, scriptOwner } from './script-state.js';
+import { installScriptMutations, scriptAttribute, scriptText, scriptShadowHost } from './script-mutations.js';
 
 const G = globalThis;
 const HTML_NS = 'http://www.w3.org/1999/xhtml';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 // Script preparation uses the node's identity, not public DOM properties
 // that page code can shadow without changing the actual kind of element.
-const scriptIdentities = new WeakMap();
-const scriptIdentity = scriptIdentities.get.bind(scriptIdentities);
-const rememberScript = scriptIdentities.set.bind(scriptIdentities);
+const scriptIdentity = node => scriptRecord(node)?.identity;
 const copyScriptBatch = Function.prototype.call.bind(Array.prototype.slice);
 const nodeRoot = Function.prototype.call.bind(L.Node.prototype.getRootNode);
 const isShadowRoot = Object.prototype.isPrototypeOf.bind(L.ShadowRoot.prototype);
+const isDocument = Object.prototype.isPrototypeOf.bind(L.Document.prototype);
 const CAP = 200;
 
 const S = {
@@ -30,7 +31,7 @@ const S = {
   url: null, origin: '', document: null, files: {}, responses: {}, cookies: new CookieJar(() => S.now),
   errors: [], console: [], requests: [], navigations: [], code: [],
   cookieWrites: [], storage: [], dialogs: [], history: [], unmodelled: new Set(),
-  listened: new Map(), cands: [], scripts: [], created: [], started: new WeakSet(),
+  listened: new Map(), cands: [], scripts: [], dynamicScripts: [],
   active: null, readyState: 'loading', actions: [], currentExternal: false,
 };
 
@@ -1050,7 +1051,6 @@ function installWindow(doc) {
     installName(el, identity, isHTMLDocument);
     if (local === 'script') {
       rememberScript(el, identity);
-      if (!S.parsing) S.created.push(el);
     }
     return el;
   };
@@ -1058,9 +1058,8 @@ function installWindow(doc) {
   // documents whose newly-created scripts can later join the active page.
   htmlPrototype.createElement = createElement;
   L.Document.prototype.createElement = createElement;
-  installCloning(L, { html: create, xml: createXML, svg: createNS }, shareObservers, (copy, identity) => {
-    rememberScript(copy, identity);
-    if (!S.parsing) S.created.push(copy);
+  installCloning(L, { html: create, xml: createXML, svg: createNS }, shareObservers, (copy, identity, original) => {
+    rememberScript(copy, identity, scriptRecord(original)?.alreadyStarted || false);
   });
   L.Document.prototype.createElementNS = function (ns, name, o) {
     const identity = qualifiedName(ns, name, arguments.length, BrowserDOMException);
@@ -1073,34 +1072,65 @@ function installWindow(doc) {
     installName(el, identity, isHTMLDocument);
     if (local === 'script') {
       rememberScript(el, identity);
-      if (!S.parsing) S.created.push(el);
     }
     return el;
   };
-  // `sink`: the name the host hears, with the markup argument's index.
+  const self = t => t;
+  const parent = t => t.parentNode || t;
   const parsing = (f, root, sink, at = 0) => function (...a) {
-    if (sink) toMarkup(sink, a[at]);
-    const was = S.parsing;
-    S.parsing = true;
-    let r;
-    try { r = f.apply(this, a); } finally { S.parsing = was; }
+    if (sink) { a[at] = String(a[at]); toMarkup(sink, a[at]); }
+    const r = f.apply(this, a);
     templates(root(this, r));
     return r;
   };
-  const self = (t) => t;
-  const parent = (t) => t.parentNode || t;
+  const isTemplate = Object.prototype.isPrototypeOf.bind(L.HTMLTemplateElement.prototype);
+  const htmlFragment = (node, markup, inert = true) => {
+    const context = isShadowRoot(node) ? scriptShadowHost(node) : node;
+    return parseHTMLFragment(markup, context, node.ownerDocument, inert);
+  };
   for (const proto of [L.Element.prototype, L.ShadowRoot.prototype, L.DocumentFragment.prototype]) {
-    for (const [k, root] of [['innerHTML', self], ['outerHTML', parent]]) {
-      const d = Object.getOwnPropertyDescriptor(proto, k);
-      if (d && d.set) Object.defineProperty(proto, k, { ...d, set: parsing(d.set, root, k) });
+    for (const [key, root] of [['innerHTML', self], ['outerHTML', parent]]) {
+      const d = Object.getOwnPropertyDescriptor(proto, key);
+      if (!d?.set) continue;
+      Object.defineProperty(proto, key, { ...d, set: parsing(function (markup) {
+        if (documentMode(this.ownerDocument) === undefined) return d.set.call(this, markup);
+        if (key === 'outerHTML') {
+          if (this.parentNode) this.replaceWith(htmlFragment(this.parentNode, markup));
+        } else {
+          const content = htmlFragment(this, markup);
+          (isTemplate(this) ? this.content : this).replaceChildren(content);
+        }
+      }, root, key) });
     }
   }
-  L.Element.prototype.insertAdjacentHTML = parsing(L.Element.prototype.insertAdjacentHTML, parent, 'insertAdjacentHTML', 1);
+  const adjacentHTML = L.Element.prototype.insertAdjacentHTML;
+  L.Element.prototype.insertAdjacentHTML = parsing(function (position, markup) {
+    if (documentMode(this.ownerDocument) === undefined) return adjacentHTML.call(this, position, markup);
+    position = String(position).toLowerCase();
+    if (position === 'beforebegin' || position === 'afterend') {
+      if (!this.parentNode || this.parentNode.nodeType === 9) throw new BrowserDOMException('No parent for adjacent HTML', 'NoModificationAllowedError');
+      const content = htmlFragment(this.parentNode, markup);
+      if (position === 'beforebegin') this.before(content); else this.after(content);
+    } else if (position === 'afterbegin' || position === 'beforeend') {
+      const content = htmlFragment(this, markup);
+      if (position === 'afterbegin') this.prepend(content); else this.append(content);
+    } else throw new BrowserDOMException('Invalid insertion position', 'SyntaxError');
+  }, parent, 'insertAdjacentHTML', 1);
   const parseDocument = L.DOMParser.prototype.parseFromString;
   L.DOMParser.prototype.parseFromString = parsing(function (markup, mime, ...rest) {
     return mime === 'text/html' ? parseHTML(markup, false) : parseDocument.call(this, markup, mime, ...rest);
   }, (t, r) => r);
+  const rangePrototype = Object.getPrototypeOf(doc.createRange());
+  const contextualFragment = rangePrototype.createContextualFragment;
+  rangePrototype.createContextualFragment = function (markup) {
+    const context = this.commonAncestorContainer || doc;
+    const owner = context.nodeType === 9 ? context : context.ownerDocument;
+    if (documentMode(owner) !== undefined) return parseHTMLFragment(markup, context, owner, false);
+    return contextualFragment.call(this, markup);
+  };
   const T = L.HTMLTemplateElement.prototype;
+  const noModule = Object.getOwnPropertyDescriptor(L.HTMLScriptElement.prototype, 'nomodule');
+  define(L.HTMLScriptElement.prototype, 'noModule', noModule);
   const setInner = Object.getOwnPropertyDescriptor(L.Element.prototype, 'innerHTML').set;
   define(T, 'innerHTML', {
     get() { const d = doc.createElement('div'); d.appendChild(this.content.cloneNode(true)); return d.innerHTML; },
@@ -1111,6 +1141,7 @@ function installWindow(doc) {
   // A fragment has descendant text and the same replace-with-text setter
   // as an element; linkedom otherwise inherits Node's null/no-op stubs.
   Object.defineProperty(L.DocumentFragment.prototype, 'textContent', Object.getOwnPropertyDescriptor(L.Element.prototype, 'textContent'));
+  installScriptMutations(L, scriptsChanged);
 
   // linkedom puts stubs on Node.prototype and the real accessors on its
   // subclasses. Code that takes an accessor from Node.prototype and calls
@@ -1367,30 +1398,89 @@ function act(i, value) {
 function scriptKind(s) {
   const identity = scriptIdentity(s);
   if (!identity || identity.local !== 'script' || (identity.namespace !== HTML_NS && identity.namespace !== SVG_NS)) return null;
-  const t = (s.getAttribute('type') || '').trim().toLowerCase();
-  if (t === 'module') return 'module';
-  if (t === '' || /^(text|application)\/(x-)?(java|ecma)script$/.test(t) || t === 'text/jscript') return s.hasAttribute('nomodule') ? null : 'classic';
+  const type = scriptAttribute(s, 'type');
+  const language = identity.namespace === HTML_NS ? scriptAttribute(s, 'language') : null;
+  const t = (type == null ? (language ? 'text/' + language : '') : type).toLowerCase();
+  const mime = type == null ? t : t.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '');
+  // Firefox also accepts ASCII whitespace around module. Keep that browser
+  // behavior without accepting non-ASCII whitespace as a JavaScript MIME.
+  if (mime === 'module') return 'module';
+  if (t === 'importmap' || t === 'speculationrules') return t;
+  if (t === '' || /^(text|application)\/(x-)?(java|ecma)script$/.test(mime)
+    || /^text\/(javascript1\.[0-5]|jscript|livescript)$/.test(mime)) return 'classic';
   return null;
 }
 
 function scriptSource(s) {
-  return scriptIdentity(s)?.namespace === SVG_NS ? (s.getAttribute('href') ?? s.getAttribute('xlink:href')) : s.getAttribute('src');
+  return scriptIdentity(s)?.namespace === SVG_NS ? (scriptAttribute(s, 'href') ?? scriptAttribute(s, 'xlink:href')) : scriptAttribute(s, 'src');
 }
 
-// What to run for one script element: its kind, its URL, its code (null
-// when no answer has it).
-function source(s, n) {
-  S.started.add(s);
+function scriptDocument(node) {
+  let root = nodeRoot(node);
+  while (isShadowRoot(root)) {
+    const host = scriptShadowHost(root);
+    if (!host) return null;
+    root = nodeRoot(host);
+  }
+  return isDocument(root) ? root : null;
+}
+
+// Preparation sets alreadyStarted even when scripting is disabled or
+// nomodule suppresses execution. Empty, detached and data-block scripts
+// return earlier and can still be prepared by a later mutation.
+function prepareScript(s) {
+  const record = scriptRecord(s);
+  if (!record || record.alreadyStarted) return null;
+  const src = scriptSource(s), code = scriptText(s);
+  if (src == null && code === '') return null;
+  const document = scriptDocument(s);
+  if (!document) return null;
   const kind = scriptKind(s);
   if (!kind) return null;
-  const src = scriptSource(s);
+  record.alreadyStarted = true;
+  record.preparationDocument = scriptOwner(s);
+  if (document !== S.document || (kind === 'classic' && scriptAttribute(s, 'nomodule') != null && record.identity.namespace === HTML_NS)) return null;
+  if (kind === 'importmap' || kind === 'speculationrules') { unmodelled('script:' + kind); return null; }
+  const n = scriptN++;
+  let prepared;
   if (src == null) {
-    const code = s.textContent;
     push(S.code, { where: 'script', code: clip(code, 2000), gesture: S.gesture });
-    return { kind, url: kind === 'module' ? S.url.href.split('#')[0] + '#inline-' + n : S.url.href, code, inline: true };
+    prepared = { kind, url: kind === 'module' ? S.url.href.split('#')[0] + '#inline-' + n : S.url.href, code, inline: true };
+  } else {
+    let url;
+    try { url = new URL(src, S.url.href).href; }
+    catch { scriptError(s); return null; }
+    if (src === '' && record.identity.namespace === HTML_NS) { scriptError(s); return null; }
+    prepared = { kind, url, code: file(url), inline: false };
   }
-  const url = new URL(src, S.url.href).href;
-  return { kind, url, code: file(url), inline: false };
+  record.prepared = prepared;
+  return prepared;
+}
+
+function scriptError(el) {
+  addTimer(() => el.dispatchEvent(new Ev('error')), 0, [], false, 'script-error', false);
+}
+
+function scriptsChanged(nodes) {
+  const inline = [];
+  for (let i = 0; i < nodes.length; i++) {
+    const el = nodes[i], script = prepareScript(el);
+    if (!script) continue;
+    if (script.inline && script.kind === 'classic') inline.push([el, script]);
+    else S.dynamicScripts.push(el);
+  }
+  for (let i = 0; i < inline.length; i++) {
+    const [el, script] = inline[i];
+    const record = scriptRecord(el);
+    record.prepared = null;
+    if (record.preparationDocument !== scriptOwner(el)) continue;
+    const current = S.current, currentEl = S.currentEl, external = S.currentExternal;
+    S.current = S.currentEl = el;
+    S.currentExternal = false;
+    try { S.runClassic(script.code, script.url); }
+    catch (e) { error('script:' + script.url, e); }
+    finally { S.current = current; S.currentEl = currentEl; S.currentExternal = external; }
+  }
 }
 
 // A script's code: what its URL answers, or null when it failed.
@@ -1410,8 +1500,11 @@ function file(url) {
 let scriptN = 0;
 function nextScript(el) {
   S.current = null;
-  const s = source(el, scriptN++);
+  const record = scriptRecord(el);
+  const s = record?.prepared || prepareScript(el);
   if (!s) return null;
+  record.prepared = null;
+  if (record.preparationDocument !== scriptOwner(el)) return null;
   if (s.kind === 'classic') S.current = el;
   S.currentEl = el;
   S.currentExternal = !s.inline;
@@ -1419,40 +1512,27 @@ function nextScript(el) {
 }
 
 // The document's scripts in the order a browser runs them: blocking ones,
-// then deferred and module ones, then async ones.
+// then deferred and module ones, then async ones. Preparation happens when
+// reached, so empty/data-block scripts keep their unstarted state.
 function pageScripts() {
   const all = [...G.document.querySelectorAll('script')];
   const blocking = [], deferred = [], later = [];
   for (const s of all) {
-    rememberScript(s, { namespace: s.namespaceURI, local: s.localName });
-    S.started.add(s);
     const kind = scriptKind(s);
     if (!kind) continue;
     const src = scriptSource(s) != null;
-    if (s.hasAttribute('async') && (src || kind === 'module')) later.push(s);
-    else if (kind === 'module' || (src && s.hasAttribute('defer'))) deferred.push(s);
+    if (scriptAttribute(s, 'async') != null && (src || kind === 'module')) later.push(s);
+    else if (kind === 'module' || (src && scriptAttribute(s, 'defer') != null)) deferred.push(s);
     else blocking.push(s);
   }
   S.scripts = [...blocking, ...deferred, ...later];
   return S.scripts.length;
 }
 
-// Scripts the page created and connected since the last look.
-function connectedToPage(node) {
-  let root = nodeRoot(node);
-  while (isShadowRoot(root)) root = nodeRoot(root.host);
-  return root === S.document;
-}
-
 function newScripts() {
-  if (!S.created.length) return 0;
-  const ready = [], pending = [];
-  for (const s of S.created) {
-    if (!S.started.has(s)) (connectedToPage(s) ? ready : pending).push(s);
-  }
-  S.created = pending;
-  S.scripts = ready;
-  return ready.length;
+  S.scripts = S.dynamicScripts;
+  S.dynamicScripts = [];
+  return S.scripts.length;
 }
 
 function scriptAt(batch, i) {
@@ -1477,6 +1557,7 @@ G.console = Object.fromEntries(['log', 'info', 'warn', 'error', 'debug', 'trace'
 Object.assign(G.console, { group() {}, groupCollapsed() {}, groupEnd() {}, time() {}, timeEnd() {}, timeLog() {}, count() {}, countReset() {}, assert(c, ...a) { if (!c) G.console.error('Assertion failed:', ...a); } });
 
 G.__af = {
+  bindClassic(run) { S.runClassic = run; delete G.__af.bindClassic; },
   // `now` and `hostSeed`: the host's clock and randomness, when it has them.
   init(json, now, hostSeed) {
     const s = JSON.parse(json);

@@ -10,6 +10,12 @@ fn visit(html: &str) -> (RunRecord, Value) {
 }
 
 fn visit_planned(html: &str, plan: Value) -> (RunRecord, Value) {
+    let (r, report) = visit_unchecked(html, plan);
+    assert_eq!(report["errors"], json!([]), "{report}");
+    (r, report)
+}
+
+fn visit_unchecked(html: &str, plan: Value) -> (RunRecord, Value) {
     let browser = Browser::shared().unwrap();
     let input = json!({"url":"https://app.example/","html":html});
     let plan = Plan::parse(&plan.to_string()).unwrap();
@@ -17,7 +23,6 @@ fn visit_planned(html: &str, plan: Value) -> (RunRecord, Value) {
     assert_eq!(r.outcome.kind, OutcomeKind::Ok, "{:?}", r.outcome);
     let report: Value = serde_json::from_str(r.result.as_ref().unwrap().as_str().unwrap()).unwrap();
     assert!(report.get("fatal").is_none(), "{report}");
-    assert_eq!(report["errors"], json!([]), "{report}");
     (r, report)
 }
 
@@ -404,8 +409,9 @@ fn cloned_scripts_wait_for_the_active_page_and_can_run_after_adoption_or_in_shad
     for destination in ["detached", "page", "shadow"] {
         let html = format!(
             r#"<script>
-            const d=new DOMParser().parseFromString('<div><script>fetch("/cloned");<\/script></div>','text/html');
-            const copy=d.querySelector('div').cloneNode(true);
+            const d=new DOMParser().parseFromString('','text/html'),original=d.createElement('div'),script=d.createElement('script');
+            script.textContent='fetch("/cloned");';original.append(script);
+            const copy=original.cloneNode(true);
             if('{destination}'==='detached'){{
                 Object.defineProperty(copy.firstChild,'isConnected',{{value:true}});copy.firstChild.getRootNode=()=>document;
                 d.body.append(copy);
@@ -761,4 +767,294 @@ fn page_map_and_property_helpers_cannot_break_document_cloning() {
     </script>"#,
     );
     assert_eq!(report["console"][0]["text"], r#"[[0,"root"],[0,"root"]]"#);
+}
+
+#[test]
+fn cloning_the_currently_executing_script_does_not_execute_it_again() {
+    let (_, report) =
+        visit(r#"<script>console.log('once');if(!window.cloned){window.cloned=true;document.head.append(document.currentScript.cloneNode(true));}</script>"#);
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["once"]);
+}
+
+#[test]
+fn executed_script_state_survives_element_subtree_document_and_fragment_cloning() {
+    for kind in ["script", "subtree", "document", "fragment"] {
+        let html = format!(
+            r#"<div id=tree><script id=ran>console.log('once');</script></div><script>
+        const original=document.getElementById('ran');let copy;
+        if('{kind}'==='script')copy=original.cloneNode(true);
+        else if('{kind}'==='subtree')copy=document.getElementById('tree').cloneNode(true);
+        else if('{kind}'==='document')copy=document.cloneNode(true).getElementById('ran');
+        else{{const fragment=document.createDocumentFragment();fragment.append(original);copy=fragment.cloneNode(true);}}
+        document.body.append(copy);
+        </script>"#
+        );
+        let (_, report) = visit(&html);
+        let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+        assert_eq!(logs, ["once"], "{kind}");
+    }
+}
+
+#[test]
+fn empty_inert_and_fresh_detached_scripts_can_execute_after_cloning() {
+    let (_, report) = visit(
+        r#"<script id=empty></script><script id=inert type=application/json>console.log('inert-copy');</script><script>
+    const empty=document.getElementById('empty').cloneNode(true);empty.textContent="console.log('empty-copy');";document.body.append(empty);
+    const inert=document.getElementById('inert').cloneNode(true);inert.type='';document.body.append(inert);
+    const fresh=document.createElement('script');fresh.textContent="console.log('fresh-copy');";document.body.append(fresh.cloneNode(true));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["empty-copy", "inert-copy", "fresh-copy"]);
+}
+
+#[test]
+fn parsed_and_nomodule_scripts_do_not_restart_when_cloned_into_the_active_page() {
+    let (r, _) = visit(
+        r#"<script id=nomodule nomodule>fetch('/nomodule');</script><script>
+    const nomodule=document.getElementById('nomodule').cloneNode(true);nomodule.removeAttribute('nomodule');document.body.append(nomodule);
+    const markup=code=>'<script>'+code+'</'+'script>';
+    const holder=document.createElement('div');holder.innerHTML=markup("fetch('/fragment');");document.body.append(holder.firstChild.cloneNode(true));
+    const parsed=new DOMParser().parseFromString(markup("fetch('/parsed');"),'text/html');document.body.append(parsed.querySelector('script').cloneNode(true));
+    </script>"#,
+    );
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert!(paths.is_empty(), "{paths:?}");
+}
+
+#[test]
+fn dynamically_inserted_inline_scripts_execute_before_insertion_returns() {
+    let (_, report) = visit(
+        r#"<script>
+    const outer=document.currentScript,s=document.createElement('script');s.text='console.log("dynamic",document.currentScript===window.dynamic);';window.dynamic=s;
+    console.log('before');document.head.append(s);console.log('after',document.currentScript===outer);
+    document.body.append(s.cloneNode(true));
+    s.text='console.log("changed");';
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["before", "dynamic true", "after true"]);
+}
+
+#[test]
+fn script_insertion_prepares_the_entire_batch_before_running_its_first_script() {
+    let (_, report) = visit(
+        r#"<script>
+    const a=document.createElement('script'),b=document.createElement('script');window.second=b;
+    a.text='console.log("first",second.isConnected);document.body.append(second.cloneNode(true));';b.text='console.log("second");';
+    document.body.append(a,b);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["first true", "second"]);
+}
+
+#[test]
+fn scripts_prepared_in_inert_documents_stay_inert_after_moving_and_cloning() {
+    let (r, _) = visit(
+        r#"<script>
+    const d=new DOMParser().parseFromString('','text/html'),s=d.createElement('script');s.text='fetch("/inactive");';d.body.append(s);
+    document.body.append(s.cloneNode(true));document.body.append(s);
+    const markup=code=>'<script>'+code+'</'+'script>';
+    for(const kind of ['fragment','document'])for(const type of ['empty','json']){
+      let script;
+      if(kind==='fragment'){const holder=document.createElement('div');holder.innerHTML=type==='empty'?markup(''):markup('fetch("/json");').replace('<script>','<script type=application/json>');script=holder.firstChild;}
+      else{const parsed=new DOMParser().parseFromString(type==='empty'?markup(''):markup('fetch("/json");').replace('<script>','<script type=application/json>'),'text/html');script=parsed.querySelector('script');}
+      const copy=script.cloneNode(true);copy.type='';if(type==='empty')copy.text='fetch("/empty");';document.body.append(copy);
+    }
+    </script>"#,
+    );
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert!(paths.is_empty(), "{paths:?}");
+}
+
+#[test]
+fn contextual_fragments_and_initial_template_scripts_execute_after_insertion() {
+    let (_, report) = visit(
+        r#"<template id=t><script>console.log('template');</script></template><script>
+    document.body.append(document.getElementById('t').content.cloneNode(true));
+    const range=document.createRange();range.selectNodeContents(document.body);
+    document.body.append(range.createContextualFragment('<script>console.log("contextual");</'+'script>'));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["template", "contextual"]);
+}
+
+#[test]
+fn script_preparation_reads_child_text_and_reacts_to_connected_text_changes() {
+    let (_, report) = visit(
+        r#"<script>
+    const s=document.createElement('script'),span=document.createElement('span');span.textContent='console.log("descendant");';s.append(span);document.body.append(s);
+    s.append('console.log("direct");');
+    const t=document.createElement('script'),text=document.createTextNode('');t.append(text);document.head.append(t);text.data='console.log("data");';
+    const inert=document.createElement('script');inert.type='application/json';inert.text='console.log("type-only");';document.body.append(inert);inert.type='';
+    console.log('after');
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["direct", "data", "after"]);
+}
+
+#[test]
+fn external_script_preparation_survives_cloning_source_changes_and_coerced_attribute_names() {
+    let (r, report) = visit_planned(
+        r#"<script>
+    const s=document.createElement('script');document.head.append(s);let names=0,values=0;
+    s.setAttribute({toString(){names++;return 'SRC';}},{toString(){values++;return '/first.js';}});
+    const copy=s.cloneNode(true);copy.src='/copy.js';document.head.append(copy);s.src='/changed.js';
+    console.log('after',names,values);
+    </script>"#,
+        json!({FETCH_OWN:{"return":{"ok":{"status":200,"headers":[],"body":"console.log('loaded');"}}}}),
+    );
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["/first.js"]);
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["after 1 1", "loaded"]);
+}
+
+#[test]
+fn nested_inline_execution_restores_current_script_and_reports_errors_without_throwing_from_append() {
+    let (_, report) = visit_unchecked(
+        r#"<script>
+    const outer=document.currentScript;
+    const inner=document.createElement('script');window.innerScript=inner;
+    inner.text='console.log("inner",document.currentScript===innerScript);const nested=document.createElement("script");nested.text="console.log(123);";document.body.append(nested);throw Error("inner failure");';
+    try{document.head.append(inner);console.log('returned',document.currentScript===outer);}catch(e){console.log('caught');}
+    document.body.append(inner.cloneNode(true));
+    </script>"#,
+        json!({}),
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["inner true", "123", "returned true"]);
+    assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["errors"][0]["message"], "inner failure");
+}
+
+#[test]
+fn scripts_in_closed_shadow_trees_prepare_when_the_host_connects_despite_public_host_shadows() {
+    let (_, report) = visit(
+        r#"<script>
+    const host=document.createElement('div'),root=host.attachShadow({mode:'closed'}),s=document.createElement('script');
+    Object.defineProperty(root,'host',{value:document.createElement('div')});
+    s.text='console.log("shadow");';root.append(s);console.log('detached');document.body.append(host);console.log('connected');
+    document.body.append(s.cloneNode(true));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["detached", "shadow", "connected"]);
+}
+
+#[test]
+fn script_mime_types_language_and_nomodule_keep_browser_preparation_behavior() {
+    let (_, report) = visit(
+        r#"<script>
+    for(const type of ['text/javascript1.5','text/livescript','application/x-javascript',' \ttext/javascript\r\n','\u00a0text/javascript\u00a0']){
+      const s=document.createElement('script');s.type=type;s.text='console.log('+JSON.stringify(type)+');';document.head.append(s);
+    }
+    const lang=document.createElement('script');lang.setAttribute('language','javascript1.5');lang.text='console.log("language");';document.head.append(lang);
+    const n=document.createElement('script');n.noModule=true;n.text='console.log("nomodule");';document.head.append(n);const copy=n.cloneNode(true);copy.noModule=false;document.body.append(copy);
+    const m=document.createElement('script');m.type=' module ';m.text='console.log("module");';document.body.append(m);document.body.append(m.cloneNode(true));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["text/javascript1.5", "text/livescript", "application/x-javascript", " \ttext/javascript\r\n", "language", "module"]);
+}
+
+#[test]
+fn adopting_a_prepared_script_into_another_document_cancels_its_execution_without_restarting_it() {
+    let (_, report) = visit(
+        r#"<script>
+    window.foreign=new DOMParser().parseFromString('','text/html');
+    const a=document.createElement('script'),b=document.createElement('script');window.second=b;
+    a.text='console.log("first");foreign.body.append(second);';b.text='console.log("moved");';
+    document.body.append(a,b);console.log('after');document.body.append(b);document.body.append(b.cloneNode(true));
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["first", "after"]);
+}
+
+#[test]
+fn an_empty_script_source_reports_error_asynchronously_and_keeps_clones_started() {
+    let (r, report) = visit(
+        r#"<script>
+    const s=document.createElement('script');s.src='';s.addEventListener('error',()=>console.log('error'));
+    document.body.append(s);s.removeAttribute('src');s.text='console.log("reran");';document.body.append(s.cloneNode(true));console.log('after');
+    </script>"#,
+    );
+    let paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
+    assert!(paths.is_empty(), "{paths:?}");
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["after", "error"]);
+}
+
+#[test]
+fn fragment_parsers_do_not_mark_scripts_created_by_custom_element_constructors_as_parser_created() {
+    let (_, report) = visit(
+        r#"<script>
+    const other=new DOMParser().parseFromString('','text/html');
+    customElements.define('x-build',class extends HTMLElement{constructor(){super();const s=other.createElement('script');s.text='console.log("fresh-constructor");';document.head.append(s);document.head.append(s.cloneNode(true));console.log('constructor-after');}});
+    const holder=document.createElement('div');holder.innerHTML='<x-build></x-build><script>console.log("parsed");</'+'script>';
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["fresh-constructor", "constructor-after"]);
+}
+
+#[test]
+fn fragment_tree_building_uses_table_and_svg_contexts_and_keeps_parsed_scripts_inert() {
+    let (_, report) = visit(
+        r#"<script>
+    const table=document.createElement('table');table.innerHTML='<tr><td>cell</td></tr>';console.log(table.innerHTML);
+    table.firstChild.insertAdjacentHTML('beforeend','<tr><td>second</td></tr>');console.log(table.rows?.length??table.querySelectorAll('tr').length);
+    const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.innerHTML='<g><circle/></g><foreignObject><div>html</div></foreignObject><script>console.log("parsed");</'+'script>';
+    console.log(svg.firstChild.namespaceURI,svg.firstChild.firstChild.namespaceURI,svg.children[1].firstChild.namespaceURI);document.body.append(svg);
+    const range=document.createRange();range.selectNodeContents(table.firstChild);const fragment=range.createContextualFragment('<tr><td>range</td></tr>');console.log(fragment.firstChild.localName,fragment.firstChild.firstChild.localName);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        logs,
+        ["<tbody><tr><td>cell</td></tr></tbody>", "2", "http://www.w3.org/2000/svg http://www.w3.org/2000/svg http://www.w3.org/1999/xhtml", "tr td"]
+    );
+}
+
+#[test]
+fn markup_coercion_happens_once_and_its_fresh_scripts_execute_without_becoming_parsed_scripts() {
+    let (_, report) = visit(
+        r#"<script>
+    let calls=0;const holder=document.createElement('div');holder.innerHTML={toString(){calls++;const s=document.createElement('script');s.text='console.log("coercion");';document.head.append(s);document.head.append(s.cloneNode(true));return '<script>console.log("parsed");</'+'script>';}};
+    console.log('after',calls);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["coercion", "after 1"]);
+}
+
+#[test]
+fn script_preparation_uses_real_attributes_and_child_text_despite_public_accessor_overrides() {
+    let (_, report) = visit(
+        r#"<script>
+    const s=document.createElement('script');s.text='console.log("real");';s.getAttribute=()=>null;s.hasAttribute=()=>false;Object.defineProperty(s,'textContent',{value:''});document.head.append(s);
+    const n=document.createElement('script');n.noModule=true;n.text='console.log("nomodule");';n.getAttribute=()=>null;n.hasAttribute=()=>false;document.head.append(n);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["real"]);
+}
+
+#[test]
+fn public_document_type_and_script_owner_shadows_do_not_change_preparation_or_execution() {
+    let (_, report) = visit(
+        r#"<script>
+    window.inertDoc=new DOMParser().parseFromString('','text/html');
+    const a=document.createElement('script'),b=document.createElement('script');window.second=b;
+    a.text='Object.defineProperty(second,"ownerDocument",{value:inertDoc});console.log("first");';b.text='console.log("second");';document.body.append(a,b);
+    Object.defineProperty(document,'nodeType',{value:1});const s=document.createElement('script');s.text='console.log("real-document");';document.head.append(s);
+    </script>"#,
+    );
+    let logs: Vec<_> = report["console"].as_array().unwrap().iter().map(|v| v["text"].as_str().unwrap()).collect();
+    assert_eq!(logs, ["first", "second", "real-document"]);
 }

@@ -400,6 +400,16 @@ fn fail(ctx: &Ctx, e: Error) -> String {
     if e.is_exception() { format!("{:?}", ctx.catch()) } else { e.to_string() }
 }
 
+// Inline scripts created by DOM operations run before that operation
+// returns. Use the callback's context directly, including for nested
+// insertions, rather than reentering the Page runtime/context lock.
+fn run_inline(ctx: Ctx<'_>, code: String, url: String) -> Result<()> {
+    let mut opts = EvalOptions::default();
+    opts.strict = false;
+    opts.filename = Some(url);
+    ctx.eval_with_options(code, opts)
+}
+
 /// A runtime with the shim loaded and no page yet.
 fn boot() -> std::result::Result<Page, String> {
     let rt = Runtime::new().map_err(|e| format!("runtime: {e}"))?;
@@ -411,6 +421,10 @@ fn boot() -> std::result::Result<Page, String> {
     let ctx = Context::full(&rt).map_err(|e| format!("context: {e}"))?;
     ctx.with(|ctx| crate::web::install(&ctx).map_err(|e| fail(&ctx, e)))?;
     ctx.with(|ctx| ctx.eval::<(), _>(SHIM).map_err(|e| fail(&ctx, e)))?;
+    ctx.with(|ctx| {
+        let run = Function::new(ctx.clone(), run_inline).map_err(|e| fail(&ctx, e))?;
+        call::<_, ()>(&ctx, "bindClassic", (run,)).map_err(|e| fail(&ctx, e))
+    })?;
     #[cfg(target_arch = "wasm32")]
     ctx.with(|ctx| bridge::install(&ctx).map_err(|e| fail(&ctx, e)))?;
     Ok(Page { compiled: Default::default(), rt, ctx })

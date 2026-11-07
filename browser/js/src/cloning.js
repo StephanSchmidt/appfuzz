@@ -29,6 +29,7 @@ function ownNodes(root, owner) {
 
 export function installCloning(L, factories, shareObservers, onScript) {
   const cloneElement = L.Element.prototype.cloneNode;
+  const insert = Object.getPrototypeOf(L.Element.prototype).insertBefore;
   const isElement = Object.prototype.isPrototypeOf.bind(L.Element.prototype);
   const isSVG = Object.prototype.isPrototypeOf.bind(L.SVGElement.prototype);
   const plainCloners = [];
@@ -50,13 +51,14 @@ export function installCloning(L, factories, shareObservers, onScript) {
     }
     const copies = [], identities = [];
     const createCopy = () => {
-      const identity = identityOf(originals[copies.length]);
+      const original = originals[copies.length];
+      const identity = identityOf(original);
       const { namespace, local } = identity;
       const copy = namespace === SVG ? factories.svg.call(owner, namespace, local)
         : (namespace === HTML ? factories.html : factories.xml).call(owner, local);
       copies.push(copy); identities.push(identity);
       installName(copy, identity, isHTMLDocument);
-      if (local === 'script') onScript(copy, identity);
+      if (local === 'script') onScript(copy, identity, original);
       return copy;
     };
     const document = new NativeProxy(owner, {
@@ -108,7 +110,8 @@ export function installCloning(L, factories, shareObservers, onScript) {
           copy = method.call(node);
           ownNodes(copy, clone);
         }
-        clone.appendChild(copy);
+        // Cloning does not run insertion's script preparation steps.
+        insert.call(clone, copy);
       }
     }
     return clone;
