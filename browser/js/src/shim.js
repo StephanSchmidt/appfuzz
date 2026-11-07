@@ -217,40 +217,45 @@ const BrowserDOMException = class DOMException extends Error {
 };
 G.DOMException = BrowserDOMException;
 
-const enc = (s) => encodeURIComponent(s).replace(/%20/g, '+');
-const dec = (s) => { try { return decodeURIComponent(s.replace(/\+/g, ' ')); } catch { return s; } };
+// URLs and form encoding by the WHATWG rules: the guest's `url` crate, the
+// parser appfuzz judges where requests go with. A page's own checks
+// (`new URL(next).host === location.host`) then parse as in a browser:
+// lookalike and numeric hosts, IPv6, backslashes, dot segments.
+const N = G.__native;
+
+// What a Web API takes as a string: lone surrogates become U+FFFD.
+const usv = (s) => {
+  s = String(s);
+  return typeof s.toWellFormed === 'function' ? s.toWellFormed() : s;
+};
 
 class URLSearchParams {
   constructor(init = '') {
     this._l = [];
     this._u = null;
     if (init instanceof URLSearchParams) this._l = init._l.map((p) => [...p]);
-    else if (typeof init === 'string') this._parse(init);
-    else if (init && typeof init[Symbol.iterator] === 'function') for (const [k, v] of init) this._l.push([String(k), String(v)]);
-    else if (init && typeof init === 'object') for (const k of Object.keys(init)) this._l.push([k, String(init[k])]);
+    else if (init && typeof init === 'object' && typeof init[Symbol.iterator] === 'function') {
+      for (const pair of init) {
+        const p = [...pair];
+        if (p.length !== 2) throw new TypeError('URLSearchParams: each pair needs a name and a value');
+        this._l.push([usv(p[0]), usv(p[1])]);
+      }
+    } else if (init && typeof init === 'object') for (const k of Object.keys(init)) this._l.push([usv(k), usv(init[k])]);
+    else this._parse(usv(init));
   }
-  _parse(s) {
-    this._l = [];
-    s = s.replace(/^\?/, '');
-    if (!s) return;
-    for (const part of s.split('&')) {
-      if (!part) continue;
-      const i = part.indexOf('=');
-      this._l.push(i < 0 ? [dec(part), ''] : [dec(part.slice(0, i)), dec(part.slice(i + 1))]);
-    }
-  }
-  _sync() { if (this._u) this._u._search = this._l.length ? '?' + this.toString() : ''; }
+  _parse(s) { s = s.replace(/^\?/, ''); this._l = s ? N.formParse(s) : []; }
+  _sync() { if (this._u) this._u._update('search', this.toString(), true); }
   get size() { return this._l.length; }
-  append(k, v) { this._l.push([String(k), String(v)]); this._sync(); }
-  delete(k) { this._l = this._l.filter((p) => p[0] !== String(k)); this._sync(); }
-  get(k) { const p = this._l.find((p) => p[0] === String(k)); return p ? p[1] : null; }
-  getAll(k) { return this._l.filter((p) => p[0] === String(k)).map((p) => p[1]); }
-  has(k) { return this._l.some((p) => p[0] === String(k)); }
+  append(k, v) { this._l.push([usv(k), usv(v)]); this._sync(); }
+  delete(k, v) { k = usv(k); this._l = this._l.filter((p) => p[0] !== k || (v !== undefined && p[1] !== usv(v))); this._sync(); }
+  get(k) { k = usv(k); const p = this._l.find((p) => p[0] === k); return p ? p[1] : null; }
+  getAll(k) { k = usv(k); return this._l.filter((p) => p[0] === k).map((p) => p[1]); }
+  has(k, v) { k = usv(k); return this._l.some((p) => p[0] === k && (v === undefined || p[1] === usv(v))); }
   set(k, v) {
-    k = String(k);
+    k = usv(k);
     const i = this._l.findIndex((p) => p[0] === k);
-    if (i < 0) this._l.push([k, String(v)]);
-    else { this._l[i][1] = String(v); this._l = this._l.filter((p, j) => j <= i || p[0] !== k); }
+    if (i < 0) this._l.push([k, usv(v)]);
+    else { this._l[i][1] = usv(v); this._l = this._l.filter((p, j) => j <= i || p[0] !== k); }
     this._sync();
   }
   sort() { this._l.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)); this._sync(); }
@@ -259,97 +264,34 @@ class URLSearchParams {
   *keys() { for (const p of this._l) yield p[0]; }
   *values() { for (const p of this._l) yield p[1]; }
   [Symbol.iterator]() { return this.entries(); }
-  toString() { return this._l.map(([k, v]) => enc(k) + '=' + enc(v)).join('&'); }
+  toString() { return N.formSerialize(this._l); }
 }
 G.URLSearchParams = URLSearchParams;
 
-const ABS = /^([a-zA-Z][a-zA-Z0-9+.-]*:)(?:\/\/(?:([^:@/?#]*)(?::([^@/?#]*))?@)?([^:/?#]*)(?::(\d*))?)?([^?#]*)(\?[^#]*)?(#.*)?$/;
-const SPECIAL = { 'http:': '80', 'https:': '443', 'ws:': '80', 'wss:': '443', 'ftp:': '21' };
-
-function dots(path) {
-  const out = [];
-  const segs = path.split('/');
-  for (let i = 0; i < segs.length; i++) {
-    const s = segs[i];
-    if (s === '..') { if (out.length > 1) out.pop(); if (i === segs.length - 1) out.push(''); }
-    else if (s === '.') { if (i === segs.length - 1) out.push(''); }
-    else out.push(s);
-  }
-  return out.join('/');
-}
+// A URL keeps its parts, in this order, as the guest gives them.
+const PARTS = ['href', 'origin', 'protocol', 'username', 'password', 'host', 'hostname', 'port', 'pathname', 'search', 'hash'];
 
 class URL {
   constructor(input, base) {
-    input = String(input).trim().replace(/[\t\n\r]/g, '').replace(/\\/g, '/');
-    let m = ABS.exec(input);
-    if (m && (m[4] !== undefined || !SPECIAL[m[1].toLowerCase()] || base === undefined)) {
-      this._set(m);
-    } else {
-      if (base === undefined) throw new TypeError('Invalid URL: ' + clip(input, 80));
-      const b = base instanceof URL ? base : new URL(base);
-      let rel = input;
-      if (m && SPECIAL[m[1].toLowerCase()] && m[1].toLowerCase() === b._protocol) rel = input.slice(m[1].length);
-      let full;
-      if (rel.startsWith('//')) full = b._protocol + rel;
-      else if (rel.startsWith('/')) full = b._protocol + '//' + b._authority() + rel;
-      else if (rel.startsWith('?')) full = b._protocol + '//' + b._authority() + b._pathname + rel;
-      else if (rel.startsWith('#')) full = b._protocol + '//' + b._authority() + b._pathname + b._search + rel;
-      else if (rel === '') full = b._protocol + '//' + b._authority() + b._pathname + b._search;
-      else full = b._protocol + '//' + b._authority() + b._pathname.replace(/[^/]*$/, '') + rel;
-      m = ABS.exec(full);
-      if (!m) throw new TypeError('Invalid URL: ' + clip(input, 80));
-      this._set(m);
-    }
-  }
-  _set(m) {
-    this._protocol = m[1].toLowerCase();
-    this._username = m[2] || '';
-    this._password = m[3] || '';
-    this._hostname = (m[4] || '').toLowerCase();
-    this._port = m[5] && m[5] !== SPECIAL[this._protocol] ? m[5] : '';
-    const special = !!SPECIAL[this._protocol];
-    let p = m[6] || '';
-    if (special && !p) p = '/';
-    this._pathname = special || p.startsWith('/') ? dots(p) : p;
-    this._search = m[7] && m[7] !== '?' ? m[7] : '';
-    this._hash = m[8] && m[8] !== '#' ? m[8] : '';
-    this._hasAuthority = m[4] !== undefined;
+    const p = N.url(usv(input), base === undefined ? null : usv(base));
+    if (!p) throw new TypeError('Invalid URL: ' + clip(input, 80));
+    this._p = p;
     this._sp = null;
   }
-  _authority() {
-    const user = this._username ? this._username + (this._password ? ':' + this._password : '') + '@' : '';
-    return user + this.host;
+  // A setter: refused values leave the URL as it was; an href that
+  // doesn't parse throws. `fromParams`: the change came from searchParams.
+  _update(key, value, fromParams = false) {
+    const p = N.urlSet(this._p[0], key, usv(value));
+    if (!p) throw new TypeError('Invalid URL: ' + clip(value, 80));
+    this._p = p;
+    if (this._sp && !fromParams && (key === 'href' || key === 'search')) this._sp._parse(p[9]);
   }
-  get protocol() { return this._protocol; }
-  set protocol(v) { this._protocol = String(v).replace(/:?$/, ':').toLowerCase(); }
-  get username() { return this._username; }
-  set username(v) { this._username = String(v); }
-  get password() { return this._password; }
-  set password(v) { this._password = String(v); }
-  get hostname() { return this._hostname; }
-  set hostname(v) { this._hostname = String(v).toLowerCase(); }
-  get port() { return this._port; }
-  set port(v) { v = String(v); this._port = v === SPECIAL[this._protocol] ? '' : v; }
-  get host() { return this._hostname + (this._port ? ':' + this._port : ''); }
-  set host(v) { const [h, p] = String(v).split(':'); this._hostname = h.toLowerCase(); this.port = p || ''; }
-  get origin() { return SPECIAL[this._protocol] && this._protocol[0] !== 'f' ? this._protocol + '//' + this.host : 'null'; }
-  get pathname() { return this._pathname; }
-  set pathname(v) { v = String(v); this._pathname = dots(v.startsWith('/') ? v : '/' + v); }
-  get search() { return this._search; }
-  set search(v) { v = String(v); this._search = v && v !== '?' ? (v[0] === '?' ? v : '?' + v) : ''; if (this._sp) this._sp._parse(this._search); }
   get searchParams() {
-    if (!this._sp) { this._sp = new URLSearchParams(this._search); this._sp._u = this; }
+    if (!this._sp) { this._sp = new URLSearchParams(this._p[9]); this._sp._u = this; }
     return this._sp;
   }
-  get hash() { return this._hash; }
-  set hash(v) { v = String(v); this._hash = v && v !== '#' ? (v[0] === '#' ? v : '#' + v) : ''; }
-  get href() {
-    const auth = this._hasAuthority || SPECIAL[this._protocol] ? '//' + this._authority() : '';
-    return this._protocol + auth + this._pathname + this._search + this._hash;
-  }
-  set href(v) { this._set(ABS.exec(new URL(v).href)); }
-  toString() { return this.href; }
-  toJSON() { return this.href; }
+  toString() { return this._p[0]; }
+  toJSON() { return this._p[0]; }
   static canParse(u, b) { try { new URL(u, b); return true; } catch { return false; } }
   static parse(u, b) { try { return new URL(u, b); } catch { return null; } }
   static createObjectURL(blob) {
@@ -359,6 +301,12 @@ class URL {
   }
   static revokeObjectURL(u) { blobs.delete(u); }
 }
+PARTS.forEach((k, i) => Object.defineProperty(URL.prototype, k, {
+  configurable: true,
+  enumerable: true,
+  get() { return this._p[i]; },
+  set: k === 'origin' ? undefined : function (v) { this._update(k, v); },
+}));
 G.URL = URL;
 const blobs = new Map();
 

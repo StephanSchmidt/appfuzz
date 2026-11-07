@@ -26,21 +26,25 @@ speed:
 	@cargo bench -p appfuzz --bench speed -- $(SPEED_ARGS)
 
 # The browser guest that runs pages' scripts (probe scripts): the DOM shim
-# (npm), then QuickJS and the driver for wasm32-wasip2, into the core's
-# assets with a note of what went in.
+# (npm), then QuickJS and the driver for wasm32-wasip2, snapshotted once the
+# shim is loaded (wizen: a page visit starts there), into the core's assets
+# with a note of what went in.
 BROWSER_ASSETS = crates/appfuzz-core/assets/browser
 BROWSER_WASM = browser/target/wasm32-wasip2/release/appfuzz_browser.wasm
+BROWSER_LOCK = grep -A1 '^name = "$(1)"$$' browser/Cargo.lock | sed -n 's/version = //p' | tr -d '"'
 
 browser:
 	cd browser/js && npm ci --silent && npm run --silent build
 	cargo build --release --manifest-path browser/Cargo.toml --target wasm32-wasip2 -p appfuzz-browser
-	cp $(BROWSER_WASM) $(BROWSER_ASSETS)/browser.wasm
+	cargo run --release --manifest-path browser/Cargo.toml -p appfuzz-browser-wizen -- $(BROWSER_WASM) $(BROWSER_ASSETS)/browser.wasm
 	{ echo "The browser guest: QuickJS (quickjs-ng, MIT, via rquickjs, MIT), a DOM"; \
 	  echo "shim on linkedom (ISC), HTML tree building with parse5 (MIT),"; \
-	  echo "cookies with tldts (MIT, Public Suffix List),"; \
-	  echo "and the page driver, built by make browser."; \
-	  echo "Source: browser/ (guest/, js/, wit/)."; \
-	  echo "rquickjs: $$(grep -A1 '^name = "rquickjs-core"' browser/Cargo.lock | sed -n 's/version = //p' | tr -d '"')"; \
+	  echo "cookies with tldts (MIT, Public Suffix List), URLs with url"; \
+	  echo "(MIT/Apache-2.0) and the page driver, snapshotted after boot,"; \
+	  echo "built by make browser."; \
+	  echo "Source: browser/ (guest/, js/, wit/, wizen/)."; \
+	  echo "rquickjs: $$($(call BROWSER_LOCK,rquickjs-core))"; \
+	  echo "url: $$($(call BROWSER_LOCK,url))"; \
 	  echo "linkedom: $$(node -p 'require("./browser/js/node_modules/linkedom/package.json").version')"; \
 	  echo "parse5: $$(node -p 'require("./browser/js/node_modules/parse5/package.json").version')"; \
 	  echo "parse5 entities: $$(node -p 'require("./browser/js/node_modules/parse5/node_modules/entities/package.json").version')"; \

@@ -5,6 +5,7 @@
 //! builds) goes to the host as calls of the `appfuzz:browser` world.
 
 pub mod driver;
+mod web;
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod component {

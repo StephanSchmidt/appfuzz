@@ -6,10 +6,38 @@
 //! an app's static scripts) the snapshot also holds them compiled: a
 //! session then runs them without parsing.
 
+use std::time::Duration;
+
 use wasmtime::component::{Linker, ResourceTable};
 use wasmtime::{Engine, Result, Store};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p2};
+use wasmtime_wasi::random::Deterministic;
+use wasmtime_wasi::{HostMonotonicClock, HostWallClock, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView, p2};
 use wasmtime_wizer::Wizer;
+
+/// The clock while booting: always the epoch. The snapshot is the same on
+/// every build machine, and no build time reaches a session (QuickJS seeds
+/// from the clock; sessions read the host's).
+struct Epoch;
+
+impl HostWallClock for Epoch {
+    fn resolution(&self) -> Duration {
+        Duration::from_millis(1)
+    }
+
+    fn now(&self) -> Duration {
+        Duration::ZERO
+    }
+}
+
+impl HostMonotonicClock for Epoch {
+    fn resolution(&self) -> u64 {
+        1
+    }
+
+    fn now(&self) -> u64 {
+        0
+    }
+}
 
 struct Ctx {
     wasi: WasiCtx,
@@ -31,6 +59,12 @@ async fn main() -> Result<()> {
     };
     let wasm = std::fs::read(&input)?;
     let mut wasi = WasiCtxBuilder::new();
+    // Randomness while booting (hash seeds) is fixed too.
+    wasi.wall_clock(Epoch)
+        .monotonic_clock(Epoch)
+        .secure_random(Deterministic::new(vec![7]))
+        .insecure_random(Deterministic::new(vec![7]))
+        .insecure_random_seed(7);
     if let Some(scripts) = args.next() {
         wasi.stdin(p2::pipe::MemoryInputPipe::new(std::fs::read(scripts)?));
     }

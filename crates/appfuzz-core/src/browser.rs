@@ -854,7 +854,10 @@ pub fn check(page: &RunRecord, s: &Session, m: &Manifest) -> Vec<Finding> {
     let reflected = crate::labels::tails_in(std::iter::once(body.as_str()))
         .iter()
         .any(|(c, t)| !s.fragment.contains(c.as_str()) && src.from.contains_key(c) && ["<", "'", "\""].iter().any(|q| crate::labels::unescaped(t, q)));
-    let inline = |place: &str| place.starts_with("handler:") || place.strip_prefix("script:").is_some_and(|u| u.contains(&format!("#{}", s.fragment)));
+    // An inline script is named by the page's URL, the fragment encoded as
+    // a browser encodes it (`<` as `%3C`).
+    let hash = url::Url::parse(&format!("{ORIGIN}/#{}", s.fragment)).ok().and_then(|u| u.fragment().map(|f| format!("#{f}"))).unwrap_or_default();
+    let inline = |place: &str| place.starts_with("handler:") || place.strip_prefix("script:").is_some_and(|u| !hash.is_empty() && u.contains(&hash));
     // The same for code the input became (a handler decodes `&#39;`).
     let injected: BTreeSet<String> = out.iter().filter(|f| f.kind == "code_injection").filter_map(|f| f.detail["sink"].as_str().map(str::to_string)).collect();
     let mut messages = BTreeSet::new();

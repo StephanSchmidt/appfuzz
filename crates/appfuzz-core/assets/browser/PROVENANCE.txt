@@ -1,13 +1,15 @@
 The browser guest: QuickJS (quickjs-ng, MIT, via rquickjs, MIT), a DOM
 shim on linkedom (ISC), HTML tree building with parse5 (MIT),
-cookies with tldts (MIT, Public Suffix List),
-and the page driver, built by make browser.
-Source: browser/ (guest/, js/, wit/).
+cookies with tldts (MIT, Public Suffix List), URLs with url
+(MIT/Apache-2.0) and the page driver, snapshotted after boot,
+built by make browser.
+Source: browser/ (guest/, js/, wit/, wizen/).
 rquickjs: 0.14.0
+url: 2.5.8
 linkedom: 0.18.15
 parse5: 8.1.0
 parse5 entities: 9.0.0
 tldts: 7.4.19
 tldts-core: 7.4.20
 rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
-SHA-256: 7e89b908195b344de5f19cad98361b52d57c42cf856dc0bf474d7252cc05274b
+SHA-256: 9c3664293c5086cad6ed5a8935ec8d6bcee01c837f932bb13be6c961df75d1cf

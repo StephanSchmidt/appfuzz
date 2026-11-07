@@ -409,6 +409,7 @@ fn boot() -> std::result::Result<Page, String> {
         let _ = if handled { call::<_, ()>(&ctx, "handled", (promise,)) } else { call::<_, ()>(&ctx, "rejected", (promise, reason)) };
     })));
     let ctx = Context::full(&rt).map_err(|e| format!("context: {e}"))?;
+    ctx.with(|ctx| crate::web::install(&ctx).map_err(|e| fail(&ctx, e)))?;
     ctx.with(|ctx| ctx.eval::<(), _>(SHIM).map_err(|e| fail(&ctx, e)))?;
     #[cfg(target_arch = "wasm32")]
     ctx.with(|ctx| bridge::install(&ctx).map_err(|e| fail(&ctx, e)))?;

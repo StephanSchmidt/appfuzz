@@ -21,6 +21,48 @@ fn visit_planned(html: &str, plan: Value) -> (RunRecord, Value) {
     (r, report)
 }
 
+/// A page's own checks (`new URL(next).host === location.host`) decide as
+/// in a browser: URLs parse by the WHATWG rules, as appfuzz judges them.
+#[test]
+fn urls_parse_as_a_browser_parses_them() {
+    let script = r#"
+        const host = (u) => { try { return new URL(u, location.href).hostname; } catch { return 'invalid'; } };
+        const u = new URL('https://app.example/a?x=1');
+        u.searchParams.append('q', 'a b!');
+        const v = new URL('https://app.example/p?a=1');
+        v.search = '?b=2';
+        v.port = 'x';
+        v.protocol = 'mailto';
+        console.log(JSON.stringify([
+          host('https://аpple.com'), host('https://ＥＶＩＬ.example'), host('http://0x7f.1/'), host('http://[::1]/'),
+          host('/\\evil.example'), host('https://evil.example:0x50/'),
+          new URL('../a b/%2e%2e/c?q=1 2#h', 'https://app.example/x/y/z').href,
+          u.href, v.href, v.searchParams.get('b'), new URLSearchParams('a=1+2&b=%zz&c').toString(),
+          [...new URLSearchParams([['x', 'é&']])].join(), String(new URLSearchParams({ k: 'v w' })),
+        ]));
+    "#;
+    let (_, report) = visit(&format!("<!doctype html><script>{script}</script>"));
+    let seen: Value = serde_json::from_str(report["console"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        seen,
+        json!([
+            "xn--pple-43d.com",
+            "evil.example",
+            "127.0.0.1",
+            "[::1]",
+            "evil.example",
+            "invalid",
+            "https://app.example/x/c?q=1%202#h",
+            "https://app.example/a?x=1&q=a+b%21",
+            "https://app.example/p?b=2",
+            "2",
+            "a=1+2&b=%25zz&c=",
+            "x,é&",
+            "k=v+w"
+        ])
+    );
+}
+
 #[test]
 fn fragments_and_omitted_document_elements_keep_their_visible_body_content() {
     for html in [
