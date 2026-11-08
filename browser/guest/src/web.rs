@@ -264,6 +264,44 @@ mod tests {
     }
 
     #[test]
+    fn json_serialization_keeps_its_lists_private() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            let result: String = ctx.eval(r#"(()=>{
+                const define=Object.defineProperty;let calls=0,text,list;
+                const value={x:[{y:2}]},replacer=['x','y'];
+                for(const key of ['0','1','2'])define(Array.prototype,key,{configurable:true,set(value){define(this,key,{value,writable:true,enumerable:true,configurable:true});calls++}});
+                try{text=JSON.stringify(value);list=JSON.stringify(value,replacer)}finally{for(const key of ['0','1','2'])delete Array.prototype[key]}
+                return text+' '+list+' '+calls;
+            })()"#).unwrap();
+            assert_eq!(result,r#"{"x":[{"y":2}]} {"x":[{"y":2}]} 0"#);
+        });
+    }
+
+    #[test]
+    fn json_serialization_keeps_public_inherited_values_and_callbacks() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            let result: String = ctx
+                .eval(
+                    r#"(()=>{
+                const value=[];value.length=1;let text,reads=0;
+                Object.defineProperty(Array.prototype,'0',{configurable:true,get(){reads++;return 'inherited'}});
+                try{text=JSON.stringify(value)}finally{delete Array.prototype[0]}
+                let getters=0,converts=0,replaces=0;
+                const object={get x(){getters++;return {toJSON(){converts++;return 2}}}};
+                const replaced=JSON.stringify(object,function(k,v){replaces++;return k==='x'?v+1:v});
+                return text+' '+reads+' '+replaced+' '+getters+' '+converts+' '+replaces;
+            })()"#,
+                )
+                .unwrap();
+            assert_eq!(result, r#"["inherited"] 1 {"x":3} 1 1 2"#);
+        });
+    }
+
+    #[test]
     fn allocating_deserialized_errors_does_not_construct_stack_traces() {
         let runtime = rquickjs::Runtime::new().unwrap();
         let context = rquickjs::Context::full(&runtime).unwrap();

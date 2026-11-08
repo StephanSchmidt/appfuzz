@@ -1,5 +1,7 @@
 [files]
 extend-exclude = [
+    # Vendored runtime sources and generated bindings retain upstream spelling.
+    "browser/vendor/rquickjs-sys/",
     # Vendored upstream interface files: keep them byte-identical.
     "crates/appfuzz-core/platforms/fastly/witx/",
     "**/deps/*.wit",

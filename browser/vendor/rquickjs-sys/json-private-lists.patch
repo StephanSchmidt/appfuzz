@@ -1,0 +1,30 @@
+--- a/quickjs/quickjs.c
++++ b/quickjs/quickjs.c
+@@ -51709,7 +51709,7 @@
+     wrapper = JS_UNDEFINED;
+ 
+     string_buffer_init(ctx, jsc->b, 0);
+-    jsc->stack = JS_NewArray(ctx);
++    jsc->stack = JS_NewObjectProtoClass(ctx, JS_NULL, JS_CLASS_ARRAY);
+     if (JS_IsException(jsc->stack))
+         goto exception;
+     if (JS_IsFunction(ctx, replacer)) {
+@@ -51720,7 +51720,7 @@
+             goto exception;
+         if (res) {
+             /* XXX: enumeration is not fully correct */
+-            jsc->property_list = JS_NewArray(ctx);
++            jsc->property_list = JS_NewObjectProtoClass(ctx, JS_NULL, JS_CLASS_ARRAY);
+             if (JS_IsException(jsc->property_list))
+                 goto exception;
+             if (js_get_length64(ctx, &n, replacer))
+@@ -51756,7 +51756,8 @@
+                     goto exception;
+                 }
+                 if (!JS_ToBoolFree(ctx, present)) {
+-                    JS_SetPropertyInt64(ctx, jsc->property_list, j++, v);
++                    if (JS_SetPropertyInt64(ctx, jsc->property_list, j++, v) < 0)
++                        goto exception;
+                 } else {
+                     JS_FreeValue(ctx, v);
+                 }

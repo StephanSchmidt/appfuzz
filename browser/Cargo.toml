@@ -4,6 +4,11 @@
 [workspace]
 resolver = "3"
 members = ["guest", "wizen"]
+exclude = ["vendor/rquickjs-sys"]
+
+[patch.crates-io]
+# Keep JSON serializer bookkeeping private without changing page callbacks.
+rquickjs-sys = { path = "vendor/rquickjs-sys" }
 
 [profile.release]
 opt-level = 3

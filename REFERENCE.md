@@ -1079,6 +1079,13 @@ executed with altered bytes. Byte-list fields and native HTTP adapters retain
 binary bodies. Readable body streams and Request/Response `formData()` decoding
 remain unsupported; using them makes coverage incomplete.
 
+The pinned QuickJS runtime includes a local fix for JSON serialization's internal
+cycle stack and replacer property list. These private lists cannot invoke page
+array index hooks; ordinary input getters, inherited elements, `toJSON` and
+replacer callbacks keep their standard behavior. Source checksums, the exact
+patch and update instructions are in
+[browser/vendor/rquickjs-sys/PATCHES.md](browser/vendor/rquickjs-sys/PATCHES.md).
+
 `structuredClone` preserves cycles, shared references, sparse arrays, native
 numeric/date/regexp/collection data, errors, DOMExceptions, blobs and files.
 ArrayBuffer transfers happen after successful serialization, including transfers

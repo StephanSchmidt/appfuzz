@@ -1,0 +1,14 @@
+const groups={},tests=[];let lines=[];
+const test=(name,run)=>tests.push({name,run});
+const log=(...args)=>lines.push(args.join(' '));
+async function runTests(){for(const {name,run} of tests){if(CASE&&name!==CASE)continue;lines=[];try{await run()}catch(e){log('ERROR',e.name,e.message)}groups[name]=lines.slice()}return groups}
+const bytes=async b=>Array.from(new Uint8Array(await b.arrayBuffer())).join(',');
+
+test('json-private-stack',()=>{const define=Object.defineProperty;let calls=0,text;define(Array.prototype,'0',{configurable:true,set(value){define(this,'0',{value,writable:true,enumerable:true,configurable:true});calls++}});try{text=JSON.stringify({x:1})}finally{delete Array.prototype[0]}log(text,calls)});
+test('response-json-private-stack',async()=>{const define=Object.defineProperty;let calls=0,response;define(Array.prototype,'0',{configurable:true,set(value){define(this,'0',{value,writable:true,enumerable:true,configurable:true});calls++}});try{response=Response.json({x:1})}finally{delete Array.prototype[0]}log(await response.text(),calls)});
+test('json-private-replacer-list',()=>{const define=Object.defineProperty;let calls=0,text;const value={x:1,y:2},replacer=['x'];define(Array.prototype,'0',{configurable:true,set(value){define(this,'0',{value,writable:true,enumerable:true,configurable:true});calls++}});try{text=JSON.stringify(value,replacer)}finally{delete Array.prototype[0]}log(text,calls)});
+test('json-private-stack-depth',()=>{const define=Object.defineProperty;let text,calls=0;for(const key of ['0','1','2','3'])define(Array.prototype,key,{configurable:true,set(value){define(this,key,{value,writable:true,enumerable:true,configurable:true});calls++}});try{text=JSON.stringify({x:[{y:2}]})}finally{for(const key of ['0','1','2','3'])delete Array.prototype[key]}log(text,calls)});
+test('json-public-inherited-index',()=>{const value=[];value.length=1;let text,reads=0;Object.defineProperty(Array.prototype,'0',{configurable:true,get(){reads++;return 'inherited'}});try{text=JSON.stringify(value)}catch(e){text=e.name}finally{delete Array.prototype[0]}log(text,reads)});
+test('json-public-callbacks',()=>{let getters=0,convert=0,replaces=0;const value={get x(){getters++;return {toJSON(k){convert++;return 2}}}};const text=JSON.stringify(value,function(k,v){replaces++;return k==='x'?v+1:v});log(text,getters,convert,replaces)});
+test('json-cycles-and-shared',()=>{const same={x:1};log(JSON.stringify([same,same]));same.self=same;try{JSON.stringify(same)}catch(e){log(e.name)}const marker={};try{JSON.stringify({get x(){throw marker}})}catch(e){log(e===marker)}});
+test('json-inherited-tojson',()=>{let reads=0,text;Object.defineProperty(Object.prototype,'toJSON',{configurable:true,get(){reads++;return undefined}});try{text=JSON.stringify({x:{y:2}})}finally{delete Object.prototype.toJSON}log(text,reads)});
