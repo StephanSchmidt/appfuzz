@@ -2,7 +2,7 @@
 // deserialize with native brands and captured intrinsics. Never use toJSON,
 // public constructors, prototype setters or author iterators for native data.
 import { serializedDOMException, deserializeDOMException } from './dom-exception.js';
-import { platformObject, platformKind } from './platform-state.js';
+import { platformObject } from './platform-state.js';
 import { runDOMCallback } from './dom-callbacks.js';
 const realm = globalThis, kindOf = globalThis.__native.cloneKind;
 const apply = Reflect.apply, create = Object.create, define = Object.defineProperty, descriptor = Object.getOwnPropertyDescriptor;
@@ -39,7 +39,8 @@ for (const [key, letter] of [['hasIndices', 'd'], ['global', 'g'], ['ignoreCase'
 // Read native stack data, as in HTML/Firefox, without invoking an author
 // stack accessor (Chrome currently invokes it).
 const errorStack = get(Error.prototype, 'stack');
-let platform = () => null, unsupported = () => {};
+let platform = () => null, unsupported = () => {}, portTransfers = { isPort: () => false };
+export function installPortTransfers(value) { portTransfers = value; }
 export function installClonePlatform(clone, report) { platform = clone; unsupported = report; }
 function list() { const value = []; setPrototype(value, null); return value; }
 function push(values, value) { values[values.length] = value; }
@@ -76,9 +77,11 @@ function optionsList(options) {
   if (!object(sequence)) throw argumentError('Transfer must be an iterable object');
   // Web IDL converts the complete sequence before transfer validation.
   // Element conversion errors do not perform IteratorClose.
-  const method = sequence[Symbol.iterator];
-  if (typeof method !== 'function') throw argumentError('Transfer must be iterable');
-  const iterator = apply(method, sequence, []);
+  return transferSequence(sequence, sequence[Symbol.iterator]);
+}
+export function transferSequence(sequence, method) {
+  if (!object(sequence) || typeof method !== 'function') throw argumentError('Transfer must be iterable');
+  const result = list(), iterator = apply(method, sequence, []);
   if (!object(iterator)) throw argumentError('Invalid transfer iterator');
   const next = iterator.next;
   if (typeof next !== 'function') throw argumentError('Invalid transfer iterator');
@@ -92,14 +95,13 @@ function optionsList(options) {
   }
   return result;
 }
-function clone(value, options) {
-  const transfers = optionsList(options), memory = new NativeMap(), records = list(), frames = list();
+export { optionsList as transferOptions, fail as cloneFailure };
+
+export function serializeMessage(value, transfers) {
+  const memory = new NativeMap(), records = list(), frames = list();
   for (let i = 0; i < transfers.length; i++) {
     const input = transfers[i], kind = kindOf(input);
-    if (kind !== 'ArrayBuffer') {
-      if (platformKind(input) === 'MessagePort') unsupported('structuredClone MessagePort transfer');
-      fail();
-    }
+    if (kind !== 'ArrayBuffer' && !portTransfers.isPort(input)) fail();
     if (mapHas(memory, input)) fail();
     const record = { __proto__: null, kind: 'ready', value: null, children: null };
     mapSet(memory, input, record); push(records, record);
@@ -198,26 +200,39 @@ function clone(value, options) {
   // A transferred buffer's final bytes include mutations made by getters.
   for (let i = 0; i < transfers.length; i++) {
     const input = transfers[i];
-    if (detached(input)) fail();
-    try { mapGet(memory, input).value = transferBuffer(input); } catch { fail(); }
-  }
-  for (let i = 0; i < records.length; i++) {
-    const record = records[i];
-    if (record.kind === 'view') record.value = new record.constructor(record.buffer.value, record.offset, record.length);
-  }
-  for (let i = 0; i < records.length; i++) {
-    const record = records[i], children = record.children;
-    switch (record.kind) {
-      case 'properties': for (let j = 0; j < children.length; j++) property(record.value, children[j][0], children[j][1].value); break;
-      case 'map': for (let j = 0; j < children.length; j += 2) mapSet(record.value, children[j].value, children[j + 1].value); break;
-      case 'set': for (let j = 0; j < children.length; j++) setAdd(record.value, children[j].value); break;
-      case 'error': property(record.value, 'cause', children[0].value, false); break;
+    const record = mapGet(memory, input);
+    if (portTransfers.isPort(input)) { record.kind = 'port'; record.holder = portTransfers.take(input); }
+    else {
+      if (detached(input)) fail();
+      try { record.value = transferBuffer(input); } catch { fail(); }
     }
   }
-  return root.value;
+  let delivered = false, result;
+  return () => {
+    if (delivered) return result;
+    const ports = [];
+    for (let i = 0; i < records.length; i++) if (records[i].kind === 'port') {
+      const record = records[i]; record.value = portTransfers.receive(record.holder);
+      property(ports, ports.length, record.value);
+    }
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      if (record.kind === 'view') record.value = new record.constructor(record.buffer.value, record.offset, record.length);
+    }
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i], children = record.children;
+      switch (record.kind) {
+        case 'properties': for (let j = 0; j < children.length; j++) property(record.value, children[j][0], children[j][1].value); break;
+        case 'map': for (let j = 0; j < children.length; j += 2) mapSet(record.value, children[j].value, children[j + 1].value); break;
+        case 'set': for (let j = 0; j < children.length; j++) setAdd(record.value, children[j].value); break;
+        case 'error': property(record.value, 'cause', children[0].value, false); break;
+      }
+    }
+    delivered = true; result = { value: root.value, ports }; return result;
+  };
 }
 export const structuredClone = { structuredClone(value, options = undefined) {
   if (this != null && this !== realm) throw argumentError('Illegal structuredClone receiver');
   if (!arguments.length) throw argumentError('structuredClone requires a value');
-  return runDOMCallback(() => clone(value, options));
+  return runDOMCallback(() => serializeMessage(value, optionsList(options))().value);
 } }.structuredClone;

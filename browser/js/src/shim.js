@@ -1,3 +1,6 @@
+import { frameworkCandidate, editable, nodeText, normalizedText, documentText } from './exploration.js';
+import { MessagePort, MessageChannel, installMessagePortTasks } from './message-ports.js';
+import { MessageEvent } from './message-events.js';
 import { installStackReporter } from './error-stacks.js';
 import { structuredClone, installClonePlatform } from './structured-clone.js';
 import { markPlatform } from './platform-state.js';
@@ -62,14 +65,16 @@ const S = {
   url: null, origin: '', document: null, files: {}, responses: {}, cookies: new CookieJar(() => S.now),
   errors: [], console: [], requests: [], navigations: [], code: [],
   cookieWrites: [], storage: [], dialogs: [], history: [], unmodelled: new Set(),
-  listened: new Map(), cands: [], scripts: [], dynamicScripts: [],
+  listened: new WeakMap(), cands: [], scripts: [], dynamicScripts: [],
   active: null, readyState: 'loading', actions: [], currentExternal: false,
 };
+
+const listenerTypes = S.listened.get.bind(S.listened), saveListenerTypes = S.listened.set.bind(S.listened), forgetListenerTypes = S.listened.delete.bind(S.listened);
 
 setEventClock(() => S.now - S.start);
 installControlState(queueDetailsToggle);
 
-const push = (list, v) => { if (list.length < CAP) nativeDefine(list, list.length, { value: v, writable: true, enumerable: true, configurable: true }); };
+const push = (list, v) => { if (list.length < CAP) nativeDefine(list, list.length, { __proto__: null, value: v, writable: true, enumerable: true, configurable: true }); };
 const clip = (s, n = 400) => { s = nativeString(s); return s.length > n ? diagnosticSlice(s, 0, n) + '…' : s; };
 let dispatchGlobalError = null, dispatchGlobalEvent = null, reportingError = false;
 const error = (where, value, notify = true) => {
@@ -368,9 +373,7 @@ class KeyboardEvent extends UIEvent {
 }
 class FocusEvent extends UIEvent { constructor(t, i = {}) { super(t, i); setRelatedTarget(this, nullableTarget(i.relatedTarget)); } get relatedTarget() { return relatedTarget(this); } }
 class SubmitEvent extends Ev { constructor(t, i = {}) { super(t, i); this.submitter = i.submitter ?? null; } }
-class MessageEvent extends Ev {
-  constructor(t, i = {}) { super(t, i); this.data = i.data ?? null; this.origin = i.origin ?? ''; this.lastEventId = ''; this.source = i.source ?? null; this.ports = []; }
-}
+
 class ProgressEvent extends Ev { constructor(t, i = {}) { super(t, i); this.lengthComputable = !!i.lengthComputable; this.loaded = i.loaded ?? 0; this.total = i.total ?? 0; } }
 class HashChangeEvent extends Ev { constructor(t, i = {}) { super(t, i); this.oldURL = i.oldURL ?? ''; this.newURL = i.newURL ?? ''; } }
 class PopStateEvent extends Ev { constructor(t, i = {}) { super(t, i); this.state = i.state ?? null; } }
@@ -456,10 +459,10 @@ installEventHooks({
   activated: completeActivation,
   changed(target, types) {
     signalListenersChanged(target, types);
-    if (!types.length) { mapDelete(S.listened, target); return; }
+    if (!types.length) { forgetListenerTypes(target); return; }
     const set = new NativeSet();
     for (let i = 0; i < types.length; i++) nativeSetAdd(set, types[i]);
-    mapSet(S.listened, target, set);
+    saveListenerTypes(target, set);
   },
   current(value, shadow, restore) { const previous = currentEvent; if (restore || !shadow) currentEvent = value; return previous; },
 }, BrowserDOMException);
@@ -546,22 +549,17 @@ class AbortController {
 setAbortEventDispatcher(signal => fireEvent(signal, new Ev('abort')));
 Object.assign(G, { AbortSignal, AbortController });
 
-class MessagePort extends L.EventTarget {
-  constructor() { super(); markPlatform(this, 'MessagePort'); this.onmessage = null; this._other = null; }
-  postMessage(data) {
-    const o = this._other;
-    addTimer(() => {
-      const ev = new MessageEvent('message', { data });
-      fireEvent(o, ev);
-    }, 0, [], false, 'MessageChannel', false);
-  }
-  start() {}
-  close() {}
-}
-G.MessagePort = MessagePort;
-G.MessageChannel = class MessageChannel {
-  constructor() { markPlatform(this); this.port1 = new MessagePort(); this.port2 = new MessagePort(); this.port1._other = this.port2; this.port2._other = this.port1; }
-};
+G.MessagePort = MessagePort; G.MessageChannel = MessageChannel;
+let messageCheckpoint = () => false;
+// Port messages are tasks, not timers: daily timer coalescing and timer
+// nesting clamps must not delay an already queued channel message.
+installMessagePortTasks(callback => {
+  const id = ++S.seq;
+  mapSet(S.timers, id, { id, order: ++S.timerOrder, due: S.now, fn: callback, args: [], repeat: false,
+    timeout: 0, nesting: 0, kind: 'MessageChannel' });
+}, () => {
+  if (messageCheckpoint()) unmodelled('microtask checkpoint budget');
+});
 
 // --- Network: every request is recorded; answers come from the session -----
 
@@ -927,7 +925,7 @@ class FileReader extends L.EventTarget {
   abort() {}
 }
 Object.assign(G, { Blob, File, FileReader });
-for (const [Class, types] of [[MessagePort, ['message', 'messageerror']], [XMLHttpRequest, ['readystatechange', 'load', 'error', 'abort', 'loadstart', 'loadend', 'progress', 'timeout']], [FileReader, ['load', 'error', 'abort', 'loadstart', 'loadend', 'progress']]]) {
+for (const [Class, types] of [[XMLHttpRequest, ['readystatechange', 'load', 'error', 'abort', 'loadstart', 'loadend', 'progress', 'timeout']], [FileReader, ['load', 'error', 'abort', 'loadstart', 'loadend', 'progress']]]) {
   for (const type of types) Object.defineProperty(Class.prototype, 'on' + type, { configurable: true, enumerable: true,
     get() { return getHandler(this, type); }, set(value) { setHandler(this, type, value); },
   });
@@ -1440,7 +1438,7 @@ function installWindow(doc) {
   L.Document.prototype.createEvent = function (name) {
     if (!arguments.length) throw new NativeTypeError('createEvent requires a name');
     const type = domString(name).toLowerCase();
-    const Classes = { __proto__: null, event: Ev, events: Ev, htmlevents: Ev, customevent: L.CustomEvent, uievent: UIEvent, uievents: UIEvent, mouseevent: MouseEvent, mouseevents: MouseEvent, keyboardevent: KeyboardEvent };
+    const Classes = { __proto__: null, event: Ev, events: Ev, htmlevents: Ev, customevent: L.CustomEvent, uievent: UIEvent, uievents: UIEvent, mouseevent: MouseEvent, mouseevents: MouseEvent, keyboardevent: KeyboardEvent, messageevent: MessageEvent };
     const Class = Classes[type];
     if (!Class) throw new BrowserDOMException('Unsupported event interface', 'NotSupportedError');
     const event = new Class(''); markEventUninitialized(event); return event;
@@ -1502,15 +1500,8 @@ function installWindow(doc) {
   define(E, 'scrollTop', { get: () => 0, set() {} });
   define(E, 'scrollLeft', { get: () => 0, set() {} });
   define(E, 'offsetParent', { get() { return this.parentElement; } });
-  H.focus = function () {
-    if (S.active === this) return;
-    const old = S.active;
-    S.active = this;
-    if (old && old.dispatchEvent) { old.dispatchEvent(new FocusEvent('blur')); old.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); }
-    this.dispatchEvent(new FocusEvent('focus'));
-    this.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
-  };
-  H.blur = function () { if (S.active === this) { S.active = null; this.dispatchEvent(new FocusEvent('blur')); } };
+  H.focus = function () { focusNode(this); };
+  H.blur = function () { if (S.active === this) { S.active = null; fireEvent(this, new FocusEvent('blur')); } };
   H.click = function () {
     if (nodeInfo(this)?.kind !== 1 || !htmlName(this)) throw new NativeTypeError('An HTMLElement is required');
     if (disabled(this) || clicking(this)) return;
@@ -1565,41 +1556,40 @@ const TYPED = new Set(['', 'text', 'search', 'email', 'url', 'tel', 'password', 
 const CLICKISH = new Set(['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'dblclick', 'submit', 'change', 'input', 'keydown', 'keyup', 'keypress']);
 const NATIVE = new Set(['button', 'input', 'select', 'textarea', 'summary']);
 const interactive = (el) => {
-  const t = el.localName;
+  const t = htmlName(el);
   if (setHas(NATIVE, t)) return true;
-  if ((t === 'a' || t === 'area') && el.hasAttribute('href')) return true;
-  return el.hasAttribute('onclick') || el.getAttribute('role') === 'button' || el.hasAttribute('contenteditable') || el.hasAttribute('tabindex');
+  if (activationKind(el) === 'link') return true;
+  return eventAttribute(el, 'onclick') !== null || eventAttribute(el, 'role') === 'button' || eventAttribute(el, 'contenteditable') !== null || eventAttribute(el, 'tabindex') !== null;
 };
 
-function delegated(el) {
-  for (const k of Object.keys(el)) {
-    if (k.startsWith('__reactProps')) {
-      const p = el[k];
-      if (p && (p.onClick || p.onMouseDown || p.onPointerDown || p.onChange || p.onInput || p.onSubmit)) return true;
-    } else if (k === '__click' || k === '__input' || k === '__change' || k === '__pointerdown' || k === '__mousedown') {
-      return true;
-    }
-  }
-  return false;
-}
-
 function candidates() {
-  const out = [];
-  const doc = G.document;
-  for (const el of doc.querySelectorAll('*')) {
-    if (el.hasAttribute('disabled') || el.hasAttribute('hidden')) continue;
-    const types = mapGet(S.listened, el);
+  const out = [], descriptions = [];
+  nativeSetPrototype(out, null); nativeSetPrototype(descriptions, null);
+  const nodes = treeElements(S.document);
+  for (let i = 0; i < nodes.length; i++) {
+    const el = nodes[i];
+    if (disabled(el) || eventAttribute(el, 'hidden') !== null) continue;
+    const types = listenerTypes(el);
     let own = false;
     if (types) setEach(types, type => { if (setHas(CLICKISH, type)) own = true; });
-    if (own || interactive(el) || delegated(el)) out.push(el);
+    if (own || interactive(el) || frameworkCandidate(el)) out[out.length] = el;
   }
   S.cands = out;
-  return out.map((el, i) => {
-    const tag = el.localName;
-    const type = (el.getAttribute('type') || '').toLowerCase();
-    const kind = (tag === 'input' && setHas(TYPED, type)) || tag === 'textarea' || el.isContentEditable ? 'type' : tag === 'select' || (htmlName(el) === 'input' && (controlType(el) === 'color' || controlType(el) === 'range')) ? 'select' : 'click';
-    return { i, tag, id: el.id || '', kind, text: clip((el.textContent || '').trim().replace(/\s+/g, ' '), 60) };
-  });
+  for (let i = 0; i < out.length; i++) {
+    const el = out[i], tag = nameIdentity(el)?.local || '', html = htmlName(el), type = controlType(el);
+    const kind = (html === 'input' && setHas(TYPED, type)) || html === 'textarea' || editable(el) ? 'type' : html === 'select' || (htmlName(el) === 'input' && (type === 'color' || type === 'range')) ? 'select' : 'click';
+    descriptions[descriptions.length] = { i, tag, id: eventAttribute(el, 'id') || '', kind, text: clip(normalizedText(nodeText(el)), 60) };
+  }
+  return descriptions;
+}
+
+function focusNode(node) {
+  if (S.active === node) return;
+  const old = S.active;
+  S.active = node;
+  if (old) { fireEvent(old, new FocusEvent('blur')); fireEvent(old, new FocusEvent('focusout', { bubbles: true })); }
+  fireEvent(node, new FocusEvent('focus'));
+  fireEvent(node, new FocusEvent('focusin', { bubbles: true }));
 }
 
 function dispatch(el, ev) { return fireEvent(el, ev); }
@@ -1612,7 +1602,7 @@ function click(el, gesture) {
     if (gesture) {
       dispatch(el, new PointerEvent('pointerdown', o));
       dispatch(el, new MouseEvent('mousedown', o));
-      if (el.focus) el.focus();
+      if (htmlName(el)) focusNode(el);
       dispatch(el, new PointerEvent('pointerup', o));
       dispatch(el, new MouseEvent('mouseup', o));
     }
@@ -1730,17 +1720,17 @@ function formNavigate(form, submitter) {
 function act(i, value) {
   const el = S.cands[i];
   if (!el || !connected(el) || disabled(el)) return false;
-  const c = { i, tag: el.localName, id: el.id || '' };
+  const c = { i, tag: nameIdentity(el)?.local || '', id: eventAttribute(el, 'id') || '' };
   S.gesture = true;
   try {
-    const tag = htmlName(el) || el.localName;
-    const type = tag === 'input' ? controlType(el) : (el.getAttribute('type') || '').toLowerCase();
-    const editable = tag !== 'input' && tag !== 'textarea' && tag !== 'select' && el.isContentEditable;
+    const tag = htmlName(el);
+    const type = controlType(el);
+    const editing = tag !== 'input' && tag !== 'textarea' && tag !== 'select' && editable(el);
     const readonly = (tag === 'input' || tag === 'textarea') && eventAttribute(el, 'readonly') !== null;
-    if ((((tag === 'input' && setHas(TYPED, type)) || tag === 'textarea') && !readonly) || editable) {
+    if ((((tag === 'input' && setHas(TYPED, type)) || tag === 'textarea') && !readonly) || editing) {
       const v = value == null ? representativeInputValue(type) : nativeString(value);
-      el.focus();
-      if (editable) el.textContent = v; else setControlValue(el, v);
+      focusNode(el);
+      if (editing) el.textContent = v; else setControlValue(el, v);
       dispatch(el, new L.InputEvent('input', { bubbles: true, data: v, inputType: 'insertText' }));
       dispatch(el, new Ev('change', { bubbles: true }));
       c.kind = 'type';
@@ -1945,10 +1935,11 @@ G.console = Object.fromEntries(['log', 'info', 'warn', 'error', 'debug', 'trace'
 }]));
 Object.assign(G.console, { group() {}, groupCollapsed() {}, groupEnd() {}, time() {}, timeEnd() {}, timeLog() {}, count() {}, countReset() {}, assert(c, ...a) { if (!c) G.console.error('Assertion failed:', ...a); } });
 
-function unsupportedAPIs() { const result = []; setEach(S.unmodelled, value => { result[result.length] = value; }); return result; }
-const pageText = () => (G.document.body ? G.document.body.textContent.replace(/\s+/g, ' ').trim() : '');
+function unsupportedAPIs() { const result = []; nativeSetPrototype(result, null); setEach(S.unmodelled, value => { result[result.length] = value; }); return result; }
+const pageText = () => documentText(S.document);
 G.__af = {
   bindClassic(run) { S.runClassic = run; },
+  bindMessageCheckpoint(value) { messageCheckpoint = value; },
   bindHost(bridge) { browserHost = bridge; },
   // `now` and `hostSeed`: the host's clock and randomness, when it has them.
   init(json, now, hostSeed) {

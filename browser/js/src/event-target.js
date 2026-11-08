@@ -8,7 +8,8 @@ import { signalState, onSignalAbort } from './abort-state.js';
 import { runDOMCallback } from './dom-callbacks.js';
 const targets = new WeakMap(), aliases = new WeakMap();
 const targetFor = targets.get.bind(targets), remember = targets.set.bind(targets), aliasFor = aliases.get.bind(aliases), rememberAlias = aliases.set.bind(aliases);
-const apply = Reflect.apply, define = Object.defineProperty, NativeTypeError = TypeError, NativeMap = Map;
+const apply = Reflect.apply, define = Object.defineProperty, NativeTypeError = TypeError, NativeMap = Map, setPrototype = Object.setPrototypeOf;
+function privateList() { const result = []; setPrototype(result, null); return result; }
 const mapGet = Function.prototype.call.bind(Map.prototype.get), mapSet = Function.prototype.call.bind(Map.prototype.set);
 let DOMError = BrowserDOMException;
 let hooks = { error() {}, changed() {}, current() {}, activation() {}, activated() {} };
@@ -28,7 +29,7 @@ export function registerWindow(document, internal, global, view) {
   rememberDocumentWindow(document, internal);
 }
 function listenersChanged(target, record) {
-  const types = [];
+  const types = privateList();
   for (let i = 0; i < record.listeners.length; i++) if (!record.listeners[i].removed) types[types.length] = record.listeners[i].type;
   hooks.changed(target, types);
 }
@@ -115,7 +116,7 @@ export function setContentHandler(target, type, compile) {
   activateHandler(target, type, slot);
 }
 function pathFor(target, state, legacyTarget) {
-  const path = [], root = physicalRoot(target); let node = target, previous = null;
+  const path = privateList(), root = physicalRoot(target); let node = target, previous = null;
   const related = state.originalRelated;
   if (retarget(related, target) === target && related !== target) return path;
   while (node) {
@@ -130,12 +131,12 @@ function pathFor(target, state, legacyTarget) {
   }
   return path;
 }
-function invoke(entry, event, capture) {
+function invoke(entry, event, capture, checkpoint) {
   const state = eventState(event);
   state.target = entry.target; state.related = entry.related;
   if (state.stopped) return;
   state.current = entry.exposed; state.currentEntry = entry;
-  const listeners = [], source = entry.listeners.listeners;
+  const listeners = privateList(), source = entry.listeners.listeners;
   for (let i = 0; i < source.length; i++) listeners[listeners.length] = source[i];
   for (let i = 0; i < listeners.length; i++) {
     const listener = listeners[i];
@@ -149,11 +150,11 @@ function invoke(entry, event, capture) {
         else apply(listener.callback.handleEvent, listener.callback, [event]);
       });
     } catch (e) { hooks.error('listener:' + state.type, e); }
-    finally { state.passive = false; hooks.current(previous, false, true); }
+    finally { if (checkpoint) checkpoint(); state.passive = false; hooks.current(previous, false, true); }
     if (state.immediate) break;
   }
 }
-export function fireEvent(target, event, trusted = true, legacyTarget = null) {
+export function fireEvent(target, event, trusted = true, legacyTarget = null, checkpoint = null) {
   target = canonicalTarget(target);
   const state = eventState(event);
   if (state.dispatching || !state.initialized) throw new DOMError('The event is already being dispatched or is uninitialized', 'InvalidStateError');
@@ -167,10 +168,10 @@ export function fireEvent(target, event, trusted = true, legacyTarget = null) {
       clear = !!shadowInfo(physicalRoot(path[i].rawTarget)) || !!shadowInfo(physicalRoot(path[i].rawRelated)); break;
     }
     activation = hooks.activation(path, event);
-    for (let i = path.length - 1; i >= 0; i--) { state.phase = path[i].atTarget ? 2 : 1; invoke(path[i], event, true); }
+    for (let i = path.length - 1; i >= 0; i--) { state.phase = path[i].atTarget ? 2 : 1; invoke(path[i], event, true, checkpoint); }
     for (let i = 0; i < path.length; i++) {
       if (!path[i].atTarget && !state.bubbles) continue;
-      state.phase = path[i].atTarget ? 2 : 3; invoke(path[i], event, false);
+      state.phase = path[i].atTarget ? 2 : 3; invoke(path[i], event, false, checkpoint);
     }
   } finally {
     state.phase = 0; state.current = null; state.currentEntry = null; state.path = [];
@@ -181,8 +182,12 @@ export function fireEvent(target, event, trusted = true, legacyTarget = null) {
   hooks.activated(activation, event);
   return !state.canceled;
 }
+export function initializeEventTarget(value) {
+  markPlatform(value); remember(value, { exposed: value, listeners: privateList(), handlers: new NativeMap(), window: false });
+  return value;
+}
 export class EventTarget {
-  constructor() { markPlatform(this); remember(this, { exposed: this, listeners: [], handlers: new NativeMap(), window: false }); }
+  constructor() { initializeEventTarget(this); }
   addEventListener(type, callback, options) {
     const target = canonicalTarget(this);
     if (arguments.length < 2) throw new NativeTypeError('addEventListener requires a type and callback');

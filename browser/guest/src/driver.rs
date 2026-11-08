@@ -424,6 +424,31 @@ fn run_inline(ctx: Ctx<'_>, code: String, url: String) -> Result<()> {
     ctx.eval_with_options(code, opts)
 }
 
+// Callback cleanup for host-fired message listeners. Reenter the same context
+// directly rather than taking the runtime lock while JavaScript is running.
+fn message_checkpoint(ctx: Ctx<'_>) -> bool {
+    for _ in 0..MAX_JOBS {
+        let mut job_context = std::ptr::null_mut();
+        // SAFETY: ctx is rooted and its runtime is exclusively executing on
+        // this thread. QuickJS supports nested job execution; the returned
+        // context is valid when a job reports an exception.
+        let status = unsafe { qjs::JS_ExecutePendingJob(qjs::JS_GetRuntime(ctx.as_raw().as_ptr()), &mut job_context) };
+        if status < 0 {
+            if let Some(pointer) = std::ptr::NonNull::new(job_context) {
+                // SAFETY: the job context belongs to this live runtime and
+                // is used only within the callback's dynamic lifetime.
+                let failed = unsafe { Ctx::from_raw(pointer) };
+                report(&failed, "job", Error::Exception);
+            }
+        } else if status == 0 {
+            return false;
+        }
+    }
+    // SAFETY: the callback still owns the same live runtime. An exactly-full
+    // checkpoint is complete if its final job emptied the queue.
+    unsafe { qjs::JS_IsJobPending(qjs::JS_GetRuntime(ctx.as_raw().as_ptr())) }
+}
+
 /// A runtime with the shim loaded and no page yet.
 fn boot() -> std::result::Result<Page, String> {
     let rt = Runtime::new().map_err(|e| format!("runtime: {e}"))?;
@@ -443,6 +468,10 @@ fn boot() -> std::result::Result<Page, String> {
     ctx.with(|ctx| {
         let run = Function::new(ctx.clone(), run_inline).map_err(|e| fail(&ctx, e))?;
         call::<_, ()>(&ctx, "bindClassic", (run,)).map_err(|e| fail(&ctx, e))
+    })?;
+    ctx.with(|ctx| {
+        let checkpoint = Function::new(ctx.clone(), message_checkpoint).map_err(|e| fail(&ctx, e))?;
+        call::<_, ()>(&ctx, "bindMessageCheckpoint", (checkpoint,)).map_err(|e| fail(&ctx, e))
     })?;
     #[cfg(target_arch = "wasm32")]
     ctx.with(|ctx| {
@@ -535,6 +564,42 @@ pub fn session(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn retained_listener_objects(script: &str) -> i64 {
+        let page = boot().unwrap();
+        page.ctx.with(|ctx| {
+            call::<_, usize>(&ctx, "init", (r#"{"url":"https://app.example/","html":"<body></body>"}"#, 0.0, 1_u32)).unwrap();
+        });
+        page.rt.run_gc();
+        let before = page.rt.memory_usage().obj_count;
+        page.ctx.with(|ctx| ctx.eval::<(), _>(script).unwrap());
+        page.rt.run_gc();
+        page.rt.memory_usage().obj_count - before
+    }
+
+    #[test]
+    fn detached_listened_nodes_are_collectible() {
+        let retained = retained_listener_objects("for(let i=0;i<256;i++){const node=document.createElement('div');node.addEventListener('click',()=>{});}");
+        assert!(retained < 128, "detached listener objects retained: {retained}");
+    }
+
+    #[test]
+    fn closed_listened_ports_are_collectible() {
+        let retained = retained_listener_objects(
+            "for(let i=0;i<256;i++){const channel=new MessageChannel();channel.port1.onmessage=()=>{};channel.port2.onmessage=()=>{};channel.port1.close();channel.port2.close();}",
+        );
+        assert!(retained < 128, "closed port objects retained: {retained}");
+    }
+
+    #[test]
+    fn controller_discovery_does_not_call_array_index_setters() {
+        let out = session(
+            r#"{"url":"https://app.example/","html":"<button type=button>tap</button><script>const define=Object.defineProperty;let calls=0;document.querySelector('button').addEventListener('click',()=>console.log('clicked'));define(Array.prototype,'0',{configurable:true,set(value){define(this,'0',{value,writable:true,enumerable:true,configurable:true});calls++}});setTimeout(()=>console.log('callbacks',calls),2000)</script>"}"#,
+        );
+        assert!(out.contains(r#""text":"clicked""#), "{out}");
+        assert!(out.contains(r#""text":"callbacks 0""#), "{out}");
+        assert!(out.contains(r#""errors":[]"#), "{out}");
+    }
 
     #[test]
     fn private_driver_survives_recreated_globals_and_report_serializers() {

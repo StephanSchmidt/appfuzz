@@ -3,6 +3,7 @@
 import { END, NEXT, PREV, START, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
 import { nameIdentity } from './names.js';
 import { shadowRoots } from '../node_modules/linkedom/esm/shared/shadow-roots.js';
+const setPrototype = Object.setPrototypeOf;
 const nodes = new WeakMap(), shadows = new WeakMap(), windows = new WeakMap();
 const node = nodes.get.bind(nodes), saveNode = nodes.set.bind(nodes);
 export function initializeNode(value, kind, local) { saveNode(value, { kind, local }); }
@@ -35,7 +36,7 @@ export function shadowAncestor(root, value) {
   return false;
 }
 export function closedAncestors(value) {
-  const roots = [];
+  const roots = []; setPrototype(roots, null);
   for (let current = value; current;) {
     const info = shadowInfo(current);
     if (info?.mode === 'closed') roots[roots.length] = current;

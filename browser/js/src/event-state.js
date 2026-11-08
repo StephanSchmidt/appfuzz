@@ -37,6 +37,14 @@ function reset(s, type, bubbles, cancelable) {
   s.initialized = true; s.type = type; s.bubbles = bubbles; s.cancelable = cancelable;
   s.stopped = s.immediate = s.canceled = s.trusted = false; s.target = null;
 }
+export function initializeEvent(event, type, bubbles = false, cancelable = false, composed = false) {
+  markPlatform(event);
+  save(event, { type, bubbles, cancelable, composed, initialized: true, canceled: false, timeStamp: clock(), trusted: false,
+    stopped: false, immediate: false, passive: false, dispatching: false,
+    target: null, current: null, phase: 0, path: [], currentEntry: null, related: null, originalRelated: null });
+  define(event, 'isTrusted', { __proto__: null, enumerable: true, get() { return eventState(this).trusted; } });
+}
+export { reset as resetEvent };
 export function markEventUninitialized(event) { eventState(event).initialized = false; }
 export class Event {
   constructor(type, options = {}) {
@@ -47,10 +55,7 @@ export class Event {
       const dictionary = eventDictionary(options);
       return { bubbles: !!dictionary.bubbles, cancelable: !!dictionary.cancelable, composed: !!dictionary.composed };
     });
-    save(this, { type, ...init, initialized: true, canceled: false, timeStamp: clock(), trusted: false,
-      stopped: false, immediate: false, passive: false, dispatching: false,
-      target: null, current: null, phase: 0, path: [], currentEntry: null, related: null, originalRelated: null });
-    define(this, 'isTrusted', { enumerable: true, get() { return eventState(this).trusted; } });
+    initializeEvent(this, type, init.bubbles, init.cancelable, init.composed);
   }
   get type() { return eventState(this).type; }
   get target() { return eventState(this).target; }
@@ -78,7 +83,7 @@ export class Event {
         for (let k = 0; k < visible.length; k++) if (visible[k] === entry.closed[j]) found = true;
         if (!found) { hidden = true; break; }
       }
-      if (!hidden) result[result.length] = entry.exposed;
+      if (!hidden) define(result, result.length, { __proto__: null, value: entry.exposed, writable: true, enumerable: true, configurable: true });
     }
     return result;
   }

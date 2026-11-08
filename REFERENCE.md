@@ -1067,12 +1067,25 @@ bytes when visited; transfers include later getter mutations. Fixed buffer views
 retain their shared backing buffer and offsets. Cloning uses private brands and
 native data, rather than public constructors, iterators or `toJSON` hooks.
 Error stack copying follows HTML/Firefox's native stack behavior; it does not
-invoke an author stack getter. MessagePort transfers, resizable-view length
-tracking and V8 stack formatters remain listed under `unsupported.apis` as
-`structuredClone MessagePort transfer`,
-`structuredClone resizable ArrayBuffer view length tracking`, and
-`Error.prepareStackTrace` respectively. Those paths cannot establish a complete
-passing review.
+invoke an author stack getter. Resizable-view length tracking and V8 stack
+formatters remain listed under `unsupported.apis` as
+`structuredClone resizable ArrayBuffer view length tracking` and
+`Error.prepareStackTrace`. Those paths cannot establish a complete passing review.
+
+MessageChannel endpoints, port links and message queues use private state.
+Posting serializes data immediately; delivery deserializes it in a later task,
+with frozen `MessageEvent.ports` and read-only message fields. Queues start paused;
+`start()` or an `onmessage` assignment enables them. Port transfers move pending
+messages to a fresh paused receiver without copying listeners. Posting cannot
+transfer its sending endpoint; duplicate or closed endpoints are rejected.
+Serialization failures preserve endpoints.
+Controller discovery and text reports use physical tree data and private
+attributes. Public DOM property shadows, collection index setters and framework
+accessors do not run during discovery. Framework accessors and proxy-backed props
+remain potential delegated targets without invoking them during inspection.
+Native port listeners run a microtask checkpoint between callbacks; synthetic
+dispatch remains synchronous. Internal listener tracking does not retain detached
+nodes or closed ports solely because they have listeners.
 Requests and clones carry distinct signals that follow their source. Combined
 signals (`AbortSignal.any`) preserve the first abort reason and update dependent
 state before abort events run. Fetch cancellation uses private signal state,

@@ -430,11 +430,12 @@ fn report(script: &str) -> Value {
     result
 }
 #[test]
-fn transferring_message_ports_is_explicitly_incomplete() {
-    let report =
-        report("const channel=new MessageChannel();try{structuredClone(channel.port1,{transfer:[channel.port1]})}catch(e){console.log(e.name,e.code)}");
-    assert_eq!(report["unmodelled"], json!(["structuredClone MessagePort transfer"]), "{report}");
-    assert_eq!(report["console"][0]["text"], "DataCloneError 25", "{report}");
+fn transferring_message_ports_preserves_identity_and_completes() {
+    let report = report(
+        "const channel=new MessageChannel();const copy=structuredClone(channel.port1,{transfer:[channel.port1]});console.log(copy!==channel.port1,copy instanceof MessagePort);channel.port1.close();channel.port2.close();copy.close();",
+    );
+    assert_eq!(report["unmodelled"], json!([]), "{report}");
+    assert_eq!(report["console"][0]["text"], "true true", "{report}");
 }
 #[test]
 fn resizable_view_length_tracking_is_explicitly_incomplete() {
