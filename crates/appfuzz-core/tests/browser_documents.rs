@@ -18,7 +18,7 @@ fn visit_planned(html: &str, plan: Value) -> (RunRecord, Value) {
 fn visit_unchecked(html: &str, plan: Value) -> (RunRecord, Value) {
     let browser = Browser::shared().unwrap();
     let input = json!({"url":"https://app.example/","html":html});
-    let plan = Plan::parse(&plan.to_string()).unwrap();
+    let plan = net_plan(&plan.to_string()).unwrap();
     let r = browser.app.run(&browser.app.spec(browser.app.export(SESSION).unwrap(), vec![json!(input.to_string())], plan, 1));
     assert_eq!(r.outcome.kind, OutcomeKind::Ok, "{:?}", r.outcome);
     let report: Value = serde_json::from_str(r.result.as_ref().unwrap().as_str().unwrap()).unwrap();
@@ -2113,4 +2113,10 @@ fn dispatch_and_cancellation_reject_non_events_without_reading_their_properties(
     );
     assert_eq!(report["console"][0]["text"], "TypeError 0");
     assert_eq!(report["console"][1]["text"], "TypeError 0");
+}
+
+#[path = "support/browser_plan.rs"]
+mod browser_plan;
+fn net_plan(text: &str) -> anyhow::Result<Plan> {
+    browser_plan::parse(text)
 }

@@ -102,3 +102,18 @@ fn request_to_host_flow_is_checked_without_a_response_body() {
     r.events[1].args.insert("body".into(), json!(text));
     assert!(detect::per_run(&r, &m).iter().any(|f| f.kind == "input_passthrough"));
 }
+
+#[test]
+fn browser_network_byte_options_preserve_detection_and_raw_evidence() {
+    for function in [appfuzz_core::browser::FETCH_OWN, appfuzz_core::browser::FETCH_OTHER] {
+        let (mut run, mut manifest) = record(&payload("sk_0123456789abcdef"));
+        run.events[1].func = function.into();
+        run.events[1].args.insert("body".into(), json!({"some":payload("sk_0123456789abcdef")}));
+        let specification = manifest.functions.remove(CLIENT_KEY).unwrap();
+        manifest.functions.insert(function.into(), specification);
+        let before = run.events[1].args.clone();
+        let findings = detect::per_run(&run, &manifest);
+        assert!(findings.iter().any(|finding| finding.kind == "secret_leak"), "{findings:?}");
+        assert_eq!(run.events[1].args, before);
+    }
+}

@@ -65,6 +65,7 @@ export function setURLPart(url, key, value, fromParams = false) {
   state.parts = result;
   if (state.query && !fromParams && (key === 'href' || key === 'search')) requireParams(state.query).list = parseQuery(result[9]);
 }
+export const isSearchParams = value => getParams(value) !== undefined;
 export function serializeParams(value) { const state = getParams(value); return state ? formSerialize(state.list) : null; }
 class ParamsIterator {
   constructor(target, kind) { markPlatform(this); requireParams(target); saveIterator(this, { target, kind, index: 0 }); }

@@ -625,7 +625,9 @@ pub(super) fn incoming_request(request: &Value) -> Result<http::Request<Full<Byt
     if uri.authority().is_none() && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("host")) {
         builder = builder.header(http::header::HOST, "app.example");
     }
-    builder.body(Full::new(Bytes::from(text("body")))).context("request")
+    let body =
+        request.get("body").map(crate::output::http_body_bytes).unwrap_or_else(|| Some(Vec::new())).context("invalid HTTP body: expected text or bytes")?;
+    builder.body(Full::new(Bytes::from(body))).context("request")
 }
 
 /// Calls `wasi:http/incoming-handler#handle` with the request record and
@@ -712,5 +714,29 @@ mod tests {
         assert_eq!(d("/a b<c>\"d").as_deref(), Some("/a%20b%3Cc%3E\"d"));
         assert_eq!(d("/?x=a\r\nb").as_deref(), Some("/?x=a%0D%0Ab"));
         assert_eq!(d("/ü").as_deref(), Some("/ü"));
+    }
+}
+
+#[cfg(test)]
+mod byte_body_tests {
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    #[test]
+    fn both_http_adapters_receive_the_original_bytes() {
+        for (body, expected) in
+            [(json!([255, 0, 128, 195, 169]), vec![255, 0, 128, 195, 169]), (json!("a\0é"), "a\0é".as_bytes().to_vec()), (json!([]), vec![])]
+        {
+            let request = super::incoming_request(&json!({"method":"POST","uri":"/upload","headers":[],"body":body})).unwrap();
+            let mut collected = std::pin::pin!(request.into_body().collect());
+            let Poll::Ready(Ok(body)) = collected.as_mut().poll(&mut Context::from_waker(Waker::noop())) else { panic!("buffered input must be ready") };
+            assert_eq!(body.to_bytes().as_ref(), expected.as_slice());
+        }
+        for body in [json!([256]), json!([false]), json!([1.5])] {
+            assert!(super::incoming_request(&json!({"method":"POST","uri":"/upload","body":body})).is_err());
+        }
     }
 }

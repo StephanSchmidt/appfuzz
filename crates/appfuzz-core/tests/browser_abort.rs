@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 fn visit(html: &str) -> (RunRecord, Value) {
     let browser = Browser::shared().unwrap();
     let input = json!({"url":"https://app.example/","html":html});
-    let plan = Plan::parse(&json!({FETCH_OWN:{"return":{"ok":{"status":200,"headers":[],"body":"ok"}}}}).to_string()).unwrap();
+    let plan = net_plan(&json!({FETCH_OWN:{"return":{"ok":{"status":200,"headers":[],"body":"ok"}}}}).to_string()).unwrap();
     let run = browser.app.run(&browser.app.spec(browser.app.export(SESSION).unwrap(), vec![json!(input.to_string())], plan, 1));
     assert_eq!(run.outcome.kind, OutcomeKind::Ok, "{:?}", run.outcome);
     let report: Value = serde_json::from_str(run.result.as_ref().unwrap().as_str().unwrap()).unwrap();
@@ -264,7 +264,7 @@ const c=new AbortController(),r=await fetch('/missing.js',{method:'HEAD',signal:
 fn canceled_fetch_delivery_does_not_apply_response_cookies() {
     let browser = Browser::shared().unwrap();
     let input = json!({"url":"https://app.example/","html":r#"<script>const c=new AbortController();fetch('/canceled',{signal:c.signal}).catch(()=>{});c.abort();setTimeout(()=>console.log('cookie',document.cookie),50);</script>"#});
-    let plan = Plan::parse(
+    let plan = net_plan(
         &json!({FETCH_OWN:{"return":{"ok":{"status":200,"headers":[["set-cookie","canceled=bad; Path=/"]],"body":"ok"}},"latency_ms":20}}).to_string(),
     )
     .unwrap();
@@ -288,7 +288,13 @@ const request=new Request('/actual',{method:'POST',body:'body',headers:{'x-data'
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].args["path"], "/actual");
     assert_eq!(calls[0].args["method"], "POST");
-    assert_eq!(calls[0].args["body"], json!({"some":"body"}));
+    assert_eq!(calls[0].args["body"], json!({"some":b"body"}));
     assert!(calls[0].args["headers"].as_array().unwrap().contains(&json!(["x-data", "real"])));
     assert!(!run.events.iter().any(|event| event.func == appfuzz_core::browser::FETCH_OTHER));
+}
+
+#[path = "support/browser_plan.rs"]
+mod browser_plan;
+fn net_plan(text: &str) -> anyhow::Result<Plan> {
+    browser_plan::parse(text)
 }

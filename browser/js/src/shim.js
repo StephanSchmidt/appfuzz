@@ -1,4 +1,5 @@
-import { Blob, File, blobRecord, requireBlob, blobText, blobBuffer, blobDataURL, fileFromBlob, emptyFile, cloneBlob, blobTransport, installBlobPlatform } from './blobs.js';
+import { extractMime } from './mime-types.js';
+import { Blob, File, blobRecord, requireBlob, blobText, blobBuffer, blobDataURL, fileFromBlob, emptyFile, cloneBlob, installBlobPlatform, byteCount, bufferOfBytes, textBytes, decodeBytes, blobBytes, blobFromBytes, copyBodyBytes, copyBytesBuffer, bufferSourceKind, bufferSourceBytes, wireBytes, joinBytes } from './blobs.js';
 import { postMessage, installWindowMessages } from './window-messages.js';
 import { frameworkCandidate, editable, nodeText, normalizedText, documentText } from './exploration.js';
 import { MessagePort, MessageChannel, installMessagePortTasks } from './message-ports.js';
@@ -17,7 +18,7 @@ import { installColorReporter } from './color-values.js';
 import { representativeInputValue, representativeSelectionValue } from './input-domains.js';
 import * as L from 'linkedom';
 import { Headers, convertHeadersInit, headersFromConverted, setHeadersGuard, copyHeaders, filterHeaders, headerObject, headerValue, appendNativeHeader } from './headers.js';
-import { URL, URLSearchParams, urlPart, setURLPart, serializeParams, setObjectURLHooks } from './urls.js';
+import { URL, URLSearchParams, urlPart, setURLPart, serializeParams, isSearchParams, setObjectURLHooks } from './urls.js';
 import { reportJSON } from './report-json.js';
 import { CookieJar } from './cookies.js';
 import { parseHTML, parseHTMLFragment, fragmentElements, documentMode } from './document.js';
@@ -94,13 +95,13 @@ const notified = notifiedRejections.get.bind(notifiedRejections), rememberNotifi
 const mapGet = Function.prototype.call.bind(Map.prototype.get), mapSet = Function.prototype.call.bind(Map.prototype.set), mapDelete = Function.prototype.call.bind(Map.prototype.delete), mapEach = Function.prototype.call.bind(Map.prototype.forEach);
 const nativeResolve = Promise.resolve.bind(Promise), nativeThen = Function.prototype.call.bind(Promise.prototype.then);
 const nativeApply = Reflect.apply, nativeConstruct = Reflect.construct, NativeTypeError = TypeError;
-const nativeMax = Math.max, nativeFloor = Math.floor, nativeImul = Math.imul;
+const nativeMax = Math.max, nativeFloor = Math.floor, nativeImul = Math.imul, nativeTrunc = Math.trunc, NativeRangeError = RangeError;
 const mapSize = Function.prototype.call.bind(Object.getOwnPropertyDescriptor(Map.prototype, 'size').get);
 const setEach = Function.prototype.call.bind(Set.prototype.forEach), setHas = Function.prototype.call.bind(Set.prototype.has);
 let handledRejections = [];
 const unmodelled = (name) => nativeSetAdd(S.unmodelled, name);
 installColorReporter(unmodelled);
-installBlobPlatform({ now: () => S.now, unsupported: unmodelled });
+installBlobPlatform({ now: () => S.now });
 
 // The host: appfuzz's browser guest binds a private bridge to the
 // `appfuzz:browser` imports. Requests go to it and it answers them; markup,
@@ -319,12 +320,17 @@ setObjectURLHooks(blob => {
 }, url => { mapDelete(blobs, url); });
 
 function uuid() {
-  const h = [...Array(16)].map(() => nativeFloor(rand() * 256));
-  h[6] = (h[6] & 15) | 64;
-  h[8] = (h[8] & 63) | 128;
-  const x = h.map((b) => b.toString(16).padStart(2, '0')).join('');
-  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`;
+  const digits = '0123456789abcdef'; let result = '';
+  for (let i = 0; i < 16; i++) {
+    let byte = nativeFloor(rand() * 256);
+    if (i === 6) byte = (byte & 15) | 64;
+    if (i === 8) byte = (byte & 63) | 128;
+    result += digits[byte >> 4] + digits[byte & 15];
+    if (i === 3 || i === 5 || i === 7 || i === 9) result += '-';
+  }
+  return result;
 }
+
 G.crypto = {
   getRandomValues(a) {
     const bytes = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
@@ -570,7 +576,7 @@ installWindowMessages({ origin: () => S.origin, enqueue: callback => enqueueMess
 // --- Network: every request is recorded; answers come from the session -----
 
 const NativePromise = Promise, createFetchObject = Object.create;
-const rejectPromise = Promise.reject.bind(Promise), parseBodyJSON = JSON.parse;
+const rejectPromise = Promise.reject.bind(Promise), parseBodyJSON = JSON.parse, stringifyBodyJSON = JSON.stringify;
 const stringUpper = Function.prototype.call.bind(String.prototype.toUpperCase);
 const formRecords = new WeakMap(), formRecord = formRecords.get.bind(formRecords), saveForm = formRecords.set.bind(formRecords);
 function requireForm(value) { const data = formRecord(value); if (!data) throw new NativeTypeError('A FormData object is required'); return data; }
@@ -584,45 +590,62 @@ function multipartName(value) {
   for (let i = 0; i < value.length; i++) result += value[i] === '\r' ? '%0D' : value[i] === '\n' ? '%0A' : value[i] === '"' ? '%22' : value[i];
   return result;
 }
-function extractBody(body) {
-  if (body == null) return { text: null, type: null };
-  const blob = blobRecord(body);
-  if (blob) return { text: blobTransport(body), type: blob.type || null };
-  const fields = formRecord(body);
-  if (fields) {
-    const boundary = '----appfuzz-' + uuid(); let text = '';
+function convertBody(body) {
+  if (body == null) return { kind: 'none' };
+  if (blobRecord(body)) return { kind: 'blob', value: body };
+  if (formRecord(body)) return { kind: 'form', value: body };
+  const type = bufferSourceKind(body);
+  if (type) return { kind: 'buffer', type, value: body };
+  if (isSearchParams(body)) return { kind: 'params', value: body };
+  return { kind: 'text', text: wellFormed(domString(body)) };
+}
+function extractConvertedBody(body) {
+  if (body.kind === 'none') return { bytes: null, type: null };
+  if (body.kind === 'blob') { const record = requireBlob(body.value); return { bytes: blobBytes(body.value), type: record.type || null }; }
+  if (body.kind === 'buffer') return { bytes: bufferSourceBytes(body.value, body.type), type: null };
+  if (body.kind === 'params') return { bytes: textBytes(serializeParams(body.value)), type: 'application/x-www-form-urlencoded;charset=UTF-8' };
+  if (body.kind === 'form') {
+    const fields = requireForm(body.value), boundary = '----appfuzz-' + uuid(), chunks = []; nativeSetPrototype(chunks, null);
     for (let i = 0; i < fields.length; i++) {
       const entry = fields[i], name = entry[0], value = entry[1], file = blobRecord(value);
-      text += '--' + boundary + '\r\nContent-Disposition: form-data; name="' + multipartName(name) + '"';
-      if (file) text += '; filename="' + multipartName(file.name ?? 'blob') + '"\r\nContent-Type: ' + (file.type || 'application/octet-stream');
-      text += '\r\n\r\n' + (file ? blobTransport(value) : crlf(value)) + '\r\n';
+      let prefix = '--' + boundary + '\r\nContent-Disposition: form-data; name="' + multipartName(name) + '"';
+      if (file) prefix += '; filename="' + multipartName(file.name ?? 'blob') + '"\r\nContent-Type: ' + (file.type || 'application/octet-stream');
+      chunks[chunks.length] = textBytes(prefix + '\r\n\r\n');
+      chunks[chunks.length] = file ? blobBytes(value) : textBytes(crlf(value));
+      chunks[chunks.length] = textBytes('\r\n');
     }
-    return { text: text + '--' + boundary + '--\r\n', type: 'multipart/form-data; boundary=' + boundary };
+    chunks[chunks.length] = textBytes('--' + boundary + '--\r\n');
+    return { bytes: joinBytes(chunks), type: 'multipart/form-data; boundary=' + boundary };
   }
-  const query = serializeParams(body);
-  if (query !== null) return { text: query, type: 'application/x-www-form-urlencoded;charset=UTF-8' };
-  return { text: wellFormed(domString(body)), type: 'text/plain;charset=UTF-8' };
+  return { bytes: textBytes(body.text), type: 'text/plain;charset=UTF-8' };
 }
-const bodyText = body => extractBody(body).text;
+const extractBody = body => extractConvertedBody(convertBody(body));
+const bodyBytes = body => extractBody(body).bytes;
 const requests = new WeakMap(), requestData = requests.get.bind(requests), saveRequest = requests.set.bind(requests);
 const responses = new WeakMap(), responseData = responses.get.bind(responses), saveResponse = responses.set.bind(responses);
 const bodies = new WeakMap(), bodyData = bodies.get.bind(bodies), saveBody = bodies.set.bind(bodies);
 function requireRequest(value) { const result = requestData(value); if (!result) throw new NativeTypeError('A Request is required'); return result; }
 function requireResponse(value) { const result = responseData(value); if (!result) throw new NativeTypeError('A Response is required'); return result; }
-function initializeBody(owner, text, signal = null) { saveBody(owner, { text, present: text !== null, used: false, signal }); }
+function initializeBody(owner, bytes, signal = null) { saveBody(owner, { bytes, present: bytes !== null, used: false, signal }); }
 function requireBody(owner) { const body = bodyData(owner); if (!body) throw new NativeTypeError('A Request or Response is required'); return body; }
-function consumeBody(owner) {
-  const body = requireBody(owner);
-  if (body.used) return rejectPromise(new NativeTypeError('Body has already been consumed.'));
-  body.used = body.present;
-  if (body.present && body.signal && signalState(body.signal).aborted) return rejectPromise(signalState(body.signal).reason);
-  return nativeResolve(body.text ?? '');
+function readBody(owner, brand, convert) {
+  try {
+    brand(owner); const body = requireBody(owner);
+    if (body.used) throw new NativeTypeError('Body has already been consumed.');
+    body.used = body.present;
+    if (body.present && body.signal && signalState(body.signal).aborted) return rejectPromise(signalState(body.signal).reason);
+    const bytes = body.bytes === null ? textBytes('') : body.bytes;
+    // The intermediate promise carries no JS representation of the private
+    // byte sequence: a public typed-array then getter must not observe it.
+    return nativeThen(nativeResolve(undefined), () => convert(bytes));
+  } catch (error) { return rejectPromise(error); }
 }
 function cloneBody(source, target) {
   const body = requireBody(source);
   if (body.used) throw new NativeTypeError('Body has already been consumed.');
-  initializeBody(target, body.text, body.signal);
+  initializeBody(target, body.bytes, body.signal);
 }
+function streamBody(owner) { const body = requireBody(owner); if (body.present) unmodelled('ReadableStream body'); return null; }
 const requestMembers = ['body','cache','credentials','duplex','headers','integrity','keepalive','method','mode','priority','redirect','referrer','referrerPolicy','signal','window'];
 const credentialModes = new Set(['omit','same-origin','include']), validCredentials = credentialModes.has.bind(credentialModes);
 const requestModes = new Set(['cors','no-cors','same-origin','navigate']), validRequestMode = requestModes.has.bind(requestModes);
@@ -642,7 +665,7 @@ function convertRequest(input, init, argumentCount) {
     const key = requestMembers[i], value = init[key];
     if (value === undefined) continue;
     if (key === 'signal') { if (value !== null) signalState(value); options.signal = value; }
-    else if (key === 'body') { const extracted = extractBody(value); options.body = extracted.text; options.bodyType = extracted.type; }
+    else if (key === 'body') options.body = value === null ? null : convertBody(value);
     else if (key === 'headers') options.headers = convertHeadersInit(value);
     else if (key === 'keepalive') options.keepalive = !!value;
     else if (key === 'window') { if (value !== null) throw new NativeTypeError('Request window must be null'); options.window = null; }
@@ -659,14 +682,14 @@ function convertRequest(input, init, argumentCount) {
   if (normalizeMethod(upper)) method = upper;
   const credentials = options.credentials ?? src?.credentials ?? 'same-origin', mode = options.mode ?? src?.mode ?? 'cors', cache = options.cache ?? src?.cache ?? 'default', redirect = options.redirect ?? src?.redirect ?? 'follow';
   if (!validCredentials(credentials) || !validRequestMode(mode) || mode === 'navigate' || !validCacheMode(cache) || !validRedirect(redirect) || (cache === 'only-if-cached' && mode !== 'same-origin') || (mode === 'no-cors' && method !== 'GET' && method !== 'HEAD' && method !== 'POST')) throw new NativeTypeError('Invalid request mode');
-  const sourceBody = src && requireBody(input), body = options.body ?? sourceBody?.text ?? null;
+  const sourceBody = src && requireBody(input), extracted = options.body == null ? null : extractConvertedBody(options.body), body = extracted === null ? sourceBody?.bytes ?? null : extracted.bytes;
   if (body !== null && (method === 'GET' || method === 'HEAD')) throw new NativeTypeError('GET and HEAD requests cannot have a body');
   if (sourceBody && body !== null && options.body == null && sourceBody.used) throw new NativeTypeError('Body has already been consumed.');
   const source = options.signal === undefined ? src?.signal : options.signal;
   const signal = new AbortSignal(signalToken); if (source) dependSignal(signal, [source]);
   const guard = mode === 'no-cors' ? 'request-no-cors' : 'request';
   const headers = options.headers !== undefined ? headersFromConverted(options.headers, guard) : src ? filterHeaders(src.headers, guard) : headersFromConverted([], guard);
-  if (options.body != null && options.bodyType !== null && headerValue(headers, 'content-type') === null) appendNativeHeader(headers, 'content-type', options.bodyType);
+  if (extracted !== null && extracted.type !== null && headerValue(headers, 'content-type') === null) appendNativeHeader(headers, 'content-type', extracted.type);
   return { url, method, headers, signal, credentials, mode, cache, redirect, body, sourceBody: options.body == null ? sourceBody : null };
 }
 class Request {
@@ -684,7 +707,7 @@ class Request {
   get mode() { return requireRequest(this).mode; }
   get cache() { return requireRequest(this).cache; }
   get redirect() { return requireRequest(this).redirect; }
-  get body() { requireRequest(this); return null; }
+  get body() { requireRequest(this); return streamBody(this); }
   get bodyUsed() { requireRequest(this); return requireBody(this).used; }
   clone() {
     const data = requireRequest(this), body = requireBody(this);
@@ -692,17 +715,40 @@ class Request {
     const result = createFetchObject(Request.prototype), signal = dependSignal(new AbortSignal(signalToken), [data.signal]);
     saveRequest(result, { ...data, headers: copyHeaders(data.headers), signal }); cloneBody(this, result); return result;
   }
-  text() { requireRequest(this); return consumeBody(this); }
-  json() { requireRequest(this); return nativeThen(consumeBody(this), parseBodyJSON); }
+  text() { return readBody(this, requireRequest, bytes => decodeBytes(bytes)); }
+  json() { return readBody(this, requireRequest, bytes => parseBodyJSON(decodeBytes(bytes))); }
+  arrayBuffer() { return readBody(this, requireRequest, copyBytesBuffer); }
+  bytes() { return readBody(this, requireRequest, copyBodyBytes); }
+  blob() { return readBody(this, requireRequest, bytes => blobFromBytes(bytes, extractMime(headerValue(requireRequest(this).headers, 'content-type')))); }
+  formData() { return readBody(this, requireRequest, () => { unmodelled('Request.formData'); return new FormData(); }); }
+}
+function responseInit(init) {
+  if (init == null) init = { __proto__: null };
+  if (typeof init !== 'object' && typeof init !== 'function') throw new NativeTypeError('Response options must be a dictionary');
+  const rawHeaders = init.headers, headers = rawHeaders === undefined ? headersFromConverted([], 'response') : headersFromConverted(convertHeadersInit(rawHeaders), 'response');
+  const value = init.status; let status = value === undefined ? 200 : +value;
+  status = finiteNumber(status) ? ((nativeTrunc(status) % 65536) + 65536) % 65536 : 0;
+  const raw = init.statusText, statusText = raw === undefined ? '' : domString(raw);
+  for (let i = 0; i < statusText.length; i++) if (charCode(statusText, i) > 255) throw new NativeTypeError('A ByteString is required');
+  return { status, statusText, headers };
+}
+function validateResponse(data, present) {
+  if (data.status < 200 || data.status > 599) throw new NativeRangeError('Invalid response status');
+  for (let i = 0; i < data.statusText.length; i++) { const c = charCode(data.statusText, i); if (c !== 9 && c < 32 || c === 127) throw new NativeTypeError('Invalid response status text'); }
+  if (present && (data.status === 204 || data.status === 205 || data.status === 304)) throw new NativeTypeError('A body is not allowed for this status');
+}
+function nativeResponse(bytes, data) {
+  const response = createFetchObject(Response.prototype); saveResponse(response, data); initializeBody(response, bytes); return response;
 }
 class Response {
   constructor(body = null, init = undefined) {
-    if (init == null) init = { __proto__: null };
-    const extracted = extractBody(body), headerInit = init.headers, pairs = headerInit === undefined ? [] : convertHeadersInit(headerInit), status = init.status ?? 200, statusText = init.statusText ?? '';
-    const headers = headersFromConverted(pairs, 'response');
-    if (extracted.type !== null && headerValue(headers, 'content-type') === null) appendNativeHeader(headers, 'content-type', extracted.type);
-    saveResponse(this, { status, statusText, headers, url: '', redirected: false, type: 'basic' });
-    initializeBody(this, extracted.text);
+    const data = runDOMCallback(() => {
+      const converted = convertBody(body), options = responseInit(init); validateResponse(options, converted.kind !== 'none');
+      const extracted = extractConvertedBody(converted);
+      if (extracted.type !== null && headerValue(options.headers, 'content-type') === null) appendNativeHeader(options.headers, 'content-type', extracted.type);
+      return { options, bytes: extracted.bytes };
+    });
+    saveResponse(this, { ...data.options, url: '', redirected: false, type: 'default' }); initializeBody(this, data.bytes);
   }
   get status() { return requireResponse(this).status; }
   get statusText() { return requireResponse(this).statusText; }
@@ -712,28 +758,40 @@ class Response {
   get redirected() { return requireResponse(this).redirected; }
   get type() { return requireResponse(this).type; }
   get bodyUsed() { requireResponse(this); return requireBody(this).used; }
-  get body() { requireResponse(this); return null; }
-  _use() { requireResponse(this); return consumeBody(this); }
-  text() { requireResponse(this); return consumeBody(this); }
-  json() { requireResponse(this); return nativeThen(consumeBody(this), parseBodyJSON); }
-  blob() { requireResponse(this); return nativeThen(consumeBody(this), text => new Blob([text])); }
-  arrayBuffer() { requireResponse(this); return nativeThen(consumeBody(this), text => new TextEncoder().encode(text).buffer); }
-  formData() { requireResponse(this); unmodelled('Response.formData'); return nativeThen(consumeBody(this), () => new FormData()); }
+  get body() { requireResponse(this); return streamBody(this); }
+  text() { return readBody(this, requireResponse, bytes => decodeBytes(bytes)); }
+  json() { return readBody(this, requireResponse, bytes => parseBodyJSON(decodeBytes(bytes))); }
+  blob() { return readBody(this, requireResponse, bytes => blobFromBytes(bytes, extractMime(headerValue(requireResponse(this).headers, 'content-type')))); }
+  arrayBuffer() { return readBody(this, requireResponse, copyBytesBuffer); }
+  bytes() { return readBody(this, requireResponse, copyBodyBytes); }
+  formData() { return readBody(this, requireResponse, () => { unmodelled('Response.formData'); return new FormData(); }); }
   clone() {
     const data = requireResponse(this), result = createFetchObject(Response.prototype);
     cloneBody(this, result); saveResponse(result, { ...data, headers: copyHeaders(data.headers) }); return result;
   }
-  static json(value, init) {
-    const response = new Response(null, init), text = JSON.stringify(value);
-    if (text === undefined) throw new NativeTypeError('The value cannot be serialized as JSON');
-    initializeBody(response, text);
-    const headers = requireResponse(response).headers;
-    if (headerValue(headers, 'content-type') === null) appendNativeHeader(headers, 'content-type', 'application/json');
-    return response;
+  static json(value, init = undefined) {
+    return runDOMCallback(() => {
+      const options = responseInit(init), text = stringifyBodyJSON(value);
+      if (text === undefined) throw new NativeTypeError('The value cannot be serialized as JSON');
+      validateResponse(options, true);
+      if (headerValue(options.headers, 'content-type') === null) appendNativeHeader(options.headers, 'content-type', 'application/json');
+      return nativeResponse(textBytes(text), { ...options, url: '', redirected: false, type: 'default' });
+    });
   }
-  static error() { const response = new Response(null, { status: 0 }); setHeadersGuard(requireResponse(response).headers, 'immutable'); return response; }
-  static redirect(url, status = 302) { const response = new Response(null, { status, headers: { location: url } }); setHeadersGuard(requireResponse(response).headers, 'immutable'); return response; }
+  static error() { return nativeResponse(null, { status: 0, statusText: '', headers: headersFromConverted([], 'immutable'), url: '', redirected: false, type: 'error' }); }
+  static redirect(url, status = 302) {
+    if (!arguments.length) throw new NativeTypeError('redirect requires a URL');
+    return runDOMCallback(() => {
+      url = wellFormed(domString(url)); const number = +status;
+      status = finiteNumber(number) ? ((nativeTrunc(number) % 65536) + 65536) % 65536 : 0;
+      let parsed; try { parsed = new URL(url, urlPart(S.url, 'href')); } catch { throw new NativeTypeError('Invalid redirect URL'); }
+      if (status !== 301 && status !== 302 && status !== 303 && status !== 307 && status !== 308) throw new NativeRangeError('Invalid redirect status');
+      return nativeResponse(null, { status, statusText: '', headers: headersFromConverted([['location', urlPart(parsed, 'href')]], 'immutable'), url: '', redirected: false, type: 'default' });
+    });
+  }
 }
+Object.defineProperty(Request, 'name', { __proto__: null, value: 'Request', configurable: true });
+Object.defineProperty(Response, 'name', { __proto__: null, value: 'Response', configurable: true });
 Object.assign(G, { Headers, Request, Response });
 
 // Cookie storage is private to the user agent: Set-Cookie never becomes
@@ -773,7 +831,7 @@ function respond(method, url, body, headers, kind, credentials = 'same-origin', 
     if (cookie) headers.cookie = cookie;
   }
   push(S.requests, {
-    kind, method, url: urlPart(u, 'href'), own, body: body == null ? null : clip(body, 2000),
+    kind, method, url: urlPart(u, 'href'), own, body: body == null ? null : clip(decodeBytes(body, false), 2000),
     headers: headers || {}, gesture: S.gesture, at: S.now - S.start,
   });
   const path = own ? urlPart(u, 'pathname') + urlPart(u, 'search') : urlPart(u, 'href');
@@ -784,8 +842,8 @@ function respond(method, url, body, headers, kind, credentials = 'same-origin', 
     const entries = nativeEntries(headers || {}), pairs = [];
     nativeSetPrototype(pairs, null);
     for (let i = 0; i < entries.length; i++) pairs[i] = [nativeString(entries[i][0]), nativeString(entries[i][1])];
-    const answer = h.fetch(kind, method, own, target, pairs, body == null ? null : nativeString(body), [!!S.gesture, S.now]);
-    const status = answer[0], rh = answer[1], text = answer[2], failed = answer[3], latency = answer[4];
+    const answer = h.fetch(kind, method, own, target, pairs, body == null ? null : bufferOfBytes(body), [!!S.gesture, S.now]);
+    const status = answer[0], rh = answer[1], text = wireBytes(answer[2]), failed = answer[3], latency = answer[4];
     if (failed != null) return { status: 0, error: failed, body: '', headers: {}, url: urlPart(u, 'href'), latency: latency ?? S.latency };
     return networkAnswer(status, text, rh, urlPart(u, 'href'), include, delayed, latency ?? S.latency);
   }
@@ -793,7 +851,8 @@ function respond(method, url, body, headers, kind, credentials = 'same-origin', 
   const r = S.responses[method + ' ' + path] || S.responses[method + ' ' + plain] || S.responses[path] || S.responses[plain]
     || (method === 'GET' && own && S.files[urlPart(u, 'pathname')] != null ? { status: 200, body: S.files[urlPart(u, 'pathname')] } : null)
     || { status: 404, body: '' };
-  return networkAnswer(r.status ?? 200, typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? ''), r.headers, urlPart(u, 'href'), include, delayed);
+  const stored = r.body ?? '', payload = typeof stored === 'string' || nativeIsArray(stored) ? stored : reportJSON(stored);
+  return networkAnswer(r.status ?? 200, wireBytes(payload), r.headers, urlPart(u, 'href'), include, delayed);
 }
 
 G.fetch = function fetch(input, init = undefined) {
@@ -809,16 +868,14 @@ G.fetch = function fetch(input, init = undefined) {
       settled = true; if (timer !== null) mapDelete(S.timers, timer); reject(signalState(req.signal).reason);
     });
     let answer;
-    try { answer = respond(req.method, req.url, body.text, headers, 'fetch', req.credentials, true); } catch (e) { settled = true; unsubscribe(); reject(e); return; }
+    try { answer = respond(req.method, req.url, body.bytes, headers, 'fetch', req.credentials, true); } catch (e) { settled = true; unsubscribe(); reject(e); return; }
     timer = addTimer(() => {
       if (settled) return;
       settled = true; unsubscribe();
       if (answer.error != null) { reject(new NativeTypeError('Failed to fetch')); return; }
       try {
         const noBody = req.method === 'HEAD' || answer.status === 204 || answer.status === 205 || answer.status === 304;
-        const response = new Response(null, { status: answer.status, headers: answer.headers });
-        initializeBody(response, noBody ? null : answer.body); requireResponse(response).url = answer.url;
-        setHeadersGuard(requireResponse(response).headers, 'immutable');
+        const response = nativeResponse(noBody ? null : answer.body, { status: answer.status, statusText: '', headers: headersFromConverted(nativeEntries(answer.headers), 'immutable'), url: answer.url, redirected: false, type: 'basic' });
         requireBody(response).signal = req.signal;
         receive(answer); resolve(response);
       } catch (e) { reject(e); }
@@ -842,7 +899,7 @@ class XMLHttpRequest extends L.EventTarget {
   getAllResponseHeaders() { return Object.entries(this._rh).map(([k, v]) => k + ': ' + v + '\r\n').join(''); }
   abort() { this._aborted = true; this.readyState = 0; this._fire('abort'); }
   send(body) {
-    const r = respond(this._m, this._u, bodyText(body), this._h, 'xhr', this.withCredentials ? 'include' : 'same-origin', true);
+    const r = respond(this._m, this._u, bodyBytes(body), this._h, 'xhr', this.withCredentials ? 'include' : 'same-origin', true);
     this._fire('loadstart');
     addTimer(() => {
       if (this._aborted) return;
@@ -857,9 +914,11 @@ class XMLHttpRequest extends L.EventTarget {
       this.statusText = r.status === 200 ? 'OK' : '';
       this._rh = Object.fromEntries(Object.entries(r.headers).map(([k, v]) => [k.toLowerCase(), String(v)]));
       this.responseURL = r.url;
-      this.responseText = r.body;
-      if (this.responseType === 'json') { try { this.response = JSON.parse(r.body); } catch { this.response = null; } }
-      else this.response = r.body;
+      this.responseText = decodeBytes(r.body);
+      if (this.responseType === 'json') { try { this.response = parseBodyJSON(decodeBytes(r.body)); } catch { this.response = null; } }
+      else if (this.responseType === 'arraybuffer') this.response = copyBytesBuffer(r.body);
+      else if (this.responseType === 'blob') this.response = blobFromBytes(r.body, extractMime(r.headers['content-type'] ?? null));
+      else this.response = decodeBytes(r.body);
       this.readyState = 2; this._fire('readystatechange');
       this.readyState = 3; this._fire('readystatechange');
       this.readyState = 4; this._fire('readystatechange');
@@ -1276,7 +1335,7 @@ function installWindow(doc) {
     language: 'en-US', languages: ['en-US', 'en'], onLine: true, cookieEnabled: true, doNotTrack: null,
     hardwareConcurrency: 4, maxTouchPoints: 0, webdriver: false, pdfViewerEnabled: false,
     sendBeacon(url, data) {
-      const r = respond('POST', url, bodyText(data), {}, 'beacon', 'include', true);
+      const r = respond('POST', url, bodyBytes(data), {}, 'beacon', 'include', true);
       if (r.acceptCookies && r.setCookies.length) addTimer(() => receive(r), r.latency, [], false, 'beacon-response', false);
       return true;
     },
@@ -1838,7 +1897,7 @@ function file(url) {
   if (host()) {
     S.now += r.latency;
     receive(r);
-    return r.error == null && r.status >= 200 && r.status < 300 ? r.body : null;
+    return r.error == null && r.status >= 200 && r.status < 300 ? decodeBytes(r.body) : null;
   }
   const body = own ? S.files[urlPart(u, 'pathname')] : S.files[urlPart(u, 'href')];
   return body == null ? null : body;

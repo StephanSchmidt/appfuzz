@@ -13,7 +13,7 @@
 //! request or host data.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
@@ -162,6 +162,9 @@ impl Browser {
         let mut spec = self.app.spec(&export, vec![Value::String(input.to_string())], Plan::default(), page.spec.seed);
         spec.now.clone_from(&page.spec.now);
 
+        let body_contract = body_contract(target, &page.spec.export);
+        let routing_gaps = Arc::new(Mutex::new(BTreeSet::new()));
+        let gaps = routing_gaps.clone();
         let (tx, rx) = mpsc::channel::<(Value, i64, mpsc::Sender<Routed>)>();
         let base = req.clone();
         let router: Router = Arc::new(move |key: &str, args: &[(String, Value)]| {
@@ -175,8 +178,31 @@ impl Browser {
             let method = arg("method")?.as_str()?;
             let path = arg("path")?.as_str()?;
             let headers = pairs(arg("headers"));
-            let body = arg("body").and_then(crate::value::some).and_then(Value::as_str);
-            let request = request_for(&base, method, path, &headers, body)?;
+            let body = arg("body").and_then(crate::value::some).and_then(crate::output::http_body_bytes);
+            let blocked = |reason: &str| {
+                gaps.lock().unwrap().insert(reason.to_string());
+                Some(Routed {
+                    value: json!({"err":"appfuzz cannot map this HTTP request to the entry contract"}),
+                    latency_ms: 0.0,
+                    source: "browser: request mapping".into(),
+                })
+            };
+            if matches!(body_contract, BodyContract::Text(_)) && body.as_ref().is_some_and(|bytes| std::str::from_utf8(bytes).is_err()) {
+                return blocked("binary HTTP body cannot be represented by the entry's text body field");
+            }
+            if matches!(body_contract, BodyContract::Unsupported) && body.is_some() {
+                return blocked("HTTP body cannot be represented by the entry's body field");
+            }
+            let Some(mut request) = request_for_bytes(&base, method, path, &headers, body.as_deref()) else {
+                return blocked("own-origin HTTP request cannot be mapped to the entry request");
+            };
+            match body_contract {
+                BodyContract::Bytes(optional) => {
+                    request["body"] = body.as_ref().map_or_else(|| if optional { Value::Null } else { json!([]) }, |bytes| json!(bytes))
+                }
+                BodyContract::Text(true) if body.is_none() => request["body"] = Value::Null,
+                _ => {}
+            }
             let now_ms = arg("now-ms")?.as_i64()?;
             let (back, answer) = mpsc::channel();
             tx.send((request, now_ms, back)).ok()?;
@@ -211,7 +237,14 @@ impl Browser {
             }
             worker.join().map(|b| (b, nested)).map_err(|_| anyhow!("the browser session panicked"))
         })?;
-        let report = browser.result.as_ref().and_then(Value::as_str).and_then(|s| serde_json::from_str(s).ok()).unwrap_or(Value::Null);
+        let mut report: Value = browser.result.as_ref().and_then(Value::as_str).and_then(|s| serde_json::from_str(s).ok()).unwrap_or(Value::Null);
+        let gaps = routing_gaps.lock().unwrap();
+        if !gaps.is_empty() && report.is_object() {
+            if !report["unmodelled"].is_array() {
+                report["unmodelled"] = json!([]);
+            }
+            report["unmodelled"].as_array_mut().unwrap().extend(gaps.iter().map(|gap| json!(gap)));
+        }
         Ok(Session { browser, nested, report, fragment })
     }
 }
@@ -314,7 +347,7 @@ fn other_origin(kind: &str, url: &str) -> Routed {
         return Routed { value: json!({"err": "appfuzz has no copy of this file"}), latency_ms: 50.0, source };
     }
     let body = Value::String(format!("remote text from {}", host(url))).to_string();
-    Routed { value: json!({"ok": {"status": 200, "headers": [["content-type", "application/json"]], "body": body}}), latency_ms: 50.0, source }
+    Routed { value: json!({"ok": {"status": 200, "headers": [["content-type", "application/json"]], "body": body.as_bytes()}}), latency_ms: 50.0, source }
 }
 
 /// A readable session cookie with a secret in it.
@@ -367,11 +400,52 @@ fn decode_pairs(s: &str) -> Vec<Value> {
         .collect()
 }
 
+#[derive(Clone, Copy)]
+enum BodyContract {
+    Native,
+    Text(bool),
+    Bytes(bool),
+    Unsupported,
+    Absent,
+}
+fn body_contract(app: &App, export: &str) -> BodyContract {
+    use wasmtime::component::Type;
+    if app.native_http_body(export) {
+        return BodyContract::Native;
+    }
+    let Ok(function) = app.export(export) else {
+        return BodyContract::Absent;
+    };
+    let Some((_, Type::Record(record))) = function.ty.params().next() else {
+        return BodyContract::Absent;
+    };
+    let Some(field) = record.fields().find(|field| field.name == "body") else {
+        return BodyContract::Absent;
+    };
+    let mut ty = field.ty;
+    let mut optional = false;
+    while let Type::Option(option) = ty {
+        optional = true;
+        ty = option.ty();
+    }
+    match ty {
+        Type::String => BodyContract::Text(optional),
+        Type::List(list) if matches!(list.ty(), Type::U8) => BodyContract::Bytes(optional),
+        _ => BodyContract::Unsupported,
+    }
+}
+
 /// The app's request for a page's request to its own origin, in the shape
 /// of the page's request: wasi:http's `{method, uri, headers, body}`, or a
 /// platform request with fields such as `method`, `path`, `query`, `form`
 /// and `body`. `None` when the request has no place for a path.
 pub fn request_for(base: &Value, method: &str, target: &str, headers: &[(String, String)], body: Option<&str>) -> Option<Value> {
+    request_for_bytes(base, method, target, headers, body.map(str::as_bytes))
+}
+
+/// The same mapping with lossless HTTP bytes. Text contracts retain strings
+/// for UTF-8; binary values and existing byte-list fields retain byte lists.
+pub fn request_for_bytes(base: &Value, method: &str, target: &str, headers: &[(String, String)], body: Option<&[u8]>) -> Option<Value> {
     let mut v = base.clone();
     let o = v.as_object_mut()?;
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
@@ -382,7 +456,7 @@ pub fn request_for(base: &Value, method: &str, target: &str, headers: &[(String,
             o.insert("headers".into(), json!(headers.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>()));
         }
         if o.contains_key("body") {
-            o.insert("body".into(), json!(body.unwrap_or_default()));
+            o.insert("body".into(), body_value(body.unwrap_or_default(), o.get("body").is_some_and(Value::is_array)));
         }
     } else if o.contains_key("path") || o.contains_key("url") {
         let key = if o.contains_key("path") { "path" } else { "url" };
@@ -401,10 +475,10 @@ pub fn request_for(base: &Value, method: &str, target: &str, headers: &[(String,
             })
         });
         if o.get("form").is_some_and(Value::is_array) {
-            o.insert("form".into(), Value::Array(form.map(decode_pairs).unwrap_or_default()));
+            o.insert("form".into(), Value::Array(form.map(|bytes| decode_pairs(&String::from_utf8_lossy(bytes))).unwrap_or_default()));
         }
-        if o.get("body").is_some_and(Value::is_string) {
-            o.insert("body".into(), json!(body.unwrap_or_default()));
+        if o.contains_key("body") {
+            o.insert("body".into(), body_value(body.unwrap_or_default(), o.get("body").is_some_and(Value::is_array)));
         }
         if o.get("headers").is_some_and(Value::is_array) {
             o.insert("headers".into(), json!(headers.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>()));
@@ -418,18 +492,29 @@ pub fn request_for(base: &Value, method: &str, target: &str, headers: &[(String,
     Some(v)
 }
 
+fn body_value(bytes: &[u8], byte_list: bool) -> Value {
+    if !byte_list && let Ok(text) = std::str::from_utf8(bytes) {
+        return json!(text);
+    }
+    json!(bytes)
+}
+
 /// The browser's answer from the app's run: the response it sent, or a
 /// server error when it failed without sending a response.
 fn answer(r: &RunRecord, m: &Manifest) -> Routed {
     let source = format!("app run {}", r.id);
     let latency_ms = r.totals.virtual_ns.ms();
     if r.result.is_none() && r.outcome.kind != OutcomeKind::Ok {
-        return Routed { value: json!({"ok": {"status": 500, "headers": [], "body": ""}}), latency_ms, source };
+        return Routed { value: json!({"ok": {"status": 500, "headers": [], "body": []}}), latency_ms, source };
     }
     let resp = crate::output::response(r, m);
     let status = resp.status.filter(|s| (100..600).contains(s)).unwrap_or(200);
     let headers: Vec<Value> = resp.headers.iter().map(|(k, v)| json!([k, v])).collect();
-    Routed { value: json!({"ok": {"status": status, "headers": headers, "body": resp.body.unwrap_or_default()}}), latency_ms, source }
+    Routed {
+        value: json!({"ok": {"status": status, "headers": headers, "body": crate::output::response_body_bytes(r, m).unwrap_or_default()}}),
+        latency_ms,
+        source,
+    }
 }
 
 /// Whether the body is labelled `html:scripts`: its scripts are meant to run.
@@ -497,6 +582,11 @@ impl Sources {
             let Some(v) = &e.result else { continue };
             let mut returned = BTreeSet::new();
             crate::output::strings(v, &mut returned);
+            if matches!(e.func.as_str(), FETCH_OWN | FETCH_OTHER)
+                && let Some(bytes) = crate::output::http_body_bytes(&v["ok"]["body"])
+            {
+                returned.insert(String::from_utf8_lossy(&bytes).into_owned());
+            }
             for text in &returned {
                 for c in CANARY.find_iter(text) {
                     self.from.entry(c.as_str().to_string()).or_insert_with(|| {
@@ -750,7 +840,13 @@ pub fn check(page: &RunRecord, s: &Session, m: &Manifest) -> Vec<Finding> {
                     ));
                 }
                 leaks(e, &traced, &to, &path, ex, run, &detail, &mut out);
-                if let Some(body) = e.result.as_ref().and_then(|v| v["ok"]["body"].as_str()).map(str::trim).filter(|text| text.len() >= 8) {
+                if let Some(body) = e
+                    .result
+                    .as_ref()
+                    .and_then(|v| crate::output::http_body_bytes(&v["ok"]["body"]))
+                    .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
+                    .filter(|text| text.len() >= 8)
+                {
                     other_bodies.push((body.to_string(), to));
                 }
             }
@@ -947,7 +1043,7 @@ pub fn unsupported(sessions: &[Session]) -> Value {
 #[allow(clippy::too_many_arguments)]
 fn leaks(e: &HostCall, traced: &[TracedValue], to: &str, path: &str, ex: &str, run: Option<&str>, detail: &dyn Fn(Value) -> Value, out: &mut Vec<Finding>) {
     let mut texts = BTreeSet::new();
-    for v in e.args.values() {
+    for v in e.text_args().values() {
         crate::output::strings(v, &mut texts);
     }
     for TracedValue { value, label, place: at, key, after } in traced {

@@ -175,8 +175,10 @@ impl HostCall {
     /// Textual inspection of native HTTP body bytes. Rules, equality, storage
     /// and value-domain checks use `args`; this view is only for text detectors.
     pub(crate) fn text_args(&self) -> std::borrow::Cow<'_, Map<String, Value>> {
-        let is_http = self.func.split_once('#').is_some_and(|(interface, name)| crate::wasi_http::is_client(interface) && name == "handle");
-        let Some(array) = self.args.get("body").filter(|_| is_http).and_then(Value::as_array) else {
+        let is_http = self.func.split_once('#').is_some_and(|(interface, name)| {
+            (crate::wasi_http::is_client(interface) && name == "handle") || (interface == "appfuzz:browser/net" && matches!(name, "fetch-own" | "fetch-other"))
+        });
+        let Some(array) = self.args.get("body").filter(|_| is_http).and_then(crate::value::some).and_then(Value::as_array) else {
             return std::borrow::Cow::Borrowed(&self.args);
         };
         let Some(bytes) = array.iter().map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok())).collect::<Option<Vec<_>>>() else {

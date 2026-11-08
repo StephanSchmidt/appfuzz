@@ -7,6 +7,9 @@ const records = new WeakMap(), get = records.get.bind(records), store = records.
 const iteratorRecords = new WeakMap(), getIterator = iteratorRecords.get.bind(iteratorRecords), saveIterator = iteratorRecords.set.bind(iteratorRecords);
 const NativeTypeError = TypeError, apply = Reflect.apply, create = Object.create, define = Object.defineProperty;
 const ownKeys = Reflect.ownKeys, descriptor = Object.getOwnPropertyDescriptor, iteratorSymbol = Symbol.iterator;
+const setPrototype = Object.setPrototypeOf;
+function privateList() { const value = []; setPrototype(value, null); return value; }
+function appendPublic(array, value) { define(array, array.length, { __proto__: null, value, writable: true, enumerable: true, configurable: true }); }
 const charCode = Function.prototype.call.bind(String.prototype.charCodeAt), slice = Function.prototype.call.bind(String.prototype.slice);
 const lower = Function.prototype.call.bind(String.prototype.toLowerCase), upper = Function.prototype.call.bind(String.prototype.toUpperCase);
 const sort = Function.prototype.call.bind(Array.prototype.sort);
@@ -35,7 +38,7 @@ function sequence(value, method, convert) {
   if (!object(value) || typeof method !== 'function') throw new NativeTypeError('A sequence requires an iterable object');
   const iterator = apply(method, value, []);
   if (!object(iterator)) throw new NativeTypeError('Invalid iterator');
-  const next = iterator.next, result = [];
+  const next = iterator.next, result = privateList();
   while (true) {
     const step = apply(next, iterator, []);
     if (!object(step)) throw new NativeTypeError('Invalid iterator result');
@@ -51,7 +54,7 @@ export function convertHeadersInit(init) {
       if (!object(pair)) throw new NativeTypeError('A header pair requires an iterable object');
       return sequence(pair, pair[iteratorSymbol], byteString);
     });
-    const pairs = [], keys = ownKeys(init);
+    const pairs = privateList(), keys = ownKeys(init);
     for (let i = 0; i < keys.length; i++) if (descriptor(init, keys[i])?.enumerable) {
       const name = byteString(keys[i]), value = byteString(init[keys[i]]); pairs[pairs.length] = [name, value];
     }
@@ -135,25 +138,26 @@ function mutate(headers, rawName, rawValue, kind) {
   if (state.guard === 'request-no-cors') remove(state, 'range');
 }
 export function headersFromConverted(pairs, guard = 'none') {
-  const headers = create(Headers.prototype); save(headers, { guard, list: [], pairs: null });
+  const headers = create(Headers.prototype); save(headers, { guard: guard === 'immutable' ? 'response' : guard, list: privateList(), pairs: null });
   for (let i = 0; i < pairs.length; i++) {
     if (pairs[i].length !== 2) throw new NativeTypeError('A header pair requires two values');
     mutate(headers, pairs[i][0], pairs[i][1], 'append');
   }
+  requireHeaders(headers).guard = guard;
   return headers;
 }
 export function headerValue(headers, name) { return valueFor(requireHeaders(headers), name); }
 export function appendNativeHeader(headers, name, value) { mutate(headers, name, value, 'append'); }
 export function setHeadersGuard(headers, guard) { requireHeaders(headers).guard = guard; }
 export function copyHeaders(headers, guard) {
-  const source = requireHeaders(headers), result = create(Headers.prototype), list = [];
+  const source = requireHeaders(headers), result = create(Headers.prototype), list = privateList();
   for (let i = 0; i < source.list.length; i++) list[i] = [source.list[i][0], source.list[i][1]];
   save(result, { guard: guard === undefined ? source.guard : guard, list, pairs: null }); return result;
 }
 export function filterHeaders(headers, guard) { return headersFromConverted(requireHeaders(headers).list, guard); }
 export function headerPairs(headers) {
   const state = requireHeaders(headers); if (state.pairs) return state.pairs;
-  const names = [], result = [];
+  const names = privateList(), result = privateList();
   for (let i = 0; i < state.list.length; i++) {
     const name = state.list[i][0]; let exists = false;
     for (let j = 0; j < names.length; j++) if (names[j] === name) exists = true;
@@ -185,8 +189,8 @@ class HeaderIterator {
 define(HeaderIterator.prototype, Symbol.toStringTag, { configurable: true, value: 'Headers Iterator' });
 export class Headers {
   constructor(init) {
-    const pairs = init === undefined ? [] : convertHeadersInit(init);
-    save(this, { guard: 'none', list: [], pairs: null });
+    const pairs = init === undefined ? privateList() : convertHeadersInit(init);
+    save(this, { guard: 'none', list: privateList(), pairs: null });
     for (let i = 0; i < pairs.length; i++) { if (pairs[i].length !== 2) throw new NativeTypeError('A header pair requires two values'); mutate(this, pairs[i][0], pairs[i][1], 'append'); }
   }
   append(name, value) {
@@ -207,7 +211,7 @@ export class Headers {
   }
   get(name) { const state = requireHeaders(this); if (!arguments.length) throw new NativeTypeError('get requires a name'); name = runDOMCallback(() => byteString(name)); return valueFor(state, validName(name)); }
   has(name) { const state = requireHeaders(this); if (!arguments.length) throw new NativeTypeError('has requires a name'); name = runDOMCallback(() => byteString(name)); return valueFor(state, validName(name)) !== null; }
-  getSetCookie() { const state = requireHeaders(this), result = []; for (let i = 0; i < state.list.length; i++) if (state.list[i][0] === 'set-cookie') result[result.length] = state.list[i][1]; return result; }
+  getSetCookie() { const state = requireHeaders(this), result = []; for (let i = 0; i < state.list.length; i++) if (state.list[i][0] === 'set-cookie') appendPublic(result, state.list[i][1]); return result; }
   forEach(callback, receiver) {
     requireHeaders(this); if (typeof callback !== 'function') throw new NativeTypeError('forEach requires a callback');
     let index = 0;

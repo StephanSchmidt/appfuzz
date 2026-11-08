@@ -1067,9 +1067,17 @@ Blob parts, options and buffer-source validation preserve native conversion
 order, including source mutations during option conversion. Resizable sources
 are rejected. Blob/File methods, cloning and FileReader byte/data-URL reads do
 not use page-defined codecs, typed-view length getters or constructor parents.
-Request/Response bodies and the browser host bridge still carry text. A Blob/FormData body
-that cannot round-trip through UTF-8 appears under `unsupported.apis` as
-`binary Blob body transport`, so it cannot establish complete passing coverage.
+Request/Response bodies and the browser host bridge preserve raw bytes, including
+binary Blob/File parts in multipart uploads. Body reads consume private snapshots;
+`text()` and `json()` decode UTF-8 and strip the initial BOM. Array buffers and
+`bytes()` are copies; `blob()` retains the bytes and the parsed response MIME type.
+MIME extraction follows [Fetch](https://fetch.spec.whatwg.org/#concept-body-mime-type)
+and [MIME Sniffing](https://mimesniff.spec.whatwg.org/#parsing-a-mime-type).
+A component entry whose WIT body field is a string cannot represent non-UTF-8
+uploads: those requests are rejected and reported as incomplete rather than
+executed with altered bytes. Byte-list fields and native HTTP adapters retain
+binary bodies. Readable body streams and Request/Response `formData()` decoding
+remain unsupported; using them makes coverage incomplete.
 
 `structuredClone` preserves cycles, shared references, sparse arrays, native
 numeric/date/regexp/collection data, errors, DOMExceptions, blobs and files.

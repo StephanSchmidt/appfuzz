@@ -15,7 +15,7 @@ fn visit_planned(script: &str, cookies: Value, extra: Value, plan: Value) -> (Ru
     let browser = Browser::shared().unwrap();
     let mut input = json!({"url":"https://app.example/account/page", "html":format!("<!doctype html><html><head><title>cookies</title></head><body><p id=c></p><script>{script}</script></body></html>"), "cookies":cookies});
     input.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-    let plan = Plan::parse(&plan.to_string()).unwrap();
+    let plan = net_plan(&plan.to_string()).unwrap();
     let mut spec = browser.app.spec(browser.app.export(SESSION).unwrap(), vec![json!(input.to_string())], plan, 1);
     spec.now = "2026-11-02T10:00:00".into();
     let r = browser.app.run(&spec);
@@ -351,4 +351,10 @@ const captured=[],define=Object.defineProperty,old=Array.prototype[Symbol.iterat
     assert!(report["console"].as_array().unwrap().iter().any(|v| v["text"] == "done"), "{report}");
     assert!(report["console"].as_array().unwrap().iter().all(|v| !v["text"].as_str().unwrap().contains("hidden-server-secret")), "{report}");
     assert!(cookie(request(&run, "/capture")).unwrap().contains("sid=hidden-server-secret"));
+}
+
+#[path = "support/browser_plan.rs"]
+mod browser_plan;
+fn net_plan(text: &str) -> anyhow::Result<Plan> {
+    browser_plan::parse(text)
 }

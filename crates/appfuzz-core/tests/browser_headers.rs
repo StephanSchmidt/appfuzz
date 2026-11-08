@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 fn visit(html: &str) -> (RunRecord, Value) {
     let browser = Browser::shared().unwrap();
     let input = json!({"url":"https://app.example/","html":html});
-    let plan = Plan::parse(&json!({FETCH_OWN:{"return":{"ok":{"status":200,"headers":[],"body":"ok"}}}}).to_string()).unwrap();
+    let plan = net_plan(&json!({FETCH_OWN:{"return":{"ok":{"status":200,"headers":[],"body":"ok"}}}}).to_string()).unwrap();
     let run = browser.app.run(&browser.app.spec(browser.app.export(SESSION).unwrap(), vec![json!(input.to_string())], plan, 1));
     assert_eq!(run.outcome.kind, OutcomeKind::Ok, "{:?}", run.outcome);
     let report: Value = serde_json::from_str(run.result.as_ref().unwrap().as_str().unwrap()).unwrap();
@@ -331,11 +331,17 @@ fn invalid_host_response_headers_reject_fetch_instead_of_leaving_it_pending() {
         [json!([["set-cookie", "rejected=bad; Path=/"], ["bad name", "x"]]), json!([["set-cookie", "rejected=bad; Path=/"], ["x-data", "bad\u{0}value"]])]
     {
         let input = json!({"url":"https://app.example/","html":r#"<script>fetch('/bad').then(()=>console.log('unexpected'),e=>console.log(e.name));setTimeout(()=>console.log('checkpoint',document.cookie),50);</script>"#});
-        let plan = Plan::parse(&json!({FETCH_OWN:{"return":{"ok":{"status":200,"headers":headers,"body":"ok"}}}}).to_string()).unwrap();
+        let plan = net_plan(&json!({FETCH_OWN:{"return":{"ok":{"status":200,"headers":headers,"body":"ok"}}}}).to_string()).unwrap();
         let run = browser.app.run(&browser.app.spec(browser.app.export(SESSION).unwrap(), vec![json!(input.to_string())], plan, 1));
         assert_eq!(run.outcome.kind, OutcomeKind::Ok);
         let report: Value = serde_json::from_str(run.result.as_ref().unwrap().as_str().unwrap()).unwrap();
         assert_eq!(report["errors"], json!([]), "{report}");
         assert_eq!(logs(&report), ["TypeError", "checkpoint "]);
     }
+}
+
+#[path = "support/browser_plan.rs"]
+mod browser_plan;
+fn net_plan(text: &str) -> anyhow::Result<Plan> {
+    browser_plan::parse(text)
 }

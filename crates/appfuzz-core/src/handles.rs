@@ -367,7 +367,8 @@ impl Handles {
                         state.insert(k.clone(), v.clone());
                     }
                 }
-                self.entries.get_mut(&bid).expect("created").bytes = text(&req["body"]).into_bytes();
+                self.entries.get_mut(&bid).expect("created").bytes =
+                    crate::output::http_body_bytes(&req["body"]).unwrap_or_else(|| text(&req["body"]).into_bytes());
                 Ok(vec![json!(rid), json!(bid)])
             }
             Op::Respond => {
@@ -475,6 +476,17 @@ mod tests {
         assert_ne!(a, u32::MAX);
         assert_ne!(b, u32::MAX);
         assert!(h.valid(first));
+    }
+
+    #[test]
+    fn downstream_body_preserves_non_utf8_and_zero_bytes() {
+        let kinds = BTreeMap::new();
+        let request = json!({"method":"POST","uri":"https://app.example/","headers":[],"body":[255,0,128,195,169]});
+        let mut handles = Handles::default();
+        let context = ctx(&kinds, Some(&request));
+        let binding = Binding { kind: Some("req".into()), body_kind: Some("body".into()), ..bind(Op::Downstream) };
+        handles.apply(&binding, &[], &[], &context).unwrap();
+        assert_eq!(handles.entries[&2].bytes, [255, 0, 128, 195, 169]);
     }
 
     #[test]

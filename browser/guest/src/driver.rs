@@ -91,11 +91,11 @@ mod bridge {
     use crate::component::{nav, net, sink};
     use rquickjs::convert::List;
     use rquickjs::function::Flat;
-    use rquickjs::{Ctx, Function, Object, Result};
+    use rquickjs::{Array, ArrayBuffer, Ctx, Function, Object, Result};
 
     /// Header pairs as JS arrays: rquickjs converts tuples through `List`.
     type Headers = Vec<List<(String, String)>>;
-    type FetchAnswer = (u16, Vec<(String, String)>, String, Option<String>, Option<f64>);
+    type FetchAnswer = (u16, Vec<(String, String)>, Option<()>, Option<String>, Option<f64>);
 
     pub fn install<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
         let host = Object::new(ctx.clone())?;
@@ -119,10 +119,13 @@ mod bridge {
         own: bool,
         target: String,
         headers: Headers,
-        body: Option<String>,
+        body: Option<ArrayBuffer<'js>>,
         List((gesture, now_ms)): List<(bool, f64)>,
     ) -> Result<rquickjs::Value<'js>> {
         let headers: Vec<(String, String)> = headers.into_iter().map(|List(h)| h).collect();
+        // SAFETY: copying the rooted buffer runs no JavaScript. The owned
+        // bytes outlive this borrow before a nested app is invoked.
+        let body = body.map(|buffer| unsafe { buffer.as_bytes() }.unwrap_or_default().to_vec());
         let before = host_ms();
         let answer = if own {
             net::fetch_own(&kind, &method, &target, &headers, body.as_deref(), gesture, now_ms.floor() as i64)
@@ -133,11 +136,16 @@ mod bridge {
         if let Some(latency) = latency {
             WAITED_MS.with(|w| w.set(w.get() + latency));
         }
-        let answer: FetchAnswer = match answer {
-            Ok(r) => (r.status, r.headers, r.body, None, latency),
-            Err(e) => (0, Vec::new(), String::new(), Some(e), latency),
+        let (answer, bytes): (FetchAnswer, Vec<u8>) = match answer {
+            Ok(r) => ((r.status, r.headers, None, None, latency), r.body),
+            Err(e) => ((0, Vec::new(), None, Some(e), latency), Vec::new()),
         };
-        crate::web::private_json(&ctx, serde_json::json!(answer))
+        let value = crate::web::private_json(&ctx, serde_json::json!(answer))?;
+        let array = Array::from_value(value)?;
+        // Slot 2 already exists as a writable own data property. Updating it
+        // cannot invoke an inherited array index setter from the page.
+        array.set(2, ArrayBuffer::new_copy(ctx.clone(), &bytes)?)?;
+        Ok(array.into_value())
     }
 
     /// The host's clock (appfuzz's virtual one) in ms, and a seed from its

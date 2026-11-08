@@ -3364,7 +3364,9 @@ fn encoded_browser_cookie_beacons_are_confirmed_replayed_and_regressed() {
     let (_, browser) = f.cli(&["show", evidence["detail"]["browser_run"].as_str().unwrap()]);
     let beacon = browser["events"].as_array().unwrap().iter().find(|e| e["func"] == "appfuzz:browser/net#fetch-other").unwrap();
     assert_eq!(beacon["args"]["kind"], "beacon", "{beacon}");
-    assert!(!appfuzz_core::value::some(&beacon["args"]["body"]).and_then(Value::as_str).unwrap().contains("sk_"), "{beacon}");
+    let body = appfuzz_core::value::some(&beacon["args"]["body"]).and_then(Value::as_array).unwrap();
+    let bytes: Vec<u8> = body.iter().map(|value| u8::try_from(value.as_u64().unwrap()).unwrap()).collect();
+    assert!(!String::from_utf8(bytes).unwrap().contains("sk_"), "{beacon}");
     let (_, confirmed) = f.cli(&["confirm", leak["id"].as_str().unwrap(), "--max-runs", "4"]);
     assert_eq!(confirmed["confirmed"], true, "{confirmed}");
     let case = confirmed["case"].as_str().unwrap();
@@ -3380,8 +3382,11 @@ fn encoded_browser_cookie_beacons_are_confirmed_replayed_and_regressed() {
     assert!(fixed["findings"].as_array().unwrap().iter().all(|f| f["kind"] != "encoded_flow"), "{fixed}");
     let (_, browser) = f.cli(&["show", fixed["pages"][0]["browser_run"].as_str().unwrap()]);
     assert!(
-        browser["events"].as_array().unwrap().iter().any(|e| e["func"] == "appfuzz:browser/net#fetch-other"
-            && appfuzz_core::value::some(&e["args"]["body"]).and_then(Value::as_str) == Some("public message")),
+        browser["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["func"] == "appfuzz:browser/net#fetch-other" && appfuzz_core::value::some(&e["args"]["body"]) == Some(&json!(b"public message"))),
         "{browser}"
     );
 }

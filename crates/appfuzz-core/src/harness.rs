@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value};
 use wasmtime::component::types::ComponentFunc;
-use wasmtime::component::{Component, InstancePre, Linker, ResourceTable, Val};
+use wasmtime::component::{Component, InstancePre, Linker, ResourceTable, Type, Val};
 use wasmtime::{Config, Engine, Store, StoreContextMut, Trap, WasmBacktrace};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
@@ -410,6 +410,13 @@ fn pooled_engine(max_memory: u64) -> Result<Engine> {
 }
 
 impl App {
+    /// Native HTTP adapters consume raw request bytes even though their
+    /// synthetic request type also accepts text. This does not change a
+    /// component entry whose WIT body field really is a string.
+    pub(crate) fn native_http_body(&self, export: &str) -> bool {
+        crate::wasi_http::is_handler_key(export) || matches!(self.pre, Pre::Core { .. })
+    }
+
     pub fn load(manifest: Manifest) -> Result<Self> {
         let path = manifest.wasm_path();
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -867,8 +874,30 @@ impl App {
         if params.len() != spec.args.len() {
             bail!("{} takes {} arguments, got {}", export.key, params.len(), spec.args.len());
         }
-        let args =
-            params.iter().zip(&spec.args).map(|((name, ty), v)| json_to_val(v, ty).with_context(|| format!("argument {name}"))).collect::<Result<Vec<_>>>()?;
+        let args = params
+            .iter()
+            .zip(&spec.args)
+            .enumerate()
+            .map(|(index, ((name, ty), value))| {
+                // Native HTTP adapters consume spec.args directly, rather than
+                // lowering this synthetic request through a component ABI. Their
+                // text carrier predates byte bodies. Validate the other fields
+                // normally, accepting only a genuine byte list in that body slot;
+                // keep the original bytes in the run spec and adapter input.
+                let mut carrier = None;
+                if index == 0
+                    && self.native_http_body(&export.key)
+                    && matches!(ty, Type::Record(record) if record.fields().any(|field| field.name == "body" && matches!(field.ty, Type::String)))
+                    && let Some(body @ Value::Array(_)) = value.get("body")
+                    && crate::output::http_body_bytes(body).is_some()
+                {
+                    let mut validation = value.clone();
+                    validation["body"] = Value::String(String::new());
+                    carrier = Some(validation);
+                }
+                json_to_val(carrier.as_ref().unwrap_or(value), ty).with_context(|| format!("argument {name}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         let start = parse_datetime(&spec.now).ok_or_else(|| anyhow!("bad time {:?}", spec.now))?;
         let start_ns = i128::from(start) * 1_000_000_000;

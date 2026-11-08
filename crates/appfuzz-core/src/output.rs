@@ -33,6 +33,23 @@ pub(crate) fn is_body(v: &Value) -> bool {
     v.is_string() || v.as_array().is_some_and(|a| a.iter().all(|x| x.as_u64().is_some_and(|n| n < 256)))
 }
 
+/// Raw HTTP body bytes. Callers identify the body field; numeric lists
+/// elsewhere remain ordinary application data.
+pub(crate) fn http_body_bytes(value: &Value) -> Option<Vec<u8>> {
+    match value {
+        Value::String(text) => Some(text.as_bytes().to_vec()),
+        Value::Array(bytes) => bytes.iter().map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok())).collect(),
+        _ => None,
+    }
+}
+
+/// The response bytes before text decoding for markup and text detectors.
+pub(crate) fn response_body_bytes(record: &RunRecord, manifest: &Manifest) -> Option<Vec<u8>> {
+    let result = record.result.as_ref()?;
+    let body = manifest.entry.as_ref().filter(|e| fn_key_eq(&e.export, &record.spec.export)).and_then(|e| e.output.body.as_deref());
+    http_body_bytes(body.map_or(Some(result), |path| field(result, path))?)
+}
+
 /// The actual string nodes a header entry consumes. Other fields remain
 /// ordinary export output, including an unused `key` beside `name`.
 pub(crate) fn header_parts(v: &Value) -> Option<(&Value, &Value)> {

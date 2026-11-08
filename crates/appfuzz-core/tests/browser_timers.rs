@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 fn visit(html: &str) -> (RunRecord, Value) {
     let browser = Browser::shared().unwrap();
     let input = json!({"url":"https://app.example/","html":html});
-    let plan = Plan::parse(&json!({FETCH_OWN:{"return":{"ok":{"status":200,"headers":[],"body":"real answer"}}}}).to_string()).unwrap();
+    let plan = net_plan(&json!({FETCH_OWN:{"return":{"ok":{"status":200,"headers":[],"body":"real answer"}}}}).to_string()).unwrap();
     let run = browser.app.run(&browser.app.spec(browser.app.export(SESSION).unwrap(), vec![json!(input.to_string())], plan, 1));
     assert_eq!(run.outcome.kind, OutcomeKind::Ok, "{:?}", run.outcome);
     let report: Value = serde_json::from_str(run.result.as_ref().unwrap().as_str().unwrap()).unwrap();
@@ -374,4 +374,10 @@ document.getElementById('target').addEventListener('click',()=>console.log('clic
 </script>"#,
     );
     assert_eq!(logs(&report), ["clicked"]);
+}
+
+#[path = "support/browser_plan.rs"]
+mod browser_plan;
+fn net_plan(text: &str) -> anyhow::Result<Plan> {
+    browser_plan::parse(text)
 }

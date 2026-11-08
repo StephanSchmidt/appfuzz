@@ -4,7 +4,7 @@ import { eventString, eventDictionary } from './event-state.js';
 import { runDOMCallback } from './dom-callbacks.js';
 import { lowerASCII } from './names.js';
 const native = globalThis.__native, kind = native.cloneKind, encode = native.encodeUtf8, decode = native.decodeUtf8, base64 = native.encodeBase64;
-const NativeTypeError = TypeError, NativeUint8Array = Uint8Array, create = Object.create, define = Object.defineProperty;
+const NativeTypeError = TypeError, NativeUint8Array = Uint8Array, isArray = Array.isArray, create = Object.create, define = Object.defineProperty;
 const descriptor = Object.getOwnPropertyDescriptor, prototype = Object.getPrototypeOf, apply = Reflect.apply, setPrototype = Object.setPrototypeOf;
 const iteratorSymbol = Symbol.iterator, tagSymbol = Symbol.toStringTag;
 const wellFormed = Function.prototype.call.bind(String.prototype.toWellFormed);
@@ -20,8 +20,8 @@ const isBuffer = bufferKinds.has.bind(bufferKinds);
 // nonserializable platform-object brand used by structured cloning.
 const records = new WeakMap(), save = records.set.bind(records);
 export const blobRecord = records.get.bind(records);
-let now = () => 0, unsupported = () => {};
-export function installBlobPlatform(value) { now = value.now; unsupported = value.unsupported; }
+let now = () => 0;
+export function installBlobPlatform(value) { now = value.now; }
 export function requireBlob(value) { const data = blobRecord(value); if (!data) throw new NativeTypeError('A Blob is required'); return data; }
 function requireFile(value) { const data = requireBlob(value); if (data.name === undefined) throw new NativeTypeError('A File is required'); return data; }
 function list() { const value = []; setPrototype(value, null); return value; }
@@ -158,11 +158,36 @@ export function blobDataURL(value) {
 export function fileFromBlob(value, name) { const record = requireBlob(value); return allocate(record.bytes, record.type, name, record.lastModified === undefined ? integer64(now()) : record.lastModified); }
 export function emptyFile() { return allocate(new NativeUint8Array(0), 'application/octet-stream', '', integer64(now())); }
 export function cloneBlob(value) { const record = requireBlob(value); return allocate(record.bytes, record.type, record.name, record.lastModified); }
-export function blobTransport(value) {
-  const record = requireBlob(value), text = record.text, encoded = new NativeUint8Array(encode(text));
-  const length = byteLength(encoded);
-  let same = length === byteLength(record.bytes);
-  for (let i = 0; same && i < length; i++) if (encoded[i] !== record.bytes[i]) same = false;
-  if (!same) unsupported('binary Blob body transport');
-  return text;
+// Shared internal byte operations. These values never leave platform slots;
+// public read methods return copies before resolving their promises.
+export const byteCount = byteLength;
+export const bufferOfBytes = bufferOf;
+export const textBytes = value => new NativeUint8Array(encode(value));
+export const decodeBytes = (bytes, strip = true) => decode(bufferOf(bytes), strip);
+export const blobBytes = value => requireBlob(value).bytes;
+export const blobFromBytes = (bytes, type = '') => allocate(bytes, mime(type));
+export function copyBodyBytes(bytes) { const copy = new NativeUint8Array(byteLength(bytes)); copyBytes(copy, bytes); return copy; }
+export const copyBytesBuffer = bytes => bufferOf(copyBodyBytes(bytes));
+export function bufferSourceKind(value) {
+  const type = kind(value);
+  if (!isBuffer(type)) return null;
+  const buffer = type === 'ArrayBuffer' ? value : apply(type === 'DataView' ? viewBuffer : typedBuffer, value, []);
+  if (apply(resizable, buffer, [])) throw new NativeTypeError('Resizable buffer sources are not BodyInit values');
+  return type;
+}
+export const bufferSourceBytes = (value, type) => copyBodyBytes(bufferView(value, type));
+export function wireBytes(value) {
+  const type = kind(value);
+  if (type === 'ArrayBuffer') return new NativeUint8Array(value);
+  if (typeof value === 'string') return textBytes(value);
+  if (!isArray(value)) throw new NativeTypeError('Invalid network byte body');
+  const bytes = new NativeUint8Array(value.length);
+  for (let i = 0; i < value.length; i++) { const byte = value[i]; if (typeof byte !== 'number' || byte < 0 || byte > 255 || trunc(byte) !== byte) throw new NativeTypeError('Invalid network body byte'); bytes[i] = byte; }
+  return bytes;
+}
+export function joinBytes(chunks) {
+  let size = 0; for (let i = 0; i < chunks.length; i++) size += byteLength(chunks[i]);
+  const bytes = new NativeUint8Array(size); let offset = 0;
+  for (let i = 0; i < chunks.length; i++) { copyBytes(bytes, chunks[i], offset); offset += byteLength(chunks[i]); }
+  return bytes;
 }
