@@ -6,7 +6,7 @@
 
 use rquickjs::convert::List;
 use rquickjs::function::Constructor;
-use rquickjs::{Ctx, Function, Object, Result, Value, qjs};
+use rquickjs::{ArrayBuffer, Ctx, Function, Object, Result, Value, qjs};
 use url::{Url, form_urlencoded, quirks};
 
 pub fn install(ctx: &Ctx<'_>) -> Result<()> {
@@ -20,6 +20,9 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     n.set("cookieSite", Function::new(ctx.clone(), cookie_site)?)?;
     n.set("bidiDirection", Function::new(ctx.clone(), bidi_direction)?)?;
     n.set("inputColor", Function::new(ctx.clone(), input_color)?)?;
+    n.set("encodeUtf8", Function::new(ctx.clone(), encode_utf8)?)?;
+    n.set("decodeUtf8", Function::new(ctx.clone(), decode_utf8)?)?;
+    n.set("encodeBase64", Function::new(ctx.clone(), encode_base64)?)?;
     // The pinned runtime has native DOMException slots but its Error.isError
     // predicate does not recognize them. Read the engine brand without invoking
     // page prototype getters or allocating/catching an exception per query.
@@ -29,6 +32,38 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     n.set("isDOMException", Function::new(ctx.clone(), move |value: Value<'_>| class_id(&value) == exception_class)?)?;
     install_clone_kinds(ctx, &n)?;
     ctx.globals().set("__native", n)
+}
+
+// Bytes stay native; no page TextEncoder/Decoder, constructors or index
+// setters run while Blob methods encode or decode their private buffers.
+fn encode_utf8(ctx: Ctx<'_>, value: String) -> Result<ArrayBuffer<'_>> {
+    ArrayBuffer::new_copy(ctx, value.as_bytes())
+}
+
+fn decode_utf8(value: ArrayBuffer<'_>, strip_bom: bool) -> String {
+    // SAFETY: the rooted buffer is only borrowed while Rust inspects it. No
+    // JavaScript runs before the decoded string owns all its data.
+    let bytes = unsafe { value.as_bytes() }.unwrap_or_default();
+    let bytes = if strip_bom { bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes) } else { bytes };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn encode_base64(value: ArrayBuffer<'_>) -> String {
+    // SAFETY: no JavaScript runs while Rust borrows the rooted buffer. The
+    // returned ASCII string owns its data before returning to the engine.
+    let bytes = unsafe { value.as_bytes() }.unwrap_or_default();
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3).saturating_mul(4));
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or(0);
+        let c = chunk.get(2).copied().unwrap_or(0);
+        output.push(ALPHABET[usize::from(a >> 2)] as char);
+        output.push(ALPHABET[usize::from(((a & 3) << 4) | (b >> 4))] as char);
+        output.push(if chunk.len() > 1 { ALPHABET[usize::from(((b & 15) << 2) | (c >> 6))] as char } else { '=' });
+        output.push(if chunk.len() > 2 { ALPHABET[usize::from(c & 63)] as char } else { '=' });
+    }
+    output
 }
 
 // Native brands distinguish internal data from prototype lookalikes and
@@ -246,6 +281,41 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(result, r#"[0,true,true,"TypeError",0]"#);
+        });
+    }
+
+    #[test]
+    fn utf8_helpers_preserve_bytes_and_recover_invalid_sequences() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            install(&ctx).unwrap();
+            let result: String = ctx.eval(r#"JSON.stringify([Array.from(new Uint8Array(__native.encodeUtf8('é🦀'))),__native.decodeUtf8(new Uint8Array([255,0,128]).buffer,true),__native.decodeUtf8(new Uint8Array([239,187,191,120]).buffer,true),__native.decodeUtf8(new Uint8Array([239,187,191,120]).buffer,false)])"#).unwrap();
+            assert_eq!(result, "[[195,169,240,159,166,128],\"�\\u0000�\",\"x\",\"\u{feff}x\"]");
+        });
+    }
+
+    #[test]
+    fn base64_helper_preserves_binary_and_partial_groups() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            install(&ctx).unwrap();
+            let result: String =
+                ctx.eval(r#"JSON.stringify([[],[0],[255],[255,128],[255,128,0,64]].map(bytes=>__native.encodeBase64(new Uint8Array(bytes).buffer)))"#).unwrap();
+            assert_eq!(result, r#"["","AA==","/w==","/4A=","/4AAQA=="]"#);
+        });
+    }
+
+    #[test]
+    fn utf8_helpers_do_not_invoke_page_codecs_or_inherited_setters() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            install(&ctx).unwrap();
+            let calls: i32 = ctx.eval(r#"let calls=0;const define=Object.defineProperty;globalThis.TextEncoder=globalThis.TextDecoder=function(){calls++};define(Array.prototype,'0',{configurable:true,set(value){define(this,'0',{value,writable:true,enumerable:true,configurable:true});calls++}});globalThis.decoded=__native.decodeUtf8(__native.encodeUtf8('é'),true);calls"#).unwrap();
+            assert_eq!(calls, 0);
+            assert_eq!(ctx.eval::<String, _>("decoded").unwrap(), "é");
         });
     }
 

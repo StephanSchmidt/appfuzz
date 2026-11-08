@@ -1059,6 +1059,18 @@ Context-dependent color expressions, advanced math the browser cannot evaluate,
 and nonfinite color conversions appear under `unsupported.apis` as
 `input[type=color]:CSS color expression`.
 
+Blob/File contents remain immutable bytes. Sizes and slices use byte offsets;
+array buffers and `bytes()` return independent copies. UTF-8 text decoding
+replaces invalid sequences and strips the initial BOM. File names and metadata
+convert at construction; `lastModified` uses signed 64-bit Web IDL conversion.
+Blob parts, options and buffer-source validation preserve native conversion
+order, including source mutations during option conversion. Resizable sources
+are rejected. Blob/File methods, cloning and FileReader byte/data-URL reads do
+not use page-defined codecs, typed-view length getters or constructor parents.
+Request/Response bodies and the browser host bridge still carry text. A Blob/FormData body
+that cannot round-trip through UTF-8 appears under `unsupported.apis` as
+`binary Blob body transport`, so it cannot establish complete passing coverage.
+
 `structuredClone` preserves cycles, shared references, sparse arrays, native
 numeric/date/regexp/collection data, errors, DOMExceptions, blobs and files.
 ArrayBuffer transfers happen after successful serialization, including transfers

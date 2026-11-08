@@ -1,3 +1,4 @@
+import { Blob, File, blobRecord, requireBlob, blobText, blobBuffer, blobDataURL, fileFromBlob, emptyFile, cloneBlob, blobTransport, installBlobPlatform } from './blobs.js';
 import { postMessage, installWindowMessages } from './window-messages.js';
 import { frameworkCandidate, editable, nodeText, normalizedText, documentText } from './exploration.js';
 import { MessagePort, MessageChannel, installMessagePortTasks } from './message-ports.js';
@@ -99,6 +100,7 @@ const setEach = Function.prototype.call.bind(Set.prototype.forEach), setHas = Fu
 let handledRejections = [];
 const unmodelled = (name) => nativeSetAdd(S.unmodelled, name);
 installColorReporter(unmodelled);
+installBlobPlatform({ now: () => S.now, unsupported: unmodelled });
 
 // The host: appfuzz's browser guest binds a private bridge to the
 // `appfuzz:browser` imports. Requests go to it and it answers them; markup,
@@ -570,10 +572,7 @@ installWindowMessages({ origin: () => S.origin, enqueue: callback => enqueueMess
 const NativePromise = Promise, createFetchObject = Object.create;
 const rejectPromise = Promise.reject.bind(Promise), parseBodyJSON = JSON.parse;
 const stringUpper = Function.prototype.call.bind(String.prototype.toUpperCase);
-const blobRecords = new WeakMap(), blobRecord = blobRecords.get.bind(blobRecords), saveBlob = blobRecords.set.bind(blobRecords);
 const formRecords = new WeakMap(), formRecord = formRecords.get.bind(formRecords), saveForm = formRecords.set.bind(formRecords);
-const NativeTextDecoder = TextDecoder;
-function requireBlob(value) { const data = blobRecord(value); if (!data) throw new NativeTypeError('A Blob is required'); return data; }
 function requireForm(value) { const data = formRecord(value); if (!data) throw new NativeTypeError('A FormData object is required'); return data; }
 function crlf(value) {
   let result = '';
@@ -588,7 +587,7 @@ function multipartName(value) {
 function extractBody(body) {
   if (body == null) return { text: null, type: null };
   const blob = blobRecord(body);
-  if (blob) return { text: blob.text, type: blob.type || null };
+  if (blob) return { text: blobTransport(body), type: blob.type || null };
   const fields = formRecord(body);
   if (fields) {
     const boundary = '----appfuzz-' + uuid(); let text = '';
@@ -596,7 +595,7 @@ function extractBody(body) {
       const entry = fields[i], name = entry[0], value = entry[1], file = blobRecord(value);
       text += '--' + boundary + '\r\nContent-Disposition: form-data; name="' + multipartName(name) + '"';
       if (file) text += '; filename="' + multipartName(file.name ?? 'blob') + '"\r\nContent-Type: ' + (file.type || 'application/octet-stream');
-      text += '\r\n\r\n' + (file ? file.text : crlf(value)) + '\r\n';
+      text += '\r\n\r\n' + (file ? blobTransport(value) : crlf(value)) + '\r\n';
     }
     return { text: text + '--' + boundary + '--\r\n', type: 'multipart/form-data; boundary=' + boundary };
   }
@@ -895,25 +894,6 @@ G.Worker = class Worker extends Inert { constructor(u) { super('Worker', u); } }
 G.SharedWorker = class SharedWorker extends Inert { constructor(u) { super('SharedWorker', u); } };
 G.BroadcastChannel = class BroadcastChannel extends Inert { constructor() { super('BroadcastChannel'); } };
 
-class Blob {
-  constructor(parts = [], options = {}) {
-    let text = '';
-    for (const part of parts) { const data = blobRecord(part); text += data ? data.text : typeof part === 'string' ? wellFormed(part) : ArrayBuffer.isView(part) || part instanceof ArrayBuffer ? new NativeTextDecoder().decode(part) : wellFormed(domString(part)); }
-    let type = options.type === undefined ? '' : domString(options.type);
-    for (let i = 0; i < type.length; i++) if (type.charCodeAt(i) < 32 || type.charCodeAt(i) > 126) { type = ''; break; }
-    saveBlob(this, { text, type: type.toLowerCase(), name: undefined, lastModified: undefined });
-  }
-  get size() { return new TextEncoder().encode(requireBlob(this).text).length; }
-  get type() { return requireBlob(this).type; }
-  text() { return nativeResolve(requireBlob(this).text); }
-  arrayBuffer() { return nativeResolve(new TextEncoder().encode(requireBlob(this).text).buffer); }
-  slice(a, b, type = '') { return new Blob([requireBlob(this).text.slice(a, b)], { type }); }
-}
-class File extends Blob {
-  constructor(parts, name, options = {}) { super(parts, options); const data = requireBlob(this); data.name = wellFormed(domString(name)); data.lastModified = options.lastModified ?? S.now; }
-  get name() { const data = requireBlob(this); if (data.name === undefined) throw new NativeTypeError('A File is required'); return data.name; }
-  get lastModified() { const data = requireBlob(this); if (data.name === undefined) throw new NativeTypeError('A File is required'); return data.lastModified; }
-}
 class FileReader extends L.EventTarget {
   constructor() { super(); this.result = null; this.readyState = 0; this.onload = null; this.onloadend = null; this.onerror = null; }
   _read(f) {
@@ -923,9 +903,9 @@ class FileReader extends L.EventTarget {
       for (const t of ['load', 'loadend']) fireEvent(this, new ProgressEvent(t));
     }, 0, [], false, 'FileReader', false);
   }
-  readAsText(b) { this._read(() => requireBlob(b).text); }
-  readAsDataURL(b) { this._read(() => 'data:' + (requireBlob(b).type || 'application/octet-stream') + ';base64,' + btoa(unescape(encodeURIComponent(requireBlob(b).text)))); }
-  readAsArrayBuffer(b) { this._read(() => new TextEncoder().encode(requireBlob(b).text).buffer); }
+  readAsText(b) { requireBlob(b); this._read(() => blobText(b)); }
+  readAsDataURL(b) { requireBlob(b); this._read(() => blobDataURL(b)); }
+  readAsArrayBuffer(b) { requireBlob(b); this._read(() => blobBuffer(b)); }
   abort() {}
 }
 Object.assign(G, { Blob, File, FileReader });
@@ -952,10 +932,8 @@ function formEntry(receiver, count, key, value, filename) {
     if (count >= 3 && !data) throw new NativeTypeError('A filename requires a Blob');
     if (!data) value = wellFormed(domString(value));
     else if (filename !== undefined || data.name === undefined) {
-      const file = nativeCreate(File.prototype);
       const fileName = filename === undefined ? 'blob' : wellFormed(domString(filename));
-      saveBlob(file, { text: data.text, type: data.type, name: fileName, lastModified: data.lastModified ?? S.now });
-      value = file;
+      value = fileFromBlob(value, fileName);
     }
     return { list, entry: [name, value] };
   });
@@ -994,10 +972,7 @@ class FormData {
     if (isConstructingForm(form)) throw new BrowserDOMException('The entry list is already being constructed', 'InvalidStateError');
     beginForm(form);
     try {
-      populateForm(form, submitter, (name, value) => { list[list.length] = [wellFormed(name), typeof value === 'string' ? wellFormed(value) : value]; }, () => {
-        const file = nativeCreate(File.prototype);
-        saveBlob(file, { text: '', type: 'application/octet-stream', name: '', lastModified: S.now }); return file;
-      });
+      populateForm(form, submitter, (name, value) => { list[list.length] = [wellFormed(name), typeof value === 'string' ? wellFormed(value) : value]; }, () => emptyFile());
       const data = nativeCreate(FormData.prototype); saveForm(data, list);
       fireEvent(form, new FormDataEvent('formdata', { bubbles: true, formData: data }));
       const copy = []; nativeSetPrototype(copy, null);
@@ -2057,10 +2032,7 @@ G.__af = {
 
 installClonePlatform(value => {
   const data = blobRecord(value);
-  if (data) {
-    const copy = nativeCreate(data.name === undefined ? Blob.prototype : File.prototype);
-    saveBlob(copy, { ...data }); return { value: copy };
-  }
+  if (data) return { value: cloneBlob(value) };
   if (nodeInfo(value) || formRecord(value) || requestData(value) || responseData(value)) return { reject: true };
   return null;
 }, unmodelled);
