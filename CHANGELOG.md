@@ -134,6 +134,10 @@
 
 **Apps that ship JavaScript**
 
+- FormData updates preserve field order and keep old values when replacement
+  conversion fails. Names, file overloads and live iteration follow browser
+  behavior even when page scripts replace public helpers.
+
 - Cookies stay private when page scripts replace collection methods, URL and
   date helpers, serializers, or prototype properties. HttpOnly values cannot
   escape through internal arrays or report snapshots. Public suffix and site

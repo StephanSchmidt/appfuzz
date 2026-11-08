@@ -928,9 +928,51 @@ for (const [Class, types] of [[MessagePort, ['message', 'messageerror']], [XMLHt
 
 // --- The page's document ----------------------------------------------------
 
+// FormData conversions run before changing the entry list. The list keeps
+// its identity so iterators and forEach observe later deletions and appends.
+function formName(receiver, count, name) {
+  const list = requireForm(receiver);
+  if (!count) throw new NativeTypeError('A field name is required');
+  return { list, name: runDOMCallback(() => wellFormed(domString(name))) };
+}
+function formEntry(receiver, count, key, value, filename) {
+  const list = requireForm(receiver);
+  if (count < 2) throw new NativeTypeError('A field name and value are required');
+  return runDOMCallback(() => {
+    const name = wellFormed(domString(key)), data = blobRecord(value);
+    if (count >= 3 && !data) throw new NativeTypeError('A filename requires a Blob');
+    if (!data) value = wellFormed(domString(value));
+    else if (filename !== undefined || data.name === undefined) {
+      const file = nativeCreate(File.prototype);
+      const fileName = filename === undefined ? 'blob' : wellFormed(domString(filename));
+      saveBlob(file, { text: data.text, type: data.type, name: fileName, lastModified: data.lastModified ?? S.now });
+      value = file;
+    }
+    return { list, entry: [name, value] };
+  });
+}
+const formIteratorRecords = new WeakMap();
+const getFormIterator = formIteratorRecords.get.bind(formIteratorRecords), saveFormIterator = formIteratorRecords.set.bind(formIteratorRecords);
+const formIteratorPrototype = nativeCreate(Object.getPrototypeOf(Object.getPrototypeOf([][iteratorSymbol]())));
+const formIteratorMethods = {
+  next() {
+    const state = getFormIterator(this);
+    if (!state) throw new NativeTypeError('A FormData iterator is required');
+    if (state.index >= state.list.length) return { value: undefined, done: true };
+    const pair = state.list[state.index++];
+    return { value: state.kind === 'keys' ? pair[0] : state.kind === 'values' ? pair[1] : [pair[0], pair[1]], done: false };
+  },
+};
+nativeDefine(formIteratorPrototype, 'next', { value: formIteratorMethods.next, writable: true, enumerable: true, configurable: true });
+nativeDefine(formIteratorPrototype, Symbol.toStringTag, { value: 'FormData Iterator', configurable: true });
+function formIterator(receiver, kind) {
+  const list = requireForm(receiver), iterator = nativeCreate(formIteratorPrototype);
+  saveFormIterator(iterator, { list, index: 0, kind }); return iterator;
+}
+
 class FormData {
   constructor(form, submitter) {
-    saveForm(this, []);
+    const list = []; nativeSetPrototype(list, null); saveForm(this, list);
     if (!form) return;
     for (const el of form.querySelectorAll('input,select,textarea,button')) {
       const name = el.getAttribute('name');
@@ -938,35 +980,61 @@ class FormData {
       const tag = el.localName;
       const type = (el.getAttribute('type') || '').toLowerCase();
       if (tag === 'button' || ['submit', 'image', 'reset', 'button'].includes(type)) {
-        if (el === submitter) requireForm(this).push([name, el.getAttribute('value') || '']);
+        if (el === submitter) list[list.length] = [name, el.getAttribute('value') || ''];
         continue;
       }
       if ((type === 'checkbox' || type === 'radio') && !el.checked) continue;
       if (type === 'file') continue;
       if (tag === 'select') {
-        for (const o of el.querySelectorAll('option')) if (o.selected) requireForm(this).push([name, o.value ?? o.textContent]);
+        for (const o of el.querySelectorAll('option')) if (o.selected) list[list.length] = [name, o.value ?? o.textContent];
         continue;
       }
-      requireForm(this).push([name, type === 'checkbox' || type === 'radio' ? el.getAttribute('value') ?? 'on' : String(el.value ?? '')]);
+      list[list.length] = [name, type === 'checkbox' || type === 'radio' ? el.getAttribute('value') ?? 'on' : nativeString(el.value ?? '')];
     }
   }
   append(k, v, filename) {
-    const list = requireForm(this), name = wellFormed(domString(k)), data = blobRecord(v);
-    if (filename !== undefined && !data) throw new NativeTypeError('A filename requires a Blob');
-    const value = data ? filename === undefined && data.name !== undefined ? v : new File([v], filename === undefined ? 'blob' : filename, { type: data.type }) : wellFormed(domString(v));
-    list[list.length] = [name, value];
+    const { list, entry } = formEntry(this, arguments.length, k, v, filename);
+    list[list.length] = entry;
   }
-  delete(k) { k = wellFormed(domString(k)); saveForm(this, requireForm(this).filter((p) => p[0] !== k)); }
-  get(k) { const p = requireForm(this).find((p) => p[0] === k); return p ? p[1] : null; }
-  getAll(k) { return requireForm(this).filter((p) => p[0] === k).map((p) => p[1]); }
-  has(k) { return requireForm(this).some((p) => p[0] === k); }
-  set(k, v, filename) { this.delete(k); this.append(k, v, filename); }
-  forEach(f, t) { for (const [k, v] of requireForm(this)) f.call(t, v, k, this); }
-  *entries() { yield* requireForm(this).map((p) => [...p]); }
-  *keys() { for (const p of requireForm(this)) yield p[0]; }
-  *values() { for (const p of requireForm(this)) yield p[1]; }
-  [Symbol.iterator]() { return this.entries(); }
+  delete(k) {
+    const { list, name } = formName(this, arguments.length, k); let write = 0;
+    for (let i = 0; i < list.length; i++) if (list[i][0] !== name) list[write++] = list[i];
+    list.length = write;
+  }
+  get(k) {
+    const { list, name } = formName(this, arguments.length, k);
+    for (let i = 0; i < list.length; i++) if (list[i][0] === name) return list[i][1];
+    return null;
+  }
+  getAll(k) {
+    const { list, name } = formName(this, arguments.length, k), result = [];
+    for (let i = 0; i < list.length; i++) if (list[i][0] === name) nativeDefine(result, result.length, { value: list[i][1], writable: true, enumerable: true, configurable: true });
+    return result;
+  }
+  has(k) {
+    const { list, name } = formName(this, arguments.length, k);
+    for (let i = 0; i < list.length; i++) if (list[i][0] === name) return true;
+    return false;
+  }
+  set(k, v, filename) {
+    const { list, entry } = formEntry(this, arguments.length, k, v, filename); let found = false, write = 0;
+    for (let i = 0; i < list.length; i++) {
+      const pair = list[i];
+      if (pair[0] !== entry[0]) list[write++] = pair;
+      else if (!found) { list[write++] = entry; found = true; }
+    }
+    list.length = write; if (!found) list[list.length] = entry;
+  }
+  forEach(f, t) {
+    const list = requireForm(this);
+    if (!arguments.length || typeof f !== 'function') throw new NativeTypeError('A callback is required');
+    for (let i = 0; i < list.length; i++) { const pair = list[i]; runDOMCallback(() => nativeApply(f, t, [pair[1], pair[0], this])); }
+  }
+  entries() { return formIterator(this, 'entries'); }
+  keys() { return formIterator(this, 'keys'); }
+  values() { return formIterator(this, 'values'); }
 }
+nativeDefine(FormData.prototype, iteratorSymbol, { value: FormData.prototype.entries, writable: true, configurable: true });
 G.FormData = FormData;
 
 function makeStorage(kind) {
