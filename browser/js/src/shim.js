@@ -3,6 +3,7 @@
 // privately: init, scripts, step, candidates, act, report. Everything a page does
 // that leaves the page (requests, navigations, cookies, code it builds)
 // is recorded.
+import { installNumericProperties } from './input-numbers.js';
 import { installColorReporter } from './color-values.js';
 import { representativeInputValue, representativeSelectionValue } from './input-domains.js';
 import * as L from 'linkedom';
@@ -1526,7 +1527,7 @@ function installWindow(doc) {
   define(I, 'indeterminate', { get() { return indeterminate(this); }, set(value) { setIndeterminate(this, value); } });
   define(I, 'defaultChecked', { get() { return this.hasAttribute('checked'); }, set(v) { this.toggleAttribute('checked', !!v); } });
   define(I, 'files', { get: () => [] });
-  define(I, 'valueAsNumber', { get() { return this.value === '' ? NaN : Number(this.value); }, set(v) { this.value = String(v); } });
+  installNumericProperties(L, BrowserDOMException);
   I.select = I.setSelectionRange = I.setCustomValidity = I.reportValidity = function () { return true; };
   I.checkValidity = function () { return true; };
   const F = L.HTMLFormElement.prototype;

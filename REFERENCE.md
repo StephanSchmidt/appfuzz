@@ -1044,6 +1044,13 @@ precede listeners and roll back on cancellation. Radio groups follow physical
 trees and form owners; programmatic clicks honor disabled controls and suppress
 recursive calls to `click()`. Labels forward clicks, links queue navigation,
 and the first summary toggles its details with a coalesced trusted toggle event.
+Numeric/date input APIs use the control's current value, preserve its default,
+and do not fire user-edit events on assignment. `valueAsNumber` uses UTC
+milliseconds for dates and weeks, months since January 1970 for month controls,
+and milliseconds since midnight for times. Calendar arithmetic supports the
+model's positive Gregorian year domain independently of JavaScript's Date
+range. `valueAsDate` returns a fresh Date object for date/month/week/time controls
+(or null for an empty/inapplicable value); an out-of-range Date has a NaN time.
 Range and color actions select a value and fire ordinary `input`/`change`
 events when it changes; canceled clicks, disabled controls and fixed ranges
 preserve their values. Color controls parse CSS colors, arithmetic and mixtures,
