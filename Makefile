@@ -39,7 +39,7 @@ browser:
 	cargo run --release --manifest-path browser/Cargo.toml -p appfuzz-browser-wizen -- $(BROWSER_WASM) $(BROWSER_ASSETS)/browser.wasm
 	{ echo "The browser guest: QuickJS (quickjs-ng, MIT, via rquickjs, MIT), a DOM"; \
 	  echo "shim on linkedom (ISC), HTML tree building with parse5 (MIT),"; \
-	  echo "cookies with tldts (MIT, Public Suffix List), URLs with url"; \
+	  echo "cookies with psl (MIT, Public Suffix List), URLs with url"; \
 	  echo "(MIT/Apache-2.0) and the page driver, snapshotted after boot,"; \
 	  echo "built by make browser."; \
 	  echo "Source: browser/ (guest/, js/, wit/, wizen/)."; \
@@ -48,14 +48,10 @@ browser:
 	  echo "linkedom: $$(node -p 'require("./browser/js/node_modules/linkedom/package.json").version')"; \
 	  echo "parse5: $$(node -p 'require("./browser/js/node_modules/parse5/package.json").version')"; \
 	  echo "parse5 entities: $$(node -p 'require("./browser/js/node_modules/parse5/node_modules/entities/package.json").version')"; \
-	  echo "tldts: $$(node -p 'require("./browser/js/node_modules/tldts/package.json").version')"; \
-	  echo "tldts-core: $$(node -p 'require("./browser/js/node_modules/tldts-core/package.json").version')"; \
+	  echo "psl: $$($(call BROWSER_LOCK,psl))"; \
 	  echo "rustc: $$(rustc --version)"; \
 	  echo "SHA-256: $$(sha256sum $(BROWSER_ASSETS)/browser.wasm | cut -d' ' -f1)"; \
 	} > $(BROWSER_ASSETS)/PROVENANCE.txt
-	{ echo "tldts"; cat browser/js/node_modules/tldts/LICENSE; \
-	  echo; echo "tldts-core"; cat browser/js/node_modules/tldts-core/LICENSE; \
-	} > $(BROWSER_ASSETS)/LICENSES.tldts.txt
 	{ echo "parse5"; cat browser/js/node_modules/parse5/LICENSE; \
 	  echo; echo "parse5 entities"; cat browser/js/node_modules/parse5/node_modules/entities/LICENSE; \
 	} > $(BROWSER_ASSETS)/LICENSES.parse5.txt

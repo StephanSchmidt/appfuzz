@@ -134,6 +134,11 @@
 
 **Apps that ship JavaScript**
 
+- Cookies stay private when page scripts replace collection methods, URL and
+  date helpers, serializers, or prototype properties. HttpOnly values cannot
+  escape through internal arrays or report snapshots. Public suffix and site
+  decisions use the same native parser as appfuzz core.
+
 - Timers use browser argument conversion, callback receivers, cancellation,
   nesting and repeat ordering. Page changes to collection or arithmetic
   helpers cannot disable scheduled work or erase unsupported API markers.

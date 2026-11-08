@@ -90,11 +90,12 @@ impl Loader for PageLoader {
 mod bridge {
     use crate::component::{nav, net, sink};
     use rquickjs::convert::List;
+    use rquickjs::function::Flat;
     use rquickjs::{Ctx, Function, Object, Result};
 
     /// Header pairs as JS arrays: rquickjs converts tuples through `List`.
     type Headers = Vec<List<(String, String)>>;
-    type FetchAnswer = List<(u16, Headers, String, Option<String>, Option<f64>)>;
+    type FetchAnswer = (u16, Vec<(String, String)>, String, Option<String>, Option<f64>);
 
     pub fn install<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
         let host = Object::new(ctx.clone())?;
@@ -112,15 +113,15 @@ mod bridge {
 
     /// A request: `target` is a path on the page's origin when `own`, else
     /// a URL. The answer is `[status, headers, body, error, latency_ms]`.
-    fn fetch(
-        kind: String,
+    fn fetch<'js>(
+        Flat((ctx, kind)): Flat<(Ctx<'js>, String)>,
         method: String,
         own: bool,
         target: String,
         headers: Headers,
         body: Option<String>,
         List((gesture, now_ms)): List<(bool, f64)>,
-    ) -> FetchAnswer {
+    ) -> Result<rquickjs::Value<'js>> {
         let headers: Vec<(String, String)> = headers.into_iter().map(|List(h)| h).collect();
         let before = host_ms();
         let answer = if own {
@@ -132,10 +133,11 @@ mod bridge {
         if let Some(latency) = latency {
             WAITED_MS.with(|w| w.set(w.get() + latency));
         }
-        match answer {
-            Ok(r) => List((r.status, r.headers.into_iter().map(List).collect(), r.body, None, latency)),
-            Err(e) => List((0, Vec::new(), String::new(), Some(e), latency)),
-        }
+        let answer: FetchAnswer = match answer {
+            Ok(r) => (r.status, r.headers, r.body, None, latency),
+            Err(e) => (0, Vec::new(), String::new(), Some(e), latency),
+        };
+        crate::web::private_json(&ctx, serde_json::json!(answer))
     }
 
     /// The host's clock (appfuzz's virtual one) in ms, and a seed from its

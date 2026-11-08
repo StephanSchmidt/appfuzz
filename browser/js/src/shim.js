@@ -43,6 +43,8 @@ const nodeRoot = Function.prototype.call.bind(L.Node.prototype.getRootNode);
 const isShadowRoot = Object.prototype.isPrototypeOf.bind(L.ShadowRoot.prototype);
 const isDocument = Object.prototype.isPrototypeOf.bind(L.Document.prototype);
 const CAP = 200;
+const nativeDefine = Object.defineProperty, nativeCreate = Object.create, nativeEntries = Object.entries, nativeIsArray = Array.isArray, nativeSetPrototype = Object.setPrototypeOf;
+const nativeLower = Function.prototype.call.bind(String.prototype.toLowerCase);
 const nativeString = String, diagnosticSlice = Function.prototype.call.bind(String.prototype.slice);
 
 const S = {
@@ -58,7 +60,7 @@ const S = {
 setEventClock(() => S.now - S.start);
 installControlState(queueDetailsToggle);
 
-const push = (list, v) => { if (list.length < CAP) list[list.length] = v; };
+const push = (list, v) => { if (list.length < CAP) nativeDefine(list, list.length, { value: v, writable: true, enumerable: true, configurable: true }); };
 const clip = (s, n = 400) => { s = nativeString(s); return s.length > n ? diagnosticSlice(s, 0, n) + '…' : s; };
 let dispatchGlobalError = null, dispatchGlobalEvent = null, reportingError = false;
 const error = (where, value, notify = true) => {
@@ -732,26 +734,32 @@ Object.assign(G, { Headers, Request, Response });
 function receive(r) {
   if (!r.received) {
     r.received = true;
-    if (r.acceptCookies && r.status >= 200) for (const value of r.setCookies) S.cookies.set(value, r.url, true);
+    if (r.acceptCookies && r.status >= 200) for (let i = 0; i < r.setCookies.length; i++) S.cookies.set(r.setCookies[i], r.url, true);
   }
   return r;
 }
 function networkAnswer(status, body, rawHeaders, url, acceptCookies, delayed, latency = S.latency) {
-  const headers = Object.create(null);
-  const setCookies = [];
-  for (const [name, value] of Array.isArray(rawHeaders) ? rawHeaders : Object.entries(rawHeaders || {})) {
-    const key = String(name).toLowerCase();
-    if (key === 'set-cookie') setCookies.push(String(value));
-    else if (key !== 'set-cookie2') headers[key] = headers[key] == null ? String(value) : headers[key] + ', ' + value;
+  const headers = nativeCreate(null), setCookies = [];
+  nativeSetPrototype(setCookies, null);
+  const pairs = nativeIsArray(rawHeaders) ? rawHeaders : nativeEntries(rawHeaders || {});
+  for (let i = 0; i < pairs.length; i++) {
+    const pair = pairs[i], key = nativeLower(nativeString(pair[0])), value = nativeString(pair[1]);
+    if (key === 'set-cookie') setCookies[setCookies.length] = value;
+    else if (key !== 'set-cookie2') headers[key] = headers[key] == null ? value : headers[key] + ', ' + value;
   }
   const r = { status, body, headers, url, acceptCookies, setCookies, received: false, latency };
   return delayed ? r : receive(r);
 }
 function respond(method, url, body, headers, kind, credentials = 'same-origin', delayed = false) {
-  const u = new URL(String(url), urlPart(S.url, 'href'));
+  const u = new URL(nativeString(url), urlPart(S.url, 'href'));
   const own = urlPart(u, 'origin') === S.origin;
   const include = credentials === 'include' || (credentials === 'same-origin' && own);
-  headers = Object.fromEntries(Object.entries(headers || {}).filter(([k]) => !['cookie', 'cookie2'].includes(k.toLowerCase())));
+  const filtered = nativeCreate(null), raw = nativeEntries(headers || {});
+  for (let i = 0; i < raw.length; i++) {
+    const pair = raw[i], name = nativeLower(nativeString(pair[0]));
+    if (name !== 'cookie' && name !== 'cookie2') filtered[pair[0]] = pair[1];
+  }
+  headers = filtered;
   if (include) {
     const cookie = S.cookies.header(urlPart(u, 'href'), true, urlPart(S.url, 'href'));
     if (cookie) headers.cookie = cookie;
@@ -764,9 +772,12 @@ function respond(method, url, body, headers, kind, credentials = 'same-origin', 
   const h = host();
   if (h) {
     // Sent now, delivered after the latency: the answer is the host's.
-    const target = own ? path : urlPart(u, 'href').split('#')[0];
-    const pairs = Object.entries(headers || {}).map(([k, v]) => [String(k), String(v)]);
-    const [status, rh, text, failed, latency] = h.fetch(kind, method, own, target, pairs, body == null ? null : String(body), [!!S.gesture, S.now]);
+    const href = urlPart(u, 'href'), hash = stringIndex(href, '#'), target = own ? path : hash < 0 ? href : stringSlice(href, 0, hash);
+    const entries = nativeEntries(headers || {}), pairs = [];
+    nativeSetPrototype(pairs, null);
+    for (let i = 0; i < entries.length; i++) pairs[i] = [nativeString(entries[i][0]), nativeString(entries[i][1])];
+    const answer = h.fetch(kind, method, own, target, pairs, body == null ? null : nativeString(body), [!!S.gesture, S.now]);
+    const status = answer[0], rh = answer[1], text = answer[2], failed = answer[3], latency = answer[4];
     if (failed != null) return { status: 0, error: failed, body: '', headers: {}, url: urlPart(u, 'href'), latency: latency ?? S.latency };
     return networkAnswer(status, text, rh, urlPart(u, 'href'), include, delayed, latency ?? S.latency);
   }
@@ -979,7 +990,7 @@ function makeStorage(kind) {
 }
 
 function setCookie(text) {
-  const written = S.cookies.set(String(text), urlPart(S.url, 'href'));
+  const written = S.cookies.set(runDOMCallback(() => domString(text)), urlPart(S.url, 'href'));
   if (written) push(S.cookieWrites, { name: clip(written.name, 100), value: clip(written.value, 200), flags: written.flags, gesture: S.gesture });
 }
 
@@ -1027,7 +1038,7 @@ const historyApi = {
   length: 1, state: null, scrollRestoration: 'auto',
   _go(how, state, url) {
     if (url != null) {
-      const u = new URL(String(url), urlPart(S.url, 'href'));
+      const u = new URL(nativeString(url), urlPart(S.url, 'href'));
       if (urlPart(u, 'origin') !== S.origin) throw new DOMException(how + ': another origin', 'SecurityError');
       S.url = u;
     }

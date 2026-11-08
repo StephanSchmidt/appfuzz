@@ -5,9 +5,9 @@
 const stringify = JSON.stringify, ownKeys = Reflect.ownKeys;
 const descriptor = Object.getOwnPropertyDescriptor, create = Object.create, setPrototype = Object.setPrototypeOf;
 const array = Array.isArray, own = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
-const string = String, NativeTypeError = TypeError;
+const string = String, finite = Number.isFinite, NativeTypeError = TypeError;
 export function reportJSON(value) {
-  const ancestors = [];
+  const ancestors = []; setPrototype(ancestors, null);
   function snapshot(value) {
     if (typeof value === 'bigint') throw new NativeTypeError('Cannot serialize BigInt');
     if (value === null || typeof value !== 'object') return typeof value === 'function' ? undefined : value;
@@ -31,5 +31,28 @@ export function reportJSON(value) {
     }
     ancestors.length--; return result;
   }
-  return stringify(snapshot(value));
+  // QuickJS JSON.stringify uses an ordinary array as its cycle stack,
+  // which can invoke page index setters even for null-prototype input.
+  // Only primitive string quoting is delegated to that native encoder.
+  function encode(value) {
+    if (value === null) return 'null';
+    if (typeof value === 'string') return stringify(value);
+    if (typeof value === 'boolean') return value ? 'true' : 'false';
+    if (typeof value === 'number') return finite(value) ? string(value) : 'null';
+    if (typeof value !== 'object') return undefined;
+    let out;
+    if (array(value)) {
+      out = '[';
+      for (let i = 0; i < value.length; i++) out += (i ? ',' : '') + (encode(value[i]) ?? 'null');
+      return out + ']';
+    }
+    out = '{';
+    const keys = ownKeys(value); let comma = '';
+    for (let i = 0; i < keys.length; i++) if (typeof keys[i] === 'string') {
+      const encoded = encode(value[keys[i]]);
+      if (encoded !== undefined) { out += comma + stringify(keys[i]) + ':' + encoded; comma = ','; }
+    }
+    return out + '}';
+  }
+  return encode(snapshot(value));
 }

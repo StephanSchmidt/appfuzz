@@ -5,16 +5,62 @@
 //! a browser.
 
 use rquickjs::convert::List;
-use rquickjs::{Ctx, Function, Object, Result};
+use rquickjs::{Ctx, Function, Object, Result, Value};
 use url::{Url, form_urlencoded, quirks};
 
 pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     let n = Object::new(ctx.clone())?;
-    n.set("url", Function::new(ctx.clone(), url_parse)?)?;
-    n.set("urlSet", Function::new(ctx.clone(), url_set)?)?;
-    n.set("formParse", Function::new(ctx.clone(), form_parse)?)?;
+    n.set("url", Function::new(ctx.clone(), url_parse_js)?)?;
+    n.set("urlSet", Function::new(ctx.clone(), url_set_js)?)?;
+    n.set("formParse", Function::new(ctx.clone(), form_parse_js)?)?;
     n.set("formSerialize", Function::new(ctx.clone(), form_serialize)?)?;
+    n.set("cookieDomainMatches", Function::new(ctx.clone(), cookie_domain_matches)?)?;
+    n.set("cookiePublicSuffix", Function::new(ctx.clone(), cookie_public_suffix)?)?;
+    n.set("cookieSite", Function::new(ctx.clone(), cookie_site)?)?;
     ctx.globals().set("__native", n)
+}
+
+// The native JSON parser defines own data properties. rquickjs's ordinary
+// Vec/List conversion uses assignment and can invoke page prototype setters.
+pub(crate) fn private_json<'js>(ctx: &Ctx<'js>, value: serde_json::Value) -> Result<Value<'js>> {
+    ctx.json_parse(value.to_string())
+}
+
+fn url_parse_js<'js>(ctx: Ctx<'js>, input: String, base: Option<String>) -> Result<Value<'js>> {
+    private_json(&ctx, serde_json::json!(url_parse(input, base)))
+}
+
+fn url_set_js<'js>(ctx: Ctx<'js>, href: String, key: String, value: String) -> Result<Value<'js>> {
+    private_json(&ctx, serde_json::json!(url_set(href, key, value)))
+}
+
+fn form_parse_js<'js>(ctx: Ctx<'js>, input: String) -> Result<Value<'js>> {
+    let pairs: Vec<_> = form_parse(input).into_iter().map(|List(pair)| pair).collect();
+    private_json(&ctx, serde_json::json!(pairs))
+}
+
+fn ip_address(host: &str) -> bool {
+    host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok()
+}
+
+fn cookie_domain_matches(host: String, domain: String) -> bool {
+    host == domain || (!ip_address(&host) && host.strip_suffix(&domain).is_some_and(|prefix| prefix.ends_with('.')))
+}
+
+fn cookie_public_suffix(host: String) -> bool {
+    !ip_address(&host) && psl::suffix_str(&host) == Some(host.as_str())
+}
+
+fn cookie_site(href: String) -> Option<String> {
+    let url = Url::parse(&href).ok()?;
+    let host = quirks::hostname(&url);
+    let domain = if ip_address(host) { host } else { psl::domain_str(host).unwrap_or(host) };
+    let scheme = match url.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        scheme => scheme,
+    };
+    Some(format!("{scheme}://{domain}"))
 }
 
 /// A URL's parts as `URL` shows them: href, origin, protocol, username,
@@ -84,6 +130,27 @@ mod tests {
 
     fn host(input: &str) -> Option<String> {
         url_parse(input.into(), Some("https://app.example/shop/item?x=1".into())).map(|p| p[6].clone())
+    }
+
+    #[test]
+    fn cookie_scope_uses_native_public_suffix_and_ip_rules() {
+        for host in ["github.io", "co.uk", "bar.ck"] {
+            assert!(cookie_public_suffix(host.into()), "{host}");
+        }
+        for host in ["mine.github.io", "www.ck", "127.0.0.1", "[::1]"] {
+            assert!(!cookie_public_suffix(host.into()), "{host}");
+        }
+        assert!(cookie_domain_matches("sub.app.example".into(), "app.example".into()));
+        assert!(!cookie_domain_matches("evilapp.example".into(), "app.example".into()));
+        assert!(!cookie_domain_matches("127.0.0.1".into(), "0.0.1".into()));
+        for (url, site) in [
+            ("https://a.example.co.uk/x", "https://example.co.uk"),
+            ("https://mine.github.io/", "https://mine.github.io"),
+            ("wss://sub.app.example/", "https://app.example"),
+            ("http://[::1]/", "http://[::1]"),
+        ] {
+            assert_eq!(cookie_site(url.into()).as_deref(), Some(site));
+        }
     }
 
     #[test]
