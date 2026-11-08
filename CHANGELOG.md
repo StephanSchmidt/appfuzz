@@ -134,6 +134,10 @@
 
 **Apps that ship JavaScript**
 
+- Input and textarea current values stay separate from defaults and DOM text.
+  Edits survive default changes, cloning and adoption, and form resets restore
+  defaults while respecting cancellation, form ownership and reset events.
+
 - FormData construction respects form ownership, disabled fieldsets, selected
   options, image buttons, empty file inputs, character sets and directionality.
   Formdata events can adjust the submitted fields without sharing later changes

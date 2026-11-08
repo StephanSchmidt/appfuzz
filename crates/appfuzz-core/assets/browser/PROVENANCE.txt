@@ -12,4 +12,4 @@ parse5 entities: 9.0.0
 psl: 2.1.245
 unicode-bidi: 0.3.18
 rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
-SHA-256: 2ca66780cdf41ca33e94140171b81ce4b86d5d8aa644afb64a3c4f1bc9b6cf7c
+SHA-256: ca1fc344f0dfbc07b432d2dc1d93124ef51217648722e4db8327453803e651d3

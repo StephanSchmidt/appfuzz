@@ -20,10 +20,13 @@ function lowerASCII(value) {
   return result;
 }
 export function htmlName(node) { const identity = nameIdentity(node); return identity?.namespace === 'http://www.w3.org/1999/xhtml' ? identity.local : null; }
+export function inputTypeName(value) { const type = lowerASCII(value || ''); return validInputType(type) ? type : 'text'; }
 export function controlType(node) {
-  const type = lowerASCII(eventAttribute(node, 'type') || '');
-  return htmlName(node) === 'input' ? (validInputType(type) ? type : 'text') : type;
+  const value = eventAttribute(node, 'type');
+  return htmlName(node) === 'input' ? inputTypeName(value) : lowerASCII(value || '');
 }
+let valueAttributeHook = () => {};
+export function installValueAttributeHook(callback) { valueAttributeHook = callback; }
 export function treeElements(root) {
   const elements = []; setPrototype(elements, null);
   if (!root) return elements;
@@ -93,6 +96,7 @@ export function setChecked(node, value, dirty = true) {
   const s = state(node); s.checked = !!value; if (dirty) s.dirty = true;
   if (s.checked) uncheckPeers(node);
 }
+export function resetChecked(node) { const s = state(node); s.dirty = false; s.checked = eventAttribute(node, 'checked') !== null; if (s.checked) uncheckPeers(node); }
 export function beginInputActivation(node) {
   const type = controlType(node), s = state(node);
   const result = { checked: s.checked, indeterminate: s.indeterminate, previous: null, changed: false };
@@ -118,6 +122,7 @@ export function copyInputState(source, copy) {
 export function installControlState(onDetailsChange) {
   installControlHooks((node, name, value, oldValue) => {
     if (htmlName(node) === 'details' && name === 'open' && (value === null) !== (oldValue === null)) onDetailsChange(node, oldValue !== null, value !== null);
+    valueAttributeHook(node, name, value, oldValue);
     if (htmlName(node) !== 'input') return;
     const s = state(node);
     if (name === 'checked' && !s.dirty) s.checked = value !== null;

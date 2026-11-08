@@ -1,6 +1,7 @@
 // Submission reads user-agent state, independently of author property shadows.
 import { END, NEXT, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
 import { htmlName, controlType, treeElements, formOwner, disabled, checked } from './controls.js';
+import { controlValue as currentValue } from './control-values.js';
 import { nodeInfo, physicalParent, physicalRoot, shadowInfo, eventAttribute } from './dom-state.js';
 const lower = Function.prototype.call.bind(String.prototype.toLowerCase);
 const bidiDirection = globalThis.__native.bidiDirection, setPrototype = Object.setPrototypeOf;
@@ -8,7 +9,7 @@ const autoTypes = new Set(['hidden', 'text', 'search', 'tel', 'url', 'email', 'p
 const autoType = autoTypes.has.bind(autoTypes);
 // Existing DOM selectedness and submission share the same private state.
 const selection = new WeakMap();
-const hasSelection = selection.has.bind(selection), readSelection = selection.get.bind(selection), writeSelection = selection.set.bind(selection);
+const hasSelection = selection.has.bind(selection), readSelection = selection.get.bind(selection), writeSelection = selection.set.bind(selection), clearSelection = selection.delete.bind(selection);
 const NativeTypeError = TypeError;
 export function optionSelected(option) {
   if (htmlName(option) !== 'option') throw new NativeTypeError('An HTMLOptionElement is required');
@@ -17,6 +18,15 @@ export function optionSelected(option) {
 export function setOptionSelected(option, value) {
   if (htmlName(option) !== 'option') throw new NativeTypeError('An HTMLOptionElement is required');
   writeSelection(option, !!value);
+}
+
+export function resetSelect(select) {
+  const nodes = treeElements(select);
+  for (let i = 1; i < nodes.length; i++) if (htmlName(nodes[i]) === 'option') {
+    let parent = physicalParent(nodes[i]);
+    while (parent && htmlName(parent) !== 'select') parent = physicalParent(parent);
+    if (parent === select) clearSelection(nodes[i]);
+  }
 }
 
 function text(node, directional = false) {
@@ -38,15 +48,8 @@ function collapseSpaces(value) {
   }
   return result;
 }
-function controlValue(node) {
-  if (htmlName(node) === 'textarea') {
-    const raw = text(node); let value = '';
-    for (let i = 0; i < raw.length; i++) { if (raw[i] === '\r') { value += '\n'; if (raw[i + 1] === '\n') i++; } else value += raw[i]; }
-    return value;
-  }
-  const value = eventAttribute(node, 'value');
-  return value ?? (htmlName(node) === 'input' && controlType(node) === 'submit' ? 'Submit Query' : '');
-}
+function controlValue(node) { if (htmlName(node) === 'button') return eventAttribute(node, 'value') ?? ''; return htmlName(node) === 'input' && controlType(node) === 'submit' && eventAttribute(node, 'value') === null ? 'Submit Query' : currentValue(node); }
+
 function autoControl(node) { return htmlName(node) === 'textarea' || (htmlName(node) === 'input' && autoType(controlType(node))); }
 function direction(node) {
   for (let current = node; current; current = physicalParent(current) || shadowInfo(current)?.host) {

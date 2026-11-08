@@ -14,9 +14,10 @@ import { setEventClock, eventState, cancelEvent, setRelatedTarget, relatedTarget
 import { fireEvent, installEventHooks, registerWindow, nullableTarget, getHandler, setHandler, setContentHandler } from './event-target.js';
 import { initializeSignal, signalState, abortSignal, dependSignal, onSignalAbort, setAbortEventDispatcher, signalListenersChanged } from './abort-state.js';
 import { installEventAttributeHook } from './ce-hooks.js';
-import { htmlName, controlType, treeElements, formOwner, connected, disabled, checked, setChecked, indeterminate, setIndeterminate, beginInputActivation, cancelInputActivation, installControlState, setControlAttribute } from './controls.js';
-import { populateForm, isSubmitButton, optionSelected, setOptionSelected } from './form-controls.js';
-import { nodeInfo, eventAttribute, physicalParent, retarget } from './dom-state.js';
+import { htmlName, controlType, treeElements, formOwner, connected, disabled, checked, setChecked, indeterminate, setIndeterminate, beginInputActivation, cancelInputActivation, resetChecked, installControlState, setControlAttribute } from './controls.js';
+import { populateForm, isSubmitButton, optionSelected, setOptionSelected, resetSelect } from './form-controls.js';
+import { installValueProperties, resetControlValue, setControlValue } from './control-values.js';
+import { nodeInfo, eventAttribute, physicalParent, physicalRoot, retarget } from './dom-state.js';
 import { exceptionInfo, clipDiagnostic } from './error-info.js';
 import { installShadowConstraints } from './shadow.js';
 import { EVENT_TARGET } from '../node_modules/linkedom/esm/shared/symbols.js';
@@ -1512,6 +1513,7 @@ function installWindow(doc) {
   define(H, 'isContentEditable', { get() { const v = this.getAttribute('contenteditable'); return v === '' || v === 'true'; } });
   define(H, 'form', { get() { return this.closest('form'); } });
 
+  installValueProperties(L, BrowserDOMException);
   const I = L.HTMLInputElement.prototype;
   define(I, 'type', { get() { if (htmlName(this) !== 'input') throw new NativeTypeError('An HTMLInputElement is required'); return controlType(this); },
     set(value) { if (htmlName(this) !== 'input') throw new NativeTypeError('An HTMLInputElement is required'); setControlAttribute(this, 'type', value); },
@@ -1530,7 +1532,7 @@ function installWindow(doc) {
   define(F, 'elements', { get() { return this.querySelectorAll('input,select,textarea,button,fieldset,output'); } });
   F.requestSubmit = function (submitter) { submit(this, submitter || null); };
   F.submit = function () { formNavigate(this, null); };
-  F.reset = function () { this.dispatchEvent(new Ev('reset', { bubbles: true, cancelable: true })); };
+  F.reset = function () { resetForm(this); };
   F.checkValidity = F.reportValidity = function () { return true; };
   const O = L.HTMLOptionElement.prototype;
   define(O, 'selected', {
@@ -1661,7 +1663,7 @@ function completeActivation(action, event) {
     if (disabled(node)) return;
     const form = formOwner(node), buttonType = kind === 'button' && type !== 'reset' && type !== 'button' ? 'submit' : type;
     if (form && (buttonType === 'submit' || buttonType === 'image')) submit(form, node);
-    else if (form && buttonType === 'reset') form.reset();
+    else if (form && buttonType === 'reset') resetForm(form);
   } else if (kind === 'summary') {
     const details = physicalParent(node);
     if (activationKind(node) === 'summary' && htmlName(details) === 'details') setControlAttribute(details, 'open', eventAttribute(details, 'open') === null ? '' : null);
@@ -1683,6 +1685,24 @@ function completeActivation(action, event) {
   }
 }
 
+const resettingForms = new WeakSet();
+const isResettingForm = resettingForms.has.bind(resettingForms), beginReset = resettingForms.add.bind(resettingForms), endReset = resettingForms.delete.bind(resettingForms);
+function resetForm(form) {
+  if (htmlName(form) !== 'form') throw new NativeTypeError('An HTMLFormElement is required');
+  if (isResettingForm(form)) return;
+  beginReset(form);
+  try {
+    if (!fireEvent(form, new Ev('reset', { bubbles: true, cancelable: true }))) return;
+    const nodes = treeElements(physicalRoot(form));
+    for (let i = 0; i < nodes.length; i++) if (formOwner(nodes[i]) === form) {
+      const kind = htmlName(nodes[i]);
+      if (kind === 'input' || kind === 'textarea') resetControlValue(nodes[i]);
+      if (kind === 'input') resetChecked(nodes[i]);
+      else if (kind === 'select') resetSelect(nodes[i]);
+    }
+  } finally { endReset(form); }
+}
+
 function submit(form, submitter) {
   if (!dispatch(form, new SubmitEvent('submit', { bubbles: true, cancelable: true, submitter }))) return;
   formNavigate(form, submitter);
@@ -1702,16 +1722,18 @@ function formNavigate(form, submitter) {
 
 function act(i, value) {
   const el = S.cands[i];
-  if (!el || !el.isConnected) return false;
+  if (!el || !connected(el) || disabled(el)) return false;
   const c = { i, tag: el.localName, id: el.id || '' };
   S.gesture = true;
   try {
-    const tag = el.localName;
-    const type = (el.getAttribute('type') || '').toLowerCase();
-    if ((tag === 'input' && setHas(TYPED, type)) || tag === 'textarea' || el.isContentEditable) {
-      const v = value == null ? 'x' : String(value);
+    const tag = htmlName(el) || el.localName;
+    const type = tag === 'input' ? controlType(el) : (el.getAttribute('type') || '').toLowerCase();
+    const editable = tag !== 'input' && tag !== 'textarea' && tag !== 'select' && el.isContentEditable;
+    const readonly = (tag === 'input' || tag === 'textarea') && eventAttribute(el, 'readonly') !== null;
+    if ((((tag === 'input' && setHas(TYPED, type)) || tag === 'textarea') && !readonly) || editable) {
+      const v = value == null ? 'x' : nativeString(value);
       el.focus();
-      if (el.isContentEditable) el.textContent = v; else el.value = v;
+      if (editable) el.textContent = v; else setControlValue(el, v);
       dispatch(el, new L.InputEvent('input', { bubbles: true, data: v, inputType: 'insertText' }));
       dispatch(el, new Ev('change', { bubbles: true }));
       c.kind = 'type';
