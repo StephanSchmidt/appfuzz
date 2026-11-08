@@ -3,13 +3,14 @@
 // privately: init, scripts, step, candidates, act, report. Everything a page does
 // that leaves the page (requests, navigations, cookies, code it builds)
 // is recorded.
+import { representativeInputValue } from './input-domains.js';
 import * as L from 'linkedom';
 import { Headers, convertHeadersInit, headersFromConverted, setHeadersGuard, copyHeaders, filterHeaders, headerObject, headerValue, appendNativeHeader } from './headers.js';
 import { URL, URLSearchParams, urlPart, setURLPart, serializeParams, setObjectURLHooks } from './urls.js';
 import { reportJSON } from './report-json.js';
 import { CookieJar } from './cookies.js';
 import { parseHTML, parseHTMLFragment, fragmentElements, documentMode } from './document.js';
-import { qualifiedName, nameIdentity } from './names.js';
+import { qualifiedName, nameIdentity, lowerASCII, validElementLocalName } from './names.js';
 import { setEventClock, eventState, cancelEvent, setRelatedTarget, relatedTarget, markEventUninitialized } from './event-state.js';
 import { fireEvent, installEventHooks, registerWindow, nullableTarget, getHandler, setHandler, setContentHandler } from './event-target.js';
 import { initializeSignal, signalState, abortSignal, dependSignal, onSignalAbort, setAbortEventDispatcher, signalListenersChanged } from './abort-state.js';
@@ -1347,12 +1348,10 @@ function installWindow(doc) {
     return value === undefined ? null : domString(value);
   };
   const createElement = function (name, options) {
-    if (!arguments.length) throw new TypeError('createElement requires a name');
+    if (!arguments.length) throw new NativeTypeError('createElement requires a name');
     const html = isHTMLDocument(this), converted = domString(name), is = creationIs(options);
-    const local = html ? converted.replace(/[A-Z]/g, c => c.toLowerCase()) : converted;
-    // Reuse the namespace factory's local-name validation without treating
-    // a colon in createElement's name as a namespace prefix.
-    qualifiedName(null, local.replace(/:/g, '_'), 2, BrowserDOMException);
+    const local = html ? lowerASCII(converted) : converted;
+    if (!validElementLocalName(local)) throw new BrowserDOMException('Invalid element name', 'InvalidCharacterError');
     shareObservers(this);
     return createInternal(this, { namespace: html ? HTML_NS : null, prefix: null, local, qualified: local }, is);
   };
@@ -1731,7 +1730,7 @@ function act(i, value) {
     const editable = tag !== 'input' && tag !== 'textarea' && tag !== 'select' && el.isContentEditable;
     const readonly = (tag === 'input' || tag === 'textarea') && eventAttribute(el, 'readonly') !== null;
     if ((((tag === 'input' && setHas(TYPED, type)) || tag === 'textarea') && !readonly) || editable) {
-      const v = value == null ? 'x' : nativeString(value);
+      const v = value == null ? representativeInputValue(type) : nativeString(value);
       el.focus();
       if (editable) el.textContent = v; else setControlValue(el, v);
       dispatch(el, new L.InputEvent('input', { bubbles: true, data: v, inputType: 'insertText' }));

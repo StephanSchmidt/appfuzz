@@ -1,6 +1,7 @@
 // Build the initial HTML document with the HTML tree-building rules, then
 // copy its nodes into linkedom. No serialization/reparse: raw text,
 // namespaces and inert template contents must keep their parsed meaning.
+import { initializeParsedValue } from './control-values.js';
 import { DOMParser } from 'linkedom';
 import { parse, parseFragment, defaultTreeAdapter } from 'parse5';
 import { Document } from '../node_modules/linkedom/esm/interface/document.js';
@@ -62,6 +63,7 @@ function appendTree(doc, target, nodes, inertScripts, svg = null, elements = [])
           if (attr.namespace) setAttributeNS.call(node, attr.namespace, name, attr.value);
           else setAttribute.call(node, name, attr.value);
         }
+        initializeParsedValue(node);
         const content = templateContent(node);
         if (source.content) children(content, source.content.childNodes, null, content.ownerDocument);
         else children(node, source.childNodes, source.namespaceURI === SVG && source.tagName === 'svg' ? node : svg, owner);

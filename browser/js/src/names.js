@@ -7,7 +7,7 @@ const exec = RegExp.prototype.exec;
 const indexOf = String.prototype.indexOf;
 const slice = String.prototype.slice;
 const define = Object.defineProperties;
-const upper = String.prototype.toUpperCase;
+const upper = String.prototype.toUpperCase, lower = String.prototype.toLowerCase;
 const replace = String.prototype.replace;
 const identities = new WeakMap();
 export const nameIdentity = identities.get.bind(identities);
@@ -20,6 +20,12 @@ define(asciiLower, {
   [Symbol.replace]: { value: RegExp.prototype[Symbol.replace] },
   exec: { value: exec }, global: { value: true }, unicode: { value: false }, unicodeSets: { value: false },
 });
+
+export function lowerASCII(value) {
+  let result = '';
+  for (let i = 0; i < value.length; i++) { const c = value[i]; result += c >= 'A' && c <= 'Z' ? apply(lower, c, []) : c; }
+  return result;
+}
 
 export const validElementLocalName = name => apply(exec, elementName, [name]) !== null;
 

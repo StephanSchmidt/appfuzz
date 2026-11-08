@@ -1,5 +1,6 @@
 // Current values and dirty flags are native control state. Default values
 // remain attributes/child text, so serializing a page does not expose edits.
+import { sanitizeInputDomain } from './input-domains.js';
 import { Text } from '../node_modules/linkedom/esm/interface/text.js';
 import { END, NEXT, PREV, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
 import { knownSiblings } from '../node_modules/linkedom/esm/shared/utils.js';
@@ -47,7 +48,7 @@ function trimASCII(value) {
   return result;
 }
 function sanitize(node, type, value) {
-  if (type !== 'text' && type !== 'search' && type !== 'tel' && type !== 'password' && type !== 'url' && type !== 'email') return value;
+  if (type !== 'text' && type !== 'search' && type !== 'tel' && type !== 'password' && type !== 'url' && type !== 'email') return sanitizeInputDomain(node, type, value);
   let result = '';
   for (let i = 0; i < value.length; i++) if (value[i] !== '\r' && value[i] !== '\n') result += value[i];
   if (type === 'url' || type === 'email') result = trimASCII(result);
@@ -106,7 +107,13 @@ function changedAttribute(node, name, value, oldValue) {
     else if (nextMode === 'filename') s.raw = '';
     else if (nextMode === 'value') s.raw = sanitize(node, next, s.dirty ? previous : defaultValue(node, 'input'));
   } else if (s && name === 'value' && !s.dirty && mode(s.type) === 'value') s.raw = sanitize(node, s.type, defaultValue(node, 'input'));
+  else if (s && s.type === 'range' && (name === 'min' || name === 'max' || name === 'step')) s.raw = sanitize(node, s.type, s.raw);
   else if (s && name === 'multiple' && s.type === 'email') s.raw = sanitize(node, s.type, s.raw);
+}
+// Parsing installs attributes as a unit. In particular a range's midpoint
+// must use all min/max/step attributes, regardless of their markup order.
+export function initializeParsedValue(node) {
+  if (htmlName(node) === 'input') resetControlValue(node);
 }
 export function copyControlValue(source, copy) {
   const name = htmlName(source);
@@ -133,6 +140,11 @@ export function installValueProperties(L, ErrorClass) {
       set(raw) { return withReactions(() => { check(this); const value = runDOMCallback(() => eventString(raw)); if (name === 'input') setControlAttribute(this, 'value', value); else replaceText(this, value); }); },
     });
   }
+  for (const name of ['min', 'max', 'step']) define(L.HTMLInputElement.prototype, name, {
+    configurable: true, enumerable: true,
+    get() { if (htmlName(this) !== 'input') throw new NativeTypeError('An input is required'); return eventAttribute(this, name) ?? ''; },
+    set(raw) { return withReactions(() => { if (htmlName(this) !== 'input') throw new NativeTypeError('An input is required'); const value = runDOMCallback(() => eventString(raw)); setControlAttribute(this, name, value); }); },
+  });
   define(L.HTMLTextAreaElement.prototype, 'type', { configurable: true, enumerable: true, get() { if (htmlName(this) !== 'textarea') throw new NativeTypeError('A textarea is required'); return 'textarea'; } });
   define(L.HTMLTextAreaElement.prototype, 'textLength', { configurable: true, enumerable: true, get() { if (htmlName(this) !== 'textarea') throw new NativeTypeError('A textarea is required'); return controlValue(this).length; } });
 }
