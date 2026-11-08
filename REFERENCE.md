@@ -1086,6 +1086,13 @@ remain potential delegated targets without invoking them during inspection.
 Native port listeners run a microtask checkpoint between callbacks; synthetic
 dispatch remains synchronous. Internal listener tracking does not retain detached
 nodes or closed ports solely because they have listeners.
+Same-window `postMessage` uses the same structured serialization and transfers,
+with the caller's origin and Window as the message source. Default `/`, wildcard
+`*`, and parsed target origins control delivery; a mismatched target discards the
+message after sender-side serialization and transfer. Invalid target origins
+throw before data serialization, following HTML/Firefox. Options dictionary
+conversion still precedes that validation. Posted messages use independent tasks
+and do not create network-request records.
 Requests and clones carry distinct signals that follow their source. Combined
 signals (`AbortSignal.any`) preserve the first abort reason and update dependent
 state before abort events run. Fetch cancellation uses private signal state,

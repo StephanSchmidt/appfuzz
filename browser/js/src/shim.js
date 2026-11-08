@@ -1,3 +1,4 @@
+import { postMessage, installWindowMessages } from './window-messages.js';
 import { frameworkCandidate, editable, nodeText, normalizedText, documentText } from './exploration.js';
 import { MessagePort, MessageChannel, installMessagePortTasks } from './message-ports.js';
 import { MessageEvent } from './message-events.js';
@@ -551,15 +552,18 @@ Object.assign(G, { AbortSignal, AbortController });
 
 G.MessagePort = MessagePort; G.MessageChannel = MessageChannel;
 let messageCheckpoint = () => false;
-// Port messages are tasks, not timers: daily timer coalescing and timer
-// nesting clamps must not delay an already queued channel message.
-installMessagePortTasks(callback => {
+// Posted messages are tasks, not timers: daily timer coalescing and timer
+// nesting clamps must not delay an already queued message.
+function enqueueMessageTask(callback, kind) {
   const id = ++S.seq;
   mapSet(S.timers, id, { id, order: ++S.timerOrder, due: S.now, fn: callback, args: [], repeat: false,
-    timeout: 0, nesting: 0, kind: 'MessageChannel' });
-}, () => {
+    timeout: 0, nesting: 0, kind });
+}
+function messageListenerCheckpoint() {
   if (messageCheckpoint()) unmodelled('microtask checkpoint budget');
-});
+}
+installMessagePortTasks(callback => enqueueMessageTask(callback, 'MessageChannel'), messageListenerCheckpoint);
+installWindowMessages({ origin: () => S.origin, enqueue: callback => enqueueMessageTask(callback, 'postMessage'), checkpoint: messageListenerCheckpoint });
 
 // --- Network: every request is recorded; answers come from the session -----
 
@@ -1285,10 +1289,7 @@ function installWindow(doc) {
     getComputedStyle: styleOf,
     matchMedia: mediaQuery,
     getSelection: () => ({ rangeCount: 0, isCollapsed: true, removeAllRanges() {}, addRange() {}, getRangeAt() { return doc.createRange(); }, toString: () => '' }),
-    postMessage(data, target) {
-      push(S.requests, { kind: 'postMessage', method: 'POST', url: String(target ?? ''), own: true, body: clip(typeof data === 'string' ? data : JSON.stringify(data) ?? ''), headers: {}, gesture: S.gesture, at: S.now - S.start });
-      addTimer(() => fireEvent(G, new MessageEvent('message', { data, origin: S.origin, source: G })), 0, [], false, 'postMessage', false);
-    },
+    postMessage,
     CSS: { supports: () => false, escape: (s) => String(s).replace(/[^a-zA-Z0-9_-]/g, (c) => '\\' + c) },
     Notification: Object.assign(function Notification() { unmodelled('Notification'); }, { permission: 'default', requestPermission: () => Promise.resolve('denied') }),
   });

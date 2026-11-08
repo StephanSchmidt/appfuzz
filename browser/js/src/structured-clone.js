@@ -4,6 +4,7 @@
 import { serializedDOMException, deserializeDOMException } from './dom-exception.js';
 import { platformObject } from './platform-state.js';
 import { runDOMCallback } from './dom-callbacks.js';
+const iteratorSymbol = Symbol.iterator;
 const realm = globalThis, kindOf = globalThis.__native.cloneKind;
 const apply = Reflect.apply, create = Object.create, define = Object.defineProperty, descriptor = Object.getOwnPropertyDescriptor;
 const keys = Object.keys, prototype = Object.getPrototypeOf, setPrototype = Object.setPrototypeOf;
@@ -77,7 +78,7 @@ function optionsList(options) {
   if (!object(sequence)) throw argumentError('Transfer must be an iterable object');
   // Web IDL converts the complete sequence before transfer validation.
   // Element conversion errors do not perform IteratorClose.
-  return transferSequence(sequence, sequence[Symbol.iterator]);
+  return transferSequence(sequence, sequence[iteratorSymbol]);
 }
 export function transferSequence(sequence, method) {
   if (!object(sequence) || typeof method !== 'function') throw argumentError('Transfer must be iterable');

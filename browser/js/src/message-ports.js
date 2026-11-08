@@ -5,6 +5,7 @@ import { markPlatform } from './platform-state.js';
 import { runDOMCallback } from './dom-callbacks.js';
 import { installPortTransfers, serializeMessage, transferOptions, transferSequence, cloneFailure } from './structured-clone.js';
 import { createMessageEvent, installMessageSourceBrand } from './message-events.js';
+const iteratorSymbol = Symbol.iterator;
 const NativeTypeError = TypeError, create = Object.create, define = Object.defineProperty, setPrototype = Object.setPrototypeOf;
 const ports = new WeakMap(), portFor = ports.get.bind(ports), savePort = ports.set.bind(ports);
 const channels = new WeakMap(), channelFor = channels.get.bind(channels), saveChannel = channels.set.bind(channels);
@@ -79,7 +80,7 @@ function receive(holder) {
 }
 function postingTransfers(options) {
   if (options !== null && (typeof options === 'object' || typeof options === 'function')) {
-    const method = options[Symbol.iterator];
+    const method = options[iteratorSymbol];
     if (method != null) return transferSequence(options, method);
   }
   return transferOptions(options);

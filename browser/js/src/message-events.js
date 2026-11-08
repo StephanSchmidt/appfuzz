@@ -2,6 +2,7 @@
 // conversion; queued delivery initializes the same slots without callbacks.
 import { Event, eventState, eventString, eventDictionary, initializeEvent, resetEvent } from './event-state.js';
 import { runDOMCallback } from './dom-callbacks.js';
+const iteratorSymbol = Symbol.iterator;
 const realm = globalThis, NativeTypeError = TypeError, apply = Reflect.apply, create = Object.create, define = Object.defineProperty, freeze = Object.freeze;
 const states = new WeakMap(), save = states.set.bind(states), read = states.get.bind(states);
 let isPort = () => false;
@@ -15,7 +16,7 @@ function sourceValue(value) {
 function append(list, value) { define(list, list.length, { __proto__: null, value, writable: true, enumerable: true, configurable: true }); }
 function frozenPorts(sequence) {
   if (sequence == null || (typeof sequence !== 'object' && typeof sequence !== 'function')) throw new NativeTypeError('Ports must be an iterable object');
-  const method = sequence[Symbol.iterator];
+  const method = sequence[iteratorSymbol];
   if (typeof method !== 'function') throw new NativeTypeError('Ports must be iterable');
   const iterator = apply(method, sequence, []);
   if (iterator === null || (typeof iterator !== 'object' && typeof iterator !== 'function')) throw new NativeTypeError('Invalid port iterator');
@@ -66,10 +67,10 @@ const fields = {
   },
 };
 for (const key of ['data', 'origin', 'lastEventId', 'source', 'ports', 'initMessageEvent']) define(prototype, key, Object.getOwnPropertyDescriptor(fields, key));
-export function createMessageEvent(type, value) {
+export function createMessageEvent(type, value, origin = '', source = null) {
   const event = create(prototype), ports = [];
   for (let i = 0; i < value.ports.length; i++) append(ports, value.ports[i]);
   initializeEvent(event, type);
-  save(event, { data: value.data, origin: '', lastEventId: '', source: null, ports: freeze(ports) });
+  save(event, { data: value.data, origin, lastEventId: '', source, ports: freeze(ports) });
   return event;
 }
