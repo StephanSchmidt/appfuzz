@@ -1,3 +1,4 @@
+import { markPlatform } from './platform-state.js';
 import { DOMException as BrowserDOMException } from './dom-exception.js';
 // Listener identity, options, removal and the dispatch path are native
 // state. Author property shadows are visible to author JS, not routing.
@@ -181,7 +182,7 @@ export function fireEvent(target, event, trusted = true, legacyTarget = null) {
   return !state.canceled;
 }
 export class EventTarget {
-  constructor() { remember(this, { exposed: this, listeners: [], handlers: new NativeMap(), window: false }); }
+  constructor() { markPlatform(this); remember(this, { exposed: this, listeners: [], handlers: new NativeMap(), window: false }); }
   addEventListener(type, callback, options) {
     const target = canonicalTarget(this);
     if (arguments.length < 2) throw new NativeTypeError('addEventListener requires a type and callback');

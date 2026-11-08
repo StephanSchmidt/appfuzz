@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 // to obtain attribute changes. Keep the DOM algorithms, while routing
 // reactions through the browser guest's definition snapshots and queues.
 const eventTarget = fileURLToPath(new URL('./src/event-target.js', import.meta.url));
+const platformState = fileURLToPath(new URL('./src/platform-state.js', import.meta.url));
 const domState = fileURLToPath(new URL('./src/dom-state.js', import.meta.url));
 const eventState = fileURLToPath(new URL('./src/event-state.js', import.meta.url));
 const replace = (source, before, after) => {
@@ -19,6 +20,16 @@ await build({
   alias: { htmlparser2: './src/alias/htmlparser2.js', 'cssomnom/parse': './src/alias/cssom.js' },
   outfile: 'dist/shim.js',
   plugins: [{ name: 'dom-internals', setup(plugin) {
+    plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\](dom[/\\](parser|token-list)|interface[/\\](range|tree-walker|node-list|mutation-observer))\.js$/ }, async ({ path }) => {
+      let source = await readFile(path, 'utf8');
+      if (path.endsWith('/dom/parser.js')) source = replace(source, 'export class DOMParser {', 'export class DOMParser { constructor() { markPlatform(this); }');
+      else if (path.endsWith('/interface/node-list.js')) source = replace(source, 'export class NodeList extends Array {', 'const allocateArray = Reflect.construct, NativeArray = Array; export class NodeList extends Array { constructor(...values) { return markPlatform(allocateArray(NativeArray, values, new.target)); }');
+      else if (path.endsWith('/dom/token-list.js')) source = replace(source, '    super();', '    super(); markPlatform(this);');
+      else if (path.endsWith('/interface/range.js')) source = replace(source, '  constructor() {', '  constructor() { markPlatform(this);');
+      else if (path.endsWith('/interface/tree-walker.js')) source = replace(source, '  constructor(root, whatToShow = SHOW_ALL) {', '  constructor(root, whatToShow = SHOW_ALL) { markPlatform(this);');
+      else source = replace(source, '      constructor(callback) {', '      constructor(callback) { markPlatform(this);');
+      return { contents: `import {markPlatform} from ${JSON.stringify(platformState)};\n${source}`, loader: 'js' };
+    });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]event\.js$/ }, async ({ path }) => {
       const source = await readFile(path, 'utf8');
       if (!source.includes('class GlobalEvent')) throw new Error('The pinned DOM Event changed');

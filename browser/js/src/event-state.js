@@ -1,3 +1,4 @@
+import { markPlatform } from './platform-state.js';
 // The DOM algorithms use these slots, never public property shadows.
 import { runDOMCallback } from './dom-callbacks.js';
 const states = new WeakMap();
@@ -39,6 +40,7 @@ function reset(s, type, bubbles, cancelable) {
 export function markEventUninitialized(event) { eventState(event).initialized = false; }
 export class Event {
   constructor(type, options = {}) {
+    markPlatform(this);
     if (!arguments.length) throw new NativeTypeError('Event requires a type');
     const init = runDOMCallback(() => {
       type = eventString(type);

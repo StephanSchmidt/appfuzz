@@ -1,3 +1,4 @@
+import { markPlatform } from './platform-state.js';
 // URL records and query lists are platform slots. Public JavaScript fields,
 // accessors and serializers never participate in their native algorithms.
 import { eventString } from './event-state.js';
@@ -9,8 +10,8 @@ const ownKeys = Reflect.ownKeys, descriptor = Object.getOwnPropertyDescriptor;
 const wellFormed = Function.prototype.call.bind(String.prototype.toWellFormed);
 const slice = Function.prototype.call.bind(String.prototype.slice), sort = Function.prototype.call.bind(Array.prototype.sort);
 const iteratorSymbol = Symbol.iterator;
-const urls = new WeakMap(), getURL = urls.get.bind(urls), saveURL = urls.set.bind(urls);
-const params = new WeakMap(), getParams = params.get.bind(params), saveParams = params.set.bind(params);
+const urls = new WeakMap(), getURL = urls.get.bind(urls), storeURL = urls.set.bind(urls), saveURL = (value, data) => { markPlatform(value); storeURL(value, data); };
+const params = new WeakMap(), getParams = params.get.bind(params), storeParams = params.set.bind(params), saveParams = (value, data) => { markPlatform(value); storeParams(value, data); };
 const iterators = new WeakMap(), getIterator = iterators.get.bind(iterators), saveIterator = iterators.set.bind(iterators);
 const object = value => value !== null && (typeof value === 'object' || typeof value === 'function');
 const usv = value => wellFormed(eventString(value));
@@ -66,7 +67,7 @@ export function setURLPart(url, key, value, fromParams = false) {
 }
 export function serializeParams(value) { const state = getParams(value); return state ? formSerialize(state.list) : null; }
 class ParamsIterator {
-  constructor(target, kind) { requireParams(target); saveIterator(this, { target, kind, index: 0 }); }
+  constructor(target, kind) { markPlatform(this); requireParams(target); saveIterator(this, { target, kind, index: 0 }); }
   next() {
     const state = getIterator(this); if (!state) throw new NativeTypeError('A URLSearchParams iterator is required');
     const list = requireParams(state.target).list;

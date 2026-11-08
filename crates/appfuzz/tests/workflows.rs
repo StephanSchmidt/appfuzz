@@ -3489,6 +3489,41 @@ fn browser_probe_executes_script_sent_before_a_child_crash() {
 }
 
 #[test]
+fn browser_unsupported_apis_make_probe_review_and_envelope_incomplete() {
+    let f = Fixture::new(true);
+    let page = "<script nonce=local>void crypto.subtle</script>";
+    f.edit("\"safe\"", &toml::Value::String(page.into()).to_string());
+    f.edit(
+        "body_format = \"html\" }",
+        "body_format = \"html\" }\nresult = { \"\" = \"html:scripts\" }\ncsp = \"default-src 'none'; script-src 'self' 'nonce-local'; connect-src 'none'\"",
+    );
+    let (code, probe) = f.cli(&["probe", "scripts"]);
+    assert_eq!(probe["unsupported"]["apis"], json!(["crypto.subtle"]), "{probe}");
+    assert_eq!(probe["errors"], json!([]), "{probe}");
+    assert_eq!(code, 3, "{probe}");
+    assert_eq!(probe["status"], "incomplete", "{probe}");
+    let (code, review) = f.cli(&["review", "--runs", "1", "--time", "1ms", "--fresh"]);
+    assert_eq!(code, 3, "{review}");
+    assert_eq!(review["status"], "incomplete", "{review}");
+    assert_eq!(review["verdict"], "incomplete", "{review}");
+    let step = review["steps"].as_array().unwrap().iter().find(|step| step["step"] == "probe scripts").unwrap();
+    assert_eq!(step["unsupported"]["apis"], json!(["crypto.subtle"]), "{review}");
+    let (code, envelope) = f.cli(&["envelope", "--review", review["session"].as_str().unwrap(), "--allow-warnings"]);
+    assert_eq!(code, 3, "{envelope}");
+}
+
+#[test]
+fn browser_unloaded_external_scripts_make_probe_incomplete() {
+    let f = Fixture::new(true);
+    let page = "<script src='https://cdn.example/app.js'></script>";
+    f.edit("\"safe\"", &toml::Value::String(page.into()).to_string());
+    let (code, probe) = f.cli(&["probe", "scripts"]);
+    assert!(probe["unsupported"]["scripts_not_loaded"].as_array().is_some_and(|values| !values.is_empty()), "{probe}");
+    assert_eq!(code, 3, "{probe}");
+    assert_eq!(probe["status"], "incomplete", "{probe}");
+}
+
+#[test]
 fn browser_probe_execution_errors_make_review_incomplete() {
     let f = Fixture::new(true);
     let page = "<script>document.title='ok'</script>";

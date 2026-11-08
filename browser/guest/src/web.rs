@@ -27,7 +27,73 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     let sample: Object = constructor.construct(())?;
     let exception_class = class_id(sample.as_value());
     n.set("isDOMException", Function::new(ctx.clone(), move |value: Value<'_>| class_id(&value) == exception_class)?)?;
+    install_clone_kinds(ctx, &n)?;
     ctx.globals().set("__native", n)
+}
+
+// Native brands distinguish internal data from prototype lookalikes and
+// proxies without executing page getters, iterators or proxy traps.
+fn install_clone_kinds<'js>(ctx: &Ctx<'js>, native: &Object<'js>) -> Result<()> {
+    let mut kinds = Vec::new();
+    for name in [
+        "Object",
+        "Array",
+        "Date",
+        "RegExp",
+        "Map",
+        "Set",
+        "Number",
+        "Boolean",
+        "String",
+        "ArrayBuffer",
+        "SharedArrayBuffer",
+        "Error",
+        "DOMException",
+        "Uint8Array",
+        "Uint8ClampedArray",
+        "Int8Array",
+        "Int16Array",
+        "Uint16Array",
+        "Int32Array",
+        "Uint32Array",
+        "BigInt64Array",
+        "BigUint64Array",
+        "Float16Array",
+        "Float32Array",
+        "Float64Array",
+    ] {
+        let Some(constructor) = ctx.globals().get::<_, Option<Constructor>>(name)? else { continue };
+        let value: Object = if name == "Date" || name.ends_with("Array") && name != "Array" || name.ends_with("ArrayBuffer") {
+            constructor.construct((0,))?
+        } else {
+            constructor.construct(())?
+        };
+        kinds.push((class_id(value.as_value()), name));
+    }
+    let bigint: Value = ctx.eval("Object(0n)")?;
+    kinds.push((class_id(&bigint), "BigInt"));
+    let view: Value = ctx.eval("new DataView(new ArrayBuffer(0))")?;
+    kinds.push((class_id(&view), "DataView"));
+    let error_class = kinds.iter().find(|(_, name)| *name == "Error").unwrap().0;
+    native.set(
+        "allocateError",
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, prototype: Object<'js>| {
+            // SAFETY: both values are rooted in this context. This public allocator
+            // initializes native Error data without constructing a new backtrace
+            // or invoking author Error.prepareStackTrace/function-name getters.
+            let value = unsafe { qjs::JS_NewObjectProtoClass(ctx.as_raw().as_ptr(), prototype.as_value().as_raw(), error_class) };
+            // SAFETY: the allocator returns an owned value belonging to ctx.
+            let value = unsafe { Value::from_raw(ctx, value) };
+            if value.is_exception() { Err(rquickjs::Error::Exception) } else { Ok(value) }
+        })?,
+    )?;
+    native.set(
+        "cloneKind",
+        Function::new(ctx.clone(), move |value: Value<'_>| {
+            let id = class_id(&value);
+            kinds.iter().find(|(kind, _)| *kind == id).map_or("unsupported", |(_, name)| *name)
+        })?,
+    )
 }
 
 fn class_id(value: &Value<'_>) -> qjs::JSClassID {
@@ -160,6 +226,44 @@ mod tests {
 
     fn host(input: &str) -> Option<String> {
         url_parse(input.into(), Some("https://app.example/shop/item?x=1".into())).map(|p| p[6].clone())
+    }
+
+    #[test]
+    fn allocating_deserialized_errors_does_not_construct_stack_traces() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            install(&ctx).unwrap();
+            let result: String = ctx
+                .eval(
+                    r#"
+                let calls=0;
+                Error.prepareStackTrace=()=>{calls++;return 'page hook'};
+                Error.stackTraceLimit={valueOf(){calls++;return 10}};
+                const e=__native.allocateError(TypeError.prototype);
+                JSON.stringify([calls,Error.isError(e),e instanceof TypeError,e.name,Reflect.ownKeys(e).length]);
+            "#,
+                )
+                .unwrap();
+            assert_eq!(result, r#"[0,true,true,"TypeError",0]"#);
+        });
+    }
+
+    #[test]
+    fn clone_kinds_use_internal_slots_without_prototypes_or_callbacks() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            install(&ctx).unwrap();
+            let result: String = ctx.eval(r#"
+                let calls=0;
+                const fake=Object.create(Map.prototype);
+                Object.defineProperty(fake,Symbol.toStringTag,{get(){calls++;throw Error('tag')}});
+                const proxy=new Proxy(new Map(),{get(){calls++;throw Error('proxy')}});
+                JSON.stringify([[{},[],new Date(0),/x/,new Map(),new Set(),Object(1),Object(false),Object('s'),Object(1n),new ArrayBuffer(0),new DataView(new ArrayBuffer(0)),new Uint16Array(0),new Error(),new DOMException(),fake,proxy,()=>{},Promise.resolve(),new WeakMap()].map(v=>__native.cloneKind(v)),calls]);
+            "#).unwrap();
+            assert_eq!(result, r#"[["Object","Array","Date","RegExp","Map","Set","Number","Boolean","String","BigInt","ArrayBuffer","DataView","Uint16Array","Error","DOMException","Object","unsupported","unsupported","unsupported","unsupported"],0]"#);
+        });
     }
 
     #[test]

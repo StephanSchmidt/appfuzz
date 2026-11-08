@@ -1,3 +1,6 @@
+import { installStackReporter } from './error-stacks.js';
+import { structuredClone, installClonePlatform } from './structured-clone.js';
+import { markPlatform } from './platform-state.js';
 // The page's world: linkedom's DOM plus the Web APIs a page's scripts
 // expect, on virtual time. The guest retains the bootstrap control handle
 // privately: init, scripts, step, candidates, act, report. Everything a page does
@@ -241,6 +244,7 @@ function step() {
 
 if (typeof G.TextEncoder !== 'function') {
   G.TextEncoder = class TextEncoder {
+    constructor() { markPlatform(this); }
     get encoding() { return 'utf-8'; }
     encode(s = '') {
       const b = unescape(encodeURIComponent(String(s)));
@@ -250,6 +254,7 @@ if (typeof G.TextEncoder !== 'function') {
     }
   };
   G.TextDecoder = class TextDecoder {
+    constructor() { markPlatform(this); }
     get encoding() { return 'utf-8'; }
     decode(buf) {
       if (!buf) return '';
@@ -322,9 +327,7 @@ G.crypto = {
   get subtle() { unmodelled('crypto.subtle'); return undefined; },
 };
 
-if (typeof G.structuredClone !== 'function') {
-  G.structuredClone = (v) => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
-}
+G.structuredClone = structuredClone;
 
 // --- Events -----------------------------------------------------------------
 
@@ -536,7 +539,7 @@ function abort(signal, reason) {
   abortSignal(signal, reason);
 }
 class AbortController {
-  constructor() { rememberController(this, new AbortSignal(signalToken)); }
+  constructor() { markPlatform(this); rememberController(this, new AbortSignal(signalToken)); }
   get signal() { const signal = controllerSignal(this); if (!signal) throw new NativeTypeError('Illegal AbortController receiver'); return signal; }
   abort(reason) { const signal = controllerSignal(this); if (!signal) throw new NativeTypeError('Illegal AbortController receiver'); abort(signal, reason); }
 }
@@ -544,7 +547,7 @@ setAbortEventDispatcher(signal => fireEvent(signal, new Ev('abort')));
 Object.assign(G, { AbortSignal, AbortController });
 
 class MessagePort extends L.EventTarget {
-  constructor() { super(); this.onmessage = null; this._other = null; }
+  constructor() { super(); markPlatform(this, 'MessagePort'); this.onmessage = null; this._other = null; }
   postMessage(data) {
     const o = this._other;
     addTimer(() => {
@@ -557,7 +560,7 @@ class MessagePort extends L.EventTarget {
 }
 G.MessagePort = MessagePort;
 G.MessageChannel = class MessageChannel {
-  constructor() { this.port1 = new MessagePort(); this.port2 = new MessagePort(); this.port1._other = this.port2; this.port2._other = this.port1; }
+  constructor() { markPlatform(this); this.port1 = new MessagePort(); this.port2 = new MessagePort(); this.port1._other = this.port2; this.port2._other = this.port1; }
 };
 
 // --- Network: every request is recorded; answers come from the session -----
@@ -1158,7 +1161,7 @@ const styleOf = (el) => new Proxy({}, {
 });
 
 class Observer {
-  constructor(cb) { this._cb = cb; this._els = []; }
+  constructor(cb) { markPlatform(this); this._cb = cb; this._els = []; }
   observe(el) { this._els.push(el); }
   unobserve(el) { this._els = this._els.filter((e) => e !== el); }
   disconnect() { this._els = []; }
@@ -1183,6 +1186,7 @@ class PerformanceObserver extends Observer { static get supportedEntryTypes() { 
 // starts with one of some prefixes.
 class XPathExpression {
   constructor(expr) {
+    markPlatform(this);
     const m = /^\.\/\/\*\[@\*\[(.*)\]\]$/s.exec(String(expr).trim());
     this.prefixes = m ? [...m[1].matchAll(/starts-with\(name\(\),\s*"([^"]*)"\)/g)].map((x) => x[1]) : null;
     if (!this.prefixes) unmodelled('XPath');
@@ -1200,6 +1204,7 @@ class XPathExpression {
 }
 G.XPathExpression = XPathExpression;
 G.XPathEvaluator = class XPathEvaluator {
+  constructor() { markPlatform(this); }
   createExpression(e) { return new XPathExpression(e); }
   createNSResolver(n) { return n; }
   evaluate(e, n) { return new XPathExpression(e).evaluate(n); }
@@ -1317,6 +1322,8 @@ function installWindow(doc) {
     permissions: { query: () => Promise.resolve({ state: 'prompt', addEventListener() {} }) },
     userAgentData: { brands: [], mobile: false, platform: 'Linux' },
   };
+
+  for (const value of [G.navigator, G.navigator.clipboard, G.navigator.serviceWorker, G.navigator.permissions, G.navigator.userAgentData, G.screen, G.screen.orientation, G.customElements]) markPlatform(value);
 
   const define = (o, k, d) => Object.defineProperty(o, k, { configurable: true, ...d });
   define(doc, 'readyState', { get: () => S.readyState });
@@ -2055,3 +2062,16 @@ G.__af = {
     });
   },
 };
+
+installClonePlatform(value => {
+  const data = blobRecord(value);
+  if (data) {
+    const copy = nativeCreate(data.name === undefined ? Blob.prototype : File.prototype);
+    saveBlob(copy, { ...data }); return { value: copy };
+  }
+  if (nodeInfo(value) || formRecord(value) || requestData(value) || responseData(value)) return { reject: true };
+  return null;
+}, unmodelled);
+for (const value of [G, G.performance, G.crypto, location, historyApi]) markPlatform(value);
+
+installStackReporter(unmodelled);

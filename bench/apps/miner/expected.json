@@ -9,5 +9,11 @@
   ],
   "allow": [
     "hang"
-  ]
+  ],
+  "incomplete": {
+    "probe scripts": [
+      "actions_not_all_tried",
+      "not_followed_30_days"
+    ]
+  }
 }

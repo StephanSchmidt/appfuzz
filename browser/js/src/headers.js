@@ -1,8 +1,9 @@
+import { markPlatform } from './platform-state.js';
 // A Headers object owns a private ordered list and a guard. Public helpers
 // can be replaced by a page without changing native copying or routing.
 import { eventString } from './event-state.js';
 import { runDOMCallback } from './dom-callbacks.js';
-const records = new WeakMap(), get = records.get.bind(records), save = records.set.bind(records);
+const records = new WeakMap(), get = records.get.bind(records), store = records.set.bind(records), save = (value, data) => { markPlatform(value); store(value, data); };
 const iteratorRecords = new WeakMap(), getIterator = iteratorRecords.get.bind(iteratorRecords), saveIterator = iteratorRecords.set.bind(iteratorRecords);
 const NativeTypeError = TypeError, apply = Reflect.apply, create = Object.create, define = Object.defineProperty;
 const ownKeys = Reflect.ownKeys, descriptor = Object.getOwnPropertyDescriptor, iteratorSymbol = Symbol.iterator;
@@ -172,7 +173,7 @@ export function headerObject(headers) {
   return result;
 }
 class HeaderIterator {
-  constructor(headers, kind) { requireHeaders(headers); saveIterator(this, { headers, kind, index: 0 }); }
+  constructor(headers, kind) { markPlatform(this); requireHeaders(headers); saveIterator(this, { headers, kind, index: 0 }); }
   next() {
     const state = getIterator(this); if (!state) throw new NativeTypeError('A Headers iterator is required');
     const pairs = headerPairs(state.headers);

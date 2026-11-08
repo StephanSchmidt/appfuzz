@@ -7,5 +7,10 @@
       "min": "fail"
     }
   ],
-  "allow": []
+  "allow": [],
+  "incomplete": {
+    "probe scripts": [
+      "scripts_not_loaded"
+    ]
+  }
 }

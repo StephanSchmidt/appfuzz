@@ -241,6 +241,9 @@ pub fn review(cli: &Cli, o: &Opts) -> Result<Value> {
                 }
                 if v["status"] == "incomplete" {
                     errors.push(format!("{name}: required analysis did not complete"));
+                    if let Some(unsupported) = v.get("unsupported") {
+                        row["unsupported"] = unsupported.clone();
+                    }
                 }
                 if matches!(v["outcome"]["kind"].as_str(), Some("error" | "plan_error")) {
                     let e = format!("{name}: {}", v["outcome"]);

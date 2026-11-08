@@ -632,12 +632,14 @@ fn probe_scripts(cli: &Cli, app: &App, store: &RunStore, export: Option<&str>, s
         store.save(&s.browser)?;
     }
     let errors: Vec<String> = sessions.iter().filter_map(|s| s.ensure_executed().err().map(|e| e.to_string())).collect();
+    let unsupported = appfuzz_core::browser::unsupported(&sessions);
+    let complete = errors.is_empty() && unsupported.as_object().is_some_and(|groups| groups.values().all(|items| items.as_array().is_some_and(Vec::is_empty)));
     let mut out = json!({
-        "status": if errors.is_empty() { "complete" } else { "incomplete" },
-        "exit_code": if errors.is_empty() { 0 } else { 3 },
+        "status": if complete { "complete" } else { "incomplete" },
+        "exit_code": if complete { 0 } else { 3 },
         "errors": errors,
         "pages": probes,
-        "unsupported": appfuzz_core::browser::unsupported(&sessions),
+        "unsupported": unsupported,
         "findings": record_findings(cli, app, found)?,
     });
     if probes.is_empty() {

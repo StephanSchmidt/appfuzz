@@ -87,9 +87,35 @@ fn check(manifest: &Path, expected: &Value, state: &Path) -> (Vec<String>, Value
     for s in review["steps"].as_array().into_iter().flatten().filter(|s| s.get("error").is_some()) {
         problems.push(format!("step {} failed: {}", s["step"], s["error"]));
     }
-    // An incomplete review (a finding confirm can't repeat, say) gives no verdict.
+    // Some fixtures deliberately exhaust browser coverage or load scripts that
+    // cannot be fetched. Require their declared reason and an incomplete
+    // verdict; their findings remain subject to all the checks above.
+    let mut coverage_errors = Vec::new();
+    if let Some(steps) = expected["incomplete"].as_object() {
+        for (name, categories) in steps {
+            let step = review["steps"].as_array().into_iter().flatten().find(|step| step["step"] == *name);
+            let reasons = categories.as_array().filter(|categories| !categories.is_empty());
+            if reasons.is_some_and(|categories| {
+                categories.iter().all(|category| {
+                    category
+                        .as_str()
+                        .is_some_and(|category| step.is_some_and(|step| step["unsupported"][category].as_array().is_some_and(|values| !values.is_empty())))
+                })
+            }) {
+                coverage_errors.push(format!("{name}: required analysis did not complete"));
+            } else {
+                problems.push(format!("missing declared incomplete coverage for {name}: {categories}"));
+            }
+        }
+    }
+    let incomplete = expected["incomplete"].as_object().is_some_and(|steps| !steps.is_empty());
+    if review["status"] != if incomplete { "incomplete" } else { "complete" } || incomplete && (review["verdict"] != "incomplete" || review["exit_code"] != 3) {
+        problems.push(format!("unexpected review completion: {} / {}", review["status"], review["verdict"]));
+    }
     for e in review["errors"].as_array().into_iter().flatten() {
-        problems.push(format!("review incomplete: {e}"));
+        if !e.as_str().is_some_and(|message| coverage_errors.iter().any(|expected| expected == message)) {
+            problems.push(format!("review incomplete: {e}"));
+        }
     }
     (problems, review)
 }

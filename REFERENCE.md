@@ -1058,6 +1058,21 @@ serialize limited sRGB or Display P3, and honor `alpha` and `colorspace` changes
 Context-dependent color expressions, advanced math the browser cannot evaluate,
 and nonfinite color conversions appear under `unsupported.apis` as
 `input[type=color]:CSS color expression`.
+
+`structuredClone` preserves cycles, shared references, sparse arrays, native
+numeric/date/regexp/collection data, errors, DOMExceptions, blobs and files.
+ArrayBuffer transfers happen after successful serialization, including transfers
+of buffers absent from the returned graph. Ordinary buffer copies snapshot their
+bytes when visited; transfers include later getter mutations. Fixed buffer views
+retain their shared backing buffer and offsets. Cloning uses private brands and
+native data, rather than public constructors, iterators or `toJSON` hooks.
+Error stack copying follows HTML/Firefox's native stack behavior; it does not
+invoke an author stack getter. MessagePort transfers, resizable-view length
+tracking and V8 stack formatters remain listed under `unsupported.apis` as
+`structuredClone MessagePort transfer`,
+`structuredClone resizable ArrayBuffer view length tracking`, and
+`Error.prepareStackTrace` respectively. Those paths cannot establish a complete
+passing review.
 Requests and clones carry distinct signals that follow their source. Combined
 signals (`AbortSignal.any`) preserve the first abort reason and update dependent
 state before abort events run. Fetch cancellation uses private signal state,
