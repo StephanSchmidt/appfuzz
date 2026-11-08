@@ -82,3 +82,19 @@ export function defaultPassiveTarget(value) {
     && ((identity.local === 'html' && node(parent)?.kind === 9)
       || (identity.local === 'body' && nameIdentity(parent)?.local === 'html' && node(physicalParent(parent))?.kind === 9));
 }
+
+// Direct children can be visited without reading public DOM accessors or
+// walking their descendants (for example a large body or stylesheet).
+function firstElement(parent) {
+  for (let value = parent[NEXT]; value && value !== parent[END]; value = value[END] ? value[END][NEXT] : value[NEXT]) if (node(value)?.kind === 1) return value;
+  return null;
+}
+export function physicalBody(document) {
+  const html = firstElement(document), identity = html && nameIdentity(html);
+  if (identity?.namespace !== 'http://www.w3.org/1999/xhtml' || identity.local !== 'html') return null;
+  for (let value = html[NEXT]; value && value !== html[END]; value = value[END] ? value[END][NEXT] : value[NEXT]) {
+    const name = nameIdentity(value);
+    if (name?.namespace === 'http://www.w3.org/1999/xhtml' && (name.local === 'body' || name.local === 'frameset')) return value;
+  }
+  return null;
+}

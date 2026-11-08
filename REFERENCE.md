@@ -1079,6 +1079,24 @@ executed with altered bytes. Byte-list fields and native HTTP adapters retain
 binary bodies. Readable body streams and Request/Response `formData()` decoding
 remain unsupported; using them makes coverage incomplete.
 
+Event constructors convert their dictionaries in inheritance order, with sorted
+members at each level. Optional dictionaries use defaults when omitted, undefined
+or null; required members remain required. Explicit objects retain their ordinary
+getters and conversions. Event data and
+interface brands live in private slots, with readonly accessors. Public
+constructor inheritance cannot select the platform's initializer. The controller,
+form construction and rejection/error delivery initialize native event data
+without running public dictionary conversion.
+
+Focus checks native HTML eligibility, including connection, disabled/hidden/inert
+state and tabindex. Focus events carry their related target and view;
+Document/ShadowRoot active-element queries use physical state and retargeting.
+Controller mouse actions preserve pressed-button state, pointer pressure and
+compatibility-event cancellation. Canceling pointerdown suppresses compatibility
+mouse events; canceling mousedown suppresses focus. The model still has no CSS
+layout. DataTransfer, StaticRange and Touch object producers are not implemented;
+those APIs and their nonempty payloads remain outside the modeled surface.
+
 The pinned QuickJS runtime includes a local fix for JSON serialization's internal
 cycle stack and replacer property list. These private lists cannot invoke page
 array index hooks; ordinary input getters, inherited elements, `toJSON` and

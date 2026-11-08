@@ -1,3 +1,4 @@
+import { UIEvent, MouseEvent, PointerEvent, WheelEvent, KeyboardEvent, FocusEvent, InputEvent, SubmitEvent, ProgressEvent, HashChangeEvent, PopStateEvent, ErrorEvent, PromiseRejectionEvent, ToggleEvent, StorageEvent, TransitionEvent, AnimationEvent, CompositionEvent, ClipboardEvent, TouchEvent, TouchList, DragEvent, isErrorEvent, errorEventData, createNativeUIEvent, registerStorageArea } from './event-interfaces.js';
 import { extractMime } from './mime-types.js';
 import { Blob, File, blobRecord, requireBlob, blobText, blobBuffer, blobDataURL, fileFromBlob, emptyFile, cloneBlob, installBlobPlatform, byteCount, bufferOfBytes, textBytes, decodeBytes, blobBytes, blobFromBytes, copyBodyBytes, copyBytesBuffer, bufferSourceKind, bufferSourceBytes, wireBytes, joinBytes } from './blobs.js';
 import { postMessage, installWindowMessages } from './window-messages.js';
@@ -23,14 +24,14 @@ import { reportJSON } from './report-json.js';
 import { CookieJar } from './cookies.js';
 import { parseHTML, parseHTMLFragment, fragmentElements, documentMode } from './document.js';
 import { qualifiedName, nameIdentity, lowerASCII, validElementLocalName } from './names.js';
-import { setEventClock, eventState, cancelEvent, setRelatedTarget, relatedTarget, markEventUninitialized } from './event-state.js';
-import { fireEvent, installEventHooks, registerWindow, nullableTarget, getHandler, setHandler, setContentHandler } from './event-target.js';
+import { setEventClock, eventState, eventDictionary, cancelEvent, initializeEvent, createNativeEvent, markEventUninitialized } from './event-state.js';
+import { fireEvent, installEventHooks, registerWindow, initializeEventTarget, getHandler, setHandler, setContentHandler } from './event-target.js';
 import { initializeSignal, signalState, abortSignal, dependSignal, onSignalAbort, setAbortEventDispatcher, signalListenersChanged } from './abort-state.js';
 import { installEventAttributeHook } from './ce-hooks.js';
 import { htmlName, controlType, treeElements, formOwner, connected, disabled, checked, setChecked, indeterminate, setIndeterminate, beginInputActivation, cancelInputActivation, resetChecked, installControlState, setControlAttribute } from './controls.js';
 import { populateForm, isSubmitButton, optionSelected, setOptionSelected, resetSelect } from './form-controls.js';
 import { installValueProperties, resetControlValue, setControlValue, controlValue } from './control-values.js';
-import { nodeInfo, eventAttribute, physicalParent, physicalRoot, retarget } from './dom-state.js';
+import { nodeInfo, shadowInfo, shadowAncestor, physicalBody, eventAttribute, physicalParent, physicalRoot, retarget } from './dom-state.js';
 import { exceptionInfo, clipDiagnostic } from './error-info.js';
 import { installShadowConstraints } from './shadow.js';
 import { EVENT_TARGET } from '../node_modules/linkedom/esm/shared/symbols.js';
@@ -346,112 +347,18 @@ G.structuredClone = structuredClone;
 // --- Events -----------------------------------------------------------------
 
 const Ev = L.Event;
-const MODS = ['ctrlKey', 'shiftKey', 'altKey', 'metaKey'];
-class UIEvent extends Ev {
-  constructor(t, i = {}) { super(t, i); this.view = i.view ?? null; this.detail = i.detail ?? 0; }
-}
-class MouseEvent extends UIEvent {
-  constructor(t, i = {}) {
-    super(t, i);
-    eventState(this).mouse = true;
-    for (const k of ['screenX', 'screenY', 'clientX', 'clientY', 'pageX', 'pageY', 'offsetX', 'offsetY', 'movementX', 'movementY', 'button', 'buttons']) this[k] = i[k] ?? 0;
-    for (const k of MODS) this[k] = !!i[k];
-    setRelatedTarget(this, nullableTarget(i.relatedTarget));
-  }
-  get relatedTarget() { return relatedTarget(this); }
-  getModifierState() { return false; }
-}
-class PointerEvent extends MouseEvent {
-  constructor(t, i = {}) {
-    super(t, i);
-    this.pointerId = i.pointerId ?? 1;
-    this.pointerType = i.pointerType ?? 'mouse';
-    this.isPrimary = i.isPrimary ?? true;
-    this.width = 1; this.height = 1; this.pressure = i.pressure ?? 0;
-  }
-}
-class WheelEvent extends MouseEvent {}
-class KeyboardEvent extends UIEvent {
-  constructor(t, i = {}) {
-    super(t, i);
-    this.key = i.key ?? ''; this.code = i.code ?? ''; this.location = 0; this.repeat = !!i.repeat; this.isComposing = false;
-    for (const k of MODS) this[k] = !!i[k];
-    this.keyCode = i.keyCode ?? 0; this.which = this.keyCode; this.charCode = i.charCode ?? 0;
-  }
-  getModifierState() { return false; }
-}
-class FocusEvent extends UIEvent { constructor(t, i = {}) { super(t, i); setRelatedTarget(this, nullableTarget(i.relatedTarget)); } get relatedTarget() { return relatedTarget(this); } }
-class SubmitEvent extends Ev { constructor(t, i = {}) { super(t, i); this.submitter = i.submitter ?? null; } }
-
-class ProgressEvent extends Ev { constructor(t, i = {}) { super(t, i); this.lengthComputable = !!i.lengthComputable; this.loaded = i.loaded ?? 0; this.total = i.total ?? 0; } }
-class HashChangeEvent extends Ev { constructor(t, i = {}) { super(t, i); this.oldURL = i.oldURL ?? ''; this.newURL = i.newURL ?? ''; } }
-class PopStateEvent extends Ev { constructor(t, i = {}) { super(t, i); this.state = i.state ?? null; } }
-const errorEventBrands = new WeakMap();
-const brandErrorEvent = errorEventBrands.set.bind(errorEventBrands), isErrorEvent = errorEventBrands.has.bind(errorEventBrands);
 const wellFormed = Function.prototype.call.bind(String.prototype.toWellFormed);
-const errorEventFor = errorEventBrands.get.bind(errorEventBrands);
-function errorEventData(event) {
-  const data = errorEventFor(event);
-  if (!data) throw new NativeTypeError('Illegal error event receiver');
-  return data;
-}
-class ErrorEvent extends Ev {
-  constructor(type, options = {}) {
-    if (!arguments.length) throw new NativeTypeError('ErrorEvent requires a type');
-    type = domString(type);
-    const init = options == null ? {} : options;
-    if (typeof init !== 'object' && typeof init !== 'function') throw new NativeTypeError('ErrorEvent options must be a dictionary');
-    // Web IDL dictionaries convert members in lexicographic order.
-    const bubbles = !!init.bubbles, cancelable = !!init.cancelable, colno = +init.colno >>> 0, composed = !!init.composed, error = init.error;
-    const rawFilename = init.filename, filename = wellFormed(domString(rawFilename === undefined ? '' : rawFilename));
-    const lineno = +init.lineno >>> 0, rawMessage = init.message, message = domString(rawMessage === undefined ? '' : rawMessage);
-    super(type, { bubbles, cancelable, composed });
-    brandErrorEvent(this, { message, filename, lineno, colno, error });
-  }
-  get message() { return errorEventData(this).message; }
-  get filename() { return errorEventData(this).filename; }
-  get lineno() { return errorEventData(this).lineno; }
-  get colno() { return errorEventData(this).colno; }
-  get error() { return errorEventData(this).error; }
-}
-class PromiseRejectionEvent extends Ev { constructor(t, i = {}) { super(t, i); this.promise = i.promise; this.reason = i.reason; } }
-class ToggleEvent extends Ev {
-  constructor(type, options = {}) {
-    if (!arguments.length) throw new NativeTypeError('ToggleEvent requires a type');
-    const data = runDOMCallback(() => {
-      type = domString(type);
-      const init = options == null ? {} : options;
-      if (typeof init !== 'object' && typeof init !== 'function') throw new NativeTypeError('ToggleEvent options must be a dictionary');
-      const bubbles = !!init.bubbles, cancelable = !!init.cancelable, composed = !!init.composed;
-      const rawNew = init.newState, newState = domString(rawNew === undefined ? '' : rawNew), rawOld = init.oldState, oldState = domString(rawOld === undefined ? '' : rawOld), source = init.source;
-      if (source != null && nodeInfo(source)?.kind !== 1) throw new NativeTypeError('ToggleEvent source must be an Element');
-      return { bubbles, cancelable, composed, oldState, newState, source: source ?? null };
-    });
-    super(type, { bubbles: data.bubbles, cancelable: data.cancelable, composed: data.composed });
-    eventState(this).toggle = data;
-  }
-  get oldState() { const data = eventState(this).toggle; if (!data) throw new NativeTypeError('A ToggleEvent is required'); return data.oldState; }
-  get newState() { const data = eventState(this).toggle; if (!data) throw new NativeTypeError('A ToggleEvent is required'); return data.newState; }
-  get source() { const state = eventState(this), data = state.toggle; if (!data) throw new NativeTypeError('A ToggleEvent is required'); return retarget(data.source, state.current); }
-}
 const detailsToggles = new WeakMap(), pendingToggle = detailsToggles.get.bind(detailsToggles), rememberToggle = detailsToggles.set.bind(detailsToggles), forgetToggle = detailsToggles.delete.bind(detailsToggles);
 function queueDetailsToggle(node, wasOpen, isOpen) {
   const pending = pendingToggle(node), oldState = pending ? pending.oldState : wasOpen ? 'open' : 'closed', newState = isOpen ? 'open' : 'closed';
   if (pending) mapDelete(S.timers, pending.id);
-  const id = addTimer(() => { forgetToggle(node); fireEvent(node, new ToggleEvent('toggle', { oldState, newState })); }, 0, [], false, 'details-toggle', false);
+  const id = addTimer(() => { forgetToggle(node); fireEvent(node, createNativeUIEvent(ToggleEvent, 'toggle', { oldState, newState })); }, 0, [], false, 'details-toggle', false);
   rememberToggle(node, { id, oldState });
 }
-class StorageEvent extends Ev {}
-class TransitionEvent extends Ev {}
-class AnimationEvent extends Ev {}
-class CompositionEvent extends UIEvent { constructor(t, i = {}) { super(t, i); this.data = i.data ?? ''; } }
-class ClipboardEvent extends Ev { constructor(t, i = {}) { super(t, i); this.clipboardData = i.clipboardData ?? null; } }
-class TouchEvent extends UIEvent { constructor(t, i = {}) { super(t, i); this.touches = []; this.targetTouches = []; this.changedTouches = []; } }
-class DragEvent extends MouseEvent { constructor(t, i = {}) { super(t, i); this.dataTransfer = i.dataTransfer ?? null; } }
 Object.assign(G, {
-  UIEvent, MouseEvent, PointerEvent, WheelEvent, KeyboardEvent, FocusEvent, SubmitEvent, MessageEvent, ProgressEvent,
+  UIEvent, MouseEvent, PointerEvent, WheelEvent, KeyboardEvent, FocusEvent, InputEvent, SubmitEvent, MessageEvent, ProgressEvent,
   HashChangeEvent, PopStateEvent, ErrorEvent, PromiseRejectionEvent, StorageEvent, TransitionEvent, AnimationEvent,
-  CompositionEvent, ClipboardEvent, TouchEvent, DragEvent, ToggleEvent,
+  CompositionEvent, ClipboardEvent, TouchEvent, TouchList, DragEvent, ToggleEvent,
 });
 
 // Listeners: a throwing listener is reported, not passed on, and `this` is
@@ -503,10 +410,10 @@ installEventAttributeHook((node, name, code) => {
 const iteratorSymbol = Symbol.iterator;
 const signalToken = {}, controllerSignals = new WeakMap();
 const controllerSignal = controllerSignals.get.bind(controllerSignals), rememberController = controllerSignals.set.bind(controllerSignals);
-class AbortSignal extends L.EventTarget {
+class AbortSignal {
   constructor(token) {
     if (token !== signalToken) throw new NativeTypeError('Illegal AbortSignal constructor');
-    super(); initializeSignal(this);
+    initializeEventTarget(this); initializeSignal(this);
   }
   get aborted() { return signalState(this).aborted; }
   get reason() { return signalState(this).reason; }
@@ -550,12 +457,14 @@ function abort(signal, reason) {
   if (reason === undefined) reason = new BrowserDOMException('The operation was aborted', 'AbortError');
   abortSignal(signal, reason);
 }
+nativeSetPrototype(AbortSignal, L.EventTarget); nativeSetPrototype(AbortSignal.prototype, L.EventTarget.prototype);
+nativeDefine(AbortSignal, 'name', { value: 'AbortSignal', configurable: true });
 class AbortController {
   constructor() { markPlatform(this); rememberController(this, new AbortSignal(signalToken)); }
   get signal() { const signal = controllerSignal(this); if (!signal) throw new NativeTypeError('Illegal AbortController receiver'); return signal; }
   abort(reason) { const signal = controllerSignal(this); if (!signal) throw new NativeTypeError('Illegal AbortController receiver'); abort(signal, reason); }
 }
-setAbortEventDispatcher(signal => fireEvent(signal, new Ev('abort')));
+setAbortEventDispatcher(signal => fireEvent(signal, createNativeEvent('abort')));
 Object.assign(G, { AbortSignal, AbortController });
 
 G.MessagePort = MessagePort; G.MessageChannel = MessageChannel;
@@ -927,7 +836,7 @@ class XMLHttpRequest extends L.EventTarget {
     }, r.latency, [], false, 'xhr', false);
   }
   _fire(type) {
-    const ev = new ProgressEvent(type);
+    const ev = createNativeUIEvent(ProgressEvent, type);
     fireEvent(this, ev);
   }
 }
@@ -959,7 +868,7 @@ class FileReader extends L.EventTarget {
     addTimer(() => {
       this.result = f();
       this.readyState = 2;
-      for (const t of ['load', 'loadend']) fireEvent(this, new ProgressEvent(t));
+      for (const t of ['load', 'loadend']) fireEvent(this, createNativeUIEvent(ProgressEvent, t));
     }, 0, [], false, 'FileReader', false);
   }
   readAsText(b) { requireBlob(b); this._read(() => blobText(b)); }
@@ -1033,7 +942,7 @@ class FormData {
     try {
       populateForm(form, submitter, (name, value) => { list[list.length] = [wellFormed(name), typeof value === 'string' ? wellFormed(value) : value]; }, () => emptyFile());
       const data = nativeCreate(FormData.prototype); saveForm(data, list);
-      fireEvent(form, new FormDataEvent('formdata', { bubbles: true, formData: data }));
+      const event = nativeCreate(FormDataEvent.prototype); initializeEvent(event, 'formdata', true); eventState(event).formData = data; fireEvent(form, event);
       const copy = []; nativeSetPrototype(copy, null);
       for (let i = 0; i < list.length; i++) copy[i] = list[i];
       saveForm(this, copy);
@@ -1083,21 +992,23 @@ class FormData {
 }
 nativeDefine(FormData.prototype, iteratorSymbol, { value: FormData.prototype.entries, writable: true, configurable: true });
 G.FormData = FormData;
-class FormDataEvent extends Ev {
+class FormDataEvent {
   constructor(type, options) {
     if (arguments.length < 2) throw new NativeTypeError('FormDataEvent requires a type and options');
     const init = runDOMCallback(() => {
       type = domString(type);
-      const dictionary = options == null ? {} : options;
+      const dictionary = eventDictionary(options);
       if (typeof dictionary !== 'object' && typeof dictionary !== 'function') throw new NativeTypeError('Event options must be a dictionary');
       const bubbles = !!dictionary.bubbles, cancelable = !!dictionary.cancelable, composed = !!dictionary.composed, formData = dictionary.formData;
       requireForm(formData); return { bubbles, cancelable, composed, formData };
     });
-    super(type, { bubbles: init.bubbles, cancelable: init.cancelable, composed: init.composed });
+    initializeEvent(this, type, init.bubbles, init.cancelable, init.composed);
     eventState(this).formData = init.formData;
   }
   get formData() { const data = eventState(this).formData; if (!data) throw new NativeTypeError('A FormDataEvent is required'); return data; }
 }
+nativeSetPrototype(FormDataEvent, Ev); nativeSetPrototype(FormDataEvent.prototype, Ev.prototype);
+nativeDefine(FormDataEvent, 'name', { value: 'FormDataEvent', configurable: true });
 nativeDefine(FormDataEvent.prototype, 'formData', { get: Object.getOwnPropertyDescriptor(FormDataEvent.prototype, 'formData').get, enumerable: true, configurable: true });
 nativeDefine(FormDataEvent.prototype, Symbol.toStringTag, { value: 'FormDataEvent', configurable: true });
 G.FormDataEvent = FormDataEvent;
@@ -1112,14 +1023,14 @@ function makeStorage(kind) {
     key: (i) => [...m.keys()][i] ?? null,
     get length() { return m.size; },
   };
-  return new Proxy(api, {
+  return registerStorageArea(new Proxy(api, {
     get: (t, k) => (k in t ? t[k] : typeof k === 'string' && m.has(k) ? m.get(k) : undefined),
     set: (t, k, v) => { api.setItem(k, v); return true; },
     has: (t, k) => k in t || m.has(k),
     deleteProperty: (t, k) => { m.delete(k); return true; },
     ownKeys: () => [...m.keys()],
     getOwnPropertyDescriptor: (t, k) => (m.has(k) ? { value: m.get(k), enumerable: true, configurable: true, writable: true } : undefined),
-  });
+  }));
 }
 
 function setCookie(text) {
@@ -1141,7 +1052,7 @@ function navigate(target, how, extra = {}) {
     const oldURL = urlPart(S.url, 'href');
     S.url = u;
     push(S.history, { how, url: urlPart(u, 'href') });
-    addTimer(() => fireEvent(G, new HashChangeEvent('hashchange', { oldURL, newURL: urlPart(u, 'href') })), 0, [], false, 'hashchange', false);
+    addTimer(() => fireEvent(G, createNativeUIEvent(HashChangeEvent, 'hashchange', { oldURL, newURL: urlPart(u, 'href') })), 0, [], false, 'hashchange', false);
     return;
   }
   push(S.navigations, { url: urlPart(u, 'href'), how, gesture: S.gesture, at: S.now - S.start, ...extra });
@@ -1257,6 +1168,7 @@ function installWindow(doc) {
   for (const [k, v] of Object.entries(L)) {
     if (/^[A-Z]/.test(k) && typeof v === 'function') G[k] = v;
   }
+  G.InputEvent = InputEvent;
   installHTMLConstructors(G, L);
   const createInternal = installRegistry(upgradeCopies, BrowserDOMException, (name, e) => error('custom-element:' + name, e));
   G.Document = L.Document;
@@ -1296,7 +1208,7 @@ function installWindow(doc) {
     });
   }
   dispatchGlobalEvent = event => fireEvent(windowTarget, event);
-  dispatchGlobalError = (info, value) => dispatchGlobalEvent(new ErrorEvent('error', { cancelable: true, message: info.eventMessage, error: value, filename: (S.url && urlPart(S.url, 'href')) || '' }));
+  dispatchGlobalError = (info, value) => dispatchGlobalEvent(createNativeUIEvent(ErrorEvent, 'error', { cancelable: true, message: info.eventMessage, error: value, filename: (S.url && urlPart(S.url, 'href')) || '' }));
   G.reportError = function (value) {
     if (!arguments.length) throw new NativeTypeError('reportError requires an argument');
     error('reportError', value);
@@ -1365,7 +1277,7 @@ function installWindow(doc) {
     get: () => S.cookies.header(urlPart(S.url, 'href'), false),
     set: (v) => setCookie(v),
   });
-  define(doc, 'activeElement', { get: () => (S.active && S.active.isConnected ? S.active : doc.body) });
+  define(L.Document.prototype, 'activeElement', { enumerable: true, configurable: true, get() { return activeElementFor(this); } });
   for (const k of ['URL', 'documentURI', 'baseURI']) define(doc, k, { get: () => urlPart(S.url, 'href') });
   define(doc, 'domain', { get: () => urlPart(S.url, 'hostname'), set() {} });
   define(doc, 'referrer', { value: '' });
@@ -1483,7 +1395,7 @@ function installWindow(doc) {
   // A fragment has descendant text and the same replace-with-text setter
   // as an element; linkedom otherwise inherits Node's null/no-op stubs.
   Object.defineProperty(L.DocumentFragment.prototype, 'textContent', Object.getOwnPropertyDescriptor(L.Element.prototype, 'textContent'));
-  installShadowConstraints(L.Element, BrowserDOMException);
+  installShadowConstraints(L.Element, BrowserDOMException, activeElementFor);
   installSerialization(L);
   installScriptMutations(L, scriptsChanged);
   installReactionBoundaries(L);
@@ -1535,8 +1447,8 @@ function installWindow(doc) {
   define(E, 'scrollTop', { get: () => 0, set() {} });
   define(E, 'scrollLeft', { get: () => 0, set() {} });
   define(E, 'offsetParent', { get() { return this.parentElement; } });
-  H.focus = function () { focusNode(this); };
-  H.blur = function () { if (S.active === this) { S.active = null; fireEvent(this, new FocusEvent('blur')); } };
+  H.focus = function () { if (!htmlName(this)) throw new NativeTypeError('An HTMLElement is required'); focusNode(this); };
+  H.blur = function () { if (!htmlName(this)) throw new NativeTypeError('An HTMLElement is required'); if (S.active === this) focusNode(null); };
   H.click = function () {
     if (nodeInfo(this)?.kind !== 1 || !htmlName(this)) throw new NativeTypeError('An HTMLElement is required');
     if (disabled(this) || clicking(this)) return;
@@ -1618,13 +1530,40 @@ function candidates() {
   return descriptions;
 }
 
+function focusDocument(node) {
+  let root = physicalRoot(node);
+  while (shadowInfo(root)) root = physicalRoot(shadowInfo(root).host);
+  return root;
+}
+function activeElementFor(root) {
+  const shadow = shadowInfo(root);
+  if (!shadow && nodeInfo(root)?.kind !== 9) throw new NativeTypeError('A Document or ShadowRoot is required');
+  if (S.active && connected(S.active) && (shadow ? shadowAncestor(root, S.active) : focusDocument(S.active) === root)) return retarget(S.active, root);
+  return shadow ? null : physicalBody(root);
+}
+function focusable(node) {
+  const name = htmlName(node);
+  if (!name || !connected(node) || focusDocument(node) !== S.document || disabled(node) || (name === 'input' && controlType(node) === 'hidden')) return false;
+  for (let parent = node; parent; parent = physicalParent(parent) || shadowInfo(parent)?.host || null) if (eventAttribute(parent, 'hidden') !== null || eventAttribute(parent, 'inert') !== null) return false;
+  const tab = eventAttribute(node, 'tabindex');
+  if (tab !== null) {
+    let index = 0;
+    while (index < tab.length && (tab[index] === ' ' || tab[index] === '\t' || tab[index] === '\n' || tab[index] === '\r' || tab[index] === '\f')) index++;
+    if (tab[index] === '+' || tab[index] === '-') index++;
+    if (index < tab.length && tab[index] >= '0' && tab[index] <= '9') return true;
+  }
+  return name === 'input' || name === 'button' || name === 'select' || name === 'textarea' || name === 'iframe' || name === 'object' || name === 'embed'
+    || ((name === 'a' || name === 'area') && eventAttribute(node, 'href') !== null)
+    || (name === 'summary' && activationKind(node) === 'summary')
+    || ((name === 'audio' || name === 'video') && eventAttribute(node, 'controls') !== null) || editable(node);
+}
 function focusNode(node) {
+  if (node !== null && !focusable(node)) return;
   if (S.active === node) return;
-  const old = S.active;
+  const old = S.active && connected(S.active) ? S.active : null;
   S.active = node;
-  if (old) { fireEvent(old, new FocusEvent('blur')); fireEvent(old, new FocusEvent('focusout', { bubbles: true })); }
-  fireEvent(node, new FocusEvent('focus'));
-  fireEvent(node, new FocusEvent('focusin', { bubbles: true }));
+  if (old) { fireEvent(old, createNativeUIEvent(FocusEvent, 'blur', { view: G, relatedTarget: node, composed: true })); fireEvent(old, createNativeUIEvent(FocusEvent, 'focusout', { view: G, relatedTarget: node, bubbles: true, composed: true })); }
+  if (node) { fireEvent(node, createNativeUIEvent(FocusEvent, 'focus', { view: G, relatedTarget: old, composed: true })); fireEvent(node, createNativeUIEvent(FocusEvent, 'focusin', { view: G, relatedTarget: old, bubbles: true, composed: true })); }
 }
 
 function dispatch(el, ev) { return fireEvent(el, ev); }
@@ -1633,15 +1572,16 @@ function click(el, gesture) {
   const was = S.gesture;
   S.gesture = was || gesture;
   try {
-    const o = { bubbles: true, cancelable: true, composed: true, view: G, button: 0, detail: 1 };
+    const o = { __proto__: null, bubbles: true, cancelable: true, composed: true, view: G, button: 0, detail: 1, pointerId: gesture ? 1 : -1, pointerType: gesture ? 'mouse' : '', isPrimary: !!gesture };
     if (gesture) {
-      dispatch(el, new PointerEvent('pointerdown', o));
-      dispatch(el, new MouseEvent('mousedown', o));
-      if (htmlName(el)) focusNode(el);
-      dispatch(el, new PointerEvent('pointerup', o));
-      dispatch(el, new MouseEvent('mouseup', o));
+      o.buttons = 1; o.pressure = 0.5;
+      const compatibility = dispatch(el, createNativeUIEvent(PointerEvent, 'pointerdown', { ...o, detail: 0 }));
+      if (compatibility && dispatch(el, createNativeUIEvent(MouseEvent, 'mousedown', o)) && htmlName(el)) focusNode(el);
+      o.buttons = 0; o.pressure = 0;
+      dispatch(el, createNativeUIEvent(PointerEvent, 'pointerup', { ...o, detail: 0 }));
+      if (compatibility) dispatch(el, createNativeUIEvent(MouseEvent, 'mouseup', o));
     }
-    const ev = new PointerEvent('click', { ...o, detail: gesture ? 1 : 0 });
+    const ev = createNativeUIEvent(PointerEvent, 'click', { ...o, detail: gesture ? 1 : 0, isPrimary: false, buttons: 0, pressure: 0 });
     return fireEvent(el, ev, gesture);
   } finally {
     S.gesture = was;
@@ -1678,8 +1618,8 @@ function completeActivation(action, event) {
   const type = controlType(node);
   if (kind === 'input' && (type === 'checkbox' || type === 'radio')) {
     if (before.changed && connected(node)) {
-      fireEvent(node, new Ev('input', { bubbles: true, composed: true }));
-      fireEvent(node, new Ev('change', { bubbles: true }));
+      fireEvent(node, createNativeEvent('input', { bubbles: true, composed: true }));
+      fireEvent(node, createNativeEvent('change', { bubbles: true }));
     }
     return;
   }
@@ -1724,7 +1664,7 @@ function resetForm(form) {
   if (isResettingForm(form)) return;
   beginReset(form);
   try {
-    if (!fireEvent(form, new Ev('reset', { bubbles: true, cancelable: true }))) return;
+    if (!fireEvent(form, createNativeEvent('reset', { bubbles: true, cancelable: true }))) return;
     const nodes = treeElements(physicalRoot(form));
     for (let i = 0; i < nodes.length; i++) if (formOwner(nodes[i]) === form) {
       const kind = htmlName(nodes[i]);
@@ -1736,7 +1676,7 @@ function resetForm(form) {
 }
 
 function submit(form, submitter) {
-  if (!dispatch(form, new SubmitEvent('submit', { bubbles: true, cancelable: true, submitter }))) return;
+  if (!dispatch(form, createNativeUIEvent(SubmitEvent, 'submit', { bubbles: true, cancelable: true, submitter }))) return;
   formNavigate(form, submitter);
 }
 
@@ -1766,8 +1706,8 @@ function act(i, value) {
       const v = value == null ? representativeInputValue(type) : nativeString(value);
       focusNode(el);
       if (editing) el.textContent = v; else setControlValue(el, v);
-      dispatch(el, new L.InputEvent('input', { bubbles: true, data: v, inputType: 'insertText' }));
-      dispatch(el, new Ev('change', { bubbles: true }));
+      dispatch(el, createNativeUIEvent(InputEvent, 'input', { bubbles: true, data: v, inputType: 'insertText' }));
+      dispatch(el, createNativeEvent('change', { bubbles: true }));
       c.kind = 'type';
       c.value = clip(v, 100);
     } else if (tag === 'input' && (type === 'color' || type === 'range')) {
@@ -1777,16 +1717,16 @@ function act(i, value) {
         setControlValue(el, chosen);
         const after = controlValue(el);
         if (after !== before) {
-          dispatch(el, new Ev('input', { bubbles: true, composed: true }));
-          dispatch(el, new Ev('change', { bubbles: true }));
+          dispatch(el, createNativeEvent('input', { bubbles: true, composed: true }));
+          dispatch(el, createNativeEvent('change', { bubbles: true }));
         }
         c.value = clip(after, 100);
       }
     } else if (tag === 'select') {
       const opts = el.querySelectorAll('option');
       if (opts.length) el.selectedIndex = Number(value ?? 1) % opts.length;
-      dispatch(el, new L.InputEvent('input', { bubbles: true }));
-      dispatch(el, new Ev('change', { bubbles: true }));
+      dispatch(el, createNativeUIEvent(InputEvent, 'input', { bubbles: true }));
+      dispatch(el, createNativeEvent('change', { bubbles: true }));
       c.kind = 'select';
     } else {
       click(el, true);
@@ -1864,7 +1804,7 @@ function prepareScript(s) {
 }
 
 function scriptError(el) {
-  addTimer(() => fireEvent(el, new Ev('error')), 0, [], false, 'script-error', false);
+  addTimer(() => fireEvent(el, createNativeEvent('error')), 0, [], false, 'script-error', false);
 }
 
 function scriptsChanged(nodes) {
@@ -1952,7 +1892,7 @@ function scriptDone(ok) {
   S.current = null;
   S.currentEl = null;
   S.currentExternal = false;
-  if (el && external) fireEvent(el, new Ev(ok ? 'load' : 'error'));
+  if (el && external) fireEvent(el, createNativeEvent(ok ? 'load' : 'error'));
 }
 
 // --- The driver's handle ---------------------------------------------------------
@@ -2034,7 +1974,7 @@ G.__af = {
       const [promise, record] = pending[i];
       if (mapGet(rejections, promise) !== record || record.handled) continue;
       dispatched = true;
-      const unhandled = dispatchGlobalEvent(new PromiseRejectionEvent('unhandledrejection', { cancelable: true, promise, reason: record.reason }));
+      const unhandled = dispatchGlobalEvent(createNativeUIEvent(PromiseRejectionEvent, 'unhandledrejection', { cancelable: true, promise, reason: record.reason }));
       mapDelete(rejections, promise);
       if (!record.handled) rememberNotified(promise, record);
       if (unhandled) error('unhandledrejection', record.reason, false);
@@ -2042,19 +1982,19 @@ G.__af = {
     for (let i = 0; i < handled.length; i++) {
       const [promise, reason] = handled[i];
       dispatched = true;
-      dispatchGlobalEvent(new PromiseRejectionEvent('rejectionhandled', { promise, reason }));
+      dispatchGlobalEvent(createNativeUIEvent(PromiseRejectionEvent, 'rejectionhandled', { promise, reason }));
     }
     return dispatched;
   },
   ready() {
     S.readyState = 'interactive';
-    fireEvent(G.document, new Ev('DOMContentLoaded', { bubbles: true }));
+    fireEvent(G.document, createNativeEvent('DOMContentLoaded', { bubbles: true }));
   },
   loaded() {
     S.readyState = 'complete';
-    const ev = new Ev('load');
+    const ev = createNativeEvent('load');
     fireEvent(G, ev, true, S.document);
-    fireEvent(G, new Ev('pageshow'));
+    fireEvent(G, createNativeEvent('pageshow'));
   },
   // Lets due tasks run for `ms` more virtual milliseconds.
   until(ms) { S.horizon = S.now + ms; },

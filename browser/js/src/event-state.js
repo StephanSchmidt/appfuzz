@@ -3,7 +3,8 @@ import { markPlatform } from './platform-state.js';
 import { runDOMCallback } from './dom-callbacks.js';
 const states = new WeakMap();
 const save = states.set.bind(states), get = states.get.bind(states);
-const NativeTypeError = TypeError, string = String, define = Object.defineProperty;
+const NativeTypeError = TypeError, string = String, define = Object.defineProperty, create = Object.create, setPrototype = Object.setPrototypeOf;
+const descriptor = Object.getOwnPropertyDescriptor, ownKeys = Reflect.ownKeys, own = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
 let clock = () => 0;
 export function setEventClock(read) { clock = read; }
 export function eventState(event) {
@@ -29,7 +30,7 @@ export function eventString(value) {
   return string(value);
 }
 export function eventDictionary(value) {
-  if (value == null) return {};
+  if (value == null) return { __proto__: null };
   if (typeof value !== 'object' && typeof value !== 'function') throw new NativeTypeError('Event options must be a dictionary');
   return value;
 }
@@ -39,7 +40,7 @@ function reset(s, type, bubbles, cancelable) {
 }
 export function initializeEvent(event, type, bubbles = false, cancelable = false, composed = false) {
   markPlatform(event);
-  save(event, { type, bubbles, cancelable, composed, initialized: true, canceled: false, timeStamp: clock(), trusted: false,
+  save(event, { __proto__: null, type, bubbles, cancelable, composed, initialized: true, canceled: false, timeStamp: clock(), trusted: false,
     stopped: false, immediate: false, passive: false, dispatching: false,
     target: null, current: null, phase: 0, path: [], currentEntry: null, related: null, originalRelated: null });
   define(event, 'isTrusted', { __proto__: null, enumerable: true, get() { return eventState(this).trusted; } });
@@ -47,7 +48,7 @@ export function initializeEvent(event, type, bubbles = false, cancelable = false
 export { reset as resetEvent };
 export function markEventUninitialized(event) { eventState(event).initialized = false; }
 export class Event {
-  constructor(type, options = {}) {
+  constructor(type, options = undefined) {
     markPlatform(this);
     if (!arguments.length) throw new NativeTypeError('Event requires a type');
     const init = runDOMCallback(() => {
@@ -102,16 +103,21 @@ export class Event {
   get AT_TARGET() { return 2; }
   get BUBBLING_PHASE() { return 3; }
 }
-export class CustomEvent extends Event {
-  constructor(type, options = {}) {
+export class CustomEvent {
+  constructor(type, options = undefined) {
     if (!arguments.length) throw new NativeTypeError('CustomEvent requires a type');
-    super(type, options);
-    const value = runDOMCallback(() => eventDictionary(options).detail);
-    eventState(this).detail = value === undefined ? null : value;
+    const data = runDOMCallback(() => {
+      type = eventString(type); const init = eventDictionary(options);
+      const bubbles = !!init.bubbles, cancelable = !!init.cancelable, composed = !!init.composed, detail = init.detail;
+      return { bubbles, cancelable, composed, detail: detail === undefined ? null : detail };
+    });
+    initializeEvent(this, type, data.bubbles, data.cancelable, data.composed);
+    eventState(this).custom = true; eventState(this).detail = data.detail;
   }
-  get detail() { return eventState(this).detail; }
+  get detail() { const state = eventState(this); if (!state.custom) throw new NativeTypeError('A CustomEvent is required'); return state.detail; }
   initCustomEvent(type, bubbles = false, cancelable = false, detail = null) {
     const s = eventState(this);
+    if (!s.custom) throw new NativeTypeError('A CustomEvent is required');
     if (!arguments.length) throw new NativeTypeError('initCustomEvent requires a type');
     type = runDOMCallback(() => eventString(type));
     if (!s.dispatching) { reset(s, type, !!bubbles, !!cancelable); s.detail = detail; }
@@ -119,3 +125,17 @@ export class CustomEvent extends Event {
 }
 define(Event.prototype, Symbol.toStringTag, { configurable: true, value: 'Event' });
 define(CustomEvent.prototype, Symbol.toStringTag, { configurable: true, value: 'CustomEvent' });
+
+setPrototype(CustomEvent, Event); setPrototype(CustomEvent.prototype, Event.prototype);
+define(Event, 'name', { value: 'Event', configurable: true });
+define(CustomEvent, 'name', { value: 'CustomEvent', configurable: true });
+// The user agent supplies a private data record, rather than a JS dictionary.
+export function ownEventData(init) {
+  const result = { __proto__: null };
+  if (init) { const keys = ownKeys(init); for (let i = 0; i < keys.length; i++) { const d = descriptor(init, keys[i]); if (d && own(d, 'value')) result[keys[i]] = d.value; } }
+  return result;
+}
+export function createNativeEvent(type, init = undefined) {
+  const data = ownEventData(init), event = create(Event.prototype);
+  initializeEvent(event, type, !!data.bubbles, !!data.cancelable, !!data.composed); return event;
+}

@@ -2,7 +2,7 @@ import { markPlatform } from './platform-state.js';
 import { DOMException as BrowserDOMException } from './dom-exception.js';
 // Listener identity, options, removal and the dispatch path are native
 // state. Author property shadows are visible to author JS, not routing.
-import { eventState, eventString, eventDictionary, setEventTrusted, cancelEvent } from './event-state.js';
+import { eventState, eventString, eventDictionary, ownEventData, setEventTrusted, cancelEvent } from './event-state.js';
 import { nodeInfo, shadowInfo, physicalRoot, closedAncestors, eventParent, retarget, defaultPassiveTarget, rememberDocumentWindow } from './dom-state.js';
 import { signalState, onSignalAbort } from './abort-state.js';
 import { runDOMCallback } from './dom-callbacks.js';
@@ -22,6 +22,7 @@ export function canonicalTarget(value) {
 }
 export function exposedTarget(value) { return value == null ? null : targetFor(canonicalTarget(value)).exposed; }
 export function nullableTarget(value) { return value == null ? null : exposedTarget(value); }
+export function nullableWindow(value) { if (value == null) return null; const record = targetFor(canonicalTarget(value)); if (!record.window) throw new NativeTypeError('A Window is required'); return record.exposed; }
 export function registerWindow(document, internal, global, view) {
   const record = targetFor(canonicalTarget(internal));
   record.exposed = global; record.window = true;
@@ -56,7 +57,8 @@ function optionsValue(value, more) {
   if (signal !== undefined) signalState(signal);
   return { capture, once, passive: rawPassive === undefined ? null : !!rawPassive, signal: signal == null ? null : signal };
 }
-export function addListener(target, type, callback, options = {}) {
+export function addListener(target, type, callback, options = undefined) {
+  options = ownEventData(options);
   target = canonicalTarget(target);
   const record = targetFor(target);
   if (options.signal && signalState(options.signal).aborted) return null;
