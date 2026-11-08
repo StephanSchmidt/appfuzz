@@ -1,3 +1,4 @@
+import { DOMException as BrowserDOMException } from './dom-exception.js';
 // Listener identity, options, removal and the dispatch path are native
 // state. Author property shadows are visible to author JS, not routing.
 import { eventState, eventString, eventDictionary, setEventTrusted, cancelEvent } from './event-state.js';
@@ -8,7 +9,7 @@ const targets = new WeakMap(), aliases = new WeakMap();
 const targetFor = targets.get.bind(targets), remember = targets.set.bind(targets), aliasFor = aliases.get.bind(aliases), rememberAlias = aliases.set.bind(aliases);
 const apply = Reflect.apply, define = Object.defineProperty, NativeTypeError = TypeError, NativeMap = Map;
 const mapGet = Function.prototype.call.bind(Map.prototype.get), mapSet = Function.prototype.call.bind(Map.prototype.set);
-let DOMError = class DOMException extends Error { constructor(message, name) { super(message); this.name = name; } };
+let DOMError = BrowserDOMException;
 let hooks = { error() {}, changed() {}, current() {}, activation() {}, activated() {} };
 export function installEventHooks(next, ErrorClass) { hooks = { ...hooks, ...next }; if (ErrorClass) DOMError = ErrorClass; }
 export function canonicalTarget(value) {

@@ -2,7 +2,7 @@
 // exception from a name/message getter or a failing string conversion.
 // Plain thrown objects use their string conversion, not Error properties.
 import { runDOMCallback } from './dom-callbacks.js';
-const isError = Error.isError;
+import { isError } from './dom-exception.js';
 const string = String;
 const slice = Function.prototype.call.bind(String.prototype.slice);
 const descriptor = Object.getOwnPropertyDescriptor;

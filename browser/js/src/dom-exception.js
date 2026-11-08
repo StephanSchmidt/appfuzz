@@ -1,0 +1,24 @@
+// Keep the runtime's native DOMException slots, getters, constants and stack.
+// The adapter supplies Web IDL's prototype fallback and preserves Error identity
+// without exposing native API construction to mutable page constructors.
+import { runDOMCallback } from './dom-callbacks.js';
+const NativeDOMException = globalThis.DOMException, NativeTypeError = TypeError;
+const construct = Reflect.construct, prototype = Object.getPrototypeOf, setPrototype = Object.setPrototypeOf;
+const define = Object.defineProperty, descriptor = Object.getOwnPropertyDescriptor, keys = Reflect.ownKeys;
+const nativeIsError = Error.isError, nativeBrand = globalThis.__native.isDOMException;
+export const isError = { isError(value) { return nativeIsError(value) || nativeBrand(value); } }.isError;
+define(Error, 'isError', { value: isError, writable: true, configurable: true });
+export function DOMException(message = '', name = 'Error') {
+  if (!new.target) throw new NativeTypeError('DOMException requires new');
+  // Ordinary construction resolves new.target.prototype before conversion.
+  // Reuse it, including the Object.prototype fallback, without a second read.
+  const target = prototype(this);
+  const result = runDOMCallback(() => construct(NativeDOMException, [message, name]));
+  setPrototype(result, target);
+  return result;
+}
+define(DOMException, 'name', { value: 'DOMException', configurable: true });
+const proto = NativeDOMException.prototype;
+define(DOMException, 'prototype', { value: proto, writable: false });
+define(proto, 'constructor', { value: DOMException, writable: true, configurable: true });
+for (const key of keys(NativeDOMException)) if (key !== 'name' && key !== 'length' && key !== 'prototype') define(DOMException, key, descriptor(NativeDOMException, key));

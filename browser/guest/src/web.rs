@@ -5,7 +5,8 @@
 //! a browser.
 
 use rquickjs::convert::List;
-use rquickjs::{Ctx, Function, Object, Result, Value};
+use rquickjs::function::Constructor;
+use rquickjs::{Ctx, Function, Object, Result, Value, qjs};
 use url::{Url, form_urlencoded, quirks};
 
 pub fn install(ctx: &Ctx<'_>) -> Result<()> {
@@ -19,7 +20,20 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     n.set("cookieSite", Function::new(ctx.clone(), cookie_site)?)?;
     n.set("bidiDirection", Function::new(ctx.clone(), bidi_direction)?)?;
     n.set("inputColor", Function::new(ctx.clone(), input_color)?)?;
+    // The pinned runtime has native DOMException slots but its Error.isError
+    // predicate does not recognize them. Read the engine brand without invoking
+    // page prototype getters or allocating/catching an exception per query.
+    let constructor: Constructor = ctx.globals().get("DOMException")?;
+    let sample: Object = constructor.construct(())?;
+    let exception_class = class_id(sample.as_value());
+    n.set("isDOMException", Function::new(ctx.clone(), move |value: Value<'_>| class_id(&value) == exception_class)?)?;
     ctx.globals().set("__native", n)
+}
+
+fn class_id(value: &Value<'_>) -> qjs::JSClassID {
+    // SAFETY: the rooted value stays alive for this call. This public QuickJS
+    // operation reads the class tag only and does not execute JavaScript.
+    unsafe { qjs::JS_GetClassID(value.as_raw()) }
 }
 
 // The native JSON parser defines own data properties. rquickjs's ordinary
@@ -146,6 +160,28 @@ mod tests {
 
     fn host(input: &str) -> Option<String> {
         url_parse(input.into(), Some("https://app.example/shop/item?x=1".into())).map(|p| p[6].clone())
+    }
+
+    #[test]
+    fn exception_brand_uses_native_slots_without_page_callbacks() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            install(&ctx).unwrap();
+            let result: String = ctx
+                .eval(
+                    r#"
+                let calls=0;
+                const fake=Object.create(DOMException.prototype);
+                Object.defineProperty(fake,Symbol.toStringTag,{get(){calls++;throw Error('getter')}});
+                const proxy=new Proxy(new DOMException(),{get(){calls++;throw Error('proxy')}});
+                const values=[new DOMException(),new(class extends DOMException{})(),fake,proxy,new Error(),null,42,()=>{}];
+                JSON.stringify([values.map(v=>__native.isDOMException(v)),calls]);
+            "#,
+                )
+                .unwrap();
+            assert_eq!(result, "[[true,true,false,false,false,false,false,false],0]");
+        });
     }
 
     #[test]

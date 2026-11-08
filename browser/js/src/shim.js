@@ -3,6 +3,7 @@
 // privately: init, scripts, step, candidates, act, report. Everything a page does
 // that leaves the page (requests, navigations, cookies, code it builds)
 // is recorded.
+import { DOMException as BrowserDOMException } from './dom-exception.js';
 import { installNumericProperties } from './input-numbers.js';
 import { installColorReporter } from './color-values.js';
 import { representativeInputValue, representativeSelectionValue } from './input-domains.js';
@@ -266,7 +267,7 @@ if (typeof G.atob !== 'function') {
     let out = '';
     for (let i = 0; i < s.length; i += 3) {
       const [a, b, c] = [s.charCodeAt(i), s.charCodeAt(i + 1), s.charCodeAt(i + 2)];
-      if (a > 255 || b > 255 || c > 255) throw new DOMException('Invalid character', 'InvalidCharacterError');
+      if (a > 255 || b > 255 || c > 255) throw new BrowserDOMException('Invalid character', 'InvalidCharacterError');
       const n = (a << 16) | ((b || 0) << 8) | (c || 0);
       out += A[n >> 18] + A[(n >> 12) & 63] + (i + 1 < s.length ? A[(n >> 6) & 63] : '=') + (i + 2 < s.length ? A[n & 63] : '=');
     }
@@ -277,7 +278,7 @@ if (typeof G.atob !== 'function') {
     let out = '';
     for (let i = 0; i < s.length; i += 4) {
       const n = [0, 1, 2, 3].map((k) => A.indexOf(s[i + k] || 'A'));
-      if (n.some((x) => x < 0)) throw new DOMException('Invalid character', 'InvalidCharacterError');
+      if (n.some((x) => x < 0)) throw new BrowserDOMException('Invalid character', 'InvalidCharacterError');
       const v = (n[0] << 18) | (n[1] << 12) | (n[2] << 6) | n[3];
       out += String.fromCharCode(v >> 16);
       if (i + 2 < s.length) out += String.fromCharCode((v >> 8) & 255);
@@ -287,9 +288,6 @@ if (typeof G.atob !== 'function') {
   };
 }
 
-const BrowserDOMException = class DOMException extends Error {
-  constructor(message = '', name = 'Error') { super(message); this.name = name; this.code = name === 'InvalidCharacterError' ? 5 : name === 'NamespaceError' ? 14 : 0; }
-};
 G.DOMException = BrowserDOMException;
 
 // URLs and form encoding by the WHATWG rules: the guest's `url` crate, the
@@ -1135,7 +1133,7 @@ const historyApi = {
   _go(how, state, url) {
     if (url != null) {
       const u = new URL(nativeString(url), urlPart(S.url, 'href'));
-      if (urlPart(u, 'origin') !== S.origin) throw new DOMException(how + ': another origin', 'SecurityError');
+      if (urlPart(u, 'origin') !== S.origin) throw new BrowserDOMException(how + ': another origin', 'SecurityError');
       S.url = u;
     }
     this.state = state ?? null;
