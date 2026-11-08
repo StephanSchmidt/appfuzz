@@ -17,6 +17,7 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     n.set("cookieDomainMatches", Function::new(ctx.clone(), cookie_domain_matches)?)?;
     n.set("cookiePublicSuffix", Function::new(ctx.clone(), cookie_public_suffix)?)?;
     n.set("cookieSite", Function::new(ctx.clone(), cookie_site)?)?;
+    n.set("bidiDirection", Function::new(ctx.clone(), bidi_direction)?)?;
     ctx.globals().set("__native", n)
 }
 
@@ -37,6 +38,15 @@ fn url_set_js<'js>(ctx: Ctx<'js>, href: String, key: String, value: String) -> R
 fn form_parse_js<'js>(ctx: Ctx<'js>, input: String) -> Result<Value<'js>> {
     let pairs: Vec<_> = form_parse(input).into_iter().map(|List(pair)| pair).collect();
     private_json(&ctx, serde_json::json!(pairs))
+}
+
+fn bidi_direction(value: String) -> Option<&'static str> {
+    use unicode_bidi::BidiClass;
+    value.chars().find_map(|c| match unicode_bidi::bidi_class(c) {
+        BidiClass::L => Some("ltr"),
+        BidiClass::R | BidiClass::AL => Some("rtl"),
+        _ => None,
+    })
 }
 
 fn ip_address(host: &str) -> bool {
@@ -130,6 +140,13 @@ mod tests {
 
     fn host(input: &str) -> Option<String> {
         url_parse(input.into(), Some("https://app.example/shop/item?x=1".into())).map(|p| p[6].clone())
+    }
+
+    #[test]
+    fn direction_uses_the_first_strong_unicode_character() {
+        for (text, direction) in [("123", None), ("123 שלום", Some("rtl")), ("a שלום", Some("ltr")), ("𞤀", Some("rtl")), ("你好", Some("ltr"))] {
+            assert_eq!(bidi_direction(text.into()), direction);
+        }
     }
 
     #[test]

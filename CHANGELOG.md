@@ -134,6 +134,11 @@
 
 **Apps that ship JavaScript**
 
+- FormData construction respects form ownership, disabled fieldsets, selected
+  options, image buttons, empty file inputs, character sets and directionality.
+  Formdata events can adjust the submitted fields without sharing later changes
+  with the returned snapshot; invalid and recursive construction is rejected.
+
 - FormData updates preserve field order and keep old values when replacement
   conversion fails. Names, file overloads and live iteration follow browser
   behavior even when page scripts replace public helpers.

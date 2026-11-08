@@ -15,6 +15,7 @@ import { fireEvent, installEventHooks, registerWindow, nullableTarget, getHandle
 import { initializeSignal, signalState, abortSignal, dependSignal, onSignalAbort, setAbortEventDispatcher, signalListenersChanged } from './abort-state.js';
 import { installEventAttributeHook } from './ce-hooks.js';
 import { htmlName, controlType, treeElements, formOwner, connected, disabled, checked, setChecked, indeterminate, setIndeterminate, beginInputActivation, cancelInputActivation, installControlState, setControlAttribute } from './controls.js';
+import { populateForm, isSubmitButton, optionSelected, setOptionSelected } from './form-controls.js';
 import { nodeInfo, eventAttribute, physicalParent, retarget } from './dom-state.js';
 import { exceptionInfo, clipDiagnostic } from './error-info.js';
 import { installShadowConstraints } from './shadow.js';
@@ -460,7 +461,7 @@ installEventHooks({
 // Content attributes activate the same handler slot as IDL assignments at
 // mutation time; compilation stays lazy until a getter or invocation needs it.
 const handlerNames = Object.getOwnPropertyNames(L.HTMLElement.prototype).filter(name => name.startsWith('on'));
-for (const type of ['wheel', 'beforeinput', 'reset', 'message', 'messageerror', 'pageshow', 'pagehide', 'hashchange', 'popstate', 'resize', 'scroll', 'focusin', 'focusout']) {
+for (const type of ['wheel', 'beforeinput', 'formdata', 'reset', 'message', 'messageerror', 'pageshow', 'pagehide', 'hashchange', 'popstate', 'resize', 'scroll', 'focusin', 'focusout']) {
   if (!handlerNames.includes('on' + type)) handlerNames.push('on' + type);
 }
 const handlerTypes = new Set(handlerNames), isHandlerName = handlerTypes.has.bind(handlerTypes);
@@ -970,27 +971,31 @@ function formIterator(receiver, kind) {
   saveFormIterator(iterator, { list, index: 0, kind }); return iterator;
 }
 
+const constructingForms = new WeakSet();
+const isConstructingForm = constructingForms.has.bind(constructingForms), beginForm = constructingForms.add.bind(constructingForms), endForm = constructingForms.delete.bind(constructingForms);
 class FormData {
-  constructor(form, submitter) {
+  constructor(form, submitter = null) {
     const list = []; nativeSetPrototype(list, null); saveForm(this, list);
-    if (!form) return;
-    for (const el of form.querySelectorAll('input,select,textarea,button')) {
-      const name = el.getAttribute('name');
-      if (!name || el.hasAttribute('disabled')) continue;
-      const tag = el.localName;
-      const type = (el.getAttribute('type') || '').toLowerCase();
-      if (tag === 'button' || ['submit', 'image', 'reset', 'button'].includes(type)) {
-        if (el === submitter) list[list.length] = [name, el.getAttribute('value') || ''];
-        continue;
-      }
-      if ((type === 'checkbox' || type === 'radio') && !el.checked) continue;
-      if (type === 'file') continue;
-      if (tag === 'select') {
-        for (const o of el.querySelectorAll('option')) if (o.selected) list[list.length] = [name, o.value ?? o.textContent];
-        continue;
-      }
-      list[list.length] = [name, type === 'checkbox' || type === 'radio' ? el.getAttribute('value') ?? 'on' : nativeString(el.value ?? '')];
+    if (form !== undefined && htmlName(form) !== 'form') throw new NativeTypeError('An HTMLFormElement is required');
+    if (submitter !== null && !htmlName(submitter)) throw new NativeTypeError('An HTMLElement submitter is required');
+    if (form === undefined) return;
+    if (submitter !== null) {
+      if (!isSubmitButton(submitter)) throw new NativeTypeError('The submitter must be a submit button');
+      if (formOwner(submitter) !== form) throw new BrowserDOMException('The submitter belongs to another form', 'NotFoundError');
     }
+    if (isConstructingForm(form)) throw new BrowserDOMException('The entry list is already being constructed', 'InvalidStateError');
+    beginForm(form);
+    try {
+      populateForm(form, submitter, (name, value) => { list[list.length] = [wellFormed(name), typeof value === 'string' ? wellFormed(value) : value]; }, () => {
+        const file = nativeCreate(File.prototype);
+        saveBlob(file, { text: '', type: 'application/octet-stream', name: '', lastModified: S.now }); return file;
+      });
+      const data = nativeCreate(FormData.prototype); saveForm(data, list);
+      fireEvent(form, new FormDataEvent('formdata', { bubbles: true, formData: data }));
+      const copy = []; nativeSetPrototype(copy, null);
+      for (let i = 0; i < list.length; i++) copy[i] = list[i];
+      saveForm(this, copy);
+    } finally { endForm(form); }
   }
   append(k, v, filename) {
     const { list, entry } = formEntry(this, arguments.length, k, v, filename);
@@ -1036,6 +1041,24 @@ class FormData {
 }
 nativeDefine(FormData.prototype, iteratorSymbol, { value: FormData.prototype.entries, writable: true, configurable: true });
 G.FormData = FormData;
+class FormDataEvent extends Ev {
+  constructor(type, options) {
+    if (arguments.length < 2) throw new NativeTypeError('FormDataEvent requires a type and options');
+    const init = runDOMCallback(() => {
+      type = domString(type);
+      const dictionary = options == null ? {} : options;
+      if (typeof dictionary !== 'object' && typeof dictionary !== 'function') throw new NativeTypeError('Event options must be a dictionary');
+      const bubbles = !!dictionary.bubbles, cancelable = !!dictionary.cancelable, composed = !!dictionary.composed, formData = dictionary.formData;
+      requireForm(formData); return { bubbles, cancelable, composed, formData };
+    });
+    super(type, { bubbles: init.bubbles, cancelable: init.cancelable, composed: init.composed });
+    eventState(this).formData = init.formData;
+  }
+  get formData() { const data = eventState(this).formData; if (!data) throw new NativeTypeError('A FormDataEvent is required'); return data; }
+}
+nativeDefine(FormDataEvent.prototype, 'formData', { get: Object.getOwnPropertyDescriptor(FormDataEvent.prototype, 'formData').get, enumerable: true, configurable: true });
+nativeDefine(FormDataEvent.prototype, Symbol.toStringTag, { value: 'FormDataEvent', configurable: true });
+G.FormDataEvent = FormDataEvent;
 
 function makeStorage(kind) {
   const m = new Map();
@@ -1510,10 +1533,9 @@ function installWindow(doc) {
   F.reset = function () { this.dispatchEvent(new Ev('reset', { bubbles: true, cancelable: true })); };
   F.checkValidity = F.reportValidity = function () { return true; };
   const O = L.HTMLOptionElement.prototype;
-  const selected = new WeakMap();
   define(O, 'selected', {
-    get() { return selected.has(this) ? selected.get(this) : this.hasAttribute('selected'); },
-    set(v) { selected.set(this, !!v); },
+    get() { return optionSelected(this); },
+    set(v) { setOptionSelected(this, v); },
   });
   const Sel = L.HTMLSelectElement.prototype;
   const options = (s) => [...s.querySelectorAll('option')];

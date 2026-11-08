@@ -10,6 +10,7 @@ import { nodeInfo, physicalParent, physicalRoot, shadowInfo, eventAttribute } fr
 import { installControlHooks } from './ce-hooks.js';
 const setAttributeValue = Function.prototype.call.bind(Object.getOwnPropertyDescriptor(Attr.prototype, 'value').set);
 const states = new WeakMap(), get = states.get.bind(states), save = states.set.bind(states);
+const setPrototype = Object.setPrototypeOf;
 const NativeTypeError = TypeError, codeAt = Function.prototype.call.bind(String.prototype.charCodeAt), character = String.fromCharCode;
 const inputTypes = new Set('hidden text search tel url email password date month week time datetime-local number range color checkbox radio file submit image reset button'.split(' '));
 const validInputType = inputTypes.has.bind(inputTypes);
@@ -24,7 +25,7 @@ export function controlType(node) {
   return htmlName(node) === 'input' ? (validInputType(type) ? type : 'text') : type;
 }
 export function treeElements(root) {
-  const elements = [];
+  const elements = []; setPrototype(elements, null);
   if (!root) return elements;
   const stop = (root[END] || root)[NEXT];
   for (let current = root; current && current !== stop; current = current[NEXT]) if (nodeInfo(current)?.kind === 1) elements[elements.length] = current;

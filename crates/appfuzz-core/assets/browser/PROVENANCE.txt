@@ -10,5 +10,6 @@ linkedom: 0.18.15
 parse5: 8.1.0
 parse5 entities: 9.0.0
 psl: 2.1.245
+unicode-bidi: 0.3.18
 rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
-SHA-256: 459fafb66c042c837d3c92816d1774c427c1be7fe017460387cae89d055d4b2a
+SHA-256: 2ca66780cdf41ca33e94140171b81ce4b86d5d8aa644afb64a3c4f1bc9b6cf7c

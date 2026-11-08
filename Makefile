@@ -49,6 +49,7 @@ browser:
 	  echo "parse5: $$(node -p 'require("./browser/js/node_modules/parse5/package.json").version')"; \
 	  echo "parse5 entities: $$(node -p 'require("./browser/js/node_modules/parse5/node_modules/entities/package.json").version')"; \
 	  echo "psl: $$($(call BROWSER_LOCK,psl))"; \
+	  echo "unicode-bidi: $$($(call BROWSER_LOCK,unicode-bidi))"; \
 	  echo "rustc: $$(rustc --version)"; \
 	  echo "SHA-256: $$(sha256sum $(BROWSER_ASSETS)/browser.wasm | cut -d' ' -f1)"; \
 	} > $(BROWSER_ASSETS)/PROVENANCE.txt
