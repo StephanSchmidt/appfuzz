@@ -18,6 +18,7 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     n.set("cookiePublicSuffix", Function::new(ctx.clone(), cookie_public_suffix)?)?;
     n.set("cookieSite", Function::new(ctx.clone(), cookie_site)?)?;
     n.set("bidiDirection", Function::new(ctx.clone(), bidi_direction)?)?;
+    n.set("inputColor", Function::new(ctx.clone(), input_color)?)?;
     ctx.globals().set("__native", n)
 }
 
@@ -132,6 +133,11 @@ fn form_parse(s: String) -> Vec<List<(String, String)>> {
 
 fn form_serialize(pairs: Vec<List<(String, String)>>) -> String {
     form_urlencoded::Serializer::new(String::new()).extend_pairs(pairs.iter().map(|List((k, v))| (k, v))).finish()
+}
+
+fn input_color<'js>(ctx: Ctx<'js>, value: String, alpha: bool, p3: bool) -> Result<Value<'js>> {
+    let (value, unsupported) = crate::input_color::sanitize(&value, alpha, p3);
+    private_json(&ctx, serde_json::json!({"value":value,"unsupported":unsupported}))
 }
 
 #[cfg(test)]

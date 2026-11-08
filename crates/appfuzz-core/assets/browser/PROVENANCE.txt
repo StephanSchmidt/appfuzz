@@ -11,5 +11,8 @@ parse5: 8.1.0
 parse5 entities: 9.0.0
 psl: 2.1.245
 unicode-bidi: 0.3.18
+color: 0.3.3
+cssparser: 0.38.0
+cssparser-color: 0.6.0
 rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
-SHA-256: 8930fda26ba52091c741587b382f5c424b7ae081d4e10f20a6b4c748128addee
+SHA-256: 5e0fdd962a3331aef6700c79db943fdd2ecc7c8044e6f9952a0e6373fda71776

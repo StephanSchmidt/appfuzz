@@ -1044,6 +1044,13 @@ precede listeners and roll back on cancellation. Radio groups follow physical
 trees and form owners; programmatic clicks honor disabled controls and suppress
 recursive calls to `click()`. Labels forward clicks, links queue navigation,
 and the first summary toggles its details with a coalesced trusted toggle event.
+Range and color actions select a value and fire ordinary `input`/`change`
+events when it changes; canceled clicks, disabled controls and fixed ranges
+preserve their values. Color controls parse CSS colors, arithmetic and mixtures,
+serialize limited sRGB or Display P3, and honor `alpha` and `colorspace` changes.
+Context-dependent color expressions, advanced math the browser cannot evaluate,
+and nonfinite color conversions appear under `unsupported.apis` as
+`input[type=color]:CSS color expression`.
 Requests and clones carry distinct signals that follow their source. Combined
 signals (`AbortSignal.any`) preserve the first abort reason and update dependent
 state before abort events run. Fetch cancellation uses private signal state,

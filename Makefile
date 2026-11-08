@@ -50,6 +50,9 @@ browser:
 	  echo "parse5 entities: $$(node -p 'require("./browser/js/node_modules/parse5/node_modules/entities/package.json").version')"; \
 	  echo "psl: $$($(call BROWSER_LOCK,psl))"; \
 	  echo "unicode-bidi: $$($(call BROWSER_LOCK,unicode-bidi))"; \
+	  echo "color: $$($(call BROWSER_LOCK,color))"; \
+	  echo "cssparser: $$($(call BROWSER_LOCK,cssparser))"; \
+	  echo "cssparser-color: $$($(call BROWSER_LOCK,cssparser-color))"; \
 	  echo "rustc: $$(rustc --version)"; \
 	  echo "SHA-256: $$(sha256sum $(BROWSER_ASSETS)/browser.wasm | cut -d' ' -f1)"; \
 	} > $(BROWSER_ASSETS)/PROVENANCE.txt

@@ -1,6 +1,7 @@
 // HTML input value sanitization. Keep the parsers and arithmetic private:
 // page replacements of Number, RegExp.exec, Math or String must not change
 // the values a native control accepts or submits.
+import { colorValue } from './color-values.js';
 import { eventAttribute } from './dom-state.js';
 const num = Number, str = String, bigint = BigInt, finite = Number.isFinite;
 const exec = Function.call.bind(RegExp.prototype.exec);
@@ -91,6 +92,7 @@ function localDateTime(value) {
   return parts[1] + 'T' + t[1] + ':' + t[2] + (num(t[3] || 0) || fraction ? ':' + t[3] + (fraction ? '.' + fraction : '') : '');
 }
 export function sanitizeInputDomain(node, type, value) {
+  if (type === 'color') return colorValue(node, value);
   if (type === 'number') return inputNumber(value) === null ? '' : value;
   if (type === 'range') return rangeValue(node, value);
   if (type === 'date') return validDate(value) ? value : '';
@@ -108,4 +110,9 @@ export function representativeInputValue(type) {
   if (type === 'time') return '12:00';
   if (type === 'datetime-local') return '2024-01-01T12:00';
   return 'x';
+}
+
+export function representativeSelectionValue(node, type, current) {
+  const first = sanitizeInputDomain(node, type, type === 'color' ? '#336699' : str(inputNumber(eventAttribute(node, 'max')) ?? 100));
+  return first !== current ? first : sanitizeInputDomain(node, type, type === 'color' ? '#663399' : str(inputNumber(eventAttribute(node, 'min')) ?? 0));
 }

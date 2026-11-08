@@ -3,7 +3,8 @@
 // privately: init, scripts, step, candidates, act, report. Everything a page does
 // that leaves the page (requests, navigations, cookies, code it builds)
 // is recorded.
-import { representativeInputValue } from './input-domains.js';
+import { installColorReporter } from './color-values.js';
+import { representativeInputValue, representativeSelectionValue } from './input-domains.js';
 import * as L from 'linkedom';
 import { Headers, convertHeadersInit, headersFromConverted, setHeadersGuard, copyHeaders, filterHeaders, headerObject, headerValue, appendNativeHeader } from './headers.js';
 import { URL, URLSearchParams, urlPart, setURLPart, serializeParams, setObjectURLHooks } from './urls.js';
@@ -17,7 +18,7 @@ import { initializeSignal, signalState, abortSignal, dependSignal, onSignalAbort
 import { installEventAttributeHook } from './ce-hooks.js';
 import { htmlName, controlType, treeElements, formOwner, connected, disabled, checked, setChecked, indeterminate, setIndeterminate, beginInputActivation, cancelInputActivation, resetChecked, installControlState, setControlAttribute } from './controls.js';
 import { populateForm, isSubmitButton, optionSelected, setOptionSelected, resetSelect } from './form-controls.js';
-import { installValueProperties, resetControlValue, setControlValue } from './control-values.js';
+import { installValueProperties, resetControlValue, setControlValue, controlValue } from './control-values.js';
 import { nodeInfo, eventAttribute, physicalParent, physicalRoot, retarget } from './dom-state.js';
 import { exceptionInfo, clipDiagnostic } from './error-info.js';
 import { installShadowConstraints } from './shadow.js';
@@ -86,6 +87,7 @@ const mapSize = Function.prototype.call.bind(Object.getOwnPropertyDescriptor(Map
 const setEach = Function.prototype.call.bind(Set.prototype.forEach), setHas = Function.prototype.call.bind(Set.prototype.has);
 let handledRejections = [];
 const unmodelled = (name) => nativeSetAdd(S.unmodelled, name);
+installColorReporter(unmodelled);
 
 // The host: appfuzz's browser guest binds a private bridge to the
 // `appfuzz:browser` imports. Requests go to it and it answers them; markup,
@@ -1589,7 +1591,7 @@ function candidates() {
   return out.map((el, i) => {
     const tag = el.localName;
     const type = (el.getAttribute('type') || '').toLowerCase();
-    const kind = (tag === 'input' && setHas(TYPED, type)) || tag === 'textarea' || el.isContentEditable ? 'type' : tag === 'select' ? 'select' : 'click';
+    const kind = (tag === 'input' && setHas(TYPED, type)) || tag === 'textarea' || el.isContentEditable ? 'type' : tag === 'select' || (htmlName(el) === 'input' && (controlType(el) === 'color' || controlType(el) === 'range')) ? 'select' : 'click';
     return { i, tag, id: el.id || '', kind, text: clip((el.textContent || '').trim().replace(/\s+/g, ' '), 60) };
   });
 }
@@ -1609,7 +1611,7 @@ function click(el, gesture) {
       dispatch(el, new MouseEvent('mouseup', o));
     }
     const ev = new PointerEvent('click', { ...o, detail: gesture ? 1 : 0 });
-    fireEvent(el, ev, gesture);
+    return fireEvent(el, ev, gesture);
   } finally {
     S.gesture = was;
   }
@@ -1737,6 +1739,18 @@ function act(i, value) {
       dispatch(el, new Ev('change', { bubbles: true }));
       c.kind = 'type';
       c.value = clip(v, 100);
+    } else if (tag === 'input' && (type === 'color' || type === 'range')) {
+      c.kind = 'select';
+      if (click(el, true) && connected(el) && !disabled(el) && controlType(el) === type) {
+        const before = controlValue(el), chosen = value == null ? representativeSelectionValue(el, type, before) : nativeString(value);
+        setControlValue(el, chosen);
+        const after = controlValue(el);
+        if (after !== before) {
+          dispatch(el, new Ev('input', { bubbles: true, composed: true }));
+          dispatch(el, new Ev('change', { bubbles: true }));
+        }
+        c.value = clip(after, 100);
+      }
     } else if (tag === 'select') {
       const opts = el.querySelectorAll('option');
       if (opts.length) el.selectedIndex = Number(value ?? 1) % opts.length;
