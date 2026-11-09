@@ -1,3 +1,4 @@
+import { FileReader, installFileReaderTasks } from './file-reader.js';
 import { installFileInputs } from './file-inputs.js';
 import { DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch, installPayloadTasks, serializeFileList } from './event-payloads.js';
 import { UIEvent, MouseEvent, PointerEvent, WheelEvent, KeyboardEvent, FocusEvent, InputEvent, SubmitEvent, ProgressEvent, HashChangeEvent, PopStateEvent, ErrorEvent, PromiseRejectionEvent, ToggleEvent, StorageEvent, TransitionEvent, AnimationEvent, CompositionEvent, ClipboardEvent, TouchEvent, TouchList, DragEvent, isErrorEvent, errorEventData, createNativeUIEvent, registerStorageArea } from './event-interfaces.js';
@@ -478,10 +479,12 @@ function enqueueMessageTask(callback, kind) {
   const id = ++S.seq;
   mapSet(S.timers, id, { id, order: ++S.timerOrder, due: S.now, fn: callback, args: [], repeat: false,
     timeout: 0, nesting: 0, kind });
+  return id;
 }
 function messageListenerCheckpoint() {
   if (messageCheckpoint()) unmodelled('microtask checkpoint budget');
 }
+installFileReaderTasks(callback => enqueueMessageTask(callback, 'FileReader'), id => mapDelete(S.timers, id), messageListenerCheckpoint);
 installPayloadTasks(callback => enqueueMessageTask(callback, 'DataTransferItem'), value => error('DataTransferItem.getAsString', value));
 installMessagePortTasks(callback => enqueueMessageTask(callback, 'MessageChannel'), messageListenerCheckpoint);
 installWindowMessages({ origin: () => S.origin, enqueue: callback => enqueueMessageTask(callback, 'postMessage'), checkpoint: messageListenerCheckpoint });
@@ -866,22 +869,8 @@ G.Worker = class Worker extends Inert { constructor(u) { super('Worker', u); } }
 G.SharedWorker = class SharedWorker extends Inert { constructor(u) { super('SharedWorker', u); } };
 G.BroadcastChannel = class BroadcastChannel extends Inert { constructor() { super('BroadcastChannel'); } };
 
-class FileReader extends L.EventTarget {
-  constructor() { super(); this.result = null; this.readyState = 0; this.onload = null; this.onloadend = null; this.onerror = null; }
-  _read(f) {
-    addTimer(() => {
-      this.result = f();
-      this.readyState = 2;
-      for (const t of ['load', 'loadend']) fireEvent(this, createNativeUIEvent(ProgressEvent, t));
-    }, 0, [], false, 'FileReader', false);
-  }
-  readAsText(b) { requireBlob(b); this._read(() => blobText(b)); }
-  readAsDataURL(b) { requireBlob(b); this._read(() => blobDataURL(b)); }
-  readAsArrayBuffer(b) { requireBlob(b); this._read(() => blobBuffer(b)); }
-  abort() {}
-}
 Object.assign(G, { Blob, File, FileReader });
-for (const [Class, types] of [[XMLHttpRequest, ['readystatechange', 'load', 'error', 'abort', 'loadstart', 'loadend', 'progress', 'timeout']], [FileReader, ['load', 'error', 'abort', 'loadstart', 'loadend', 'progress']]]) {
+for (const [Class, types] of [[XMLHttpRequest, ['readystatechange', 'load', 'error', 'abort', 'loadstart', 'loadend', 'progress', 'timeout']]]) {
   for (const type of types) Object.defineProperty(Class.prototype, 'on' + type, { configurable: true, enumerable: true,
     get() { return getHandler(this, type); }, set(value) { setHandler(this, type, value); },
   });

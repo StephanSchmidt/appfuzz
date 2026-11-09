@@ -1067,6 +1067,24 @@ Blob parts, options and buffer-source validation preserve native conversion
 order, including source mutations during option conversion. Resizable sources
 are rejected. Blob/File methods, cloning and FileReader byte/data-URL reads do
 not use page-defined codecs, typed-view length getters or constructor parents.
+FileReader keeps readonly result, error and loading state in private records.
+Reads reject overlap, schedule trusted loadstart/progress/load/loadend events,
+and cancel owned tasks on abort. Callback and microtask read chaining suppresses
+the previous read's loadend while the new read is loading. Binary-string and
+ArrayBuffer reads preserve bytes; text reads use native Encoding Standard
+label lookup, MIME charset fallback, BOM sniffing and replacement decoding.
+Public Blob methods, reader helpers, state setters and constructor parents do
+not participate in native reads. Constructor prototype lookup remains public
+and uses the FileReader prototype fallback.
+
+Reader edge behavior follows the [File API](https://w3c.github.io/FileAPI/#readOperation)
+for clearing a completed result on abort, cancellable loading progress, and
+chained-read completion. Abort reports AbortError as both native reference
+engines do, with default progress fields. MIME duplicate parameters use the
+MIME Sniffing parser's first value; text recovery follows the
+[Encoding Standard](https://encoding.spec.whatwg.org/#decode). These choices
+are explicit in the Chrome/Firefox reference regressions where engines differ.
+
 Request/Response bodies and the browser host bridge preserve raw bytes, including
 binary Blob/File parts in multipart uploads. Body reads consume private snapshots;
 `text()` and `json()` decode UTF-8 and strip the initial BOM. Array buffers and

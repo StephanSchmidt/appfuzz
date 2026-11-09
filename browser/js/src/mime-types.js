@@ -71,3 +71,6 @@ export function extractMime(value) {
   }
   return result ? serialize(result) : '';
 }
+
+// Private File API charset extraction reuses the MIME Sniffing parser.
+export function mimeCharset(value) { const mime = parse(value); return mime && own(mime.params, 'charset') ? mime.params.charset : null; }

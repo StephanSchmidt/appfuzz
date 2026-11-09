@@ -22,6 +22,7 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     n.set("inputColor", Function::new(ctx.clone(), input_color)?)?;
     n.set("encodeUtf8", Function::new(ctx.clone(), encode_utf8)?)?;
     n.set("decodeUtf8", Function::new(ctx.clone(), decode_utf8)?)?;
+    n.set("decodeFileText", Function::new(ctx.clone(), decode_file_text)?)?;
     n.set("encodeBase64", Function::new(ctx.clone(), encode_base64)?)?;
     // The pinned runtime has native DOMException slots but its Error.isError
     // predicate does not recognize them. Read the engine brand without invoking
@@ -46,6 +47,20 @@ fn decode_utf8(value: ArrayBuffer<'_>, strip_bom: bool) -> String {
     let bytes = unsafe { value.as_bytes() }.unwrap_or_default();
     let bytes = if strip_bom { bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes) } else { bytes };
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+// File API text packaging chooses the explicit label, then the Blob MIME
+// charset, then UTF-8. Encoding Standard BOM sniffing overrides that fallback.
+fn decode_file_text(value: ArrayBuffer<'_>, label: Option<String>, charset: Option<String>) -> String {
+    // SAFETY: the rooted buffer is only borrowed during native decoding; no
+    // JavaScript runs before the result owns its complete string data.
+    let bytes = unsafe { value.as_bytes() }.unwrap_or_default();
+    let encoding = label
+        .as_deref()
+        .and_then(|s| encoding_rs::Encoding::for_label(s.as_bytes()))
+        .or_else(|| charset.as_deref().and_then(|s| encoding_rs::Encoding::for_label(s.as_bytes())))
+        .unwrap_or(encoding_rs::UTF_8);
+    encoding.decode(bytes).0.into_owned()
 }
 
 fn encode_base64(value: ArrayBuffer<'_>) -> String {
@@ -330,6 +345,44 @@ mod tests {
             install(&ctx).unwrap();
             let result: String = ctx.eval(r#"JSON.stringify([Array.from(new Uint8Array(__native.encodeUtf8('é🦀'))),__native.decodeUtf8(new Uint8Array([255,0,128]).buffer,true),__native.decodeUtf8(new Uint8Array([239,187,191,120]).buffer,true),__native.decodeUtf8(new Uint8Array([239,187,191,120]).buffer,false)])"#).unwrap();
             assert_eq!(result, "[[195,169,240,159,166,128],\"�\\u0000�\",\"x\",\"\u{feff}x\"]");
+        });
+    }
+
+    #[test]
+    fn file_text_decoding_respects_labels_mime_fallback_boms_and_invalid_sequences() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            install(&ctx).unwrap();
+            let result: String = ctx
+                .eval(
+                    r#"JSON.stringify([
+                __native.decodeFileText(new Uint8Array([233]).buffer,'latin1',null),
+                __native.decodeFileText(new Uint8Array([233]).buffer,'invalid','windows-1252'),
+                __native.decodeFileText(new Uint8Array([233]).buffer,'utf-8','windows-1252'),
+                __native.decodeFileText(new Uint8Array([233]).buffer,null,null),
+                __native.decodeFileText(new Uint8Array([255,254,65,0]).buffer,'windows-1252',null),
+                __native.decodeFileText(new Uint8Array([254,255,0,65]).buffer,null,null),
+                __native.decodeFileText(new Uint8Array([255,254,0]).buffer,null,null),
+                __native.decodeFileText(new Uint8Array([130,160]).buffer,'shift_jis',null),
+                __native.decodeFileText(new Uint8Array([128,255]).buffer,'x-user-defined',null),
+                __native.decodeFileText(new Uint8Array([65,66]).buffer,'iso-2022-kr',null)
+            ])"#,
+                )
+                .unwrap();
+            assert_eq!(result, "[\"é\",\"é\",\"�\",\"�\",\"A\",\"A\",\"�\",\"あ\",\"\u{f780}\u{f7ff}\",\"�\"]");
+        });
+    }
+
+    #[test]
+    fn file_text_decoding_keeps_native_bytes_private_from_page_codecs_and_setters() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            install(&ctx).unwrap();
+            let calls: i32 = ctx.eval(r#"let calls=0;const buffer=new Uint8Array([233]).buffer;globalThis.TextDecoder=function(){calls++};Object.defineProperty(Array.prototype,'0',{configurable:true,set(){calls++}});globalThis.decoded=__native.decodeFileText(buffer,'windows-1252',null);calls"#).unwrap();
+            assert_eq!(calls, 0);
+            assert_eq!(ctx.eval::<String, _>("decoded").unwrap(), "é");
         });
     }
 
