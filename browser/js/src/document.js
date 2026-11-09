@@ -1,4 +1,6 @@
 import { parsedAttribute } from './attributes.js';
+import { backendChildNodes } from './collection-data.js';
+import { nodeInfo } from './dom-state.js';
 // Build the initial HTML document with the HTML tree-building rules, then
 // copy its nodes into linkedom. No serialization/reparse: raw text,
 // namespaces and inert template contents must keep their parsed meaning.
@@ -34,7 +36,7 @@ export function parseHTML(markup, scriptingEnabled) {
   Object.defineProperty(doc, 'compatMode', { value: mode });
   // The native getter looks only at the first child; a leading comment
   // must not hide the actual doctype.
-  Object.defineProperty(doc, 'doctype', { get: () => [...doc.childNodes].find(n => n.nodeType === 10) || null });
+  Object.defineProperty(doc, 'doctype', { get: () => backendChildNodes(doc).find(n => nodeInfo(n)?.kind === 10) || null });
   return doc;
 }
 

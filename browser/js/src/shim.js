@@ -54,6 +54,7 @@ import { installAdoption } from './adoption.js';
 import { installObservers } from './observers.js';
 import { templateContent, templateOwner, templateInnerHTML, shareTemplateObservers } from './templates.js';
 import { installSelectors } from './selectors.js';
+import { NodeList, HTMLCollection, NamedNodeMap, installCollections } from './collections.js';
 import { scriptRecord, rememberScript, scriptOwner } from './script-state.js';
 import { installScriptMutations, scriptAttribute, scriptText, scriptShadowHost } from './script-mutations.js';
 
@@ -78,10 +79,7 @@ for (const [name, C] of Object.entries(L)) if (/^[A-Z]/.test(name) && typeof C =
 }
 installAttributes();
 const DOMParser = platformConstructor(L.DOMParser, 'DOMParser');
-const NodeList = platformConstructor(L.NodeList, 'NodeList', 0, true);
-// The backend uses array-like list storage; the public interface constructor
-// has the ordinary Web IDL function parent.
-nativeSetPrototype(NodeList, Function.prototype);
+installCollections();
 const nativeLower = Function.prototype.call.bind(String.prototype.toLowerCase);
 const nativeString = String, diagnosticSlice = Function.prototype.call.bind(String.prototype.slice);
 
@@ -1134,7 +1132,7 @@ function installWindow(doc) {
   for (const [k, v] of Object.entries(L)) {
     if (/^[A-Z]/.test(k) && typeof v === 'function') G[k] = v;
   }
-  Object.assign(G, { InputEvent, DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch, DOMParser, NodeList });
+  Object.assign(G, { InputEvent, DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch, DOMParser, NodeList, HTMLCollection, NamedNodeMap });
   installHTMLConstructors(G, L);
   const createInternal = installRegistry(upgradeCopies, BrowserDOMException, (name, e) => error('custom-element:' + name, e));
   G.Document = L.Document;

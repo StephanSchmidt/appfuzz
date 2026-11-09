@@ -4,7 +4,7 @@
 import { markPlatform } from './platform-state.js';
 const NativeArray = Array, construct = Reflect.construct, create = Object.create, define = Object.defineProperty;
 const ownKeys = Reflect.ownKeys, descriptor = Object.getOwnPropertyDescriptor, setPrototype = Object.setPrototypeOf;
-const operations = create(Object.prototype), names = ownKeys(NativeArray.prototype);
+const operations = create(null), names = ownKeys(NativeArray.prototype);
 for (let i = 0; i < names.length; i++) {
   const key = names[i];
   if (key !== 'constructor' && key !== 'length' && key !== 'toString' && key !== 'toLocaleString') define(operations, key, descriptor(NativeArray.prototype, key));

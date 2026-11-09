@@ -17,6 +17,44 @@ const replace = (source, before, after) => {
   if (!source.includes(before)) throw new Error('The pinned DOM event sites changed: ' + before);
   return source.replace(before, after);
 };
+// Public collections implement Web IDL. Backend algorithms use private
+// snapshots instead of calling page-visible collection methods or iterators.
+const collectionData = fileURLToPath(new URL('./src/collection-data.js', import.meta.url));
+const collectionVersion = fileURLToPath(new URL('./src/collection-version.js', import.meta.url));
+const collectionSites = {
+  'interface/custom-element-registry.js': [['const {attributes, isConnected} = element;', 'const attributes = backendAttributes(element), {isConnected} = element;']],
+  'mixin/non-element-parent-node.js': [['this.childNodes', 'backendChildNodes(this)'], ['const {childNodes, localName} = this;', 'const childNodes = backendChildNodes(this), {localName} = this;']],
+  'mixin/parent-node.js': [['this.children.length', 'backendChildren(this).length']],
+  'mixin/inner-html.js': [['node.childNodes', 'backendChildNodes(node)'], ['const {childNodes} = parseFromString(document, ignoreCase(node), html);', 'const childNodes = backendChildNodes(parseFromString(document, ignoreCase(node), html));']],
+  'dom/string-map.js': [['ref.attributes', 'backendAttributes(ref)']],
+  'interface/document.js': [['const {childNodes} = this;', 'const childNodes = backendChildNodes(this);'], ['this.childNodes', 'backendChildNodes(this)']],
+  'interface/mutation-observer.js': [['target.children.includes(element)', 'backendChildren(target).includes(element)'], ["target[characterData ? 'childNodes' : 'children'].includes(element)", '(characterData ? backendChildNodes(target) : backendChildren(target)).includes(element)']],
+  'interface/node.js': [['const {childNodes} = this.parentNode;', 'const childNodes = backendChildNodes(this.parentNode);'], ['this.childNodes', 'backendChildNodes(this)'], ['node.childNodes', 'backendChildNodes(node)']],
+  'interface/element.js': [['template.childNodes', 'backendChildNodes(template)']],
+  'interface/range.js': [['node.childNodes', 'backendChildNodes(node)'], ['content.childNodes', 'backendChildNodes(content)']],
+  'html/select-element.js': [['firstElementChild.children', 'backendChildren(firstElementChild)']],
+  'html/slot-element.js': [['this.getRootNode().host?.childNodes ?? []', 'backendChildNodes(this.getRootNode().host)'], ['this.childNodes', 'backendChildNodes(this)'], ['this.children', 'backendChildren(this)']],
+  'shared/matches.js': [['const getChildren = ({childNodes}) => childNodes;', 'const getChildren = backendChildNodes;']],
+  'html/template-element.js': [['this.childNodes', 'backendChildNodes(this)']],
+  'html/document.js': [["head.getElementsByTagName('title').at(0)", "head.getElementsByTagName('title')[0]"]],
+};
+async function readDOM(path) {
+  let source = await readFile(path, 'utf8');
+  const key = path.split('/linkedom/esm/')[1], sites = collectionSites[key];
+  if (sites) {
+    for (const [before, after] of sites) {
+      if (!source.includes(before)) throw new Error('The pinned DOM collection sites changed: ' + key + ': ' + before);
+      source = source.replaceAll(before, after);
+    }
+    source = `import {backendChildNodes,backendChildren,backendAttributes} from ${JSON.stringify(collectionData)};\n${source}`;
+  }
+  if (key === 'shared/utils.js') {
+    source = replace(source, 'export const knownAdjacent = (prev, next) => {', 'export const knownAdjacent = (prev, next) => { collectionLinksChanged();');
+    source = replace(source, 'export const setAdjacent = (prev, next) => {', 'export const setAdjacent = (prev, next) => { collectionLinksChanged();');
+    source = `import {collectionLinksChanged} from ${JSON.stringify(collectionVersion)};\n${source}`;
+  }
+  return source;
+}
 const hooks = fileURLToPath(new URL('./src/ce-hooks.js', import.meta.url));
 await build({
   entryPoints: ['src/shim.js'], bundle: true, inject: ['src/weak-map.js'],
@@ -25,7 +63,7 @@ await build({
   outfile: 'dist/shim.js',
   plugins: [{ name: 'dom-internals', setup(plugin) {
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\](dom[/\\](parser|token-list)|interface[/\\](range|tree-walker|node-list|mutation-observer))\.js$/ }, async ({ path }) => {
-      let source = await readFile(path, 'utf8');
+      let source = await readDOM(path);
       if (path.endsWith('/dom/parser.js')) source = `import {initializeParser} from ${JSON.stringify(parserState)};\n` + replace(source, 'export class DOMParser {', 'export class DOMParser { constructor() { markPlatform(this); initializeParser(this); }');
       else if (path.endsWith('/interface/node-list.js')) {
         source = replace(source, 'export class NodeList extends Array {', 'export class NodeList { constructor(...values) { initializeNodeList(this, values); }');
@@ -47,7 +85,7 @@ await build({
       return { contents: `import {markPlatform} from ${JSON.stringify(platformState)};\n${source}`, loader: 'js' };
     });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\](interface[/\\](attr|element|document)|shared[/\\](attributes|parse-from-string|parse-json)|mixin[/\\]inner-html)\.js$/ }, async ({ path }) => {
-      let source = await readFile(path, 'utf8');
+      let source = await readDOM(path);
       if (path.endsWith('/interface/attr.js')) {
         source = replace(source, '    this.ownerElement = null;', '');
         source = replace(source, '    this.name = String(name);', '    initializeAttribute(this, String(name));');
@@ -62,37 +100,38 @@ await build({
       return { contents: `import {initializeAttribute,installAttributeSlots,setAttributeOwner,setNodeDocument,attributeInfo} from ${JSON.stringify(attributeState)};\n${source}`, loader: 'js' };
     });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]document-type\.js$/ }, async ({ path }) => {
-      let source = await readFile(path, 'utf8');
+      let source = await readDOM(path);
       source = replace(source, '    this.name = name;\n    this.publicId = publicId;\n    this.systemId = systemId;', '    initializeDoctype(this, name, publicId, systemId);');
       return { contents: `import {initializeDoctype,installDoctypeSlots} from ${JSON.stringify(doctypeState)};\n${source}\ninstallDoctypeSlots(DocumentType.prototype);`, loader: 'js' };
     });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]event\.js$/ }, async ({ path }) => {
-      const source = await readFile(path, 'utf8');
+      const source = await readDOM(path);
       if (!source.includes('class GlobalEvent')) throw new Error('The pinned DOM Event changed');
       return { contents: `export {Event} from ${JSON.stringify(eventState)};`, loader: 'js' };
     });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]custom-event\.js$/ }, async ({ path }) => {
-      const source = await readFile(path, 'utf8');
+      const source = await readDOM(path);
       if (!source.includes('class CustomEvent extends Event')) throw new Error('The pinned DOM CustomEvent changed');
       return { contents: `export {CustomEvent} from ${JSON.stringify(eventState)};`, loader: 'js' };
     });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]event-target\.js$/ }, async ({ path }) => {
-      const source = await readFile(path, 'utf8');
+      const source = await readDOM(path);
       if (!source.includes('class DOMEventTarget')) throw new Error('The pinned DOM EventTarget changed');
       return { contents: `export {EventTarget} from ${JSON.stringify(eventTarget)};`, loader: 'js' };
     });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]node\.js$/ }, async ({ path }) => {
-      let source = replace(await readFile(path, 'utf8'), '    this.ownerDocument = ownerDocument;\n    this.localName = localName;\n    this.nodeType = nodeType;\n    this.parentNode = null;', '    if (nodeType === 2) initializeAttributeNode(this, ownerDocument, localName); else { this.ownerDocument = ownerDocument; this.localName = localName; this.nodeType = nodeType; this.parentNode = null; } initializeNode(this, nodeType, localName);');
+      let source = replace(await readDOM(path), '    this.ownerDocument = ownerDocument;\n    this.localName = localName;\n    this.nodeType = nodeType;\n    this.parentNode = null;', '    if (nodeType === 2) initializeAttributeNode(this, ownerDocument, localName); else { this.ownerDocument = ownerDocument; this.localName = localName; this.nodeType = nodeType; this.parentNode = null; } initializeNode(this, nodeType, localName);');
       source = `import {initializeAttributeNode} from ${JSON.stringify(attributeState)};\n${source}`;
       return { contents: `import {initializeNode} from ${JSON.stringify(domState)};\n` + source, loader: 'js' };
     });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]custom-element-registry\.js$/ }, async ({ path }) => {
-      const source = await readFile(path, 'utf8');
+      const source = await readDOM(path);
       const start = source.indexOf('export const attributeChangedCallback =');
       const end = source.indexOf('/**\n * @implements globalThis.CustomElementRegistry', start);
       if (start < 0 || end < 0) throw new Error('The pinned DOM reaction sites changed');
       const ports = `export const attributeChangedCallback = attributeReaction;\nexport const connectedCallback = element => connectionReaction(element, true);\nexport const disconnectedCallback = element => connectionReaction(element, false);\n\n`;
       return { contents: `import {attributeReaction, connectionReaction} from ${JSON.stringify(hooks)};\n` + source.slice(0, start) + ports + source.slice(end), loader: 'js' };
     });
+    plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\].*\.js$/ }, async ({ path }) => ({ contents: await readDOM(path), loader: 'js' }));
   } }],
 });

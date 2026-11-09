@@ -57,7 +57,7 @@ export function cloneAttribute(attr, owner) { const data = requireAttribute(attr
 function required(n, count) { if (n < count) throw new NativeTypeError('Not enough arguments'); }
 function byName(element, value, count) { requireElement(element); required(count, 1); return runDOMCallback(() => nameFor(element, value)); }
 function byNS(element, namespace, local, count) { requireElement(element); required(count, 2); return runDOMCallback(() => ({ __proto__: null, namespace: normalizedNS(namespace == null ? null : eventString(namespace)), local: eventString(local) })); }
-const methods = {
+export const attributeMethods = {
   getAttribute(name) { name = byName(this, name, arguments.length); return find(this, null, name, true)?.[VALUE] ?? null; },
   getAttributeNode(name) { name = byName(this, name, arguments.length); return find(this, null, name, true); },
   hasAttribute(name) { name = byName(this, name, arguments.length); return find(this, null, name, true) !== null; },
@@ -98,7 +98,7 @@ function setNode(element, attr, count) {
 export function installAttributes() {
   const roots = { get documentElement() { return physicalDocumentElement(this); } };
   define(Document.prototype, 'documentElement', descriptor(roots, 'documentElement'));
-  for (const key of ownKeys(methods)) define(Element.prototype, key, { ...descriptor(methods, key), enumerable: true });
+  for (const key of ownKeys(attributeMethods)) define(Element.prototype, key, { ...descriptor(attributeMethods, key), enumerable: true });
   define(Attr.prototype, 'cloneNode', { __proto__: null, value: function cloneNode() { requireAttribute(this); return cloneAttribute(this, requireAttribute(this).document); }, writable: true, enumerable: true, configurable: true });
   const fields = { get value() { requireAttribute(this); return this[VALUE]; }, set value(value) { requireAttribute(this); value = runDOMCallback(() => eventString(value)); write(this, value); } };
   define(Attr.prototype, 'value', { ...descriptor(fields, 'value'), enumerable: true });

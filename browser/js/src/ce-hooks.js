@@ -1,3 +1,4 @@
+import { collectionAttributesChanged } from './collection-version.js';
 // Linkedom calls these ports at the actual mutation, preserving argument
 // values (including a repeated assignment of the same attribute value).
 let attribute = () => {}, connection = () => {};
@@ -6,6 +7,7 @@ let eventAttribute = () => {}, controlAttribute = () => {}, controlConnection = 
 export function installControlHooks(onAttribute, onConnection) { controlAttribute = onAttribute; controlConnection = onConnection; }
 export function installEventAttributeHook(callback) { eventAttribute = callback; }
 export function attributeReaction(element, name, oldValue, value, namespace = null) {
+  collectionAttributesChanged();
   if (namespace === null) { eventAttribute(element, name, value); controlAttribute(element, name, value, oldValue); }
   attribute(element, name, oldValue, value, namespace);
 }
