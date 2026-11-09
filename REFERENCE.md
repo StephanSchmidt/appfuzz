@@ -1094,8 +1094,24 @@ Document/ShadowRoot active-element queries use physical state and retargeting.
 Controller mouse actions preserve pressed-button state, pointer pressure and
 compatibility-event cancellation. Canceling pointerdown suppresses compatibility
 mouse events; canceling mousedown suppresses focus. The model still has no CSS
-layout. DataTransfer, StaticRange and Touch object producers are not implemented;
-those APIs and their nonempty payloads remain outside the modeled surface.
+layout. Synthetic DataTransfer stores support text, files, live readonly item
+and file lists, asynchronous string callbacks and event payloads. StaticRange
+retains its boundary points; Touch retains typed immutable coordinates and its
+target. File inputs accept synthetic FileLists; values, reset, cloning and form
+submission read their private selection. No operating-system clipboard or file
+picker is connected. FileList serialization snapshots files without reading
+public properties and shares the surrounding clone operation's memory map.
+
+Where current browser implementations differ, the payload model follows HTML
+for SameObject item lists, ASCII MIME normalization, replacement order and
+disabled removed items; Web IDL for readonly indexed properties; the current
+DOM NodeRange hierarchy; File API for serialization; and Touch Events for
+coordinate doubles and draft angle/type members. Native browser references
+and these explicit standard choices are covered by payload regression tests.
+The source contracts are [HTML drag data](https://html.spec.whatwg.org/multipage/dnd.html),
+[File API serialization](https://w3c.github.io/FileAPI/#filelist-section),
+[DOM ranges](https://dom.spec.whatwg.org/#interface-staticrange), and
+[Touch Events](https://w3c.github.io/touch-events/#touch-interface).
 
 The pinned QuickJS runtime includes a local fix for JSON serialization's internal
 cycle stack and replacer property list. These private lists cannot invoke page
@@ -1105,7 +1121,7 @@ patch and update instructions are in
 [browser/vendor/rquickjs-sys/PATCHES.md](browser/vendor/rquickjs-sys/PATCHES.md).
 
 `structuredClone` preserves cycles, shared references, sparse arrays, native
-numeric/date/regexp/collection data, errors, DOMExceptions, blobs and files.
+numeric/date/regexp/collection data, errors, DOMExceptions, blobs, files and FileLists.
 ArrayBuffer transfers happen after successful serialization, including transfers
 of buffers absent from the returned graph. Ordinary buffer copies snapshot their
 bytes when visited; transfers include later getter mutations. Fixed buffer views

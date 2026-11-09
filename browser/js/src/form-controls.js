@@ -1,3 +1,4 @@
+import { selectedInputFiles } from './file-inputs.js';
 // Submission reads user-agent state, independently of author property shadows.
 import { END, NEXT, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
 import { htmlName, controlType, treeElements, formOwner, disabled, checked } from './controls.js';
@@ -113,7 +114,7 @@ export function populateForm(form, submitter, add, emptyFile) {
     if (!name) continue;
     if (tag === 'select') selectEntries(field, name, add);
     else if (tag === 'input' && (type === 'checkbox' || type === 'radio')) add(name, eventAttribute(field, 'value') ?? 'on');
-    else if (tag === 'input' && type === 'file') add(name, emptyFile());
+    else if (tag === 'input' && type === 'file') { const files = selectedInputFiles(field); if (!files.length) add(name, emptyFile()); else for (let j = 0; j < files.length; j++) add(name, files[j]); }
     else if (tag === 'input' && type === 'hidden' && lower(name) === '_charset_') add(name, 'UTF-8');
     else add(name, controlValue(field));
     const dirname = eventAttribute(field, 'dirname');

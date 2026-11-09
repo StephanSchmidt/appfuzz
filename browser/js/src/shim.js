@@ -1,3 +1,5 @@
+import { installFileInputs } from './file-inputs.js';
+import { DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch, installPayloadTasks, serializeFileList } from './event-payloads.js';
 import { UIEvent, MouseEvent, PointerEvent, WheelEvent, KeyboardEvent, FocusEvent, InputEvent, SubmitEvent, ProgressEvent, HashChangeEvent, PopStateEvent, ErrorEvent, PromiseRejectionEvent, ToggleEvent, StorageEvent, TransitionEvent, AnimationEvent, CompositionEvent, ClipboardEvent, TouchEvent, TouchList, DragEvent, isErrorEvent, errorEventData, createNativeUIEvent, registerStorageArea } from './event-interfaces.js';
 import { extractMime } from './mime-types.js';
 import { Blob, File, blobRecord, requireBlob, blobText, blobBuffer, blobDataURL, fileFromBlob, emptyFile, cloneBlob, installBlobPlatform, byteCount, bufferOfBytes, textBytes, decodeBytes, blobBytes, blobFromBytes, copyBodyBytes, copyBytesBuffer, bufferSourceKind, bufferSourceBytes, wireBytes, joinBytes } from './blobs.js';
@@ -359,6 +361,7 @@ Object.assign(G, {
   UIEvent, MouseEvent, PointerEvent, WheelEvent, KeyboardEvent, FocusEvent, InputEvent, SubmitEvent, MessageEvent, ProgressEvent,
   HashChangeEvent, PopStateEvent, ErrorEvent, PromiseRejectionEvent, StorageEvent, TransitionEvent, AnimationEvent,
   CompositionEvent, ClipboardEvent, TouchEvent, TouchList, DragEvent, ToggleEvent,
+  DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch,
 });
 
 // Listeners: a throwing listener is reported, not passed on, and `this` is
@@ -479,6 +482,7 @@ function enqueueMessageTask(callback, kind) {
 function messageListenerCheckpoint() {
   if (messageCheckpoint()) unmodelled('microtask checkpoint budget');
 }
+installPayloadTasks(callback => enqueueMessageTask(callback, 'DataTransferItem'), value => error('DataTransferItem.getAsString', value));
 installMessagePortTasks(callback => enqueueMessageTask(callback, 'MessageChannel'), messageListenerCheckpoint);
 installWindowMessages({ origin: () => S.origin, enqueue: callback => enqueueMessageTask(callback, 'postMessage'), checkpoint: messageListenerCheckpoint });
 
@@ -1168,7 +1172,7 @@ function installWindow(doc) {
   for (const [k, v] of Object.entries(L)) {
     if (/^[A-Z]/.test(k) && typeof v === 'function') G[k] = v;
   }
-  G.InputEvent = InputEvent;
+  Object.assign(G, { InputEvent, DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch });
   installHTMLConstructors(G, L);
   const createInternal = installRegistry(upgradeCopies, BrowserDOMException, (name, e) => error('custom-element:' + name, e));
   G.Document = L.Document;
@@ -1277,7 +1281,8 @@ function installWindow(doc) {
     get: () => S.cookies.header(urlPart(S.url, 'href'), false),
     set: (v) => setCookie(v),
   });
-  define(L.Document.prototype, 'activeElement', { enumerable: true, configurable: true, get() { return activeElementFor(this); } });
+  const activeElementGetter = { get activeElement() { return activeElementFor(this); } };
+  define(L.Document.prototype, 'activeElement', Object.getOwnPropertyDescriptor(activeElementGetter, 'activeElement'));
   for (const k of ['URL', 'documentURI', 'baseURI']) define(doc, k, { get: () => urlPart(S.url, 'href') });
   define(doc, 'domain', { get: () => urlPart(S.url, 'hostname'), set() {} });
   define(doc, 'referrer', { value: '' });
@@ -1469,7 +1474,7 @@ function installWindow(doc) {
   define(I, 'checked', { get() { return checked(this); }, set(value) { setChecked(this, value); } });
   define(I, 'indeterminate', { get() { return indeterminate(this); }, set(value) { setIndeterminate(this, value); } });
   define(I, 'defaultChecked', { get() { return this.hasAttribute('checked'); }, set(v) { this.toggleAttribute('checked', !!v); } });
-  define(I, 'files', { get: () => [] });
+  installFileInputs(I);
   installNumericProperties(L, BrowserDOMException);
   I.select = I.setSelectionRange = I.setCustomValidity = I.reportValidity = function () { return true; };
   I.checkValidity = function () { return true; };
@@ -2032,6 +2037,8 @@ G.__af = {
 installClonePlatform(value => {
   const data = blobRecord(value);
   if (data) return { value: cloneBlob(value) };
+  const fileList = serializeFileList(value);
+  if (fileList) return fileList;
   if (nodeInfo(value) || formRecord(value) || requestData(value) || responseData(value)) return { reject: true };
   return null;
 }, unmodelled);

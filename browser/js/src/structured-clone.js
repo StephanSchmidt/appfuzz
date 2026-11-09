@@ -115,13 +115,14 @@ export function serializeMessage(value, transfers) {
     if (mapHas(memory, input)) return mapGet(memory, input);
     if (platformObject(input)) fail();
     const exception = serializedDOMException(input);
-    const kind = exception ? 'DOMException' : kindOf(input), record = { __proto__: null, kind: 'ready', value: null, children: null };
+    const special = platform(input);
+    if (special?.reject) fail();
+    const kind = special ? 'Platform' : exception ? 'DOMException' : kindOf(input), record = { __proto__: null, kind: 'ready', value: null, children: null };
     let entries = null, properties = false;
     switch (kind) {
+      case 'Platform':
+        record.value = special.value; if (special.children) { record.kind = 'platform'; entries = special.children; record.receive = special.receive; } break;
       case 'Object': case 'Array': {
-        const special = platform(input);
-        if (special?.reject || platformObject(input)) fail();
-        if (special) { record.value = special.value; break; }
         record.kind = 'properties'; record.value = kind === 'Array' ? new NativeArray(descriptor(input, 'length').value) : create(NativeObject.prototype);
         entries = keys(input); properties = true; break;
       }
@@ -227,6 +228,7 @@ export function serializeMessage(value, transfers) {
         case 'map': for (let j = 0; j < children.length; j += 2) mapSet(record.value, children[j].value, children[j + 1].value); break;
         case 'set': for (let j = 0; j < children.length; j++) setAdd(record.value, children[j].value); break;
         case 'error': property(record.value, 'cause', children[0].value, false); break;
+        case 'platform': record.receive(children); break;
       }
     }
     delivered = true; result = { value: root.value, ports }; return result;

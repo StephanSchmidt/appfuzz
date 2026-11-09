@@ -6,6 +6,7 @@ import { nullableTarget, nullableWindow } from './event-target.js';
 import { nodeInfo, retarget } from './dom-state.js';
 import { nameIdentity } from './names.js';
 import { markPlatform } from './platform-state.js';
+import { indexedObject } from './indexed-list.js';
 import { runDOMCallback } from './dom-callbacks.js';
 const NativeTypeError = TypeError, create = Object.create, define = Object.defineProperty, descriptor = Object.getOwnPropertyDescriptor;
 const setPrototype = Object.setPrototypeOf, ownKeys = Reflect.ownKeys, apply = Reflect.apply;
@@ -21,9 +22,8 @@ export function registerStorageArea(value) { saveStorage(value); return value; }
 const transfers = new WeakSet(), ranges = new WeakSet(), touches = new WeakSet();
 const hasTransfer = transfers.has.bind(transfers), hasRange = ranges.has.bind(ranges), hasTouch = touches.has.bind(touches);
 const addTransfer = transfers.add.bind(transfers), addRange = ranges.add.bind(ranges), addTouch = touches.add.bind(touches);
-// These producer hooks remain internal to the bundle. The current realm has
-// no DataTransfer, StaticRange or Touch producers; its null/empty payloads are
-// valid, while object lookalikes fail interface conversion.
+// Producer hooks stay private to the bundle; public prototype lookalikes
+// never acquire an interface brand.
 export function registerEventPayload(type, value) { if (type === 'transfer') addTransfer(value); else if (type === 'range') addRange(value); else if (type === 'touch') addTouch(value); else throw new NativeTypeError('Unknown event payload'); markPlatform(value); return value; }
 
 function list() { const result = []; setPrototype(result, null); return result; }
@@ -235,7 +235,7 @@ define(touchPrototype, 'item', { value: nativeMethod('item', descriptor(touchPro
 define(touchPrototype, iteratorSymbol, { value: nativeMethod('values', descriptor(touchPrototype, iteratorSymbol).value), configurable: true, writable: true });
 for (const key of ['touches','targetTouches','changedTouches']) {
   const cache = new WeakMap(), readList = cache.get.bind(cache), saveList = cache.set.bind(cache);
-  attribute(typeFor(TouchEvent), key, (event, values) => { let list = readList(event); if (!list) { list = create(touchPrototype); markPlatform(list); saveTouchList(list, values[key]); for (let i = 0; i < values[key].length; i++) define(list, i, { __proto__: null, value: values[key][i], enumerable: true }); saveList(event, list); } return list; });
+  attribute(typeFor(TouchEvent), key, (event, values) => { let list = readList(event); if (!list) { list = indexedObject(touchPrototype, () => values[key]); markPlatform(list); saveTouchList(list, values[key]); saveList(event, list); } return list; });
 }
 
 export const DragEvent = interfaceType('DragEvent', MouseEvent, { dataTransfer: 'transfer' });

@@ -1,3 +1,4 @@
+import { clearInputFiles, copyInputFiles, fileInputValue } from './file-inputs.js';
 // Current values and dirty flags are native control state. Default values
 // remain attributes/child text, so serializing a page does not expose edits.
 import { colorSpaceName } from './color-values.js';
@@ -72,7 +73,7 @@ export function controlValue(node) {
   const s = state(node);
   if (s.name === 'textarea') return normalizeLines(s.dirty ? s.raw : childText(node));
   const current = mode(s.type);
-  if (current === 'filename') return '';
+  if (current === 'filename') return fileInputValue(node);
   if (current === 'default' || current === 'default/on') return eventAttribute(node, 'value') ?? (current === 'default/on' ? 'on' : '');
   return s.raw;
 }
@@ -83,7 +84,7 @@ export function setControlValue(node, raw) {
   const current = mode(s.type);
   if (current === 'filename') {
     if (value !== '') throw new DOMError('A file value can only be cleared', 'InvalidStateError');
-    s.raw = ''; s.dirty = true;
+    clearInputFiles(node); s.raw = ''; s.dirty = true;
   } else if (current === 'default' || current === 'default/on') setControlAttribute(node, 'value', value);
   else { s.raw = sanitize(node, s.type, value); s.dirty = true; }
 }
@@ -103,6 +104,7 @@ function changedAttribute(node, name, value, oldValue) {
     s = s || state(node, inputTypeName(oldValue));
     const oldMode = mode(s.type), next = controlType(node), nextMode = mode(next), previous = controlValue(node);
     s.type = next;
+    if (next !== inputTypeName(oldValue) && (next === 'file' || inputTypeName(oldValue) === 'file')) clearInputFiles(node, true);
     if (oldMode === 'value' && (nextMode === 'default' || nextMode === 'default/on') && previous !== '') setControlAttribute(node, 'value', previous);
     else if (oldMode !== 'value' && nextMode === 'value') { s.raw = sanitize(node, next, defaultValue(node, 'input')); s.dirty = false; }
     else if (nextMode === 'filename') s.raw = '';
@@ -120,9 +122,11 @@ export function initializeParsedValue(node) {
 export function copyControlValue(source, copy) {
   const name = htmlName(source);
   if (name !== 'input' && name !== 'textarea') return;
+  if (name === 'input' && controlType(source) === 'file') copyInputFiles(source, copy);
   const s = state(source); save(copy, { name: s.name, type: s.type, raw: s.raw, dirty: s.dirty });
 }
 export function resetControlValue(node) {
+  if (htmlName(node) === 'input') clearInputFiles(node);
   const s = state(node); s.dirty = false; s.raw = sanitize(node, s.type, defaultValue(node, s.name));
 }
 export function installValueProperties(L, ErrorClass) {

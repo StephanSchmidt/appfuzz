@@ -19,7 +19,8 @@ export function installShadowConstraints(Element, DOMError, readActive = () => n
     if (mode === undefined) throw new NativeTypeError('Illegal shadow root receiver');
     return mode;
   } });
-  Object.defineProperty(ShadowRoot.prototype, 'activeElement', { configurable: true, enumerable: true, get() { if (!shadowInfo(this)) throw new NativeTypeError('Illegal shadow root receiver'); return readActive(this); } });
+  const activeElementGetter = { get activeElement() { if (!shadowInfo(this)) throw new NativeTypeError('Illegal shadow root receiver'); return readActive(this); } };
+  Object.defineProperty(ShadowRoot.prototype, 'activeElement', Object.getOwnPropertyDescriptor(activeElementGetter, 'activeElement'));
   Element.prototype.attachShadow = function (options) {
     if (!isElement(this)) throw new NativeTypeError('Illegal element receiver');
     if (options == null || (typeof options !== 'object' && typeof options !== 'function')) throw new NativeTypeError('Shadow options require a mode');
