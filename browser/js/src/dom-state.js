@@ -105,3 +105,13 @@ export function physicalBody(document) {
   }
   return null;
 }
+
+export function physicalHead(document) {
+  const html = firstElement(document), identity = html && nameIdentity(html);
+  if (identity?.namespace !== 'http://www.w3.org/1999/xhtml' || identity.local !== 'html') return null;
+  for (let value = html[NEXT]; value && value !== html[END]; value = value[END] ? value[END][NEXT] : value[NEXT]) {
+    const name = nameIdentity(value);
+    if (name?.namespace === 'http://www.w3.org/1999/xhtml' && name.local === 'head') return value;
+  }
+  return null;
+}

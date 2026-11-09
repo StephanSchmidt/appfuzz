@@ -4,6 +4,7 @@
 //! What the page sends out (requests, navigations, markup and code it
 //! builds) goes to the host as calls of the `appfuzz:browser` world.
 
+mod csp;
 mod css_components;
 pub mod driver;
 mod input_color;

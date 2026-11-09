@@ -1,4 +1,4 @@
-import { baseAttributeChanged } from './document-urls.js';
+import { baseAttributeChanged, documentConnectionChanged } from './document-urls.js';
 import { collectionAttributesChanged } from './collection-version.js';
 // Linkedom calls these ports at the actual mutation, preserving argument
 // values (including a repeated assignment of the same attribute value).
@@ -17,4 +17,4 @@ export function attributeReaction(element, name, oldValue, value, namespace = nu
   scriptAttribute(element,name,namespace);
   attribute(element, name, oldValue, value, namespace);
 }
-export function connectionReaction(root, connected) { controlConnection(root, connected); selectConnection(root, connected); connection(root, connected); }
+export function connectionReaction(root, connected) { documentConnectionChanged(root, connected); controlConnection(root, connected); selectConnection(root, connected); connection(root, connected); }

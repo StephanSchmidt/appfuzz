@@ -1,3 +1,5 @@
+import { initializeDocumentCSP } from './document-csp.js';
+import { rememberDocumentURL } from './document-state.js';
 import { parsedAttribute } from './attributes.js';
 import { backendChildNodes } from './collection-data.js';
 import { nodeInfo } from './dom-state.js';
@@ -26,10 +28,11 @@ const doctype = Document.prototype.createDocumentType;
 const fragment = Document.prototype.createDocumentFragment;
 const insert = Object.getPrototypeOf(Element.prototype).insertBefore;
 
-export function parseHTML(markup, scriptingEnabled) {
+export function parseHTML(markup, scriptingEnabled, active = null) {
   const tree = parse(String(markup), { scriptingEnabled });
   const doc = nativeParse.call(new DOMParser(), '', 'text/html');
   rememberDocumentScripting(doc, scriptingEnabled);
+  if (active) { rememberDocumentURL(doc, active.url); initializeDocumentCSP(doc,active.policies); }
   appendTree(doc, doc, tree.childNodes, !scriptingEnabled);
   const mode = tree.mode === 'quirks' ? 'BackCompat' : 'CSS1Compat';
   rememberDocumentMode(doc, mode);

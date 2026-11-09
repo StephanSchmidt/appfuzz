@@ -152,11 +152,14 @@ impl Browser {
         // Keep response attributes intact for the browser's cookie jar.
         // The readable probe cookie gets an unused name so real credentials
         // named af_session are preserved.
+        let mut csp: Vec<&str> =
+            resp.headers.iter().filter(|(name, _)| name.eq_ignore_ascii_case("content-security-policy")).map(|(_, value)| value.as_str()).collect();
+        csp.extend(m.entry.as_ref().and_then(|entry| entry.csp.as_deref()));
         let input = json!({
             "url": url, "html": resp.body.unwrap_or_default(),
             "request_cookies": request_cookies, "set_cookies": set_cookies,
             "probe_cookie": {"name": COOKIE, "value": secret_cookie(page.spec.seed)},
-            "page_run": page.id, "now": start_ms.floor(),
+            "page_run": page.id, "now": start_ms.floor(), "csp": csp,
         });
         let export = self.app.default_export()?.clone();
         let mut spec = self.app.spec(&export, vec![Value::String(input.to_string())], Plan::default(), page.spec.seed);

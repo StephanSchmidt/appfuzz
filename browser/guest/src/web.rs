@@ -12,6 +12,10 @@ use url::{Url, form_urlencoded, quirks};
 pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     let n = Object::new(ctx.clone())?;
     n.set("url", Function::new(ctx.clone(), url_parse_js)?)?;
+    n.set(
+        "cspAllowsBase",
+        Function::new(ctx.clone(), |policy: String, candidate: String, document: String| crate::csp::allows_base(&policy, &candidate, &document))?,
+    )?;
     n.set("urlSet", Function::new(ctx.clone(), url_set_js)?)?;
     n.set("formParse", Function::new(ctx.clone(), form_parse_js)?)?;
     n.set("formSerialize", Function::new(ctx.clone(), form_serialize)?)?;

@@ -1,0 +1,47 @@
+const groups={},tests=[];let lines=[];const test=(name,run)=>tests.push({name,run});const log=(...args)=>lines.push(args.join(' '));async function runTests(){for(const {name,run}of tests){if(CASE&&name!==CASE)continue;lines=[];try{await run()}catch(e){log('ERROR',e.name,e.message)}groups[name]=lines.slice()}return groups}const attempt=fn=>{try{const v=fn();return v===undefined?'ok':v}catch(e){return e.name}};
+
+
+const meta=(policy="base-uri 'none'",parent=document.head)=>{const m=document.createElement('meta');m.setAttribute('http-equiv','Content-Security-Policy');m.setAttribute('content',policy);if(parent)parent.append(m);return m};
+const base=(href='/nested/',parent=document.head)=>{const b=document.createElement('base');b.href=href;if(parent)parent.append(b);return b};
+const path=()=>new URL(document.baseURI).pathname;
+const probe=(policy,href)=>{const b=base(href,null);meta(policy);document.head.append(b);log(path());b.remove()};
+test('meta-none',()=>{meta();base();log(path(),new URL(new Request('child').url).pathname)});
+test('meta-removal-persists',()=>{meta().remove();base();log(path())});
+test('meta-content-change-ignored',()=>{const m=meta("base-uri *");m.setAttribute('content',"base-uri 'none'");base();log(path())});
+test('meta-late-content-ignored',()=>{const m=meta('',document.head);m.setAttribute('content',"base-uri 'none'");base();log(path())});
+test('meta-late-equiv-ignored',()=>{const m=document.createElement('meta');m.setAttribute('content',"base-uri 'none'");document.head.append(m);m.setAttribute('http-equiv','Content-Security-Policy');base();log(path())});
+test('meta-reinsertion-processes',()=>{const m=meta("base-uri *");m.remove();m.setAttribute('content',"base-uri 'none'");document.head.append(m);base();log(path())});
+test('meta-body-ignored',()=>{meta(undefined,document.body);base();log(path())});
+test('meta-nested-head-ignored',()=>{const d=document.createElement('div');document.head.append(d);meta(undefined,d);base();log(path())});
+test('meta-detached-head-ignored',()=>{const h=document.createElement('head');meta(undefined,h);base();log(path())});
+test('meta-detached-head-connects',()=>{const h=document.createElement('head');meta(undefined,h);document.documentElement.append(h);base();log(path())});
+test('meta-equiv-whitespace-ignored',()=>{const m=meta(undefined,null);m.setAttribute('http-equiv',' Content-Security-Policy ');document.head.append(m);base();log(path())});
+test('base-before-policy-retains-unread',()=>{const b=base();meta();log(path());b.href='/changed/';log(path())});
+test('base-before-policy-retains-read',()=>{const b=base();log(path());meta();log(path());b.href='/changed/';log(path())});
+test('base-before-policy-reinsert',()=>{const b=base();meta();b.remove();document.head.append(b);log(path())});
+test('fragment-base-before-meta',()=>{const f=document.createDocumentFragment();f.append(base('/nested/',null),meta(undefined,null));document.head.append(f);log(path())});
+test('fragment-meta-before-base',()=>{const f=document.createDocumentFragment();f.append(meta(undefined,null),base('/nested/',null));document.head.append(f);log(path())});
+test('meta-intersection',()=>{meta("base-uri 'none'");meta('base-uri *');base();log(path())});
+test('default-src-no-base-fallback',()=>{meta("default-src 'none'; connect-src 'self' https://sink.example");base();log(path())});
+test('duplicate-directive-first-wins',()=>{meta("base-uri *; base-uri 'none'");base();log(path())});
+test('comma-separated-policy-intersection',()=>{meta("base-uri *, base-uri 'none'");base();log(path())});
+test('meta-self-allow',()=>{meta("base-uri 'self'");base();log(path())});
+test('meta-self-block',()=>{meta("base-uri 'self'");base('https://other.example/nested/');log(path())});
+test('meta-path-match',()=>{probe('base-uri https://other.example/Allowed/','https://other.example/Allowed/child')});
+test('meta-path-case-sensitive',()=>{probe('base-uri https://other.example/Allowed/','https://other.example/allowed/child')});
+test('meta-path-encoded-match',()=>{probe('base-uri https://other.example/Al%6cowed/','https://other.example/Allowed/child')});
+test('meta-wildcard-host-allow',()=>{probe('base-uri https://*.other.example','https://sub.other.example/nested/')});
+test('meta-wildcard-host-block-root',()=>{probe('base-uri https://*.other.example','https://other.example/nested/')});
+test('meta-scheme-upgrade',()=>{probe('base-uri http://other.example','https://other.example/nested/')});
+test('meta-empty-blocks',()=>{meta('base-uri');base();log(path())});
+test('meta-none-with-other-source',()=>{meta("base-uri 'none' 'self'");base();log(path())});
+test('header-none',()=>{base();log(path())});
+test('header-report-only-ignored',()=>{base();log(path())});
+test('parser-meta-before-base',()=>{log(path())});
+test('parser-base-before-meta',()=>{log(path());document.querySelector('base').href='/changed/';log(path())});
+test('parser-template-inert',()=>{base();log(path())});
+
+test('meta-private-attributes',()=>{const m=meta(undefined,null);m.getAttribute=()=>null;Object.defineProperty(m,'ownerDocument',{value:null});document.head.append(m);base();log(path())});
+test('meta-private-head',()=>{const h=document.head,m=meta(undefined,null);Object.defineProperty(document,'head',{value:null});h.append(m);base('/nested/',h);log(path())});
+test('meta-frozen-wrapper',()=>{const m=meta(undefined,null);Object.freeze(m);document.head.append(m);m.remove();base();log(path())});
+test('meta-inert-document-isolation',()=>{const doc=new DOMParser().parseFromString('<head><meta http-equiv="Content-Security-Policy" content="base-uri \'none\'"></head>','text/html');const b=doc.createElement('base');b.href='https://owned.example/other/';doc.head.append(b);base();log(new URL(doc.baseURI).pathname,path())});

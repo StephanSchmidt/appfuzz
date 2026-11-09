@@ -1890,7 +1890,7 @@ G.__af = {
       for (let i = 1; S.cookies.has(name); i++) name = base + '_' + i;
       S.cookies.seed(name, s.probe_cookie.value, urlPart(S.url, 'href'));
     }
-    const doc = parseHTML(s.html || '', true);
+    const doc = parseHTML(s.html || '', true, { __proto__: null, url: () => urlPart(S.url,'href'), policies: s.csp || [] });
     S.document = doc;
     installWindow(doc);
     return pageScripts();
