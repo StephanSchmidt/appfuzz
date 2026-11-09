@@ -67,7 +67,7 @@ import { installSelectorPlatform } from './selector-engine.js';
 import { NodeList, HTMLCollection, NamedNodeMap, installCollections } from './collections.js';
 import { scriptRecord, rememberScript, scriptOwner } from './script-state.js';
 import { installMultiNode } from './multi-node.js';
-import { installScriptMutations, scriptAttribute, scriptText, scriptShadowHost } from './script-mutations.js';
+import { installScriptMutations, withScriptMutationBatch, scriptAttribute, scriptText, scriptShadowHost } from './script-mutations.js';
 import { backendList } from './collection-data.js';
 import { beginHTML } from './html-parser.js';
 import { createBareElement } from './creation.js';
@@ -95,7 +95,7 @@ for (const [name, C] of Object.entries(L)) if (/^[A-Z]/.test(name) && typeof C =
 installAttributes();
 installDOMMutations(L);
 installCharacterData(L);
-installDOMImplementation(L);
+installDOMImplementation(L,withScriptMutationBatch);
 installElementURLs(L);
 const DOMParser = platformConstructor(L.DOMParser, 'DOMParser');
 installCollections();

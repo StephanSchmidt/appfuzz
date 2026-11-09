@@ -7,9 +7,9 @@ import { SVGDocument } from '../node_modules/linkedom/esm/svg/document.js';
 import { XMLDocument as NativeXMLDocument } from '../node_modules/linkedom/esm/xml/document.js';
 import { DocumentType } from '../node_modules/linkedom/esm/interface/document-type.js';
 import { createBareElement } from './creation.js';
-import { createNativeText, insertNativeNode, replaceAllText } from './dom-mutations.js';
+import { createNativeText, insertNativeNode, replaceAllText, preInsert, replaceTreeChild } from './dom-mutations.js';
 import { backendChildNodes, collectionDescendants } from './collection-data.js';
-import { nodeInfo, nodeDocument, physicalDocumentElement, physicalHead, physicalBody } from './dom-state.js';
+import { nodeInfo, nodeDocument, physicalParent, physicalDocumentElement, physicalHead, physicalBody } from './dom-state.js';
 import { qualifiedName, nameIdentity } from './names.js';
 import { rememberDocumentMode, rememberDocumentScripting, rememberDocumentURL, installDocumentFactory } from './document-state.js';
 import { adoptNativeNode } from './adoption.js';
@@ -55,6 +55,22 @@ function setTitle(doc,value) {
   else return;
   replaceAllText(node,value);
 }
+// The body setter accepts nullable HTMLElement values; wrong interface values
+// fail Web IDL conversion, while null and non-body HTML elements fail the
+// setter's hierarchy rule. Identity comes from allocation slots, not expandos.
+function bodyValue(value) {
+  if (value != null && (nodeInfo(value)?.kind !== 1 || nameIdentity(value)?.namespace !== HTML)) throw new NativeTypeError('An HTMLElement is required');
+  return value;
+}
+function setBody(document,value) {
+  if (!matches(value,HTML,'body') && !matches(value,HTML,'frameset')) throw new DOMException('A body or frameset element is required','HierarchyRequestError');
+  const previous = physicalBody(document);
+  if (value === previous) return;
+  if (previous) { replaceTreeChild(physicalParent(previous),value,previous); return; }
+  const root = physicalDocumentElement(document);
+  if (!root) throw new DOMException('The document has no document element','HierarchyRequestError');
+  preInsert(value,root);
+}
 function validDoctype(name) { for (let i = 0; i < name.length; i++) { const c = name[i]; if (c === '\0' || c === ' ' || c === '\t' || c === '\n' || c === '\f' || c === '\r' || c === '>') return false; } return true; }
 export let DOMImplementation = class DOMImplementation {
   constructor() { throw new NativeTypeError('Illegal constructor'); }
@@ -91,10 +107,14 @@ XMLConstructor.prototype = NativeXMLDocument.prototype;
 export const XMLDocument = platformConstructor(XMLConstructor,'XMLDocument',0,true);
 define(XMLDocument.prototype,Symbol.toStringTag,{ __proto__: null, value: 'XMLDocument', configurable: true });
 for (const key of ['createDocumentType','createDocument','createHTMLDocument','hasFeature']) define(DOMImplementation.prototype,key,{ ...Object.getOwnPropertyDescriptor(DOMImplementation.prototype,key), enumerable: true });
-export function installDOMImplementation(L) {
+export function installDOMImplementation(L,batchScripts) {
   const html = Object.prototype.isPrototypeOf.bind(HTMLDocument.prototype), svg = Object.prototype.isPrototypeOf.bind(SVGDocument.prototype);
   installDocumentFactory(doc => html(doc) ? new HTMLDocument() : svg(doc) ? new SVGDocument() : new NativeXMLDocument());
-  const tree = { get head() { requireDocument(this); return physicalHead(this); }, get body() { requireDocument(this); return physicalBody(this); } };
+  const tree = {
+    get head() { requireDocument(this); return physicalHead(this); },
+    get body() { requireDocument(this); return physicalBody(this); },
+    set body(value) { requireDocument(this); value = bodyValue(value); withReactions(() => batchScripts(() => setBody(this,value))); },
+  };
   for (const key of ['head','body']) { delete HTMLDocument.prototype[key]; define(L.Document.prototype,key,{ ...Object.getOwnPropertyDescriptor(tree,key), enumerable: true }); }
   const base = { get baseURI() { const kind = nodeInfo(this)?.kind; if (kind === undefined) throw new NativeTypeError('A Node is required'); return documentBaseURL(kind === 9 ? this : nodeDocument(this)); } };
   define(L.Node.prototype,'baseURI',Object.getOwnPropertyDescriptor(base,'baseURI'));
