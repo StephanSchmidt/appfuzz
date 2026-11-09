@@ -1,7 +1,7 @@
 // Shared tree primitives observe physical identity and links. They never call
 // a child's public remove/parentNode/nodeType properties during a native edit.
 import { END, NEXT, PREV } from '../node_modules/linkedom/esm/shared/symbols.js';
-import { setAdjacent, knownSiblings } from '../node_modules/linkedom/esm/shared/utils.js';
+import { setAdjacent, knownSiblings, knownBoundaries } from '../node_modules/linkedom/esm/shared/utils.js';
 import { nodeInfo, nodeDocument, physicalParent, physicalPreviousSibling, physicalNextSibling } from './dom-state.js';
 import { backendList, backendChildNodes } from './collection-data.js';
 import { retainRemovedSubtree, childMutation } from './mutation-observers.js';
@@ -26,6 +26,13 @@ export function insertNativeText(parent, text, before = null, notify = true) {
   const next = before || parent[END], previous = before ? physicalPreviousSibling(before) : backendChildNodes(parent).at(-1) || null;
   knownSiblings(next[PREV], text, next);
   if (notify) { childMutation(parent, [text], backendList(), previous, before); childrenChanged(parent); }
+}
+export function insertNativeNode(parent,node,before = null) {
+  const next = before || parent[END], previous = before ? physicalPreviousSibling(before) : backendChildNodes(parent).at(-1) || null;
+  knownBoundaries(next[PREV],node,next);
+  childMutation(parent,[node],backendList(),previous,before);
+  if (nodeInfo(node)?.kind === 1) connectionReaction(node,true);
+  childrenChanged(parent);
 }
 export function replaceAllText(parent, value) {
   const removed = backendChildNodes(parent), added = backendList(); if (value !== '') added[0] = newText(nodeDocument(parent), value);

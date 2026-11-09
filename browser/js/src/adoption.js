@@ -1,4 +1,8 @@
-import { nodeInfo } from './dom-state.js';
+import { backendList } from './collection-data.js';
+import { nodeInfo, nodeDocument, physicalParent, shadowInfo } from './dom-state.js';
+import { attributeInfo } from './attribute-state.js';
+import { attributeMethods } from './attributes.js';
+import { removeNativeNode } from './dom-mutations.js';
 import { setNodeDocument } from './attribute-state.js';
 // Linkedom moves node ranges without adopting them. Use its private ranges
 // and shadow-root/element records so attributes and closed trees move too.
@@ -21,20 +25,21 @@ const detach = (node) => unlink(node[PREV], node, getEnd(node)[NEXT]);
 
 const shadowRoot = shadowRoots.get.bind(shadowRoots);
 const customElement = customElements.get.bind(customElements);
+const apply = Reflect.apply, removeAttribute = attributeMethods.removeAttributeNode;
+let nativeAdopter;
+export function adoptNativeNode(document,node) { return nativeAdopter(document,node); }
 
 function treeNodes(root, document) {
-  const nodes = [];
-  const pending = [[root, (root[END] || root)[NEXT], document]];
+  const nodes = backendList(), pending = backendList(); pending[0] = { __proto__: null, node: root, stop: (root[END] || root)[NEXT], document };
   while (pending.length) {
-    let [node, stop, document] = pending.pop();
+    const job = pending.pop(); let node = job.node; const stop = job.stop, document = job.document;
     while (node !== stop) {
-      nodes.push({ node, document });
-      const content = templateContent(node);
-      const shadow = shadowRoot(node)?.shadowRoot;
+      nodes[nodes.length] = { __proto__: null, node, document };
+      const content = templateContent(node), shadow = shadowRoot(node)?.shadowRoot;
       if (content || shadow) {
-        pending.push([node[NEXT], stop, document]);
-        if (content) pending.push([content, content[END][NEXT], templateOwner(document)]);
-        if (shadow) pending.push([shadow, shadow[END][NEXT], document]);
+        pending[pending.length] = { __proto__: null, node: node[NEXT], stop, document };
+        if (content) pending[pending.length] = { __proto__: null, node: content, stop: content[END][NEXT], document: templateOwner(document) };
+        if (shadow) pending[pending.length] = { __proto__: null, node: shadow, stop: shadow[END][NEXT], document };
         break;
       }
       node = node[NEXT];
@@ -61,6 +66,21 @@ export function installAdoption(Element, shareObservers, onError, DOMError) {
     if (!definition) return;
     enqueueReaction(node, () => withReactions(() => upgradeInserted(node, isConnected, enqueue, onError, true, definition, DOMError)));
   };
+  nativeAdopter = (document,node) => withReactions(() => {
+    if (nodeInfo(node)?.kind === 9) throw new DOMError('Documents cannot be adopted','NotSupportedError');
+    if (shadowInfo(node)) throw new DOMError('Shadow roots cannot be adopted','HierarchyRequestError');
+    const nodes = treeNodes(node,document), oldDocuments = backendList();
+    for (let i = 0; i < nodes.length; i++) oldDocuments[i] = nodeDocument(nodes[i].node);
+    const attr = attributeInfo(node);
+    if (attr?.owner) apply(removeAttribute,attr.owner,[node]);
+    else if (physicalParent(node)) removeNativeNode(node);
+    for (let i = 0; i < nodes.length; i++) {
+      const item = nodes[i]; setNodeDocument(item.node,item.document);
+      const info = customElement(item.node);
+      if (info && oldDocuments[i] !== item.document) { info.owner = item.document; enqueue(item.node,'adoptedCallback',[oldDocuments[i],item.document]); }
+    }
+    return node;
+  });
   setReactionErrorHandler(onError);
   const includes = Function.prototype.call.bind(Array.prototype.includes);
   installCEHooks((node, name, oldValue, value, namespace) => {

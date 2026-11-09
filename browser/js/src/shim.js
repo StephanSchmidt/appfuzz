@@ -1,3 +1,5 @@
+import { rememberDocumentURL } from './document-state.js';
+import { documentBaseURL } from './document-urls.js';
 import { installCharacterData } from './character-data.js';
 import { installDOMMutations } from './dom-mutations.js';
 import { MutationRecord, installMutationObserverReporter } from './mutation-observers.js';
@@ -55,6 +57,7 @@ import { installReactionBoundaries, withReactions } from './ce-reactions.js';
 import { runDOMCallback } from './dom-callbacks.js';
 import { installSerialization } from './serialization.js';
 import { installAdoption } from './adoption.js';
+import { DOMImplementation, XMLDocument, installDOMImplementation } from './dom-implementation.js';
 import { installObservers } from './observers.js';
 import { templateContent, templateOwner, templateInnerHTML, shareTemplateObservers } from './templates.js';
 import { installSelectors } from './selectors.js';
@@ -87,6 +90,7 @@ for (const [name, C] of Object.entries(L)) if (/^[A-Z]/.test(name) && typeof C =
 installAttributes();
 installDOMMutations(L);
 installCharacterData(L);
+installDOMImplementation(L);
 const DOMParser = platformConstructor(L.DOMParser, 'DOMParser');
 installCollections();
 const nativeLower = Function.prototype.call.bind(String.prototype.toLowerCase);
@@ -1147,6 +1151,8 @@ function installWindow(doc) {
   Object.assign(G, { InputEvent, DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch, DOMParser, NodeList, HTMLCollection, NamedNodeMap });
   installHTMLConstructors(G, L);
   const createInternal = installRegistry(upgradeCopies, BrowserDOMException, (name, e) => error('custom-element:' + name, e));
+  G.DOMImplementation = DOMImplementation; G.XMLDocument = XMLDocument;
+  nativeSetPrototype(XMLDocument,L.Document);
   G.Document = L.Document;
   G.HTMLDocument = L.Document;
   for (const k of ['addEventListener', 'removeEventListener', 'dispatchEvent']) G[k] = view[k];
@@ -1255,7 +1261,9 @@ function installWindow(doc) {
   });
   const activeElementGetter = { get activeElement() { return activeElementFor(this); } };
   define(L.Document.prototype, 'activeElement', Object.getOwnPropertyDescriptor(activeElementGetter, 'activeElement'));
-  for (const k of ['URL', 'documentURI', 'baseURI']) define(doc, k, { get: () => urlPart(S.url, 'href') });
+  rememberDocumentURL(doc,() => urlPart(S.url,'href'));
+  for (const k of ['URL', 'documentURI']) define(doc, k, { get: () => urlPart(S.url, 'href') });
+  define(doc,'baseURI',{ get: () => documentBaseURL(doc) });
   define(doc, 'domain', { get: () => urlPart(S.url, 'hostname'), set() {} });
   define(doc, 'referrer', { value: '' });
   define(doc, 'visibilityState', { value: 'visible' });

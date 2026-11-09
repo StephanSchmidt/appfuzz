@@ -50,6 +50,7 @@ async function readDOM(path) {
     }
     source = `import {backendChildNodes,backendChildren,backendAttributes} from ${JSON.stringify(collectionData)};\n${source}`;
   }
+  if (key === 'mixin/inner-html.js') { source = replace(source,'  const {constructor} = ownerDocument;\n  const document = new constructor;', '  const document = createDocumentLike(ownerDocument);'); source = `import {createDocumentLike} from ${JSON.stringify(fileURLToPath(new URL('./src/document-state.js',import.meta.url)))};\n${source}`; }
   const parentWrites = ['node.parentNode = this;', 'firstChild.parentNode = this;', 'node.parentNode = self;', 'node.parentNode = parentNode;', 'element.parentNode = parentNode;', 'child.parentNode = fragment;', 'if (!attributeInfo(next)) next.parentNode = parentNode;'];
   for (const assignment of parentWrites) source = source.replaceAll(assignment, '');
   if (key === 'mixin/child-node.js') {

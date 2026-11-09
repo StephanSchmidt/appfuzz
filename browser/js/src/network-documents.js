@@ -1,3 +1,4 @@
+import { rememberDocumentURL } from './document-state.js';
 import { parsedAttribute } from './attributes.js';
 // Network documents have no browsing context and execute no scripts. XML is
 // validated and namespace-resolved in Rust before these DOM nodes are made.
@@ -36,7 +37,8 @@ export function parseNetworkDocument(markup, mime, url, encoding = 'UTF-8') {
       nodes[i] = node; apply(insert, nodes[data[1]], [node]);
     }
   }
-  const urlKeys = ['URL','documentURI','baseURI']; for (let i = 0; i < urlKeys.length; i++) define(doc, urlKeys[i], { __proto__: null, value: url, configurable: true });
+  rememberDocumentURL(doc,url);
+  const urlKeys = ['URL','documentURI']; for (let i = 0; i < urlKeys.length; i++) define(doc, urlKeys[i], { __proto__: null, value: url, configurable: true });
   const encodingKeys = ['characterSet','charset','inputEncoding']; for (let i = 0; i < encodingKeys.length; i++) define(doc, encodingKeys[i], { __proto__: null, value: encoding, configurable: true });
   define(doc, 'contentType', { __proto__: null, value: mime, configurable: true });
   define(doc, 'defaultView', { __proto__: null, value: null, configurable: true });
