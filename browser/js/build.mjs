@@ -1,4 +1,5 @@
 import { build } from 'esbuild';
+import { privateSelectors } from './private-selectors.mjs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -34,7 +35,6 @@ const collectionSites = {
   'interface/range.js': [['node.childNodes', 'backendChildNodes(node)'], ['content.childNodes', 'backendChildNodes(content)']],
   'html/select-element.js': [['firstElementChild.children', 'backendChildren(firstElementChild)']],
   'html/slot-element.js': [['this.getRootNode().host?.childNodes ?? []', 'backendChildNodes(this.getRootNode().host)'], ['this.childNodes', 'backendChildNodes(this)'], ['this.children', 'backendChildren(this)']],
-  'shared/matches.js': [['const getChildren = ({childNodes}) => childNodes;', 'const getChildren = backendChildNodes;']],
   'html/template-element.js': [['this.childNodes', 'backendChildNodes(this)']],
   'html/document.js': [["head.getElementsByTagName('title').at(0)", "head.getElementsByTagName('title')[0]"]],
 };
@@ -55,6 +55,7 @@ async function readDOM(path) {
   }
   return source;
 }
+const selectorEngine = fileURLToPath(new URL('./src/selector-engine.js', import.meta.url));
 const hooks = fileURLToPath(new URL('./src/ce-hooks.js', import.meta.url));
 await build({
   entryPoints: ['src/shim.js'], bundle: true, inject: ['src/weak-map.js'],
@@ -62,6 +63,12 @@ await build({
   alias: { htmlparser2: './src/alias/htmlparser2.js', 'cssomnom/parse': './src/alias/cssom.js' },
   outfile: 'dist/shim.js',
   plugins: [{ name: 'dom-internals', setup(plugin) {
+    plugin.onLoad({ filter: /[/\\]node_modules[/\\](css-select|css-what|nth-check|boolbase)[/\\].*\.js$/ }, async ({ path }) => ({ contents: privateSelectors(await readFile(path, 'utf8')), loader: 'js' }));
+    plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]shared[/\\]matches\.js$/ }, async ({ path }) => {
+      const source = await readFile(path, 'utf8');
+      if (!source.includes('export const prepareMatch')) throw new Error('The pinned DOM selector entry changed');
+      return { contents: `export {prepareMatch,matches} from ${JSON.stringify(selectorEngine)};`, loader: 'js' };
+    });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\](dom[/\\](parser|token-list)|interface[/\\](range|tree-walker|node-list|mutation-observer))\.js$/ }, async ({ path }) => {
       let source = await readDOM(path);
       if (path.endsWith('/dom/parser.js')) source = `import {initializeParser} from ${JSON.stringify(parserState)};\n` + replace(source, 'export class DOMParser {', 'export class DOMParser { constructor() { markPlatform(this); initializeParser(this); }');

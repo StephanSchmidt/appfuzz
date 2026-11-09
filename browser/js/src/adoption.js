@@ -1,3 +1,4 @@
+import { nodeInfo } from './dom-state.js';
 import { setNodeDocument } from './attribute-state.js';
 // Linkedom moves node ranges without adopting them. Use its private ranges
 // and shadow-root/element records so attributes and closed trees move too.
@@ -46,7 +47,9 @@ export function installAdoption(Element, shareObservers, onError, DOMError) {
   const parent = Object.getPrototypeOf(Element.prototype);
   const insert = parent.insertBefore;
   const connected = Object.getOwnPropertyDescriptor(Element.prototype, 'isConnected').get;
-  const isConnected = Function.prototype.call.bind(connected);
+  const connectedNode = Function.prototype.call.bind(connected);
+  // Physical ranges include end markers, which are not DOM Nodes.
+  const isConnected = node => !!nodeInfo(node) && connectedNode(node);
   const callbackKeys = { connectedCallback: 'connected', disconnectedCallback: 'disconnected', adoptedCallback: 'adopted', attributeChangedCallback: 'attribute' };
   const enqueue = (node, name, args = [], selected) => {
     const definition = elementDefinition(node);

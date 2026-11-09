@@ -54,10 +54,13 @@ import { installAdoption } from './adoption.js';
 import { installObservers } from './observers.js';
 import { templateContent, templateOwner, templateInnerHTML, shareTemplateObservers } from './templates.js';
 import { installSelectors } from './selectors.js';
+import { installTreeAccessors } from './tree-accessors.js';
+import { installSelectorPlatform } from './selector-engine.js';
 import { NodeList, HTMLCollection, NamedNodeMap, installCollections } from './collections.js';
 import { scriptRecord, rememberScript, scriptOwner } from './script-state.js';
 import { installScriptMutations, scriptAttribute, scriptText, scriptShadowHost } from './script-mutations.js';
 
+installTreeAccessors();
 const G = globalThis;
 const HTML_NS = 'http://www.w3.org/1999/xhtml';
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -122,6 +125,7 @@ const setEach = Function.prototype.call.bind(Set.prototype.forEach), setHas = Fu
 let handledRejections = [];
 const unmodelled = (name) => nativeSetAdd(S.unmodelled, name);
 installColorReporter(unmodelled);
+installSelectorPlatform({ unsupported: unmodelled, active: root => S.active ? activeElementFor(root) : null });
 installBlobPlatform({ now: () => S.now });
 
 // The host: appfuzz's browser guest binds a private bridge to the

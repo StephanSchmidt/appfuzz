@@ -121,11 +121,14 @@ export function installCollections() {
     get attributes() { if (nodeInfo(this)?.kind !== 1) throw new NativeTypeError('An Element is required'); const data = ownerRecord(this); return data.attributes || (data.attributes = collection('NamedNodeMap', this, () => backendAttributes(this))); },
   };
   define(BackendNode.prototype, 'childNodes', describe(fields, 'childNodes')); define(ParentNode.prototype, 'childNodes', describe(fields, 'childNodes')); define(ParentNode.prototype, 'children', describe(fields, 'children')); define(Element.prototype, 'attributes', describe(fields, 'attributes'));
-  const methods = {
-    getElementsByTagName(name) { requireNode(this, true); required(arguments.length, 1); name = runDOMCallback(() => eventString(name)); return query(this, 'tag', name); },
-    getElementsByTagNameNS(namespace, local) { requireNode(this, true); required(arguments.length, 2); const args = runDOMCallback(() => ({ __proto__: null, namespace: namespace == null ? null : eventString(namespace), local: eventString(local) })); return query(this, 'namespace', args.namespace === '' ? null : args.namespace, args.local); },
-    getElementsByClassName(name) { requireNode(this, true); required(arguments.length, 1); name = runDOMCallback(() => eventString(name)); return query(this, 'class', name); },
-  };
-  for (const key of ownKeys(methods)) { const d = describe(methods, key); d.enumerable = true; define(Element.prototype, key, d); define(Document.prototype, key, d); }
+  for (const [prototype, kind] of [[Element.prototype, 1], [Document.prototype, 9]]) {
+    const check = node => { if (nodeInfo(node)?.kind !== kind) throw new NativeTypeError('An appropriate DOM receiver is required'); };
+    const methods = {
+      getElementsByTagName(name) { check(this); required(arguments.length, 1); name = runDOMCallback(() => eventString(name)); return query(this, 'tag', name); },
+      getElementsByTagNameNS(namespace, local) { check(this); required(arguments.length, 2); const args = runDOMCallback(() => ({ __proto__: null, namespace: namespace == null ? null : eventString(namespace), local: eventString(local) })); return query(this, 'namespace', args.namespace === '' ? null : args.namespace, args.local); },
+      getElementsByClassName(name) { check(this); required(arguments.length, 1); name = runDOMCallback(() => eventString(name)); return query(this, 'class', name); },
+    };
+    for (const key of ownKeys(methods)) { const d = describe(methods, key); d.enumerable = true; define(prototype, key, d); }
+  }
   define(BackendNodeList.prototype, 'constructor', { __proto__: null, value: NodeList, configurable: true, writable: true }); freeze(BackendNodeList.prototype);
 }
