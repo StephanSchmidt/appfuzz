@@ -29,7 +29,7 @@ function required(count, min) { if (count < min) throw new NativeTypeError('Not 
 function uint(value) { const n = +value; return finite(n) && n ? ((trunc(n) % 4294967296) + 4294967296) % 4294967296 : 0; }
 function index(key) { if (typeof key !== 'string') return -1; const n = number(key); return integer(n) && n >= 0 && n < 4294967295 && text(n) === key ? n : -1; }
 // Mutation generations make repeated indexed reads constant time between changes.
-function values(record) { const version = collectionVersion(record.sensitive); if (record.data === null || record.live && record.version !== version) { record.data = record.collect(); record.version = version; } return record.data; }
+function values(record) { const version = record.generation ? record.generation() : collectionVersion(record.sensitive); if (record.data === null || record.live && record.version !== version) { record.data = record.collect(); record.version = version; } return record.data; }
 function publicItem(receiver, kind, index, count) { const record = requireCollection(receiver, kind); required(count, 1); index = runDOMCallback(() => uint(index)); return values(record)[index] ?? null; }
 export let NodeList = class NodeList { constructor() { throw new NativeTypeError('Illegal constructor'); } get length() { return values(requireCollection(this, 'NodeList')).length; } item(index) { return publicItem(this, 'NodeList', index, arguments.length); } };
 export let HTMLCollection = class HTMLCollection { constructor() { throw new NativeTypeError('Illegal constructor'); } get length() { return values(requireCollection(this, 'HTMLCollection')).length; } item(index) { return publicItem(this, 'HTMLCollection', index, arguments.length); } namedItem(name) { const record = requireCollection(this, 'HTMLCollection'); required(arguments.length, 1); name = runDOMCallback(() => eventString(name)); return named(record, name); } };
@@ -72,9 +72,9 @@ function named(record, name) {
 }
 function supported(record, key, data) { if (typeof key !== 'string' || record.kind === 'NodeList') return false; const list = names(record, data); for (let i = 0; i < list.length; i++) if (list[i] === key) return true; return false; }
 function visible(target, key) { if (describe(target, key)) return false; for (let p = prototype(target); p !== null; p = prototype(p)) if (describe(p, key)) return false; return true; }
-function collection(kind, owner, collect, sensitive = false, live = true) {
+function collection(kind, owner, collect, sensitive = false, live = true, generation = null) {
   const p = kind === 'NodeList' ? nodePrototype : kind === 'HTMLCollection' ? elementPrototype : attributePrototype, target = create(p);
-  const record = { __proto__: null, kind, owner, collect, sensitive, live, data: null, version: -1 };
+  const record = { __proto__: null, kind, owner, collect, sensitive, live, generation, data: null, version: -1 };
   // Web IDL legacy platform objects expose read-only virtual entries while
   // retaining ordinary expandos. Their indexed/named writes cannot replace nodes.
   const proxy = new NativeProxy(target, { __proto__: null,
@@ -90,6 +90,7 @@ function collection(kind, owner, collect, sensitive = false, live = true) {
   save(proxy, record); markPlatform(proxy); return proxy;
 }
 function ownerRecord(owner) { let data = ownerFor(owner); if (!data) saveOwner(owner, data = { __proto__: null, nodes: null, children: null, attributes: null, queries: new NativeMap() }); return data; }
+export function liveHTMLCollection(owner, collect, generation) { return collection('HTMLCollection', owner, collect, true, true, generation); }
 export function staticNodeList(input) { const data = backendList(); for (let i = 0; i < input.length; i++) data[i] = input[i]; return collection('NodeList', null, () => data, false, false); }
 function tokens(value) { const result = backendList(); let token = ''; for (let i = 0; i <= value.length; i++) { const c = value[i]; if (i === value.length || c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f') { if (token) result[result.length] = token; token = ''; } else token += c; } return result; }
 function query(root, kind, first, second = undefined) {

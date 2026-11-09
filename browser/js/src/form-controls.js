@@ -1,3 +1,4 @@
+import { optionList, optionSelected, optionDisabled, optionValue } from './select-state.js';
 import { selectedInputFiles } from './file-inputs.js';
 // Submission reads user-agent state, independently of author property shadows.
 import { END, NEXT, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
@@ -5,31 +6,9 @@ import { htmlName, controlType, treeElements, formOwner, disabled, checked } fro
 import { controlValue as currentValue } from './control-values.js';
 import { nodeInfo, physicalParent, physicalRoot, shadowInfo, eventAttribute } from './dom-state.js';
 const lower = Function.prototype.call.bind(String.prototype.toLowerCase);
-const bidiDirection = globalThis.__native.bidiDirection, setPrototype = Object.setPrototypeOf;
+const bidiDirection = globalThis.__native.bidiDirection;
 const autoTypes = new Set(['hidden', 'text', 'search', 'tel', 'url', 'email', 'password', 'submit', 'reset', 'button']);
 const autoType = autoTypes.has.bind(autoTypes);
-// Existing DOM selectedness and submission share the same private state.
-const selection = new WeakMap();
-const hasSelection = selection.has.bind(selection), readSelection = selection.get.bind(selection), writeSelection = selection.set.bind(selection), clearSelection = selection.delete.bind(selection);
-const NativeTypeError = TypeError;
-export function optionSelected(option) {
-  if (htmlName(option) !== 'option') throw new NativeTypeError('An HTMLOptionElement is required');
-  return hasSelection(option) ? readSelection(option) : eventAttribute(option, 'selected') !== null;
-}
-export function setOptionSelected(option, value) {
-  if (htmlName(option) !== 'option') throw new NativeTypeError('An HTMLOptionElement is required');
-  writeSelection(option, !!value);
-}
-
-export function resetSelect(select) {
-  const nodes = treeElements(select);
-  for (let i = 1; i < nodes.length; i++) if (htmlName(nodes[i]) === 'option') {
-    let parent = physicalParent(nodes[i]);
-    while (parent && htmlName(parent) !== 'select') parent = physicalParent(parent);
-    if (parent === select) clearSelection(nodes[i]);
-  }
-}
-
 function text(node, directional = false) {
   let result = '';
   for (let child = node[NEXT]; child && child !== node[END]; child = child[NEXT]) {
@@ -37,15 +16,6 @@ function text(node, directional = false) {
     if (directional && name && (name === 'bdi' || name === 'script' || name === 'style' || name === 'textarea' || eventAttribute(child, 'dir') !== null)) { child = child[END]; continue; }
     const kind = nodeInfo(child)?.kind;
     if (kind === 3 || kind === 4) result += child[VALUE];
-  }
-  return result;
-}
-function collapseSpaces(value) {
-  let result = '', space = false;
-  for (let i = 0; i < value.length; i++) {
-    const c = value[i];
-    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f') space = !!result;
-    else { result += (space ? ' ' : '') + c; space = false; }
   }
   return result;
 }
@@ -65,40 +35,9 @@ export function isSubmitButton(node) {
   const name = htmlName(node), type = controlType(node);
   return name === 'button' ? type !== 'button' && type !== 'reset' : name === 'input' && (type === 'submit' || type === 'image');
 }
-function optionDisabled(option) {
-  if (eventAttribute(option, 'disabled') !== null) return true;
-  const parent = physicalParent(option);
-  return htmlName(parent) === 'optgroup' && eventAttribute(parent, 'disabled') !== null;
-}
-// HTML nonnegative integer attributes accept a leading sign and digit
-// prefix; they do not use JavaScript's hexadecimal or fractional syntax.
-function displaySize(select) {
-  const raw = eventAttribute(select, 'size') || ''; let i = 0, value = 0, digits = false;
-  while (raw[i] === ' ' || raw[i] === '\t' || raw[i] === '\n' || raw[i] === '\r' || raw[i] === '\f') i++;
-  if (raw[i] === '+') i++;
-  for (; i < raw.length && raw[i] >= '0' && raw[i] <= '9'; i++) {
-    digits = true; value = value * 10 + (raw[i] - '0');
-    if (value > 2147483647) return 0;
-  }
-  return digits ? value : 0;
-}
 function selectEntries(select, name, add) {
-  const nodes = treeElements(select), options = []; setPrototype(options, null);
-  for (let i = 1; i < nodes.length; i++) if (htmlName(nodes[i]) === 'option') {
-    let parent = physicalParent(nodes[i]);
-    while (parent && htmlName(parent) !== 'select') parent = physicalParent(parent);
-    if (parent === select) options[options.length] = nodes[i];
-  }
-  const multiple = eventAttribute(select, 'multiple') !== null; let selected = -1, explicit = false;
-  if (!multiple) {
-    for (let i = 0; i < options.length; i++) { if (optionSelected(options[i])) selected = i; if (hasSelection(options[i])) explicit = true; }
-    const size = displaySize(select);
-    if (selected < 0 && !explicit && !(size > 1)) for (let i = 0; i < options.length; i++) if (!optionDisabled(options[i])) { selected = i; break; }
-  }
-  for (let i = 0; i < options.length; i++) {
-    const option = options[i];
-    if ((multiple ? optionSelected(option) : i === selected) && !optionDisabled(option)) add(name, eventAttribute(option, 'value') ?? collapseSpaces(text(option)));
-  }
+  const options = optionList(select);
+  for (let i = 0; i < options.length; i++) if (optionSelected(options[i]) && !optionDisabled(options[i])) add(name, optionValue(options[i]));
 }
 export function populateForm(form, submitter, add, emptyFile) {
   const nodes = treeElements(physicalRoot(form));

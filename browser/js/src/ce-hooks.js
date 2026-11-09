@@ -5,10 +5,12 @@ let attribute = () => {}, connection = () => {};
 export function installCEHooks(onAttribute, onConnection) { attribute = onAttribute; connection = onConnection; }
 let eventAttribute = () => {}, controlAttribute = () => {}, controlConnection = () => {};
 export function installControlHooks(onAttribute, onConnection) { controlAttribute = onAttribute; controlConnection = onConnection; }
+let selectAttribute = () => {}, selectConnection = () => {};
+export function installSelectHooks(onAttribute, onConnection) { selectAttribute = onAttribute; selectConnection = onConnection; }
 export function installEventAttributeHook(callback) { eventAttribute = callback; }
 export function attributeReaction(element, name, oldValue, value, namespace = null) {
   collectionAttributesChanged();
-  if (namespace === null) { eventAttribute(element, name, value); controlAttribute(element, name, value, oldValue); }
+  if (namespace === null) { eventAttribute(element, name, value); controlAttribute(element, name, value, oldValue); selectAttribute(element, name, value, oldValue); }
   attribute(element, name, oldValue, value, namespace);
 }
-export function connectionReaction(root, connected) { controlConnection(root, connected); connection(root, connected); }
+export function connectionReaction(root, connected) { controlConnection(root, connected); selectConnection(root, connected); connection(root, connected); }

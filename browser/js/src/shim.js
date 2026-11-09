@@ -1,3 +1,4 @@
+import { installSelectProperties, resetSelect } from './select-state.js';
 import { requireParser } from './parser-state.js';
 import { serializeDocument } from './document-body.js';
 import { installAttributes } from './attributes.js';
@@ -38,7 +39,7 @@ import { fireEvent, installEventHooks, registerWindow, initializeEventTarget, ge
 import { initializeSignal, signalState, abortSignal, dependSignal, onSignalAbort, setAbortEventDispatcher, signalListenersChanged } from './abort-state.js';
 import { installEventAttributeHook } from './ce-hooks.js';
 import { htmlName, controlType, treeElements, formOwner, connected, disabled, checked, setChecked, indeterminate, setIndeterminate, beginInputActivation, cancelInputActivation, resetChecked, installControlState, setControlAttribute } from './controls.js';
-import { populateForm, isSubmitButton, optionSelected, setOptionSelected, resetSelect } from './form-controls.js';
+import { populateForm, isSubmitButton } from './form-controls.js';
 import { installValueProperties, resetControlValue, setControlValue, controlValue } from './control-values.js';
 import { nodeInfo, shadowInfo, shadowAncestor, physicalBody, eventAttribute, physicalParent, physicalRoot, retarget } from './dom-state.js';
 import { exceptionInfo, clipDiagnostic } from './error-info.js';
@@ -1451,22 +1452,7 @@ function installWindow(doc) {
   F.submit = function () { formNavigate(this, null); };
   F.reset = function () { resetForm(this); };
   F.checkValidity = F.reportValidity = function () { return true; };
-  const O = L.HTMLOptionElement.prototype;
-  define(O, 'selected', {
-    get() { return optionSelected(this); },
-    set(v) { setOptionSelected(this, v); },
-  });
-  const Sel = L.HTMLSelectElement.prototype;
-  const options = (s) => [...s.querySelectorAll('option')];
-  define(Sel, 'selectedIndex', {
-    get() { const o = options(this); const i = o.findIndex((x) => x.selected); return i < 0 && o.length && !this.hasAttribute('multiple') ? 0 : i; },
-    set(i) { options(this).forEach((o, j) => { o.selected = j === i; }); },
-  });
-  define(Sel, 'value', {
-    get() { const o = options(this)[this.selectedIndex]; return o ? (o.hasAttribute('value') ? o.getAttribute('value') : o.textContent) : ''; },
-    set(v) { options(this).forEach((o) => { o.selected = (o.hasAttribute('value') ? o.getAttribute('value') : o.textContent) === String(v); }); },
-  });
-  define(Sel, 'selectedOptions', { get() { return options(this).filter((o) => o.selected); } });
+  installSelectProperties(L);
 }
 
 // --- What a person does: clicks, typing, submits ------------------------------

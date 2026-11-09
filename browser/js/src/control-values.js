@@ -88,7 +88,7 @@ export function setControlValue(node, raw) {
   } else if (current === 'default' || current === 'default/on') setControlAttribute(node, 'value', value);
   else { s.raw = sanitize(node, s.type, value); s.dirty = true; }
 }
-function replaceText(node, value) {
+export function replaceControlText(node, value) {
   // Use tree primitives rather than author replaceChildren/appendChild/remove.
   let child = node[NEXT];
   while (nodeInfo(child)?.kind === 2) child = child[NEXT];
@@ -143,7 +143,7 @@ export function installValueProperties(L, ErrorClass) {
     });
     define(Class.prototype, 'defaultValue', { configurable: true, enumerable: true,
       get() { check(this); return defaultValue(this, name); },
-      set(raw) { return withReactions(() => { check(this); const value = runDOMCallback(() => eventString(raw)); if (name === 'input') setControlAttribute(this, 'value', value); else replaceText(this, value); }); },
+      set(raw) { return withReactions(() => { check(this); const value = runDOMCallback(() => eventString(raw)); if (name === 'input') setControlAttribute(this, 'value', value); else replaceControlText(this, value); }); },
     });
   }
   for (const name of ['min', 'max', 'step']) define(L.HTMLInputElement.prototype, name, {

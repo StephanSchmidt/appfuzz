@@ -12,7 +12,7 @@ import { attributeInfo } from './attribute-state.js';
 import { nameIdentity, lowerASCII } from './names.js';
 import { documentMode } from './document-state.js';
 import { htmlName, controlType, checked, indeterminate, disabled, treeElements, formOwner } from './controls.js';
-import { optionSelected } from './form-controls.js';
+import { optionSelected, optionDisabled } from './select-state.js';
 import { DOMException } from './dom-exception.js';
 const NativeError = selectorError, isArray = Array.isArray, create = Object.create;
 const includes = Function.prototype.call.bind(String.prototype.includes), starts = Function.prototype.call.bind(String.prototype.startsWith), ends = Function.prototype.call.bind(String.prototype.endsWith);
@@ -51,7 +51,7 @@ function attrMatch(token, node) {
   }
   return false;
 }
-function disabledState(node) { if (htmlName(node) === 'option' && htmlName(physicalParent(node)) === 'optgroup' && eventAttribute(physicalParent(node), 'disabled') !== null) return true; return disabled(node); }
+function disabledState(node) { return htmlName(node) === 'option' ? optionDisabled(node) : disabled(node); }
 function radioIndeterminate(node) { if (checked(node)) return false; const name = eventAttribute(node, 'name'); if (!name) return true; const nodes = treeElements(physicalRoot(node)), owner = formOwner(node); for (let i = 0; i < nodes.length; i++) if (nodes[i] !== node && htmlName(nodes[i]) === 'input' && controlType(nodes[i]) === 'radio' && eventAttribute(nodes[i], 'name') === name && formOwner(nodes[i]) === owner && checked(nodes[i])) return false; return true; }
 function state(name, node) {
   const kind = htmlName(node), type = kind === 'input' ? controlType(node) : null;
