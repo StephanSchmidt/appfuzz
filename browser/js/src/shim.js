@@ -1,4 +1,4 @@
-import { installSelectProperties, resetSelect } from './select-state.js';
+import { installSelectProperties, resetSelect, chooseSelectOption } from './select-state.js';
 import { requireParser } from './parser-state.js';
 import { serializeDocument } from './document-body.js';
 import { installAttributes } from './attributes.js';
@@ -1681,11 +1681,12 @@ function act(i, value) {
         c.value = clip(after, 100);
       }
     } else if (tag === 'select') {
-      const opts = el.querySelectorAll('option');
-      if (opts.length) el.selectedIndex = Number(value ?? 1) % opts.length;
-      dispatch(el, createNativeUIEvent(InputEvent, 'input', { bubbles: true }));
-      dispatch(el, createNativeEvent('change', { bubbles: true }));
       c.kind = 'select';
+      focusNode(el);
+      if (connected(el) && !disabled(el) && chooseSelectOption(el, value)) {
+        dispatch(el, createNativeEvent('input', { bubbles: true, composed: true }));
+        dispatch(el, createNativeEvent('change', { bubbles: true }));
+      }
     } else {
       click(el, true);
       c.kind = 'click';

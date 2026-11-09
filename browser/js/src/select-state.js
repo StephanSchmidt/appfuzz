@@ -110,6 +110,23 @@ function setIndex(select, value) {
   check(select, 'select'); value = runDOMCallback(() => (+value) >> 0); ensure(select); const options = optionList(select);
   for (let i = 0; i < options.length; i++) { change(options[i], i === value); if (i === value) state(options[i]).dirty = true; }
 }
+// A user choice bypasses page IDL shadows and cannot pick a disabled option.
+// Single selects move to another eligible option; multiple selects toggle an
+// eligible option, as a control-click does, preserving the other selections.
+export function chooseSelectOption(select, requested = undefined) {
+  check(select, 'select');
+  const preferred = requested == null ? null : runDOMCallback(() => (+requested) >> 0);
+  ensure(select); const options = optionList(select); if (!options.length) return false;
+  let current = -1;
+  for (let i = 0; i < options.length; i++) if (state(options[i]).selected) { current = i; break; }
+  const start = ((preferred ?? current + 1) % options.length + options.length) % options.length, many = multiple(select);
+  for (let offset = 0; offset < options.length; offset++) {
+    const option = options[(start + offset) % options.length];
+    if (optionDisabled(option) || !many && state(option).selected) continue;
+    setOptionSelected(option, many ? !state(option).selected : true); return true;
+  }
+  return false;
+}
 function selectValue(select) { check(select, 'select'); ensure(select); const options = optionList(select); for (let i = 0; i < options.length; i++) if (state(options[i]).selected) return optionValue(options[i]); return ''; }
 function setValue(select, value) {
   check(select, 'select'); value = runDOMCallback(() => eventString(value)); ensure(select); const options = optionList(select); let matched = false;

@@ -1,0 +1,100 @@
+{
+  "ordinary": {
+    "html": "<select id=target><option value=a>A</option><option value=b>B</option></select>",
+    "keys": [
+      "ArrowDown"
+    ],
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));;globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "disabled-option": {
+    "html": "<select id=target><option value=a>A</option><option disabled value=b>B</option><option value=c>C</option></select>",
+    "keys": [
+      "ArrowDown"
+    ],
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));;globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "disabled-group": {
+    "html": "<select id=target><option value=a>A</option><optgroup disabled><option value=b>B</option></optgroup><option value=c>C</option></select>",
+    "keys": [
+      "ArrowDown"
+    ],
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));;globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "one-enabled": {
+    "html": "<select id=target><option value=a>A</option><option disabled value=b>B</option></select>",
+    "keys": [
+      "ArrowDown"
+    ],
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));;globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "empty": {
+    "html": "<select id=target></select>",
+    "keys": [
+      "ArrowDown"
+    ],
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));;globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "only-disabled": {
+    "html": "<select id=target><option disabled value=a>A</option><option disabled value=b>B</option></select>",
+    "keys": [
+      "ArrowDown"
+    ],
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));;globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "wrap-choice": {
+    "html": "<select id=target><option value=a>A</option><option selected value=b>B</option></select>",
+    "keys": [
+      "Home"
+    ],
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));;globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "private-hooks": {
+    "html": "<select id=target><option value=a>A</option><option value=b>B</option></select>",
+    "keys": [
+      "ArrowDown"
+    ],
+    "setup": "const query=s.querySelectorAll,index=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex');s.querySelectorAll=function(...a){calls++;return Reflect.apply(query,this,a)};Object.defineProperty(s,'selectedIndex',{configurable:true,get(){calls++;return index.get.call(s)},set(v){calls++;index.set.call(s,v)}});for(const k of ['focus','dispatchEvent'])s[k]=()=>{calls++;};",
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));const query=s.querySelectorAll,index=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex');s.querySelectorAll=function(...a){calls++;return Reflect.apply(query,this,a)};Object.defineProperty(s,'selectedIndex',{configurable:true,get(){calls++;return index.get.call(s)},set(v){calls++;index.set.call(s,v)}});for(const k of ['focus','dispatchEvent'])s[k]=()=>{calls++;};;for(const o of query.call(s,'option'))for(const key of ['selected','disabled','value','nodeType','parentNode','hasAttribute','getAttribute'])Object.defineProperty(o,key,{configurable:true,get(){calls++;return ()=>null},set(){calls++;}});globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "focus-disables": {
+    "html": "<select id=target><option value=a>A</option><option value=b>B</option></select>",
+    "keys": [
+      "ArrowDown"
+    ],
+    "setup": "s.addEventListener('focus',()=>s.setAttribute('disabled',''));",
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));s.addEventListener('focus',()=>s.setAttribute('disabled',''));;globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "focus-removes": {
+    "html": "<select id=target><option value=a>A</option><option value=b>B</option></select>",
+    "keys": [
+      "ArrowDown"
+    ],
+    "setup": "s.addEventListener('focus',()=>s.remove());",
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));s.addEventListener('focus',()=>s.remove());;globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "focus-replaces-options": {
+    "html": "<select id=target><option value=a>A</option><option value=b>B</option></select>",
+    "keys": [
+      "ArrowDown"
+    ],
+    "setup": "s.addEventListener('focus',()=>s.innerHTML='<option value=c>C</option><option value=d>D</option>');",
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));s.addEventListener('focus',()=>s.innerHTML='<option value=c>C</option><option value=d>D</option>');;globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "multiple-toggle": {
+    "html": "<select multiple id=target><option selected value=a>A</option><option value=b>B</option></select>",
+    "click_option": 1,
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));;globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "multiple-unselect": {
+    "html": "<select multiple id=target><option selected value=a>A</option><option selected value=b>B</option></select>",
+    "click_option": 1,
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));;globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  },
+  "private-number": {
+    "html": "<select id=target><option value=a>A</option><option value=b>B</option></select>",
+    "keys": [
+      "ArrowDown"
+    ],
+    "script": "const s=document.getElementById('target'),get=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedIndex').get,value=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').get,getSelected=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'selectedOptions').get,optionValue=Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype,'value').get;let calls=0;globalThis.records=[];const record=(...a)=>records[records.length]=a.join(' ');for(const type of ['input','change'])s.addEventListener(type,e=>record(type,JSON.stringify([get.call(s),value.call(s),e.isTrusted,e.bubbles,e.composed,e instanceof InputEvent,Object.prototype.toString.call(e)])));;globalThis.Number=()=>{calls++;return 0};globalThis.finish=()=>{const selected=getSelected.call(s),values=[];for(let i=0;i<selected.length;i++)values[values.length]=optionValue.call(selected[i]);record('final',get.call(s),value.call(s),JSON.stringify(values),calls);return records};globalThis.ready=true;"
+  }
+}
