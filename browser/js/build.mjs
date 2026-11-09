@@ -1,5 +1,6 @@
 import { build } from 'esbuild';
 import { privateSelectors } from './private-selectors.mjs';
+import { privateDOMSlots } from './private-dom-slots.mjs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -41,6 +42,7 @@ const collectionSites = {
 async function readDOM(path) {
   let source = await readFile(path, 'utf8');
   const key = path.split('/linkedom/esm/')[1], sites = collectionSites[key];
+  if (key === 'interface/css-style-declaration.js') { source = replace(source, '  get[PRIVATE]() { return this; }', ''); source = replace(source, '    refs.set(this, element);', '    refs.set(this, element); this[PRIVATE] = this;'); source = replace(source, '    return new Proxy(this, handler);', '    const proxy = new Proxy(this, handler); proxy[PRIVATE] = this; return proxy;'); }
   if (sites) {
     for (const [before, after] of sites) {
       if (!source.includes(before)) throw new Error('The pinned DOM collection sites changed: ' + key + ': ' + before);
@@ -81,6 +83,9 @@ await build({
   alias: { htmlparser2: './src/alias/htmlparser2.js', 'cssomnom/parse': './src/alias/cssom.js' },
   outfile: 'dist/shim.js',
   plugins: [{ name: 'dom-internals', setup(plugin) {
+    const onLoad = plugin.onLoad.bind(plugin);
+    plugin = { onLoad(options,callback) { onLoad(options,async args => { const result = await callback(args); return result?.contents ? {...result,contents:privateDOMSlots(result.contents)} : result; }); } };
+    plugin.onLoad({filter:/[/\\]browser[/\\]js[/\\]src[/\\].*\.js$/},async ({path}) => ({contents:await readFile(path,'utf8'),loader:'js'}));
     plugin.onLoad({ filter: /[/\\]node_modules[/\\](css-select|css-what|nth-check|boolbase)[/\\].*\.js$/ }, async ({ path }) => ({ contents: privateSelectors(await readFile(path, 'utf8')), loader: 'js' }));
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]mutation-observer\.js$/ }, async () => ({ contents: `export {MutationObserverClass,attributeMutation as attributeChangedCallback,legacyChildMutation as moCallback} from ${JSON.stringify(mutations)};`, loader: 'js' }));
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]shared[/\\]matches\.js$/ }, async ({ path }) => {

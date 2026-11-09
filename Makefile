@@ -34,7 +34,7 @@ BROWSER_WASM = browser/target/wasm32-wasip2/release/appfuzz_browser.wasm
 BROWSER_LOCK = grep -A1 '^name = "$(1)"$$' browser/Cargo.lock | sed -n 's/version = //p' | tr -d '"'
 
 browser:
-	cd browser/js && npm ci --silent && npm run --silent build
+	cd browser/js && npm ci --silent && node --test private-dom-slots.test.mjs && npm run --silent build
 	cargo build --release --manifest-path browser/Cargo.toml --target wasm32-wasip2 -p appfuzz-browser
 	cargo run --release --manifest-path browser/Cargo.toml -p appfuzz-browser-wizen -- $(BROWSER_WASM) $(BROWSER_ASSETS)/browser.wasm
 	{ echo "The browser guest: QuickJS (quickjs-ng, MIT, via rquickjs, MIT), a DOM"; \

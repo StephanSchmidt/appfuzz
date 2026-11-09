@@ -1,3 +1,4 @@
+import { privateSlots, slotFacade } from './dom-slots.js';
 import { setNodeDocument } from './attribute-state.js';
 import { doctypeInfo } from './doctype-state.js';
 import { cloneAttribute } from './attributes.js';
@@ -93,6 +94,7 @@ export function installCloning(L, shareObservers, onScript, upgradeCopies, DOMEr
         return read(owner, key, owner);
       },
     });
+    slotFacade(document, owner);
     const views = new NativeWeakMap();
     const sourceView = node => {
       if (!node) return node;
@@ -100,13 +102,15 @@ export function installCloning(L, shareObservers, onScript, upgradeCopies, DOMEr
       if (!view) {
         view = new NativeProxy(facade(node), { get(_target, key) {
           const target = node;
-          if (key === NEXT || key === END) return sourceView(target[key]);
           if (key === 'ownerDocument') return document;
           if (key === 'localName' && (nameIdentity(target) || isElement(target))) return identityOf(target).local;
           if (key === 'nodeType') return nameIdentity(target) || isElement(target) ? 1 : (plainCloner(target)?.type ?? target.nodeType);
           if (key === 'cloneNode') return () => plainCloner(target).copy(target, owner);
           return read(target, key, target);
         }, has(_target, key) { return key in node; } });
+        const slots = slotFacade(view,node);
+        const link = key => define(slots,key,{ __proto__: null, get() { return sourceView(privateSlots(node)[key]); } });
+        link(NEXT); link(END);
         weakSet(views, node, view);
       }
       return view;
