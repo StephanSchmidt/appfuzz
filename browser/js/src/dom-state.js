@@ -7,7 +7,11 @@ import { shadowRoots } from '../node_modules/linkedom/esm/shared/shadow-roots.js
 const setPrototype = Object.setPrototypeOf, NativeTypeError = TypeError;
 const nodes = new WeakMap(), shadows = new WeakMap(), windows = new WeakMap();
 const node = nodes.get.bind(nodes), saveNode = nodes.set.bind(nodes);
-export function initializeNode(value, kind, local) { saveNode(value, { kind, local }); }
+export function initializeNode(value, kind, local, document) { saveNode(value, { __proto__: null, kind, local, document }); }
+export function nodeDocument(value) { const data = node(value); return data?.kind === 9 ? value : attributeInfo(value)?.document ?? data?.document ?? null; }
+export function rememberNodeDocument(value, document) { const data = node(value); if (data) data.document = document; }
+export function physicalNextSibling(value) { if (!physicalParent(value)) return null; const next = (value[END] || value)[NEXT]; return node(next) ? next : null; }
+export function physicalPreviousSibling(value) { if (!physicalParent(value)) return null; const previous = value[PREV]; if (previous?.[START]) return previous[START]; const kind = node(previous)?.kind; return kind === 3 || kind === 4 || kind === 7 || kind === 8 || kind === 10 ? previous : null; }
 export const nodeInfo = node;
 export const shadowInfo = shadows.get.bind(shadows);
 export const rememberShadow = shadows.set.bind(shadows);

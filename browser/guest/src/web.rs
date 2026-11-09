@@ -20,6 +20,7 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     n.set("cookieSite", Function::new(ctx.clone(), cookie_site)?)?;
     n.set("bidiDirection", Function::new(ctx.clone(), bidi_direction)?)?;
     n.set("cssComponents", Function::new(ctx.clone(), css_components_js)?)?;
+    n.set("queueMicrotask", Function::new(ctx.clone(), |callback: Function<'_>| callback.defer(()))?)?;
     n.set("inputColor", Function::new(ctx.clone(), input_color)?)?;
     n.set("encodeUtf8", Function::new(ctx.clone(), encode_utf8)?)?;
     n.set("decodeUtf8", Function::new(ctx.clone(), decode_utf8)?)?;
@@ -294,6 +295,31 @@ mod tests {
 
     fn host(input: &str) -> Option<String> {
         url_parse(input.into(), Some("https://app.example/shop/item?x=1".into())).map(|p| p[6].clone())
+    }
+
+    #[test]
+    fn native_microtasks_do_not_consult_page_promises() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            install(&ctx).unwrap();
+            let pending: i32 = ctx
+                .eval(
+                    r#"
+                globalThis.done=0;globalThis.calls=0;
+                Object.defineProperty(Promise.prototype,'constructor',{configurable:true,get(){calls++;throw Error('page Promise')}});
+                globalThis.queueMicrotask=()=>{calls++;throw Error('page queue')};
+                __native.queueMicrotask(()=>{done++});done
+            "#,
+                )
+                .unwrap();
+            assert_eq!(pending, 0);
+        });
+        assert!(runtime.execute_pending_job().unwrap());
+        assert!(!runtime.execute_pending_job().unwrap());
+        context.with(|ctx| {
+            assert_eq!(ctx.eval::<String, _>("done+' '+calls").unwrap(), "1 0");
+        });
     }
 
     #[test]

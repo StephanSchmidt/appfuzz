@@ -20,4 +20,4 @@ color: 0.3.3
 cssparser: 0.38.0
 cssparser-color: 0.6.0
 rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
-SHA-256: 2f2d3daff591d52837dacd6bd0c8304e19e838a9328ec04b23f96406e3a532d4
+SHA-256: d18149dcac243daf303768d88eb69f633091eeea79a61a111dc7687bf70db448

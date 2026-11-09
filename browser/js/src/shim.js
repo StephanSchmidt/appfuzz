@@ -1,3 +1,6 @@
+import { installCharacterData } from './character-data.js';
+import { installDOMMutations } from './dom-mutations.js';
+import { MutationRecord, installMutationObserverReporter } from './mutation-observers.js';
 import { installSelectProperties, resetSelect, chooseSelectOption } from './select-state.js';
 import { requireParser } from './parser-state.js';
 import { serializeDocument } from './document-body.js';
@@ -82,6 +85,8 @@ for (const [name, C] of Object.entries(L)) if (/^[A-Z]/.test(name) && typeof C =
   if (typeof backing === 'function' && backing !== C) nativeDefine(backing, 'name', { __proto__: null, value: name, configurable: true });
 }
 installAttributes();
+installDOMMutations(L);
+installCharacterData(L);
 const DOMParser = platformConstructor(L.DOMParser, 'DOMParser');
 installCollections();
 const nativeLower = Function.prototype.call.bind(String.prototype.toLowerCase);
@@ -115,9 +120,11 @@ const error = (where, value, notify = true) => {
   }
   if (unhandled) push(S.errors, { where, at: S.now - S.start, name: clipDiagnostic(info.name), message: clipDiagnostic(info.message), stack: clipDiagnostic(info.stack, 1200) });
 };
+installMutationObserverReporter(value => error('MutationObserver', value));
 const rejections = new Map(), notifiedRejections = new WeakMap();
 const notified = notifiedRejections.get.bind(notifiedRejections), rememberNotified = notifiedRejections.set.bind(notifiedRejections), forgetNotified = notifiedRejections.delete.bind(notifiedRejections);
 const mapGet = Function.prototype.call.bind(Map.prototype.get), mapSet = Function.prototype.call.bind(Map.prototype.set), mapDelete = Function.prototype.call.bind(Map.prototype.delete), mapEach = Function.prototype.call.bind(Map.prototype.forEach);
+const nativeQueueMicrotask = G.__native.queueMicrotask;
 const nativeResolve = Promise.resolve.bind(Promise), nativeThen = Function.prototype.call.bind(Promise.prototype.then);
 const nativeApply = Reflect.apply, nativeConstruct = Reflect.construct, NativeTypeError = TypeError;
 const nativeMax = Math.max, nativeFloor = Math.floor, nativeImul = Math.imul, nativeTrunc = Math.trunc, NativeRangeError = RangeError;
@@ -250,7 +257,7 @@ for (const name of Object.keys(timerAPI)) G[name] = timerAPI[name];
 
 G.queueMicrotask = (fn) => {
   if (typeof fn !== 'function') throw new NativeTypeError('queueMicrotask requires a callback');
-  nativeThen(nativeResolve(), () => { try { runDOMCallback(() => nativeApply(fn, undefined, [])); } catch (e) { error('queueMicrotask', e); } });
+  nativeQueueMicrotask(() => { try { runDOMCallback(() => nativeApply(fn, undefined, [])); } catch (e) { error('queueMicrotask', e); } });
 };
 
 // The next due task, if it is due by the horizon.
@@ -1183,7 +1190,7 @@ function installWindow(doc) {
     error('reportError', value);
   };
   G.customElements = view.customElements;
-  G.MutationObserver = view.MutationObserver;
+  G.MutationObserver = view.MutationObserver; G.MutationRecord = MutationRecord;
   G.Image = view.Image;
   G.window = G.self = G.top = G.parent = G.frames = G;
   Object.assign(G, {
@@ -1373,33 +1380,6 @@ function installWindow(doc) {
   installScriptMutations(L, scriptsChanged);
   installReactionBoundaries(L);
 
-  // linkedom puts stubs on Node.prototype and the real accessors on its
-  // subclasses. Code that takes an accessor from Node.prototype and calls
-  // it (Svelte does, for speed) gets the subclass's.
-  const NP = L.Node.prototype;
-  for (const k of Object.getOwnPropertyNames(NP)) {
-    const base = Object.getOwnPropertyDescriptor(NP, k);
-    if (!base.get) continue;
-    const cache = new Map();
-    const own = (proto) => {
-      let d = cache.get(proto);
-      if (d === undefined) {
-        d = null;
-        for (let p = proto; p && p !== NP; p = Object.getPrototypeOf(p)) {
-          const x = Object.getOwnPropertyDescriptor(p, k);
-          if (x) { d = x; break; }
-        }
-        cache.set(proto, d);
-      }
-      return d;
-    };
-    Object.defineProperty(NP, k, {
-      configurable: true,
-      enumerable: base.enumerable,
-      get() { const d = own(Object.getPrototypeOf(this)); return d ? (d.get ? d.get.call(this) : d.value) : base.get.call(this); },
-      set: base.set ? function (v) { const d = own(Object.getPrototypeOf(this)); if (d && d.set) d.set.call(this, v); else base.set.call(this, v); } : undefined,
-    });
-  }
   doc.write = doc.writeln = (...a) => { unmodelled('document.write'); push(S.code, { where: 'document.write', code: clip(a.join(''), 2000), gesture: S.gesture }); toMarkup('document.write', a.join('')); };
 
   const E = L.Element.prototype;

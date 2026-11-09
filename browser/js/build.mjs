@@ -48,6 +48,23 @@ async function readDOM(path) {
     }
     source = `import {backendChildNodes,backendChildren,backendAttributes} from ${JSON.stringify(collectionData)};\n${source}`;
   }
+  const parentWrites = ['node.parentNode = this;', 'firstChild.parentNode = this;', 'node.parentNode = self;', 'node.parentNode = parentNode;', 'element.parentNode = parentNode;', 'child.parentNode = fragment;', 'if (!attributeInfo(next)) next.parentNode = parentNode;'];
+  for (const assignment of parentWrites) source = source.replaceAll(assignment, '');
+  if (key === 'mixin/child-node.js') {
+    const start = source.indexOf('export const remove = (prev, current, next) => {');
+    if (start < 0) throw new Error('Pinned DOM removal changed');
+    source = source.slice(0,start) + 'export const remove = (_prev,current,_next) => removeNativeNode(current);\n';
+    source = `import {removeNativeNode} from ${JSON.stringify(fileURLToPath(new URL('./src/dom-mutations.js',import.meta.url)))};\n${source}`;
+  }
+  if (key === 'interface/character-data.js') {
+    source = replace(source,'    this[VALUE] = String(data);','    initializeCharacterData(this, String(data));');
+    source = `import {initializeCharacterData} from ${JSON.stringify(fileURLToPath(new URL('./src/character-data-state.js',import.meta.url)))};\n${source}`;
+  }
+  if (key === 'shared/utils.js') {
+    source = replace(source, 'node => node.nodeType === ELEMENT_NODE ? node[END] : node;', 'node => (nodeInfo(node)?.kind ?? node.nodeType) === ELEMENT_NODE ? node[END] : node;');
+    source = `import {nodeInfo} from ${JSON.stringify(domState)};\n${source}`;
+  }
+  if (key === 'html/element.js') { source = source.replace('this.ownerDocument = this[END].ownerDocument = ownerDocument;', 'setNodeDocument(this, ownerDocument); this[END].ownerDocument = ownerDocument;'); source = `import {setNodeDocument} from ${JSON.stringify(attributeState)};\n${source}`; }
   if (key === 'shared/utils.js') {
     source = replace(source, 'export const knownAdjacent = (prev, next) => {', 'export const knownAdjacent = (prev, next) => { collectionLinksChanged();');
     source = replace(source, 'export const setAdjacent = (prev, next) => {', 'export const setAdjacent = (prev, next) => { collectionLinksChanged();');
@@ -57,6 +74,7 @@ async function readDOM(path) {
 }
 const selectorEngine = fileURLToPath(new URL('./src/selector-engine.js', import.meta.url));
 const hooks = fileURLToPath(new URL('./src/ce-hooks.js', import.meta.url));
+const mutations = fileURLToPath(new URL('./src/mutation-observers.js', import.meta.url));
 await build({
   entryPoints: ['src/shim.js'], bundle: true, inject: ['src/weak-map.js'],
   format: 'iife', target: 'es2023', minify: true, legalComments: 'none',
@@ -64,6 +82,7 @@ await build({
   outfile: 'dist/shim.js',
   plugins: [{ name: 'dom-internals', setup(plugin) {
     plugin.onLoad({ filter: /[/\\]node_modules[/\\](css-select|css-what|nth-check|boolbase)[/\\].*\.js$/ }, async ({ path }) => ({ contents: privateSelectors(await readFile(path, 'utf8')), loader: 'js' }));
+    plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]mutation-observer\.js$/ }, async () => ({ contents: `export {MutationObserverClass,attributeMutation as attributeChangedCallback,legacyChildMutation as moCallback} from ${JSON.stringify(mutations)};`, loader: 'js' }));
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]shared[/\\]matches\.js$/ }, async ({ path }) => {
       const source = await readFile(path, 'utf8');
       if (!source.includes('export const prepareMatch')) throw new Error('The pinned DOM selector entry changed');
@@ -101,7 +120,7 @@ await build({
         source = source.replaceAll('attribute.ownerElement = element;', 'setAttributeOwner(attribute, element);')
           .replaceAll('attribute.ownerElement = attribute[PREV] = attribute[NEXT] = null;', 'setAttributeOwner(attribute, null); attribute[PREV] = attribute[NEXT] = null;')
           .replaceAll('attr.ownerElement = parentNode;', 'setAttributeOwner(attr, parentNode);')
-          .replaceAll('next.parentNode = parentNode;', 'if (!attributeInfo(next)) next.parentNode = parentNode;')
+          .replaceAll('next.parentNode = parentNode;', '')
           .replaceAll('node.ownerDocument = this;', 'setNodeDocument(node, this);').replaceAll('element.ownerDocument = this;', 'setNodeDocument(element, this);');
       }
       return { contents: `import {initializeAttribute,installAttributeSlots,setAttributeOwner,setNodeDocument,attributeInfo} from ${JSON.stringify(attributeState)};\n${source}`, loader: 'js' };
@@ -127,7 +146,7 @@ await build({
       return { contents: `export {EventTarget} from ${JSON.stringify(eventTarget)};`, loader: 'js' };
     });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\]interface[/\\]node\.js$/ }, async ({ path }) => {
-      let source = replace(await readDOM(path), '    this.ownerDocument = ownerDocument;\n    this.localName = localName;\n    this.nodeType = nodeType;\n    this.parentNode = null;', '    if (nodeType === 2) initializeAttributeNode(this, ownerDocument, localName); else { this.ownerDocument = ownerDocument; this.localName = localName; this.nodeType = nodeType; this.parentNode = null; } initializeNode(this, nodeType, localName);');
+      let source = replace(await readDOM(path), '    this.ownerDocument = ownerDocument;\n    this.localName = localName;\n    this.nodeType = nodeType;\n    this.parentNode = null;', '    if (nodeType === 2) initializeAttributeNode(this, ownerDocument, localName); else { this.localName = localName; this.nodeType = nodeType; } initializeNode(this, nodeType, localName, ownerDocument);');
       source = `import {initializeAttributeNode} from ${JSON.stringify(attributeState)};\n${source}`;
       return { contents: `import {initializeNode} from ${JSON.stringify(domState)};\n` + source, loader: 'js' };
     });

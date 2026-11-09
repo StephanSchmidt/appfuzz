@@ -1,3 +1,7 @@
+import { nameIdentity } from './names.js';
+import { attributeInfo } from './attribute-state.js';
+import { doctypeInfo } from './doctype-state.js';
+import { collectionHTMLDocument } from './collection-data.js';
 // DOM tree accessors observe physical links, not page shadows of nodeType,
 // firstChild, lastChild or parentNode. Root lookup crosses a shadow only when
 // the caller requests a composed root.
@@ -6,8 +10,9 @@ import { ParentNode } from '../node_modules/linkedom/esm/mixin/parent-node.js';
 import { Element } from '../node_modules/linkedom/esm/interface/element.js';
 import { CharacterData } from '../node_modules/linkedom/esm/interface/character-data.js';
 import { END, NEXT, PREV, START } from '../node_modules/linkedom/esm/shared/symbols.js';
-import { nodeInfo, physicalParent, physicalRoot, shadowInfo } from './dom-state.js';
+import { nodeInfo, physicalParent, physicalRoot, shadowInfo, nodeDocument } from './dom-state.js';
 import { runDOMCallback } from './dom-callbacks.js';
+const upper = Function.prototype.call.bind(String.prototype.toUpperCase);
 const define = Object.defineProperty, describe = Object.getOwnPropertyDescriptor, keys = Reflect.ownKeys, NativeTypeError = TypeError;
 function requireNode(node) { if (!nodeInfo(node)) throw new NativeTypeError('A Node is required'); }
 function requireParent(node) { const kind = nodeInfo(node)?.kind; if (kind !== 1 && kind !== 9 && kind !== 11) throw new NativeTypeError('A ParentNode is required'); }
@@ -19,6 +24,13 @@ function element(node, step) { for (let value = node; value; value = step(value)
 function root(node, composed) { let value = physicalRoot(node), shadow; while (composed && (shadow = shadowInfo(value))) value = physicalRoot(shadow.host); return value; }
 export function installTreeAccessors() {
   const fields = {
+    get nodeName() { requireNode(this); const data = nodeInfo(this), kind = data.kind;
+      if (kind === 1) { const id = nameIdentity(this); if (!id) return data.local; if (id.namespace !== 'http://www.w3.org/1999/xhtml' || !collectionHTMLDocument(nodeDocument(this))) return id.qualified; let result = ''; for (let i = 0; i < id.qualified.length; i++) { const c = id.qualified[i]; result += c >= 'a' && c <= 'z' ? upper(c) : c; } return result; }
+      if (kind === 2) return attributeInfo(this).qualified; if (kind === 10) return doctypeInfo(this).name;
+      return kind === 3 ? '#text' : kind === 4 ? '#cdata-section' : kind === 7 ? data.local : kind === 8 ? '#comment' : kind === 9 ? '#document' : '#document-fragment';
+    },
+    get ownerDocument() { requireNode(this); return nodeInfo(this).kind === 9 ? null : nodeDocument(this); },
+    get parentNode() { requireNode(this); return physicalParent(this); },
     get firstChild() { requireNode(this); return first(this); },
     get lastChild() { requireNode(this); return last(this); },
     get parentElement() { requireNode(this); const parent = physicalParent(this); return nodeInfo(parent)?.kind === 1 ? parent : null; },

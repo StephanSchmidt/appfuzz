@@ -1,3 +1,5 @@
+import { installChildrenChangedHook } from './dom-mutations.js';
+import { physicalParent } from './dom-state.js';
 // Script preparation is a DOM mutation step, not an event-loop poll. Batch
 // multi-node operations so all inserted scripts are prepared before any
 // inline code runs, and keep native fragments before insertion empties them.
@@ -95,7 +97,7 @@ export function installScriptMutations(L, changed) {
     const inserted = candidates;
     candidates = outer;
     try {
-      const oldParent = node?.parentNode;
+      const oldParent = node ? physicalParent(node) : null;
       const result = apply(insert, this, [node, before]);
       if (node !== before) {
         for (let i = 0; i < inserted.length; i++) note(inserted[i]);
@@ -111,13 +113,13 @@ export function installScriptMutations(L, changed) {
     const remove = proto.remove;
     if (typeof remove === 'function') proto.remove = function () {
       depth++;
-      const oldParent = this.parentNode;
+      const oldParent = physicalParent(this);
       try { const result = apply(remove, this, []); note(oldParent); return result; }
       finally { finish(); }
     };
   }
   for (const proto of [L.Element.prototype, L.DocumentFragment.prototype]) setter(proto, 'textContent', note);
-  setter(character, 'data', node => { if (node.nodeType === 3 || node.nodeType === 4) note(node.parentNode); });
+  installChildrenChangedHook(node => { depth++; try { note(node); } finally { finish(); } });
   const sourceAttribute = (node, name) => {
     const identity = scriptRecord(node)?.identity;
     return identity && (identity.namespace === 'http://www.w3.org/2000/svg'

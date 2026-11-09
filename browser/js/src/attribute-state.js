@@ -1,3 +1,4 @@
+import { nodeInfo, rememberNodeDocument } from './dom-state.js';
 // Attribute identity and ownership are native slots, independent of shadows.
 const states = new WeakMap(), get = states.get.bind(states), save = states.set.bind(states);
 const define = Object.defineProperty, NativeTypeError = TypeError;
@@ -17,4 +18,4 @@ export function installAttributeSlots(prototype) {
   }
 }
 
-export function setNodeDocument(value, document) { const data = get(value); if (data) data.document = document; else value.ownerDocument = document; }
+export function setNodeDocument(value, document) { const data = get(value); if (data) data.document = document; else if (nodeInfo(value)) rememberNodeDocument(value, document); else value.ownerDocument = document; }

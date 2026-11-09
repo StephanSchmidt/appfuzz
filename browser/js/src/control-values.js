@@ -1,13 +1,11 @@
+import { replaceAllText as replaceControlText } from './dom-mutations.js';
+export { replaceAllText as replaceControlText } from './dom-mutations.js';
 import { clearInputFiles, copyInputFiles, fileInputValue } from './file-inputs.js';
 // Current values and dirty flags are native control state. Default values
 // remain attributes/child text, so serializing a page does not expose edits.
 import { colorSpaceName } from './color-values.js';
 import { sanitizeInputDomain } from './input-domains.js';
-import { Text } from '../node_modules/linkedom/esm/interface/text.js';
-import { END, NEXT, PREV, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
-import { knownSiblings } from '../node_modules/linkedom/esm/shared/utils.js';
-import { remove } from '../node_modules/linkedom/esm/mixin/child-node.js';
-import { moCallback } from '../node_modules/linkedom/esm/interface/mutation-observer.js';
+import { END, NEXT, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
 import { htmlName, controlType, inputTypeName, setControlAttribute, installValueAttributeHook } from './controls.js';
 import { nodeInfo, eventAttribute } from './dom-state.js';
 import { eventString } from './event-state.js';
@@ -87,15 +85,6 @@ export function setControlValue(node, raw) {
     clearInputFiles(node); s.raw = ''; s.dirty = true;
   } else if (current === 'default' || current === 'default/on') setControlAttribute(node, 'value', value);
   else { s.raw = sanitize(node, s.type, value); s.dirty = true; }
-}
-export function replaceControlText(node, value) {
-  // Use tree primitives rather than author replaceChildren/appendChild/remove.
-  let child = node[NEXT];
-  while (nodeInfo(child)?.kind === 2) child = child[NEXT];
-  while (child !== node[END]) {
-    const next = (child[END] || child)[NEXT]; remove(child[PREV], child, next); child = next;
-  }
-  if (value !== '') { const text = new Text(node[END].ownerDocument, value); text.parentNode = node; knownSiblings(node[END][PREV], text, node[END]); moCallback(text, null); }
 }
 function changedAttribute(node, name, value, oldValue) {
   if (htmlName(node) !== 'input') return;
