@@ -2,8 +2,9 @@
 // properties and methods are not callbacks in the browser's selector algorithm.
 import { compile } from 'css-select';
 import { parse } from 'css-what';
+import { selectorError, expectedSelectorError } from './selector-intrinsics.js';
 import nthCheck from 'nth-check';
-import { forgivingSyntax } from './selector-syntax.js';
+import { forgivingSyntax, installSyntaxReporter, isSelectorLimit } from './selector-syntax.js';
 import { backendList, backendChildNodes, backendAttributes, collectionDocument, collectionHTMLDocument } from './collection-data.js';
 import { nodeInfo, physicalParent, physicalRoot, physicalDocumentElement, eventAttribute } from './dom-state.js';
 import { VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
@@ -13,12 +14,12 @@ import { documentMode } from './document-state.js';
 import { htmlName, controlType, checked, indeterminate, disabled, treeElements, formOwner } from './controls.js';
 import { optionSelected } from './form-controls.js';
 import { DOMException } from './dom-exception.js';
-const NativeError = Error, isArray = Array.isArray, create = Object.create;
+const NativeError = selectorError, isArray = Array.isArray, create = Object.create;
 const includes = Function.prototype.call.bind(String.prototype.includes), starts = Function.prototype.call.bind(String.prototype.startsWith), ends = Function.prototype.call.bind(String.prototype.endsWith);
 const exec = Function.prototype.call.bind(RegExp.prototype.exec), nthOf = /^([\s\S]*?)\s+of\s+([\s\S]+)$/i;
 const HTML = 'http://www.w3.org/1999/xhtml';
 let unsupported = () => {}, activeElement = () => null;
-export function installSelectorPlatform(options) { unsupported = options.unsupported; activeElement = options.active; }
+export function installSelectorPlatform(options) { unsupported = options.unsupported; installSyntaxReporter(unsupported); activeElement = options.active; }
 function fail() { throw new NativeError('Invalid selector'); }
 function tag(node) { return nodeInfo(node)?.kind === 1; }
 function siblings(node) { const parent = physicalParent(node); if (parent) return backendChildNodes(parent); const result = backendList(); result[0] = node; return result; }
@@ -98,7 +99,7 @@ export function compileSelector(root, text) {
           const name = token.name, data = token.data;
           if (name === 'is' || name === 'where') {
             if (!isArray(data)) fail(); const branches = backendList();
-            for (let k = 0; k < data.length; k++) { try { const one = backendList(); one[0] = data[k]; const branch = normalize(one, inHas, false, true); compileList(branch); branches[branches.length] = branch[0]; } catch {} }
+            for (let k = 0; k < data.length; k++) { try { const one = backendList(); one[0] = data[k]; const branch = normalize(one, inHas, false, true); compileList(branch); branches[branches.length] = branch[0]; } catch (error) { if (!expectedSelectorError(error)) throw error; } }
             rules[rules.length] = branches.length ? { __proto__: null, type, name, data: branches } : predicate(() => false);
           } else if (name === 'not' || name === 'has') {
             if (!isArray(data) || !data.length || name === 'has' && inHas) fail(); rules[rules.length] = { __proto__: null, type, name, data: normalize(data, inHas || name === 'has', name === 'has', true) };
@@ -114,7 +115,7 @@ export function compileSelector(root, text) {
     return result;
   }
   try { return compileList(normalize(parse(forgivingSyntax(text)))); }
-  catch { throw new DOMException('The selector is invalid', 'SyntaxError'); }
+  catch (error) { if (isSelectorLimit(error)) throw error; if (!expectedSelectorError(error)) { unsupported('selector:parser execution'); throw error; } throw new DOMException('The selector is invalid', 'SyntaxError'); }
 }
 export function prepareMatch(root, text) { return compileSelector(root, text); }
 export function matches(node, text) { return compileSelector(node, text)(node); }

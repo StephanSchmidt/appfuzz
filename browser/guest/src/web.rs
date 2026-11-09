@@ -19,6 +19,7 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     n.set("cookiePublicSuffix", Function::new(ctx.clone(), cookie_public_suffix)?)?;
     n.set("cookieSite", Function::new(ctx.clone(), cookie_site)?)?;
     n.set("bidiDirection", Function::new(ctx.clone(), bidi_direction)?)?;
+    n.set("cssComponents", Function::new(ctx.clone(), css_components_js)?)?;
     n.set("inputColor", Function::new(ctx.clone(), input_color)?)?;
     n.set("encodeUtf8", Function::new(ctx.clone(), encode_utf8)?)?;
     n.set("decodeUtf8", Function::new(ctx.clone(), decode_utf8)?)?;
@@ -63,6 +64,10 @@ fn decode_file_text(value: ArrayBuffer<'_>, label: Option<String>, charset: Opti
         .or_else(|| charset.as_deref().and_then(|s| encoding_rs::Encoding::for_label(s.as_bytes())))
         .unwrap_or(encoding_rs::UTF_8);
     encoding.decode(bytes).0.into_owned()
+}
+
+fn css_components_js<'js>(ctx: Ctx<'js>, value: String) -> Result<Value<'js>> {
+    private_json(&ctx, crate::css_components::components(&value))
 }
 
 use crate::xml::xml_tree;
@@ -289,6 +294,26 @@ mod tests {
 
     fn host(input: &str) -> Option<String> {
         url_parse(input.into(), Some("https://app.example/shop/item?x=1".into())).map(|p| p[6].clone())
+    }
+
+    #[test]
+    fn css_component_records_ignore_array_and_record_setters() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            install(&ctx).unwrap();
+            let result: String = ctx
+                .eval(
+                    r#"(()=>{
+                let calls=0;
+                for(const key of ['0','tokens','limited'])Object.defineProperty(Object.prototype,key,{configurable:true,set(){calls++}});
+                try{const value=__native.cssComponents(':\\69 s(.a,[x)');return value.tokens[2][4]+' '+value.limited+' '+calls}
+                finally{for(const key of ['0','tokens','limited'])delete Object.prototype[key]}
+            })()"#,
+                )
+                .unwrap();
+            assert_eq!(result, "is false 0");
+        });
     }
 
     #[test]

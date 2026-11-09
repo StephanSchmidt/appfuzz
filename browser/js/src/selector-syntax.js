@@ -1,33 +1,33 @@
-// The backend parser expects nonempty strict lists. CSS :is() and :where()
-// instead discard invalid branches, including malformed nested selectors.
+// CSS component values preserve native EOF recovery, decoded function names
+// and bad-token boundaries before the strict selector parser sees the input.
 import { parse } from 'css-what';
+import { selectorError, expectedSelectorError } from './selector-intrinsics.js';
 import { backendList } from './collection-data.js';
-const slice = Function.prototype.call.bind(String.prototype.slice), indexOf = Function.prototype.call.bind(String.prototype.indexOf), codeAt = Function.prototype.call.bind(String.prototype.charCodeAt);
-const NativeError = Error;
-function quoteEnd(text, i) { const quote = text[i++]; for (; i < text.length; i++) { if (text[i] === '\\') i++; else if (text[i] === quote) return i; } return text.length; }
-function functionEnd(text, i) { let depth = 1; for (; i < text.length; i++) { const c = text[i]; if (c === '\\') i++; else if (c === '"' || c === "'") i = quoteEnd(text, i); else if (c === '/' && text[i + 1] === '*') { const end = indexOf(text, '*/', i + 2); if (end < 0) return -1; i = end + 1; } else if (c === '(') depth++; else if (c === ')' && --depth === 0) return i; } return -1; }
-function splitBranches(text) { const result = backendList(); let start = 0, square = 0; for (let i = 0; i < text.length; i++) { const c = text[i]; if (c === '\\') i++; else if (c === '"' || c === "'") i = quoteEnd(text, i); else if (c === '/' && text[i + 1] === '*') { const end = indexOf(text, '*/', i + 2); i = end < 0 ? text.length : end + 1; } else if (c === '(') { const end = functionEnd(text, i + 1); i = end < 0 ? text.length : end; } else if (c === '[') square++; else if (c === ']') square--; else if (c === ',' && square === 0) { result[result.length] = slice(text, start, i); start = i + 1; } } result[result.length] = slice(text, start); return result; }
+const components = globalThis.__native.cssComponents, NativeError = selectorError, NativeRangeError = RangeError;
+const limits = new WeakSet(), saveLimit = limits.add.bind(limits);
+export const isSelectorLimit = limits.has.bind(limits);
+let report = () => {};
+export function installSyntaxReporter(callback) { report = callback; }
 export function forgivingSyntax(text) {
-  let result = '', start = 0, square = 0;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '\\') { i++; continue; }
-    if (c === '"' || c === "'") { i = quoteEnd(text, i); continue; }
-    if (c === '/' && text[i + 1] === '*') { const end = indexOf(text, '*/', i + 2); i = end < 0 ? text.length : end + 1; continue; }
-    if (c === '[') square++; else if (c === ']') square--;
-    if (c !== ':' || square) continue;
-    let open = i + 1;
-    while (open < text.length) { const k = text[open]; if (k === '\\') { open += 2; continue; } if (k === '-' || k === '_' || k >= '0' && k <= '9' || k >= 'a' && k <= 'z' || k >= 'A' && k <= 'Z' || codeAt(k, 0) >= 128) open++; else break; }
-    if (text[open] !== '(') continue;
-    const end = functionEnd(text, open + 1); if (end < 0) throw new NativeError('Unclosed selector function');
-    let name = ''; try { name = parse(slice(text, i, open) + '(*)')[0][0].name; } catch {}
-    const content = slice(text, open + 1, end); let replacement;
-    if (name === 'is' || name === 'where') {
-      const parts = splitBranches(content), valid = backendList();
-      for (let j = 0; j < parts.length; j++) { try { const branch = forgivingSyntax(parts[j]); if (parse(branch).length) valid[valid.length] = branch; } catch {} }
-      replacement = valid.length ? slice(text, i, open + 1) + valid.join(',') + ')' : ':not(*)';
-    } else replacement = slice(text, i, open + 1) + forgivingSyntax(content) + ')';
-    result += slice(text, start, i) + replacement; start = end + 1; i = end;
+  const data = components(text);
+  if (data.limited) { report('selector:CSS nesting depth'); const error = new NativeRangeError('CSS nesting exceeds the supported depth'); saveLimit(error); throw error; }
+  const tokens = data.tokens, children = backendList(), values = backendList();
+  for (let i = 0; i < tokens.length; i++) { children[i] = backendList(); if (i) { const list = children[tokens[i][1]]; list[list.length] = i; } }
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const token = tokens[i], list = children[i];
+    if (token[0] === 'token' || token[0] === 'comma' || token[0] === 'comment') { values[i] = { __proto__: null, text: token[0] === 'comment' ? '' : token[2], bad: token[5] === true }; continue; }
+    const forgiving = token[0] === 'function' && (token[4] === 'is' || token[4] === 'where');
+    let content = '', bad = false, invalidValue = false; const valid = backendList();
+    const branch = () => { if (!bad) { try { if (parse(content).length) valid[valid.length] = content; } catch (error) { if (!expectedSelectorError(error)) throw error; } } content = ''; bad = false; };
+    for (let j = 0; j < list.length; j++) {
+      const child = list[j];
+      if (forgiving && tokens[child][4] === true) invalidValue = true;
+      if (forgiving && tokens[child][0] === 'comma') branch();
+      else { content += values[child].text; bad = bad || values[child].bad; }
+    }
+    if (forgiving) { branch(); values[i] = { __proto__: null, text: valid.length ? token[2] + valid.join(',') + token[3] : 'not(*)', bad: token[5] === true || invalidValue }; }
+    else values[i] = { __proto__: null, text: token[2] + content + token[3], bad: bad || token[5] === true };
   }
-  return result + slice(text, start);
+  if (values[0].bad) throw new NativeError('Invalid CSS token');
+  return values[0].text;
 }

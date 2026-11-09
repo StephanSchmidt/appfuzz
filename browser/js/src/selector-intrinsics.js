@@ -36,4 +36,9 @@ function privateConstructor(Native, iterator = false) {
 export const selectorMap = privateConstructor(Map, true), selectorSet = privateConstructor(Set, true), selectorWeakMap = privateConstructor(WeakMap);
 export const selectorRegExp = privateConstructor(NativeRegExp);
 export function privateRegex(value) { setPrototype(value, selectorRegExp.prototype); return value; }
-export const selectorError = Error, selectorTypeError = TypeError;
+// Expected parser errors are branded privately. Runtime failures must not be
+// swallowed as invalid forgiving branches or reclassified as CSS SyntaxError.
+const NativeError = Error, parserErrors = new WeakSet();
+const saveParserError = parserErrors.add.bind(parserErrors), readParserError = parserErrors.has.bind(parserErrors);
+export function selectorError(message) { const error = new NativeError(message); saveParserError(error); return error; }
+export const expectedSelectorError = readParserError, selectorTypeError = TypeError;
