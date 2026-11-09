@@ -1,5 +1,5 @@
 import { installScriptAttributeHook } from './ce-hooks.js';
-import { installChildrenChangedHook } from './dom-mutations.js';
+import { installChildrenChangedHook, installInsertedTreeHook } from './dom-mutations.js';
 import { physicalParent } from './dom-state.js';
 // Script preparation is a DOM mutation step, not an event-loop poll. Batch
 // multi-node operations so all inserted scripts are prepared before any
@@ -20,6 +20,8 @@ const host = shadowHosts.get.bind(shadowHosts);
 const rememberHost = shadowHosts.set.bind(shadowHosts);
 const lowerASCII = value => value.replace(/[A-Z]/g, c => c.toLowerCase());
 export const scriptShadowHost = host;
+let mutationBatch = callback => callback();
+export function withScriptMutationBatch(callback) { return mutationBatch(callback); }
 
 export function scriptAttribute(node, name) {
   for (let attr = node[NEXT]; attr && attr.nodeType === 2; attr = attr[NEXT]) {
@@ -60,6 +62,8 @@ export function installScriptMutations(L, changed) {
     candidates = [];
     changed(nodes);
   };
+  mutationBatch = callback => { depth++; try { return callback(); } finally { finish(); } };
+  installInsertedTreeHook(collect);
   const wrap = (proto, key, after) => {
     const original = proto[key];
     if (typeof original !== 'function') return;

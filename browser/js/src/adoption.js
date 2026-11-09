@@ -2,13 +2,11 @@ import { backendList } from './collection-data.js';
 import { nodeInfo, nodeDocument, physicalParent, shadowInfo } from './dom-state.js';
 import { attributeInfo } from './attribute-state.js';
 import { attributeMethods } from './attributes.js';
-import { removeNativeNode } from './dom-mutations.js';
+import { removeNativeNode, installTreeAdoption } from './dom-mutations.js';
 import { setNodeDocument } from './attribute-state.js';
 // Linkedom moves node ranges without adopting them. Use its private ranges
 // and shadow-root/element records so attributes and closed trees move too.
-import { END, NEXT, PREV } from '../node_modules/linkedom/esm/shared/symbols.js';
-import { getEnd } from '../node_modules/linkedom/esm/shared/utils.js';
-import { remove as unlink } from '../node_modules/linkedom/esm/mixin/child-node.js';
+import { END, NEXT } from '../node_modules/linkedom/esm/shared/symbols.js';
 import { shadowRoots } from '../node_modules/linkedom/esm/shared/shadow-roots.js';
 import { customElements } from '../node_modules/linkedom/esm/interface/custom-element-registry.js';
 import { templateContent, templateOwner } from './templates.js';
@@ -17,11 +15,6 @@ import { enqueueReaction, withReactions, setReactionErrorHandler } from './ce-re
 import { elementDefinition } from './element-state.js';
 import { installCEHooks } from './ce-hooks.js';
 import { shadowTreeNodes } from './shadow-tree.js';
-
-// Takes any node out of its parent, as Element and CharacterData's own
-// remove() do: an element ends at its end tag, text and comments at
-// themselves. Element.prototype.remove alone breaks on a text node.
-const detach = (node) => unlink(node[PREV], node, getEnd(node)[NEXT]);
 
 const shadowRoot = shadowRoots.get.bind(shadowRoots);
 const customElement = customElements.get.bind(customElements);
@@ -49,8 +42,6 @@ function treeNodes(root, document) {
 }
 
 export function installAdoption(Element, shareObservers, onError, DOMError) {
-  const parent = Object.getPrototypeOf(Element.prototype);
-  const insert = parent.insertBefore;
   const connected = Object.getOwnPropertyDescriptor(Element.prototype, 'isConnected').get;
   const connectedNode = Function.prototype.call.bind(connected);
   // Physical ranges include end markers, which are not DOM Nodes.
@@ -66,9 +57,12 @@ export function installAdoption(Element, shareObservers, onError, DOMError) {
     if (!definition) return;
     enqueueReaction(node, () => withReactions(() => upgradeInserted(node, isConnected, enqueue, onError, true, definition, DOMError)));
   };
-  nativeAdopter = (document,node) => withReactions(() => {
+  nativeAdopter = (document,node,internal = false) => withReactions(() => {
     if (nodeInfo(node)?.kind === 9) throw new DOMError('Documents cannot be adopted','NotSupportedError');
+    if (internal && shadowInfo(node)) return node;
     if (shadowInfo(node)) throw new DOMError('Shadow roots cannot be adopted','HierarchyRequestError');
+    shareObservers(document); shareObservers(nodeDocument(node));
+    if (internal && nodeDocument(node) === document && (!node[END] || node[END].ownerDocument === document)) { if (physicalParent(node)) removeNativeNode(node); return node; }
     const nodes = treeNodes(node,document), oldDocuments = backendList();
     for (let i = 0; i < nodes.length; i++) oldDocuments[i] = nodeDocument(nodes[i].node);
     const attr = attributeInfo(node);
@@ -98,57 +92,10 @@ export function installAdoption(Element, shareObservers, onError, DOMError) {
       }
     }
   });
-  parent.insertBefore = function (node, before = null) {
-    // Preserve the native no-op and self-insertion error. All ParentNode
-    // and ChildNode insertion methods converge on this operation.
-    if (node === before || node === this) return insert.call(this, node, before);
-    const document = nodeDocument(this);
-    shareObservers(document);
-    shareObservers(nodeDocument(node));
-    if (!document || !node) {
-      return insert.call(this, node, before);
-    }
-    const nodes = treeNodes(node, document);
-    // A native XML setter/import can update just the public root owner,
-    // leaving its end marker, attributes and descendants in the old document.
-    if (nodeDocument(node) === document && (!node[END] || node[END].ownerDocument === document)) {
-      const result = insert.call(this, node, before);
-      for (const { node } of nodes) if (isConnected(node)) queueUpgrade(node);
-      return result;
-    }
-    const reactions = [];
-    for (const { node: descendant } of nodes) {
-      const info = customElement(descendant);
-      if (info) reactions.push({ node: descendant, info, oldDocument: nodeDocument(descendant), wasConnected: connected.call(descendant) });
-    }
-    const oldParent = physicalParent(node);
-    let inserting = false;
-    try {
-      // Queue reactions across removal/adoption/insertion; callbacks must
-      // observe the completed DOM operation. Removal observers still use
-      // the old owner document before ownership changes.
-      for (const reaction of reactions) reaction.info.connected = false;
-      if (oldParent) detach(node);
-      for (const { node: descendant, document: owner } of nodes) { shareObservers(owner); setNodeDocument(descendant, owner); }
-      for (const reaction of reactions) reaction.info.connected = true;
-      inserting = true;
-      return insert.call(this, node, before);
-    } finally {
-      const removed = oldParent && physicalParent(node) !== oldParent;
-      for (const reaction of reactions) {
-        reaction.isConnected = connected.call(reaction.node);
-        reaction.newDocument = nodeDocument(reaction.node);
-        reaction.info.connected = reaction.isConnected;
-      }
-      for (const reaction of reactions) {
-        const { node: element, oldDocument, newDocument, wasConnected, isConnected } = reaction;
-        if (wasConnected && removed) enqueue(element, 'disconnectedCallback');
-        if (newDocument !== oldDocument) enqueue(element, 'adoptedCallback', [oldDocument, newDocument]);
-        if (inserting && isConnected) enqueue(element, 'connectedCallback');
-      }
-      for (const { node } of nodes) if (inserting && isConnected(node)) queueUpgrade(node);
-    }
-  };
+  installTreeAdoption((document,node) => nativeAdopter(document,node,true), root => {
+    const nodes = shadowTreeNodes(root);
+    for (let i = 0; i < nodes.length; i++) if (isConnected(nodes[i])) queueUpgrade(nodes[i]);
+  });
   // cloneNode/importNode queue upgrades as they create elements, then run
   // them only after the complete detached copy has its attributes/children.
   const upgradeCopies = (nodes, registry) => withReactions(() => {

@@ -483,7 +483,7 @@ fn documents_created_by_domparser_share_namespace_validation_and_case_rules() {
 }
 
 #[test]
-fn inserting_a_foreign_subtree_adopts_elements_attributes_text_and_fragments() {
+fn inserting_a_foreign_subtree_adopts_descendants_and_retains_source_fragment_owner() {
     let (_, report) = visit(
         r#"<body><script>
         const foreign=new DOMParser().parseFromString('','text/html');
@@ -497,7 +497,8 @@ fn inserting_a_foreign_subtree_adopts_elements_attributes_text_and_fragments() {
             else if(['before','after','replaceWith'].includes(method))anchor[method](root);
             else if(method==='insertAdjacentElement')anchor.insertAdjacentElement('afterend',root);
             else target[method](root);
-            console.log(method,[root,child,text,comment,child.attributes[0],...(method==='fragment'?[fragment]:[])].every(n=>n.ownerDocument===document));
+            console.log(method,[root,child,text,comment,child.attributes[0]].every(n=>n.ownerDocument===document));
+            if(method==='fragment')console.log('source fragment',fragment.ownerDocument===foreign,fragment.childNodes.length===0);
         }
     </script>"#,
     );
@@ -515,7 +516,8 @@ fn inserting_a_foreign_subtree_adopts_elements_attributes_text_and_fragments() {
             "replaceWith true",
             "replaceChildren true",
             "insertAdjacentElement true",
-            "fragment true"
+            "fragment true",
+            "source fragment true true"
         ]
     );
 }

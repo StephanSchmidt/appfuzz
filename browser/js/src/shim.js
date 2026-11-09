@@ -66,6 +66,7 @@ import { installTreeAccessors } from './tree-accessors.js';
 import { installSelectorPlatform } from './selector-engine.js';
 import { NodeList, HTMLCollection, NamedNodeMap, installCollections } from './collections.js';
 import { scriptRecord, rememberScript, scriptOwner } from './script-state.js';
+import { installMultiNode } from './multi-node.js';
 import { installScriptMutations, scriptAttribute, scriptText, scriptShadowHost } from './script-mutations.js';
 import { backendList } from './collection-data.js';
 import { beginHTML } from './html-parser.js';
@@ -1395,6 +1396,7 @@ function installWindow(doc) {
   installSerialization(L);
   installScriptMutations(L, scriptsChanged);
   installReactionBoundaries(L);
+  installMultiNode(L);
 
   doc.write = doc.writeln = (...a) => { unmodelled('document.write'); push(S.code, { where: 'document.write', code: clip(a.join(''), 2000), gesture: S.gesture }); toMarkup('document.write', a.join('')); };
 
