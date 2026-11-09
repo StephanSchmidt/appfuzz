@@ -23,14 +23,14 @@ impl exports::bench::web::handler::Guest for A {
         let names: Vec<String> = items::all().iter().take(20).map(|it| js(&it.name)).collect();
         let body = format!(
             "<p>Results for {}</p><ul id=\"list\"></ul>\
-             <script>window.app = {{ q: {}, names: [{}] }};</script>\
+             <script nonce=bench-init>window.app = {{ q: {}, names: [{}] }};</script>\
              <script src=\"https://cdn.example.net/lit.js\" integrity=\"sha384-oqVuAfXRKap7fdgcCY5uykM6+R9GqQ8K/uxy9rx7HNQlGYl1kPzQho1wx4JwY8wC\" crossorigin=\"anonymous\"></script>\
              <script type=\"module\" src=\"/static/app.js\"></script>",
             esc(q),
             js(q),
             names.join(",")
         );
-        let csp = "default-src 'self'; script-src 'self' cdn.example.net; img-src 'self' data:; form-action 'self'; base-uri 'none'";
+        let csp = "default-src 'self'; script-src 'self' cdn.example.net 'nonce-bench-init'; img-src 'self' data:; form-action 'self'; base-uri 'none'";
         Response { status: 200, body, headers: vec![("content-type".into(), "text/html".into()), ("content-security-policy".into(), csp.into())] }
     }
 }

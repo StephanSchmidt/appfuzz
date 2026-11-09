@@ -1,3 +1,5 @@
+import { installNonceAPI, cryptographicNonce } from './nonce-state.js';
+import { checkCSP, installCSPReporter } from './document-csp.js';
 import { rememberDocumentURL, documentURL } from './document-state.js';
 import { documentBaseURL } from './document-urls.js';
 import { installCharacterData } from './character-data.js';
@@ -6,14 +8,14 @@ import { MutationRecord, installMutationObserverReporter } from './mutation-obse
 import { installSelectProperties, resetSelect, chooseSelectOption } from './select-state.js';
 import { requireParser } from './parser-state.js';
 import { serializeDocument } from './document-body.js';
-import { installAttributes } from './attributes.js';
+import { installAttributes, attributeMethods } from './attributes.js';
 import { parseNetworkDocument } from './network-documents.js';
 import { XMLHttpRequest, XMLHttpRequestEventTarget, XMLHttpRequestUpload, installXHRPlatform } from './xml-http-request.js';
 import { platformConstructor } from './constructors.js';
 import { FileReader, installFileReaderTasks } from './file-reader.js';
 import { installFileInputs } from './file-inputs.js';
 import { DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch, installPayloadTasks, serializeFileList } from './event-payloads.js';
-import { UIEvent, MouseEvent, PointerEvent, WheelEvent, KeyboardEvent, FocusEvent, InputEvent, SubmitEvent, ProgressEvent, HashChangeEvent, PopStateEvent, ErrorEvent, PromiseRejectionEvent, ToggleEvent, StorageEvent, TransitionEvent, AnimationEvent, CompositionEvent, ClipboardEvent, TouchEvent, TouchList, DragEvent, isErrorEvent, errorEventData, createNativeUIEvent, registerStorageArea } from './event-interfaces.js';
+import { UIEvent, MouseEvent, PointerEvent, WheelEvent, KeyboardEvent, FocusEvent, InputEvent, SubmitEvent, ProgressEvent, HashChangeEvent, PopStateEvent, ErrorEvent, PromiseRejectionEvent, ToggleEvent, StorageEvent, SecurityPolicyViolationEvent, markCSPEventLocation, TransitionEvent, AnimationEvent, CompositionEvent, ClipboardEvent, TouchEvent, TouchList, DragEvent, isErrorEvent, errorEventData, createNativeUIEvent, registerStorageArea } from './event-interfaces.js';
 import { extractMime } from './mime-types.js';
 import { Blob, File, blobRecord, requireBlob, blobText, blobBuffer, blobDataURL, fileFromBlob, emptyFile, cloneBlob, installBlobPlatform, byteCount, bufferOfBytes, textBytes, decodeBytes, blobBytes, blobFromBytes, copyBodyBytes, copyBytesBuffer, bufferSourceKind, bufferSourceBytes, wireBytes, joinBytes } from './blobs.js';
 import { postMessage, installWindowMessages } from './window-messages.js';
@@ -93,6 +95,7 @@ for (const [name, C] of Object.entries(L)) if (/^[A-Z]/.test(name) && typeof C =
   if (typeof backing === 'function' && backing !== C) nativeDefine(backing, 'name', { __proto__: null, value: name, configurable: true });
 }
 installAttributes();
+installNonceAPI(L,(node,name,value) => nativeApply(attributeMethods.setAttribute,node,[name,value]),domString);
 installDOMMutations(L);
 installCharacterData(L);
 installDOMImplementation(L,withScriptMutationBatch);
@@ -100,6 +103,7 @@ installElementURLs(L);
 const DOMParser = platformConstructor(L.DOMParser, 'DOMParser');
 installCollections();
 const nativeLower = Function.prototype.call.bind(String.prototype.toLowerCase);
+const diagnosticWellFormed = Function.prototype.call.bind(String.prototype.toWellFormed);
 const nativeString = String, diagnosticSlice = Function.prototype.call.bind(String.prototype.slice);
 
 const S = {
@@ -133,10 +137,11 @@ const error = (where, value, notify = true) => {
 installMutationObserverReporter(value => error('MutationObserver', value));
 const rejections = new Map(), notifiedRejections = new WeakMap();
 const notified = notifiedRejections.get.bind(notifiedRejections), rememberNotified = notifiedRejections.set.bind(notifiedRejections), forgetNotified = notifiedRejections.delete.bind(notifiedRejections);
+const NativeMap = Map;
 const mapGet = Function.prototype.call.bind(Map.prototype.get), mapSet = Function.prototype.call.bind(Map.prototype.set), mapDelete = Function.prototype.call.bind(Map.prototype.delete), mapEach = Function.prototype.call.bind(Map.prototype.forEach);
 const nativeQueueMicrotask = G.__native.queueMicrotask;
 const nativeResolve = Promise.resolve.bind(Promise), nativeThen = Function.prototype.call.bind(Promise.prototype.then);
-const nativeApply = Reflect.apply, nativeConstruct = Reflect.construct, NativeTypeError = TypeError;
+const nativeApply = Reflect.apply, nativeConstruct = Reflect.construct, NativeTypeError = TypeError, NativeEvalError = EvalError;
 const nativeMax = Math.max, nativeFloor = Math.floor, nativeImul = Math.imul, nativeTrunc = Math.trunc, NativeRangeError = RangeError;
 const mapSize = Function.prototype.call.bind(Object.getOwnPropertyDescriptor(Map.prototype, 'size').get);
 const setEach = Function.prototype.call.bind(Set.prototype.forEach), setHas = Function.prototype.call.bind(Set.prototype.has);
@@ -154,7 +159,7 @@ installBlobPlatform({ now: () => S.now });
 let browserHost = null;
 const host = () => browserHost;
 const toMarkup = (where, value) => { const h = host(); if (h) h.html(String(where), String(value)); };
-const toCode = (where, value) => { const h = host(); if (h) h.code(String(where), String(value)); };
+const toCode = (where, value) => { const h = host(); if (h) h.code(nativeString(where), diagnosticWellFormed(nativeString(value))); };
 
 // --- Determinism: seeded randomness and a virtual clock --------------------
 
@@ -189,53 +194,51 @@ G.performance = {
   getEntries: () => [], getEntriesByName: () => [], getEntriesByType: () => [],
 };
 
-function runCode(code, where) {
-  push(S.code, { where, code: clip(code, 2000), gesture: S.gesture });
-  toCode(where, code);
-  try { return realEval(code); } catch (e) { error(where, e); }
+// Reports cross a UTF-8 boundary. Keep lone UTF-16 units as explicit evidence
+// beside a readable scalar-value preview, without changing the executed source.
+function recordCode(where,source) {
+  const preview = clip(source,2000), code = diagnosticWellFormed(preview);
+  const entry = { where, code, gesture: S.gesture };
+  if (code !== preview) {
+    const units = backendList();
+    for (let i = 0; i < preview.length; i++) units[units.length] = charCode(preview,i);
+    entry.code_utf16 = units;
+  }
+  push(S.code,entry);
 }
 
-// eval and Function build code from text: both are code sinks. The shim's
-// own code uses the real ones. A wrapped eval is an indirect eval: code
-// that relies on a direct eval seeing its local variables breaks.
-const realEval = G.eval;
-const RealFunction = Function;
-// A method keeps the name `eval`, which a module may not declare.
-G.eval = {
-  eval(code) {
-    if (typeof code !== 'string') return code;
-    push(S.code, { where: 'eval', code: clip(code, 2000), gesture: S.gesture });
-    toCode('eval', code);
-    return realEval(code);
-  },
-}.eval;
-const codeOf = (a) => (a.length ? String(a[a.length - 1]) : '');
-const watched = (C, where) => {
-  const p = new Proxy(C, {
-    apply(t, self, a) { toCode(where, codeOf(a)); return Reflect.apply(t, self, a); },
-    construct(t, a, nt) { toCode(where, codeOf(a)); return Reflect.construct(t, a, nt === p ? t : nt); },
-  });
-  return p;
-};
-G.Function = watched(RealFunction, 'Function');
-Object.defineProperty(RealFunction.prototype, 'constructor', { value: G.Function, writable: true, configurable: true });
-// Reached only through a function's prototype (Alpine builds its
-// expressions with AsyncFunction).
-for (const [f, where] of [[async function () {}, 'AsyncFunction'], [function* () {}, 'GeneratorFunction'], [async function* () {}, 'AsyncGeneratorFunction']]) {
-  const proto = Object.getPrototypeOf(f);
-  Object.defineProperty(proto, 'constructor', { value: watched(proto.constructor, where), writable: true, configurable: true });
+function runCode(code, where) {
+  recordCode(where,code);
+  toCode(where, code);
+  try { return compileClassicScript(code,urlPart(S.url,'href'))(); } catch (e) { error(where, e); }
 }
+
+// The engine observes string compilation without replacing eval's identity
+// or Function-family constructors. Direct eval retains its lexical bindings.
+const integrityMatches = G.__native.cspIntegrity, integrityDenied = nativeCreate(null);
+const compileClassicScript = G.__native.compileClassicScript;
+G.__native.setStringCompilationHook((source,kind,body) => {
+  const sample = kind ? typeof body === 'string' ? body : '' : source;
+  if (!checkCSP(S.document,'eval','','',sample)) throw new NativeEvalError('Content Security Policy blocks string compilation');
+  const where = kind === 1 ? 'Function' : kind === 2 ? 'GeneratorFunction' : kind === 3 ? 'AsyncFunction' : kind === 4 ? 'AsyncGeneratorFunction' : 'eval';
+  recordCode(where,source);
+  toCode(where,source);
+});
+function compileHandler(code) { return compileClassicScript('(function(event){\n'+code+'\n})',urlPart(S.url,'href'))(); }
 
 function timerDelay(timeout, nesting) {
   return nativeMax(0, timeout, S.throttle, nesting > 5 ? 4 : 0);
 }
 function addTimer(fn, delay, args, repeat, kind, clamp = true) {
+  const id = ++S.seq;
   if (typeof fn !== 'function') {
     const code = nativeString(fn);
-    fn = () => runCode(code, kind);
+    if (!checkCSP(S.document,'eval','','',code)) return id;
+    toCode(kind,code); recordCode(kind,code);
+    try { fn = compileClassicScript(code,urlPart(S.url,'href')); } catch (e) { fn = () => error(kind,e); }
   }
   const timeout = clamp ? nativeMax(0, delay) : delay;
-  const id = ++S.seq, nesting = clamp ? S.nesting + 1 : 0;
+  const nesting = clamp ? S.nesting + 1 : 0;
   mapSet(S.timers, id, { id, order: ++S.timerOrder, due: S.now + timerDelay(timeout, clamp ? S.nesting : 0), fn, args, repeat, timeout, nesting, kind });
   return id;
 }
@@ -399,7 +402,7 @@ function queueDetailsToggle(node, wasOpen, isOpen) {
 }
 Object.assign(G, {
   UIEvent, MouseEvent, PointerEvent, WheelEvent, KeyboardEvent, FocusEvent, InputEvent, SubmitEvent, MessageEvent, ProgressEvent,
-  HashChangeEvent, PopStateEvent, ErrorEvent, PromiseRejectionEvent, StorageEvent, TransitionEvent, AnimationEvent,
+  HashChangeEvent, PopStateEvent, ErrorEvent, PromiseRejectionEvent, StorageEvent, SecurityPolicyViolationEvent, TransitionEvent, AnimationEvent,
   CompositionEvent, ClipboardEvent, TouchEvent, TouchList, DragEvent, ToggleEvent,
   DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch,
 });
@@ -428,8 +431,22 @@ installEventHooks({
 
 // Content attributes activate the same handler slot as IDL assignments at
 // mutation time; compilation stays lazy until a getter or invocation needs it.
+installCSPReporter((doc,element,violation,disposition) => {
+  const uri = documentURL(doc), fragment = stringIndex(uri,'#'), sourceFile = fragment < 0 ? uri : stringSlice(uri,0,fragment), status = S.responseStatus ?? 200;
+  addTimer(() => {
+    const target = element && focusDocument(element) === doc ? element : doc;
+    const event = createNativeUIEvent(SecurityPolicyViolationEvent,'securitypolicyviolation',{
+      __proto__: null, bubbles: true, composed: true, cancelable: false,
+      documentURI: sourceFile, referrer: '', blockedURI: violation[2],
+      effectiveDirective: violation[1], violatedDirective: violation[1], originalPolicy: violation[0],
+      disposition, sourceFile, sample: violation[3], statusCode: status, lineNumber: 0, columnNumber: 0,
+    });
+    markCSPEventLocation(event,unmodelled);
+    fireEvent(target,event);
+  },0,[],false,'csp-violation',false);
+});
 const handlerNames = Object.getOwnPropertyNames(L.HTMLElement.prototype).filter(name => name.startsWith('on'));
-for (const type of ['wheel', 'beforeinput', 'formdata', 'reset', 'message', 'messageerror', 'pageshow', 'pagehide', 'hashchange', 'popstate', 'resize', 'scroll', 'focusin', 'focusout']) {
+for (const type of ['wheel', 'beforeinput', 'formdata', 'reset', 'message', 'messageerror', 'pageshow', 'pagehide', 'hashchange', 'popstate', 'resize', 'scroll', 'focusin', 'focusout', 'securitypolicyviolation']) {
   if (!handlerNames.includes('on' + type)) handlerNames.push('on' + type);
 }
 const handlerTypes = new Set(handlerNames), isHandlerName = handlerTypes.has.bind(handlerTypes);
@@ -443,10 +460,11 @@ installEventAttributeHook((node, name, code) => {
   if (nodeInfo(node)?.kind !== 1 || !isHandlerName(name)) return;
   const type = name.slice(2);
   setContentHandler(node, type, code == null ? null : () => {
+    if (!checkCSP(nodeDocument(node),'handler','','',code,false,node)) return null;
     try {
-      push(S.code, { where: 'handler:on' + type, code: clip(code, 2000), gesture: S.gesture });
+      recordCode('handler:on'+type,code);
       toCode('handler:on' + type, code);
-      return new RealFunction('event', code);
+      return compileHandler(code);
     } catch (e) { error('handler:on' + type, e); return null; }
   });
 });
@@ -775,6 +793,8 @@ function networkAnswer(status, body, rawHeaders, url, acceptCookies, delayed, la
 function respond(method, url, body, headers, kind, credentials = 'same-origin', delayed = false) {
   const u = new URL(nativeString(url), apiBase());
   setURLPart(u,'hash','');
+  const destination = kind === 'script' ? null : kind === 'serviceWorker' || kind === 'Worker' || kind === 'SharedWorker' ? 'worker' : 'connect';
+  if (destination && !checkCSP(S.document,destination,urlPart(u,'href'))) return { __proto__: null, status: 0, error: 'Content Security Policy blocked the request', body: [], headers: nativeCreate(null), url: urlPart(u,'href'), latency: 0, acceptCookies: false, setCookies: [] };
   const own = urlPart(u, 'origin') === S.origin;
   const include = credentials === 'include' || (credentials === 'same-origin' && own);
   const filtered = nativeCreate(null), raw = nativeEntries(headers || {});
@@ -831,6 +851,7 @@ G.fetch = function fetch(input, init = undefined) {
       settled = true; unsubscribe();
       if (answer.error != null) { reject(new NativeTypeError('Failed to fetch')); return; }
       try {
+        if (!checkCSP(S.document,'connect',answer.url)) { reject(new NativeTypeError('Failed to fetch')); return; }
         const noBody = req.method === 'HEAD' || answer.status === 204 || answer.status === 205 || answer.status === 304;
         const response = nativeResponse(noBody ? null : answer.body, { status: answer.status, statusText: '', headers: headersFromConverted(nativeEntries(answer.headers), 'immutable'), url: answer.url, redirected: false, type: 'basic' });
         requireBody(response).signal = req.signal;
@@ -845,7 +866,7 @@ installXHRPlatform({
   enqueue: (fn, delay) => addTimer(fn, delay, [], false, 'xhr', false), cancel: id => mapDelete(S.timers, id),
   checkpoint: messageListenerCheckpoint, respond, receive, convertBody: body => nodeInfo(body)?.kind === 9 ? { __proto__: null, kind: 'document', value: body } : convertBody(body),
   extractBody: body => body.kind === 'document' ? { __proto__: null, bytes: textBytes(serializeDocument(body.value)), type: documentMode(body.value) !== undefined ? 'text/html;charset=UTF-8' : 'application/xml;charset=UTF-8' } : extractConvertedBody(body), entries: nativeEntries,
-  document: parseNetworkDocument,
+  document: parseNetworkDocument, responseAllowed: url => checkCSP(S.document,'connect',url),
 });
 Object.assign(G, { XMLHttpRequest, XMLHttpRequestEventTarget, XMLHttpRequestUpload });
 
@@ -1032,7 +1053,7 @@ function navigate(target, how, extra = {}) {
   if (urlPart(u, 'protocol') === 'javascript:') {
     let code = urlPart(u, 'href').slice('javascript:'.length);
     try { code = decodeURIComponent(code); } catch {}
-    runCode(code, 'javascript-url');
+    if (checkCSP(S.document,'handler','','',code)) runCode(code, 'javascript-url');
     return;
   }
   const strip = (h) => h.split('#')[0];
@@ -1239,7 +1260,7 @@ function installWindow(doc) {
     hardwareConcurrency: 4, maxTouchPoints: 0, webdriver: false, pdfViewerEnabled: false,
     sendBeacon(url, data) {
       const r = respond('POST', url, bodyBytes(data), {}, 'beacon', 'include', true);
-      if (r.acceptCookies && r.setCookies.length) addTimer(() => receive(r), r.latency, [], false, 'beacon-response', false);
+      if (r.error == null) addTimer(() => { receive(r); checkCSP(S.document,'connect',r.url); }, r.latency, [], false, 'beacon-response', false);
       return true;
     },
     clipboard: {
@@ -1371,6 +1392,11 @@ function installWindow(doc) {
     });
     return contextualFragment.call(this, markup);
   };
+  const scriptIntegrity = {
+    get integrity() { if (htmlName(this) !== 'script') throw new NativeTypeError('An HTMLScriptElement is required'); return nativeApply(attributeMethods.getAttribute,this,['integrity']) || ''; },
+    set integrity(value) { if (htmlName(this) !== 'script') throw new NativeTypeError('An HTMLScriptElement is required'); value = runDOMCallback(() => domString(value)); withReactions(() => nativeApply(attributeMethods.setAttribute,this,['integrity',value])); },
+  };
+  define(L.HTMLScriptElement.prototype,'integrity',Object.getOwnPropertyDescriptor(scriptIntegrity,'integrity'));
   const T = L.HTMLTemplateElement.prototype;
   const noModule = Object.getOwnPropertyDescriptor(L.HTMLScriptElement.prototype, 'nomodule');
   define(L.HTMLScriptElement.prototype, 'noModule', noModule);
@@ -1754,10 +1780,12 @@ function prepareScript(s) {
   record.preparationDocument = scriptOwner(s);
   if (document !== S.document || (kind === 'classic' && scriptAttribute(s, 'nomodule') != null && record.identity.namespace === HTML_NS)) return null;
   if (kind === 'importmap' || kind === 'speculationrules') { unmodelled('script:' + kind); return null; }
+  const nonce = cryptographicNonce(s);
+  if (src == null && !checkCSP(document,'inline','',nonce,code,!!record.parserInserted,s)) return null;
   const n = scriptN++;
   let prepared;
   if (src == null) {
-    push(S.code, { where: 'script', code: clip(code, 2000), gesture: S.gesture });
+    recordCode('script',code);
     const baseURL = documentBaseURL(scriptOwner(s));
     prepared = { kind, url: kind === 'module' ? baseURL.split('#')[0] + '#inline-' + n : urlPart(S.url, 'href'), metaURL: baseURL, code, inline: true };
   } else {
@@ -1765,8 +1793,13 @@ function prepareScript(s) {
     try { url = urlPart(new URL(src, documentBaseURL(scriptOwner(s))), 'href'); }
     catch { scriptError(s); return null; }
     if (src === '' && record.identity.namespace === HTML_NS) { scriptError(s); return null; }
-    prepared = { kind, url, code: file(url), inline: false };
+    const integrity = scriptAttribute(s,'integrity') || '';
+    if (!checkCSP(document,'script',url,nonce,integrity,!!record.parserInserted,s)) { scriptError(s); return null; }
+    const loaded = file(url,nonce,!!record.parserInserted,integrity,true);
+    if (loaded === integrityDenied) { scriptError(s); return null; }
+    prepared = { kind, url, code: loaded, inline: false };
   }
+  if (kind === 'module' && mapGet(S.moduleNonces,prepared.url) === undefined) mapSet(S.moduleNonces,prepared.url,nonce);
   record.prepared = prepared;
   return prepared;
 }
@@ -1798,17 +1831,23 @@ function scriptsChanged(nodes) {
 }
 
 // A script's code: what its URL answers, or null when it failed.
-function file(url) {
+function file(url,nonce = '',parser = false,integrity = '',checked = false) {
+  if (!checked) nonce = mapGet(S.moduleNonces,url) ?? nonce;
+  if (!checked && !checkCSP(S.document,'script',url,nonce,integrity,parser)) return null;
   const u = new URL(url);
   const own = urlPart(u, 'origin') === S.origin;
   const r = respond('GET', urlPart(u, 'href'), null, {}, 'script', 'same-origin', true);
   if (host()) {
     S.now += r.latency;
     receive(r);
-    return r.error == null && r.status >= 200 && r.status < 300 ? decodeBytes(r.body) : null;
+    if (r.error == null && !checkCSP(S.document,'script',r.url,nonce,integrity,parser)) return integrityDenied;
+    if (r.error != null || r.status < 200 || r.status >= 300) return null;
+    if (integrity && !integrityMatches(bufferOfBytes(r.body),integrity)) return integrityDenied;
+    return decodeBytes(r.body);
   }
   const body = own ? S.files[urlPart(u, 'pathname')] : S.files[urlPart(u, 'href')];
-  return body == null ? null : body;
+  if (body == null) return null;
+  return integrity && !integrityMatches(bufferOfBytes(textBytes(body)),integrity) ? integrityDenied : body;
 }
 
 let scriptN = 0;
@@ -1900,6 +1939,7 @@ G.__af = {
     S.start = S.now = s.now ?? now ?? RealDate.UTC(2026, 10, 2, 10);
     S.horizon = S.now;
     seed = s.seed ?? hostSeed ?? 1;
+    S.moduleNonces = new NativeMap();
     S.files = s.files || {};
     S.responses = s.responses || {};
     S.latency = s.latency_ms ?? 5;
@@ -1912,8 +1952,8 @@ G.__af = {
       for (let i = 1; S.cookies.has(name); i++) name = base + '_' + i;
       S.cookies.seed(name, s.probe_cookie.value, urlPart(S.url, 'href'));
     }
-    const parsing = beginHTML({ __proto__: null, url: () => urlPart(S.url,'href'), policies: s.csp || [], create: (owner,identity,is) => S.parserCreate(owner,identity,is) });
-    const doc = parsing.doc; S.document = doc; installWindow(doc);
+    const parsing = beginHTML({ __proto__: null, url: () => urlPart(S.url,'href'), policies: s.csp || [], reportOnly: s.csp_report_only || [], create: (owner,identity,is) => S.parserCreate(owner,identity,is) });
+    const doc = parsing.doc; S.responseStatus = s.status === undefined ? 200 : s.status; S.document = doc; installWindow(doc);
     parserDeferred = backendList(); parserLater = backendList();
     documentParser = parsing.start(parserScript);
     return resumeParser(s.html || '');
@@ -1925,7 +1965,9 @@ G.__af = {
   newScripts,
   resolve(spec, base) {
     if (!/^(\.{0,2}\/|[a-zA-Z][a-zA-Z0-9+.-]*:)/.test(spec)) throw new TypeError(`Failed to resolve module specifier "${spec}"`);
-    return urlPart(new URL(spec, base), 'href');
+    const url = urlPart(new URL(spec,base),'href'), inherited = mapGet(S.moduleNonces,base);
+    if (inherited !== undefined && mapGet(S.moduleNonces,url) === undefined) mapSet(S.moduleNonces,url,inherited);
+    return url;
   },
   file,
   error(where, e, notify = true) { error(where, e, notify); },

@@ -17,6 +17,7 @@ export const shadowInfo = shadows.get.bind(shadows);
 export const rememberShadow = shadows.set.bind(shadows);
 export const rememberDocumentWindow = windows.set.bind(windows);
 const windowFor = windows.get.bind(windows), shadowFor = shadowRoots.get.bind(shadowRoots);
+export function browsingDocument(value) { let root = physicalRoot(value); while (shadowInfo(root)) root = physicalRoot(shadowInfo(root).host); return windowFor(root) ? root : null; }
 export function physicalParent(value) { return node(value)?.parent || null; }
 export function rememberNodeParent(value, parent) {
   const data = node(value);

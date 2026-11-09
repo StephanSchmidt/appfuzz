@@ -32,7 +32,7 @@ export function parseHTML(markup, scriptingEnabled, active = null) {
   const tree = parse(String(markup), { scriptingEnabled });
   const doc = nativeParse.call(new DOMParser(), '', 'text/html');
   rememberDocumentScripting(doc, scriptingEnabled);
-  if (active) { rememberDocumentURL(doc, active.url); initializeDocumentCSP(doc,active.policies); }
+  if (active) { rememberDocumentURL(doc, active.url); initializeDocumentCSP(doc,active.policies,active.reportOnly || []); }
   appendTree(doc, doc, tree.childNodes, !scriptingEnabled);
   const mode = tree.mode === 'quirks' ? 'BackCompat' : 'CSS1Compat';
   rememberDocumentMode(doc, mode);

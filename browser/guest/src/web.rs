@@ -7,6 +7,7 @@
 use rquickjs::convert::List;
 use rquickjs::function::Constructor;
 use rquickjs::{ArrayBuffer, Ctx, Function, Object, Result, Value, qjs};
+use std::ffi::CString;
 use url::{Url, form_urlencoded, quirks};
 
 pub fn install(ctx: &Ctx<'_>) -> Result<()> {
@@ -26,6 +27,29 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
         "cspAllowsBase",
         Function::new(ctx.clone(), |policy: String, candidate: String, document: String| crate::csp::allows_base(&policy, &candidate, &document))?,
     )?;
+    n.set(
+        "cspCheck",
+        Function::new(ctx.clone(), |policy: String, kind: String, candidate: String, origin: String, nonce: String, source: String, parser: bool| {
+            crate::csp::check(&policy, &kind, &candidate, &origin, &nonce, &source, parser)
+        })?,
+    )?;
+    n.set(
+        "cspIntegrity",
+        Function::new(ctx.clone(), |bytes: ArrayBuffer<'_>, metadata: String| {
+            // SAFETY: the rooted buffer is borrowed only while Rust hashes it;
+            // policy evaluation never calls back into JavaScript.
+            unsafe { bytes.as_bytes() }.is_some_and(|bytes| crate::csp::integrity_matches(&metadata, bytes))
+        })?,
+    )?;
+    n.set(
+        "setStringCompilationHook",
+        Function::new(ctx.clone(), |ctx: Ctx<'_>, hook: Function<'_>| {
+            // SAFETY: this context is locked and live. QuickJS duplicates the
+            // callback and traces/releases it with its owning context.
+            unsafe { qjs::JS_SetStringCompilationHook(ctx.as_raw().as_ptr(), hook.as_value().as_raw()) };
+        })?,
+    )?;
+    n.set("compileClassicScript", Function::new(ctx.clone(), compile_classic_script)?)?;
     n.set("urlSet", Function::new(ctx.clone(), url_set_js)?)?;
     n.set("formParse", Function::new(ctx.clone(), form_parse_js)?)?;
     n.set("formSerialize", Function::new(ctx.clone(), form_serialize)?)?;
@@ -51,6 +75,56 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     n.set("isDOMException", Function::new(ctx.clone(), move |value: Value<'_>| class_id(&value) == exception_class)?)?;
     install_clone_kinds(ctx, &n)?;
     ctx.globals().set("__native", n)
+}
+
+// Engine-owned function data keeps the compiled script visible to QuickJS's
+// collector; no Rust closure captures a JavaScript value or context cycle.
+unsafe extern "C" fn execute_classic_script(
+    ctx: *mut qjs::JSContext,
+    _this: qjs::JSValue,
+    _argc: std::ffi::c_int,
+    _argv: *mut qjs::JSValue,
+    _magic: std::ffi::c_int,
+    data: *mut qjs::JSValue,
+) -> qjs::JSValue {
+    // SAFETY: only compile_classic_script creates this callback. Its single
+    // data value is rooted bytecode; EvalFunction consumes the duplicate.
+    unsafe { qjs::JS_EvalFunction(ctx, qjs::JS_DupValue(ctx, *data)) }
+}
+pub(crate) fn compile_classic_script<'js>(ctx: Ctx<'js>, code: rquickjs::String<'js>, filename: String) -> Result<Function<'js>> {
+    let filename = CString::new(filename).map_err(|_| rquickjs::Error::new_from_js_message("string", "filename", "NUL in script filename"))?;
+    let mut length: usize = 0;
+    // SAFETY: code is a rooted engine string. This follows JS_EvalObject's
+    // exact conversion, retaining embedded NULs and lone UTF-16 surrogates.
+    let bytes = unsafe { qjs::JS_ToCStringLen(ctx.as_raw().as_ptr(), &mut length, code.as_value().as_raw()) };
+    if bytes.is_null() {
+        return Err(rquickjs::Error::Exception);
+    }
+    // SAFETY: the engine owns a terminated buffer of length bytes and the
+    // context is locked/live. The returned compiled value is immediately rooted.
+    let compiled = unsafe {
+        let value = qjs::JS_Eval(
+            ctx.as_raw().as_ptr(),
+            bytes,
+            length as qjs::size_t,
+            filename.as_ptr(),
+            (qjs::JS_EVAL_TYPE_GLOBAL | qjs::JS_EVAL_FLAG_COMPILE_ONLY) as i32,
+        );
+        qjs::JS_FreeCString(ctx.as_raw().as_ptr(), bytes);
+        Value::from_raw(ctx.clone(), value)
+    };
+    if compiled.is_exception() {
+        return Err(rquickjs::Error::Exception);
+    }
+    let mut data = [compiled.as_raw()];
+    // SAFETY: QuickJS duplicates the rooted bytecode into function data and
+    // owns its trace/finalization. The callback has the exact JSCFunctionData ABI.
+    let result =
+        unsafe { Value::from_raw(ctx.clone(), qjs::JS_NewCFunctionData(ctx.as_raw().as_ptr(), Some(execute_classic_script), 0, 0, 1, data.as_mut_ptr())) };
+    if result.is_exception() {
+        return Err(rquickjs::Error::Exception);
+    }
+    Function::from_value(result)
 }
 
 // Bytes stay native; no page TextEncoder/Decoder, constructors or index

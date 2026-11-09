@@ -5,8 +5,8 @@ cookies with psl (MIT, Public Suffix List), URLs with url
 built by make browser.
 Source: browser/ (guest/, js/, wit/, wizen/).
 rquickjs: 0.14.0
-QuickJS patch: browser/vendor/rquickjs-sys/json-private-lists.patch
-QuickJS source SHA-256: 17fb55c9d2389f981f23325c6d73e5d460dad680846ad1096d8041dde21a7c84
+QuickJS patches: browser/vendor/rquickjs-sys/json-private-lists.patch browser/vendor/rquickjs-sys/string-compilation-hook.patch
+QuickJS source SHA-256: 444ced890938b011c281eea8d341bcf478f3273de9e4129695c0959555ebaad7
 url: 2.5.8
 linkedom: 0.18.15
 parse5: 8.1.0
@@ -20,4 +20,4 @@ color: 0.3.3
 cssparser: 0.38.0
 cssparser-color: 0.6.0
 rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
-SHA-256: 72b1426cc4efa100bb1977274488efc0693c70ab1a8c606355e850773735f320
+SHA-256: 49ba346e53a4ef53ac5aa6366e64c04e28583fddb4690ae72763238e6fee3095

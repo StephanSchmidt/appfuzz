@@ -5,10 +5,14 @@ import { nodeDocument, physicalParent, physicalRoot, physicalHead } from './dom-
 import { nameIdentity, lowerASCII } from './names.js';
 import { documentURL } from './document-state.js';
 const documents = new WeakMap(), read = documents.get.bind(documents), save = documents.set.bind(documents);
-const allows = globalThis.__native.cspAllowsBase, HTML = 'http://www.w3.org/1999/xhtml';
-export function initializeDocumentCSP(doc, policies) {
+const evaluate = globalThis.__native.cspCheck, parse = JSON.parse, HTML = 'http://www.w3.org/1999/xhtml';
+const wellFormed = Function.prototype.call.bind(String.prototype.toWellFormed);
+let report = () => {};
+export function installCSPReporter(callback) { report = callback; }
+export function initializeDocumentCSP(doc, policies, reportOnly = []) {
   const list = backendList();
-  for (let i = 0; i < policies.length; i++) list[list.length] = policies[i];
+  for (let i = 0; i < policies.length; i++) list[list.length] = { __proto__: null, policy: policies[i], disposition: 'enforce', header: true };
+  for (let i = 0; i < reportOnly.length; i++) list[list.length] = { __proto__: null, policy: reportOnly[i], disposition: 'report', header: true };
   save(doc, { __proto__: null, origin: documentURL(doc), policies: list });
 }
 export function processDocumentMeta(node) {
@@ -23,10 +27,19 @@ export function processDocumentMeta(node) {
   while (parent && parent !== head) parent = physicalParent(parent);
   if (!parent || lowerASCII(collectionAttribute(node,'http-equiv') || '') !== 'content-security-policy') return;
   const policy = collectionAttribute(node,'content');
-  if (policy) state.policies[state.policies.length] = policy;
+  if (policy) state.policies[state.policies.length] = { __proto__: null, policy, disposition: 'enforce', header: false };
 }
-export function baseAllowed(doc, url) {
+export function checkCSP(doc, kind, candidate = '', nonce = '', source = '', parser = false, element = null) {
   const state = read(doc); if (!state) return true;
-  for (let i = 0; i < state.policies.length; i++) if (!allows(state.policies[i],url,state.origin)) return false;
-  return true;
+  let allowed = true;
+  for (let i = 0; i < state.policies.length; i++) {
+    const entry = state.policies[i], violations = parse(evaluate(entry.policy,kind,candidate,state.origin,nonce,wellFormed(source),parser));
+    for (let j = 0; j < violations.length; j++) {
+      if (entry.disposition === 'enforce') allowed = false;
+      report(doc,element,violations[j],entry.disposition);
+    }
+  }
+  return allowed;
 }
+export function baseAllowed(doc, url, element = null) { return checkCSP(doc,'base',url,'','',false,element); }
+export function hasHeaderCSP(doc) { const state = read(doc); if (state) for (let i = 0; i < state.policies.length; i++) if (state.policies[i].header) return true; return false; }

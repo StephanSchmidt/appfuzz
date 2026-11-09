@@ -11,7 +11,7 @@ output = { status = "status", body = "body", headers = "headers", body_format = 
 now = "2026-11-02T10:00:00"
 result = { body = "html:scripts" }
 sensitive_paths = ["/admin"]
-csp = "default-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'"
+csp = "default-src 'self'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self'; base-uri 'none'"
 
 [grants]
 imports = []

@@ -1,3 +1,4 @@
+import { copyNonce } from './nonce-state.js';
 import { privateSlots, slotFacade } from './dom-slots.js';
 import { setNodeDocument } from './attribute-state.js';
 import { doctypeInfo } from './doctype-state.js';
@@ -120,6 +121,7 @@ export function installCloning(L, shareObservers, onScript, upgradeCopies, DOMEr
     ownNodes(clone, owner);
     for (let i = 0; i < copies.length; i++) {
       const copy = copies[i], identity = identities[i];
+      copyNonce(originals[i],copy);
       copyInputState(originals[i], copy);
       copyControlValue(originals[i], copy);
       const content = templateContent(copy);

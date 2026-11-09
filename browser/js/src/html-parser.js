@@ -34,7 +34,7 @@ function qualified(attr) { return attr.prefix ? attr.prefix + ':' + attr.name : 
 export function beginHTML(active) {
   const doc = new HTMLDocument();
   rememberDocumentScripting(doc,true); rememberDocumentMode(doc,'CSS1Compat'); saveMode(doc,'no-quirks');
-  rememberDocumentURL(doc,active.url); initializeDocumentCSP(doc,active.policies);
+  rememberDocumentURL(doc,active.url); initializeDocumentCSP(doc,active.policies,active.reportOnly || []);
   define(doc,'compatMode',{ __proto__: null, get: () => documentMode(doc) });
   define(doc,'doctype',{ __proto__: null, get: () => { const nodes = backendChildNodes(doc); for (let i = 0; i < nodes.length; i++) if (nodeInfo(nodes[i])?.kind === 10) return nodes[i]; return null; } });
   const insert = (parent,node,before = null) => withReactions(() => {
@@ -55,7 +55,7 @@ export function beginHTML(active) {
       const owner = nodeDocument(intendedParent) || doc;
       let is = null; for (let i = 0; i < attributes.length; i++) if (attributes[i].name === 'is' && !attributes[i].namespace) is = attributes[i].value;
       const node = active.create(owner,{ __proto__: null, namespace, prefix: null, local, qualified: local },is);
-      if (local === 'script') rememberScript(node,{ __proto__: null, namespace, local }).parserPending = true;
+      if (local === 'script') { const record = rememberScript(node,{ __proto__: null, namespace, local }); record.parserPending = record.parserInserted = true; }
       for (let i = 0; i < attributes.length; i++) { const attr = attributes[i]; parsedAttribute(node,attr.namespace || null,qualified(attr),attr.value); }
       initializeParsedValue(node); return node;
     }); },

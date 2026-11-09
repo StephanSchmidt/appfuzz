@@ -1,3 +1,4 @@
+import { nonceAttributeChanged, nonceConnectionChanged } from './nonce-state.js';
 import { baseAttributeChanged, documentConnectionChanged } from './document-urls.js';
 import { collectionAttributesChanged } from './collection-version.js';
 // Linkedom calls these ports at the actual mutation, preserving argument
@@ -12,9 +13,10 @@ export function installSelectHooks(onAttribute, onConnection) { selectAttribute 
 export function installEventAttributeHook(callback) { eventAttribute = callback; }
 export function attributeReaction(element, name, oldValue, value, namespace = null) {
   collectionAttributesChanged();
+  nonceAttributeChanged(element,name,value,namespace);
   baseAttributeChanged(element,name,namespace);
   if (namespace === null) { eventAttribute(element, name, value); controlAttribute(element, name, value, oldValue); selectAttribute(element, name, value, oldValue); }
   scriptAttribute(element,name,namespace);
   attribute(element, name, oldValue, value, namespace);
 }
-export function connectionReaction(root, connected) { documentConnectionChanged(root, connected); controlConnection(root, connected); selectConnection(root, connected); connection(root, connected); }
+export function connectionReaction(root, connected) { documentConnectionChanged(root, connected); nonceConnectionChanged(root, connected); controlConnection(root, connected); selectConnection(root, connected); connection(root, connected); }

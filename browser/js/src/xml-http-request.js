@@ -53,7 +53,9 @@ function length(answer) { const value = answer.headers['content-length']; if (va
 function finish(target, data, op, answer) {
   if (!current(data, op)) return;
   if (answer.error != null || !answer.status) { fail(target, data, 'error', true); return; }
-  hooks.receive(answer); data.answer = answer;
+  hooks.receive(answer);
+  if (!hooks.responseAllowed(answer.url)) { fail(target, data, 'error', true); return; }
+  data.answer = answer;
   const noBody = data.method === 'HEAD' || answer.status === 204 || answer.status === 205 || answer.status === 304;
   const bytes = noBody ? null : answer.body, loaded = bytes === null ? 0 : byteCount(bytes), total = length(answer);
   if (!data.sync) {

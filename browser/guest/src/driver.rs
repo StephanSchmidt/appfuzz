@@ -459,11 +459,8 @@ fn fail(ctx: &Ctx, e: Error) -> String {
 // Inline scripts created by DOM operations run before that operation
 // returns. Use the callback's context directly, including for nested
 // insertions, rather than reentering the Page runtime/context lock.
-fn run_inline(ctx: Ctx<'_>, code: String, url: String) -> Result<()> {
-    let mut opts = EvalOptions::default();
-    opts.strict = false;
-    opts.filename = Some(url);
-    ctx.eval_with_options(code, opts)
+fn run_inline<'js>(ctx: Ctx<'js>, code: rquickjs::String<'js>, url: String) -> Result<()> {
+    crate::web::compile_classic_script(ctx, code, url)?.call(())
 }
 
 // Callback cleanup for host-fired message listeners. Reenter the same context

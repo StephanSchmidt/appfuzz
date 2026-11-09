@@ -1276,6 +1276,8 @@ JS_EXTERN JSValue JS_ReadObject2(JSContext *ctx, const uint8_t *buf, size_t buf_
 /* instantiate and evaluate a bytecode function. Only used when
    reading a script or module with JS_ReadObject() */
 JS_EXTERN JSValue JS_EvalFunction(JSContext *ctx, JSValue fun_obj);
+/* Appfuzz observer: (source, function kind + 1 or 0 for eval, body). */
+JS_EXTERN void JS_SetStringCompilationHook(JSContext *ctx, JSValueConst hook);
 /* load the dependencies of the module 'obj'. Useful when JS_ReadObject()
    returns a module. */
 JS_EXTERN int JS_ResolveModule(JSContext *ctx, JSValueConst obj);

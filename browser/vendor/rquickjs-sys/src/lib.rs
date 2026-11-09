@@ -25,3 +25,9 @@ include!("inlines/ptr_64.rs");
 include!("inlines/ptr_32_nan_boxing.rs");
 
 include!("inlines/common.rs");
+
+// The generated bindings include this local API when bindgen is enabled.
+#[cfg(not(feature = "bindgen"))]
+unsafe extern "C" {
+    pub fn JS_SetStringCompilationHook(ctx: *mut JSContext, hook: JSValue);
+}

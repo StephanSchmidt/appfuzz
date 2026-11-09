@@ -82,6 +82,7 @@ function convert(value, type) {
     case 'double': return number(value);
     case 'float': return number(value, true);
     case 'string': return eventString(value);
+    case 'disposition': { const name = eventString(value); if (name !== 'enforce' && name !== 'report') throw new NativeTypeError('Invalid CSP disposition'); return name; }
     case 'usv': return wellFormed(eventString(value));
     case 'nullable-string': return value == null ? null : eventString(value);
     case 'target': return nullableTarget(value);
@@ -215,6 +216,18 @@ export const PromiseRejectionEvent = interfaceType('PromiseRejectionEvent', Even
 define(PromiseRejectionEvent, 'length', { __proto__: null, value: 2, configurable: true });
 export const ToggleEvent = interfaceType('ToggleEvent', Event, { newState: 'string', oldState: 'string', source: 'element' });
 attribute(typeFor(ToggleEvent), 'source', (event, values) => retarget(values.source, eventState(event).current));
+export const SecurityPolicyViolationEvent = interfaceType('SecurityPolicyViolationEvent', Event, {
+  documentURI: 'usv', referrer: 'usv', blockedURI: 'usv', effectiveDirective: 'string', violatedDirective: 'string', originalPolicy: 'string',
+  sourceFile: 'usv', sample: 'string', disposition: ['disposition','enforce'], statusCode: 'ushort', lineNumber: 'ulong', columnNumber: 'ulong',
+});
+// Source positions need parser/engine location records. Reading an unavailable
+// UA position must make coverage incomplete; constructed events remain exact.
+const cspLocations = new WeakMap(), readCSPLocation = cspLocations.get.bind(cspLocations), saveCSPLocation = cspLocations.set.bind(cspLocations);
+export function markCSPEventLocation(event, missing) { saveCSPLocation(event,missing); }
+for (const key of ['sourceFile','lineNumber','columnNumber']) attribute(typeFor(SecurityPolicyViolationEvent),key,(event,values) => {
+  const missing = readCSPLocation(event); if (missing) missing('SecurityPolicyViolationEvent.'+key);
+  return values[key];
+});
 export const StorageEvent = interfaceType('StorageEvent', Event, { key: 'nullable-string', newValue: 'nullable-string', oldValue: 'nullable-string', storageArea: 'storage', url: 'usv' });
 export const TransitionEvent = interfaceType('TransitionEvent', Event, { elapsedTime: 'double', propertyName: 'string', pseudoElement: 'string' });
 export const AnimationEvent = interfaceType('AnimationEvent', Event, { animationName: 'string', elapsedTime: 'double', pseudoElement: 'string' });

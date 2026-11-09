@@ -44,7 +44,7 @@ browser:
 	  echo "built by make browser."; \
 	  echo "Source: browser/ (guest/, js/, wit/, wizen/)."; \
 	  echo "rquickjs: $$($(call BROWSER_LOCK,rquickjs-core))"; \
-	  echo "QuickJS patch: browser/vendor/rquickjs-sys/json-private-lists.patch"; \
+	  echo "QuickJS patches: browser/vendor/rquickjs-sys/json-private-lists.patch browser/vendor/rquickjs-sys/string-compilation-hook.patch"; \
 	  echo "QuickJS source SHA-256: $$(sha256sum browser/vendor/rquickjs-sys/quickjs/quickjs.c | cut -d' ' -f1)"; \
 	  echo "url: $$($(call BROWSER_LOCK,url))"; \
 	  echo "linkedom: $$(node -p 'require("./browser/js/node_modules/linkedom/package.json").version')"; \

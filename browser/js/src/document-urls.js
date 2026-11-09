@@ -18,7 +18,7 @@ export function documentBaseURL(doc) {
     const href = collectionAttribute(nodes[i],'href'); if (href === null) continue;
     const stamp = revision(nodes[i]) || 0;
     if (previous?.base === nodes[i] && previous.stamp === stamp) return store(previous.url,nodes[i],stamp);
-    const parsed = parse(href,fallback), allowed = parsed && parsed[2] !== 'data:' && parsed[2] !== 'javascript:' && baseAllowed(doc,parsed[0]); return store(allowed ? parsed[0] : fallback,nodes[i],stamp);
+    const parsed = parse(href,fallback), allowed = parsed && parsed[2] !== 'data:' && parsed[2] !== 'javascript:' && baseAllowed(doc,parsed[0],nodes[i]); return store(allowed ? parsed[0] : fallback,nodes[i],stamp);
   }
   return store(fallback);
 }

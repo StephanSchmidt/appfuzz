@@ -1,0 +1,186 @@
+--- a/quickjs/quickjs.c
++++ b/quickjs/quickjs.c
+@@ -595,6 +595,7 @@
+     JSValue array_proto_values;
+     JSValue throw_type_error;
+     JSValue eval_obj;
++    JSValue string_compilation_hook;
+ 
+     JSValue global_obj; /* global object */
+     JSValue global_var_obj; /* contains the global let/const definitions */
+@@ -1288,7 +1289,7 @@
+ static __exception int JS_ToArrayLengthFree(JSContext *ctx, uint32_t *plen,
+                                             JSValue val, bool is_array_ctor);
+ static JSValue JS_EvalObject(JSContext *ctx, JSValueConst this_obj,
+-                             JSValueConst val, int flags, int scope_idx);
++                             JSValueConst val, int flags, int scope_idx, int compilation_kind, JSValueConst body);
+ static JSValue js_new_suppressed_error(JSContext *ctx, JSValueConst error,
+                                        JSValueConst suppressed);
+ static __maybe_unused void JS_DumpString(JSRuntime *rt, JSString *p);
+@@ -2857,6 +2858,7 @@
+     ctx = js_mallocz_rt(rt, sizeof(JSContext));
+     if (!ctx)
+         return NULL;
++    ctx->string_compilation_hook = JS_UNDEFINED;
+     JS_REF_COUNT(ctx) = 1;
+     add_gc_object(rt, &ctx->header, JS_GC_OBJ_TYPE_JS_CONTEXT);
+ 
+@@ -2930,6 +2932,15 @@
+     ctx->user_opaque = opaque;
+ }
+ 
++/* Embedder-owned string compilation observer. It is a context root and
++   is never exposed as a property of a guest-visible JavaScript object. */
++void JS_SetStringCompilationHook(JSContext *ctx, JSValueConst hook)
++{
++    JSValue previous = ctx->string_compilation_hook;
++    ctx->string_compilation_hook = js_dup(hook);
++    JS_FreeValue(ctx, previous);
++}
++
+ /* set the new value and free the old value after (freeing the value
+    can reallocate the object data) */
+ static inline void set_value(JSContext *ctx, JSValue *pval, JSValue new_val)
+@@ -3000,6 +3011,7 @@
+ 
+     JS_MarkValue(rt, ctx->throw_type_error, mark_func);
+     JS_MarkValue(rt, ctx->eval_obj, mark_func);
++    JS_MarkValue(rt, ctx->string_compilation_hook, mark_func);
+ 
+     JS_MarkValue(rt, ctx->array_proto_values, mark_func);
+     for(i = 0; i < JS_NATIVE_ERROR_COUNT; i++) {
+@@ -3082,6 +3094,7 @@
+ 
+     JS_FreeValue(ctx, ctx->throw_type_error);
+     JS_FreeValue(ctx, ctx->eval_obj);
++    JS_FreeValue(ctx, ctx->string_compilation_hook);
+ 
+     JS_FreeValue(ctx, ctx->array_proto_values);
+     for(i = 0; i < JS_NATIVE_ERROR_COUNT; i++) {
+@@ -18723,7 +18736,7 @@
+                     else
+                         obj = JS_UNDEFINED;
+                     ret_val = JS_EvalObject(ctx, JS_UNDEFINED, obj,
+-                                            JS_EVAL_TYPE_DIRECT, scope_idx);
++                                            JS_EVAL_TYPE_DIRECT, scope_idx, 0, JS_UNDEFINED);
+                 } else {
+                     ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
+                                               JS_UNDEFINED, call_argc,
+@@ -18757,7 +18770,7 @@
+                     else
+                         obj = JS_UNDEFINED;
+                     ret_val = JS_EvalObject(ctx, JS_UNDEFINED, obj,
+-                                            JS_EVAL_TYPE_DIRECT, scope_idx);
++                                            JS_EVAL_TYPE_DIRECT, scope_idx, 0, JS_UNDEFINED);
+                 } else {
+                     ret_val = JS_Call(ctx, sp[-2], JS_UNDEFINED, len, vc(tab));
+                 }
+@@ -38258,7 +38271,7 @@
+ }
+ 
+ static JSValue JS_EvalObject(JSContext *ctx, JSValueConst this_obj,
+-                             JSValueConst val, int flags, int scope_idx)
++                             JSValueConst val, int flags, int scope_idx, int compilation_kind, JSValueConst body)
+ {
+     JSValue ret;
+     const char *str;
+@@ -38266,6 +38279,15 @@
+ 
+     if (!JS_IsString(val))
+         return js_dup(val);
++    if (JS_IsFunction(ctx, ctx->string_compilation_hook)) {
++        JSValue args[3] = { js_dup(val), JS_NewInt32(ctx, compilation_kind), js_dup(body) };
++        JSValue checked = JS_Call(ctx, ctx->string_compilation_hook, JS_UNDEFINED, 3, vc(args));
++        JS_FreeValue(ctx, args[0]);
++        JS_FreeValue(ctx, args[2]);
++        if (JS_IsException(checked))
++            return JS_EXCEPTION;
++        JS_FreeValue(ctx, checked);
++    }
+     str = JS_ToCStringLen(ctx, &len, val);
+     if (!str)
+         return JS_EXCEPTION;
+@@ -40998,7 +41020,7 @@
+ static JSValue js_global_eval(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv)
+ {
+-    return JS_EvalObject(ctx, ctx->global_obj, argv[0], JS_EVAL_TYPE_INDIRECT, -1);
++    return JS_EvalObject(ctx, ctx->global_obj, argv[0], JS_EVAL_TYPE_INDIRECT, -1, 0, JS_UNDEFINED);
+ }
+ 
+ static JSValue js_global_isNaN(JSContext *ctx, JSValueConst this_val,
+@@ -42338,7 +42360,7 @@
+ {
+     JSFunctionKindEnum func_kind = magic;
+     int i, n, ret;
+-    JSValue s, proto, obj = JS_UNDEFINED;
++    JSValue s, proto, obj = JS_UNDEFINED, body = JS_UNDEFINED;
+     StringBuffer b_s, *b = &b_s;
+ 
+     string_buffer_init(ctx, b, 0);
+@@ -42364,7 +42386,8 @@
+     }
+     string_buffer_puts8(b, "\n) {\n");
+     if (n >= 0) {
+-        if (string_buffer_concat_value(b, argv[n]))
++        body = JS_ToString(ctx, argv[n]);
++        if (JS_IsException(body) || string_buffer_concat_value(b, body))
+             goto fail;
+     }
+     string_buffer_puts8(b, "\n})");
+@@ -42372,7 +42395,7 @@
+     if (JS_IsException(s))
+         goto fail1;
+ 
+-    obj = JS_EvalObject(ctx, ctx->global_obj, s, JS_EVAL_TYPE_INDIRECT, -1);
++    obj = JS_EvalObject(ctx, ctx->global_obj, s, JS_EVAL_TYPE_INDIRECT, -1, func_kind + 1, body);
+     JS_FreeValue(ctx, s);
+     if (JS_IsException(obj))
+         goto fail1;
+@@ -42394,11 +42417,13 @@
+         if (ret < 0)
+             goto fail1;
+     }
++    JS_FreeValue(ctx, body);
+     return obj;
+ 
+  fail:
+     string_buffer_free(b);
+  fail1:
++    JS_FreeValue(ctx, body);
+     JS_FreeValue(ctx, obj);
+     return JS_EXCEPTION;
+ }
+--- a/quickjs/quickjs.h
++++ b/quickjs/quickjs.h
+@@ -1276,6 +1276,8 @@
+ /* instantiate and evaluate a bytecode function. Only used when
+    reading a script or module with JS_ReadObject() */
+ JS_EXTERN JSValue JS_EvalFunction(JSContext *ctx, JSValue fun_obj);
++/* Appfuzz observer: (source, function kind + 1 or 0 for eval, body). */
++JS_EXTERN void JS_SetStringCompilationHook(JSContext *ctx, JSValueConst hook);
+ /* load the dependencies of the module 'obj'. Useful when JS_ReadObject()
+    returns a module. */
+ JS_EXTERN int JS_ResolveModule(JSContext *ctx, JSValueConst obj);
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -25,3 +25,9 @@
+ include!("inlines/ptr_32_nan_boxing.rs");
+ 
+ include!("inlines/common.rs");
++
++// The generated bindings include this local API when bindgen is enabled.
++#[cfg(not(feature = "bindgen"))]
++unsafe extern "C" {
++    pub fn JS_SetStringCompilationHook(ctx: *mut JSContext, hook: JSValue);
++}
+--- a/build.rs
++++ b/build.rs
+@@ -220,6 +220,7 @@
+     }
+ 
+     for file in source_files.iter().chain(header_files.iter()) {
++        println!("cargo:rerun-if-changed={}", src_dir.join(file).display());
+         fs::copy(src_dir.join(file), out_dir.join(file))
+             .expect("Unable to copy source; try 'git submodule update --init'");
+     }

