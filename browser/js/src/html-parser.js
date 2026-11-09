@@ -2,7 +2,7 @@
 // No public DOM method, metadata getter or live collection drives parsing.
 import { HTMLDocument } from '../node_modules/linkedom/esm/html/document.js';
 import { Document } from '../node_modules/linkedom/esm/interface/document.js';
-import { nodeInfo, nodeDocument, physicalParent, physicalPreviousSibling } from './dom-state.js';
+import { nodeInfo, nodeDocument, physicalParent, physicalPreviousSibling, physicalFirstChild, physicalLastChild } from './dom-state.js';
 import { doctypeInfo, initializeDoctype } from './doctype-state.js';
 import { attributeInfo } from './attribute-state.js';
 import { backendList, backendChildNodes, backendAttributes } from './collection-data.js';
@@ -44,7 +44,7 @@ export function beginHTML(active) {
     insertNativeNode(parent,node,before);
   });
   const insertText = (parent,value,before = null) => {
-    const nodes = before ? null : backendChildNodes(parent), previous = before ? physicalPreviousSibling(before) : nodes[nodes.length - 1];
+    const previous = before ? physicalPreviousSibling(before) : physicalLastChild(parent);
     if (nodeInfo(previous)?.kind === 3) { const old = characterValue(previous); characterMutation(previous,old); storeCharacterValue(previous,old + value); childrenChanged(parent); }
     else insert(parent,apply(text,nodeDocument(parent),[value]),before);
   };
@@ -64,7 +64,7 @@ export function beginHTML(active) {
     appendChild: (parent,node) => insert(parent,node), insertBefore: insert,
     detachNode: removeNativeNode,
     insertText: (parent,value) => insertText(parent,value), insertTextBefore: insertText,
-    getChildNodes: backendChildNodes, getFirstChild: node => backendChildNodes(node)[0] || null,
+    getChildNodes: backendChildNodes, getFirstChild: physicalFirstChild,
     getParentNode: physicalParent, getAttrList: attrs,
     getTagName: node => nameIdentity(node)?.local,
     getNamespaceURI: node => nameIdentity(node)?.namespace,

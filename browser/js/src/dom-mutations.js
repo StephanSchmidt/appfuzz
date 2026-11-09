@@ -2,7 +2,7 @@
 // a child's public remove/parentNode/nodeType properties during a native edit.
 import { END, NEXT, PREV } from '../node_modules/linkedom/esm/shared/symbols.js';
 import { setAdjacent, knownSiblings, knownBoundaries } from '../node_modules/linkedom/esm/shared/utils.js';
-import { nodeInfo, nodeDocument, physicalParent, physicalPreviousSibling, physicalNextSibling } from './dom-state.js';
+import { nodeInfo, nodeDocument, physicalParent, physicalPreviousSibling, physicalNextSibling, physicalLastChild, rememberNodeParent } from './dom-state.js';
 import { backendList, backendChildNodes } from './collection-data.js';
 import { retainRemovedSubtree, childMutation } from './mutation-observers.js';
 import { connectionReaction } from './ce-hooks.js';
@@ -16,19 +16,19 @@ function requireNode(node) { if (!nodeInfo(node)) throw new NativeTypeError('A N
 export function removeNativeNode(node, notify = true) {
   requireNode(node); const parent = physicalParent(node); if (!parent) return;
   const previous = physicalPreviousSibling(node), next = physicalNextSibling(node), end = node[END] || node;
-  retainRemovedSubtree(node, parent); setAdjacent(node[PREV], end[NEXT]); node[PREV] = null; end[NEXT] = null;
+  retainRemovedSubtree(node, parent); setAdjacent(node[PREV], end[NEXT]); node[PREV] = null; end[NEXT] = null; rememberNodeParent(node,null);
   if (notify) childMutation(parent, backendList(), [node], previous, next);
   if (nodeInfo(node).kind === 1) connectionReaction(node, false);
   if (notify) childrenChanged(parent);
 }
 export function createNativeText(document, value) { return newText(document, value); }
 export function insertNativeText(parent, text, before = null, notify = true) {
-  const next = before || parent[END], previous = before ? physicalPreviousSibling(before) : backendChildNodes(parent).at(-1) || null;
+  const next = before || parent[END], previous = before ? physicalPreviousSibling(before) : physicalLastChild(parent);
   knownSiblings(next[PREV], text, next);
   if (notify) { childMutation(parent, [text], backendList(), previous, before); childrenChanged(parent); }
 }
 export function insertNativeNode(parent,node,before = null) {
-  const next = before || parent[END], previous = before ? physicalPreviousSibling(before) : backendChildNodes(parent).at(-1) || null;
+  const next = before || parent[END], previous = before ? physicalPreviousSibling(before) : physicalLastChild(parent);
   knownBoundaries(next[PREV],node,next);
   childMutation(parent,[node],backendList(),previous,before);
   if (nodeInfo(node)?.kind === 1) connectionReaction(node,true);

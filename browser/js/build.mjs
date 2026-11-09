@@ -54,6 +54,20 @@ async function readDOM(path) {
     source = `import {backendChildNodes,backendChildren,backendAttributes} from ${JSON.stringify(collectionData)};\n${source}`;
   }
   if (key === 'mixin/inner-html.js') { source = replace(source,'  const {constructor} = ownerDocument;\n  const document = new constructor;', '  const document = createDocumentLike(ownerDocument);'); source = `import {createDocumentLike} from ${JSON.stringify(fileURLToPath(new URL('./src/document-state.js',import.meta.url)))};\n${source}`; }
+  if (key === 'mixin/parent-node.js') {
+    source = replace(source, '  const {ownerDocument} = parentNode;', '  const ownerDocument = nodeDocument(parentNode);');
+    source = replace(source, 'insert(this, this.firstChild, nodes);', 'insert(this, physicalFirstChild(this), nodes);');
+    source = replace(source, 'switch (node.nodeType) {', 'switch (nodeInfo(node)?.kind ?? node.nodeType) {');
+    source = replace(source, 'let {[PRIVATE]: parentNode, firstChild, lastChild} = node;', 'let parentNode = node[PRIVATE], firstChild = physicalFirstChild(node), lastChild = physicalLastChild(node);');
+    source = replace(source, '(firstChild = nextSibling(firstChild))', '(firstChild = physicalNextSibling(firstChild))');
+    if (!source.includes('if (firstChild.nodeType === ELEMENT_NODE)')) throw new Error('Pinned DOM child identity sites changed');
+    source = source.replaceAll('if (firstChild.nodeType === ELEMENT_NODE)', 'if (nodeInfo(firstChild)?.kind === ELEMENT_NODE)');
+    source = `import {nodeInfo,nodeDocument,physicalFirstChild,physicalLastChild,physicalNextSibling} from ${JSON.stringify(domState)};\n${source}`;
+  }
+  if (key === 'mixin/child-node.js') {
+    source = source.replaceAll('const {ownerDocument, parentNode} = node;', 'const ownerDocument = nodeDocument(node), parentNode = physicalParent(node);');
+    source = `import {nodeDocument,physicalParent} from ${JSON.stringify(domState)};\n${source}`;
+  }
   const parentWrites = ['node.parentNode = this;', 'firstChild.parentNode = this;', 'node.parentNode = self;', 'node.parentNode = parentNode;', 'element.parentNode = parentNode;', 'child.parentNode = fragment;', 'if (!attributeInfo(next)) next.parentNode = parentNode;'];
   for (const assignment of parentWrites) source = source.replaceAll(assignment, '');
   if (key === 'mixin/child-node.js') {
@@ -68,12 +82,13 @@ async function readDOM(path) {
   }
   if (key === 'shared/utils.js') {
     source = replace(source, 'node => node.nodeType === ELEMENT_NODE ? node[END] : node;', 'node => (nodeInfo(node)?.kind ?? node.nodeType) === ELEMENT_NODE ? node[END] : node;');
-    source = `import {nodeInfo} from ${JSON.stringify(domState)};\n${source}`;
+    source = `import {nodeInfo,rememberAdjacentParent,rememberSegmentParent} from ${JSON.stringify(domState)};\n${source}`;
   }
   if (key === 'html/element.js') { source = source.replace('this.ownerDocument = this[END].ownerDocument = ownerDocument;', 'setNodeDocument(this, ownerDocument); this[END].ownerDocument = ownerDocument;'); source = `import {setNodeDocument} from ${JSON.stringify(attributeState)};\n${source}`; }
   if (key === 'shared/utils.js') {
-    source = replace(source, 'export const knownAdjacent = (prev, next) => {', 'export const knownAdjacent = (prev, next) => { collectionLinksChanged();');
-    source = replace(source, 'export const setAdjacent = (prev, next) => {', 'export const setAdjacent = (prev, next) => { collectionLinksChanged();');
+    source = replace(source, 'export const knownAdjacent = (prev, next) => {', 'export const knownAdjacent = (prev, next) => { collectionLinksChanged(); rememberAdjacentParent(prev,next);');
+    source = replace(source, 'export const setAdjacent = (prev, next) => {', 'export const setAdjacent = (prev, next) => { collectionLinksChanged(); rememberAdjacentParent(prev,next);');
+    source = replace(source, 'export const knownSegment = (prev, start, end, next) => {', 'export const knownSegment = (prev, start, end, next) => { rememberSegmentParent(prev,start,end);');
     source = `import {collectionLinksChanged} from ${JSON.stringify(collectionVersion)};\n${source}`;
   }
   return source;

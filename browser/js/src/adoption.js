@@ -102,16 +102,16 @@ export function installAdoption(Element, shareObservers, onError, DOMError) {
     // Preserve the native no-op and self-insertion error. All ParentNode
     // and ChildNode insertion methods converge on this operation.
     if (node === before || node === this) return insert.call(this, node, before);
-    const document = this.nodeType === 9 ? this : this.ownerDocument;
+    const document = nodeDocument(this);
     shareObservers(document);
-    shareObservers(node?.ownerDocument);
+    shareObservers(nodeDocument(node));
     if (!document || !node) {
       return insert.call(this, node, before);
     }
     const nodes = treeNodes(node, document);
     // A native XML setter/import can update just the public root owner,
     // leaving its end marker, attributes and descendants in the old document.
-    if (node.ownerDocument === document && (!node[END] || node[END].ownerDocument === document)) {
+    if (nodeDocument(node) === document && (!node[END] || node[END].ownerDocument === document)) {
       const result = insert.call(this, node, before);
       for (const { node } of nodes) if (isConnected(node)) queueUpgrade(node);
       return result;
@@ -119,9 +119,9 @@ export function installAdoption(Element, shareObservers, onError, DOMError) {
     const reactions = [];
     for (const { node: descendant } of nodes) {
       const info = customElement(descendant);
-      if (info) reactions.push({ node: descendant, info, oldDocument: descendant.ownerDocument, wasConnected: connected.call(descendant) });
+      if (info) reactions.push({ node: descendant, info, oldDocument: nodeDocument(descendant), wasConnected: connected.call(descendant) });
     }
-    const oldParent = node.parentNode;
+    const oldParent = physicalParent(node);
     let inserting = false;
     try {
       // Queue reactions across removal/adoption/insertion; callbacks must
@@ -134,10 +134,10 @@ export function installAdoption(Element, shareObservers, onError, DOMError) {
       inserting = true;
       return insert.call(this, node, before);
     } finally {
-      const removed = oldParent && node.parentNode !== oldParent;
+      const removed = oldParent && physicalParent(node) !== oldParent;
       for (const reaction of reactions) {
         reaction.isConnected = connected.call(reaction.node);
-        reaction.newDocument = reaction.node.ownerDocument;
+        reaction.newDocument = nodeDocument(reaction.node);
         reaction.info.connected = reaction.isConnected;
       }
       for (const reaction of reactions) {
