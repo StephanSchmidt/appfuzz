@@ -1,4 +1,4 @@
-import { rememberDocumentURL } from './document-state.js';
+import { rememberDocumentURL, documentURL } from './document-state.js';
 import { documentBaseURL } from './document-urls.js';
 import { installCharacterData } from './character-data.js';
 import { installDOMMutations } from './dom-mutations.js';
@@ -46,7 +46,7 @@ import { installEventAttributeHook } from './ce-hooks.js';
 import { htmlName, controlType, treeElements, formOwner, connected, disabled, checked, setChecked, indeterminate, setIndeterminate, beginInputActivation, cancelInputActivation, resetChecked, installControlState, setControlAttribute } from './controls.js';
 import { populateForm, isSubmitButton } from './form-controls.js';
 import { installValueProperties, resetControlValue, setControlValue, controlValue } from './control-values.js';
-import { nodeInfo, shadowInfo, shadowAncestor, physicalBody, eventAttribute, physicalParent, physicalRoot, retarget } from './dom-state.js';
+import { nodeDocument, nodeInfo, shadowInfo, shadowAncestor, physicalBody, eventAttribute, physicalParent, physicalRoot, retarget } from './dom-state.js';
 import { exceptionInfo, clipDiagnostic } from './error-info.js';
 import { installShadowConstraints } from './shadow.js';
 import { EVENT_TARGET } from '../node_modules/linkedom/esm/shared/symbols.js';
@@ -57,6 +57,7 @@ import { installReactionBoundaries, withReactions } from './ce-reactions.js';
 import { runDOMCallback } from './dom-callbacks.js';
 import { installSerialization } from './serialization.js';
 import { installAdoption } from './adoption.js';
+import { installElementURLs } from './element-urls.js';
 import { DOMImplementation, XMLDocument, installDOMImplementation } from './dom-implementation.js';
 import { installObservers } from './observers.js';
 import { templateContent, templateOwner, templateInnerHTML, shareTemplateObservers } from './templates.js';
@@ -91,6 +92,7 @@ installAttributes();
 installDOMMutations(L);
 installCharacterData(L);
 installDOMImplementation(L);
+installElementURLs(L);
 const DOMParser = platformConstructor(L.DOMParser, 'DOMParser');
 installCollections();
 const nativeLower = Function.prototype.call.bind(String.prototype.toLowerCase);
@@ -602,6 +604,7 @@ const redirectModes = new Set(['follow','error','manual']), validRedirect = redi
 const normalizedMethods = new Set(['DELETE','GET','HEAD','OPTIONS','POST','PUT']), normalizeMethod = normalizedMethods.has.bind(normalizedMethods);
 const tokenCode = code => (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 33 || (code >= 35 && code <= 39) || code === 42 || code === 43 || code === 45 || code === 46 || code === 94 || code === 95 || code === 96 || code === 124 || code === 126;
 const charCode = Function.prototype.call.bind(String.prototype.charCodeAt), stringIndex = Function.prototype.call.bind(String.prototype.indexOf), stringSlice = Function.prototype.call.bind(String.prototype.slice);
+const apiBase = () => documentBaseURL(S.document);
 function convertRequest(input, init, argumentCount) {
   if (!argumentCount) throw new NativeTypeError('Request requires an input');
   const src = requestData(input);
@@ -619,9 +622,9 @@ function convertRequest(input, init, argumentCount) {
     else if (key === 'window') { if (value !== null) throw new NativeTypeError('Request window must be null'); options.window = null; }
     else options[key] = domString(value);
   }
-  const parsed = N.url(rawURL, urlPart(S.url, 'href'));
+  const parsed = N.url(rawURL, apiBase());
   if (!parsed || parsed[3] || parsed[4]) throw new NativeTypeError('Invalid request URL');
-  const fragment = stringIndex(parsed[0], '#'), url = fragment < 0 ? parsed[0] : stringSlice(parsed[0], 0, fragment);
+  const url = parsed[0];
   let method = options.method ?? src?.method ?? 'GET';
   if (!method.length) throw new NativeTypeError('Invalid HTTP method');
   for (let i = 0; i < method.length; i++) if (!tokenCode(charCode(method, i))) throw new NativeTypeError('Invalid HTTP method');
@@ -732,7 +735,7 @@ let Response = class Response {
     return runDOMCallback(() => {
       url = wellFormed(domString(url)); const number = +status;
       status = finiteNumber(number) ? ((nativeTrunc(number) % 65536) + 65536) % 65536 : 0;
-      let parsed; try { parsed = new URL(url, urlPart(S.url, 'href')); } catch { throw new NativeTypeError('Invalid redirect URL'); }
+      let parsed; try { parsed = new URL(url, apiBase()); } catch { throw new NativeTypeError('Invalid redirect URL'); }
       if (status !== 301 && status !== 302 && status !== 303 && status !== 307 && status !== 308) throw new NativeRangeError('Invalid redirect status');
       return nativeResponse(null, { status, statusText: '', headers: headersFromConverted([['location', urlPart(parsed, 'href')]], 'immutable'), url: '', redirected: false, type: 'default' });
     });
@@ -766,7 +769,8 @@ function networkAnswer(status, body, rawHeaders, url, acceptCookies, delayed, la
   return delayed ? r : receive(r);
 }
 function respond(method, url, body, headers, kind, credentials = 'same-origin', delayed = false) {
-  const u = new URL(nativeString(url), urlPart(S.url, 'href'));
+  const u = new URL(nativeString(url), apiBase());
+  setURLPart(u,'hash','');
   const own = urlPart(u, 'origin') === S.origin;
   const include = credentials === 'include' || (credentials === 'same-origin' && own);
   const filtered = nativeCreate(null), raw = nativeEntries(headers || {});
@@ -833,7 +837,7 @@ G.fetch = function fetch(input, init = undefined) {
 };
 
 installXHRPlatform({
-  base: () => urlPart(S.url, 'href'), now: () => S.now,
+  base: apiBase, now: () => S.now,
   enqueue: (fn, delay) => addTimer(fn, delay, [], false, 'xhr', false), cancel: id => mapDelete(S.timers, id),
   checkpoint: messageListenerCheckpoint, respond, receive, convertBody: body => nodeInfo(body)?.kind === 9 ? { __proto__: null, kind: 'document', value: body } : convertBody(body),
   extractBody: body => body.kind === 'document' ? { __proto__: null, bytes: textBytes(serializeDocument(body.value)), type: documentMode(body.value) !== undefined ? 'text/html;charset=UTF-8' : 'application/xml;charset=UTF-8' } : extractConvertedBody(body), entries: nativeEntries,
@@ -1020,7 +1024,7 @@ function setCookie(text) {
 
 function navigate(target, how, extra = {}) {
   let u;
-  try { u = new URL(String(target), urlPart(S.url, 'href')); } catch (e) { error(how, e); return; }
+  try { u = new URL(String(target), apiBase()); } catch (e) { error(how, e); return; }
   if (urlPart(u, 'protocol') === 'javascript:') {
     let code = urlPart(u, 'href').slice('javascript:'.length);
     try { code = decodeURIComponent(code); } catch {}
@@ -1030,7 +1034,7 @@ function navigate(target, how, extra = {}) {
   const strip = (h) => h.split('#')[0];
   if (strip(urlPart(u, 'href')) === strip(urlPart(S.url, 'href')) && urlPart(u, 'hash') && how !== 'location.reload' && !extra.method) {
     const oldURL = urlPart(S.url, 'href');
-    S.url = u;
+    apiBase(); S.url = u;
     push(S.history, { how, url: urlPart(u, 'href') });
     addTimer(() => fireEvent(G, createNativeUIEvent(HashChangeEvent, 'hashchange', { oldURL, newURL: urlPart(u, 'href') })), 0, [], false, 'hashchange', false);
     return;
@@ -1062,9 +1066,9 @@ const historyApi = {
   length: 1, state: null, scrollRestoration: 'auto',
   _go(how, state, url) {
     if (url != null) {
-      const u = new URL(nativeString(url), urlPart(S.url, 'href'));
+      const u = new URL(nativeString(url), apiBase());
       if (urlPart(u, 'origin') !== S.origin) throw new BrowserDOMException(how + ': another origin', 'SecurityError');
-      S.url = u;
+      apiBase(); S.url = u;
     }
     this.state = state ?? null;
     push(S.history, { how, url: urlPart(S.url, 'href') });
@@ -1574,7 +1578,7 @@ function completeActivation(action, event) {
     if (href !== null) {
       const target = eventAttribute(node, 'target');
       const extra = target && target !== '_self' ? { popup: true, target } : {}, gesture = S.gesture;
-      let destination; try { destination = urlPart(new URL(href, urlPart(S.url, 'href')), 'href'); } catch { return; }
+      let destination; try { destination = urlPart(new URL(href, documentBaseURL(nodeDocument(node))), 'href'); } catch { return; }
       addTimer(() => { const was = S.gesture; S.gesture = gesture; try { navigate(destination, 'link', extra); } finally { S.gesture = was; } }, 0, [], false, 'link-navigation', false);
     }
   } else if (kind === 'input' || kind === 'button') {
@@ -1627,10 +1631,12 @@ function submit(form, submitter) {
 }
 
 function formNavigate(form, submitter) {
-  const attr = (k) => (submitter && submitter.getAttribute('form' + k)) || form.getAttribute(k);
-  const method = (attr('method') || 'get').toLowerCase();
+  const owner = nodeDocument(form); if (owner !== S.document) return;
+  const attr = k => (submitter ? eventAttribute(submitter,'form' + k) : null) ?? eventAttribute(form,k);
+  const method = nativeLower(attr('method') || 'get');
   if (method === 'dialog') return;
-  const action = new URL(attr('action') || urlPart(S.url, 'href'), urlPart(S.url, 'href'));
+  const raw = attr('action');
+  const action = new URL(raw == null || raw === '' ? documentURL(owner) : raw, documentBaseURL(owner));
   const data = serializeParams(new URLSearchParams([...new FormData(form, submitter)].map(([k, v]) => [k, typeof v === 'string' ? v : '[file]'])));
   const target = attr('target');
   const extra = target && target !== '_self' ? { popup: true, target } : {};
@@ -1738,10 +1744,11 @@ function prepareScript(s) {
   let prepared;
   if (src == null) {
     push(S.code, { where: 'script', code: clip(code, 2000), gesture: S.gesture });
-    prepared = { kind, url: kind === 'module' ? urlPart(S.url, 'href').split('#')[0] + '#inline-' + n : urlPart(S.url, 'href'), code, inline: true };
+    const baseURL = documentBaseURL(scriptOwner(s));
+    prepared = { kind, url: kind === 'module' ? baseURL.split('#')[0] + '#inline-' + n : urlPart(S.url, 'href'), metaURL: baseURL, code, inline: true };
   } else {
     let url;
-    try { url = urlPart(new URL(src, urlPart(S.url, 'href')), 'href'); }
+    try { url = urlPart(new URL(src, documentBaseURL(scriptOwner(s))), 'href'); }
     catch { scriptError(s); return null; }
     if (src === '' && record.identity.namespace === HTML_NS) { scriptError(s); return null; }
     prepared = { kind, url, code: file(url), inline: false };

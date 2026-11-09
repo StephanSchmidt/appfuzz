@@ -7,7 +7,7 @@ import { knownSiblings, knownAdjacent } from '../node_modules/linkedom/esm/share
 import { attributeChangedCallback as observeAttribute } from '../node_modules/linkedom/esm/interface/mutation-observer.js';
 import { attributeReaction } from './ce-hooks.js';
 import { attributeInfo, requireAttribute, setAttributeOwner, setNodeDocument } from './attribute-state.js';
-import { nodeInfo, physicalDocumentElement } from './dom-state.js';
+import { nodeInfo, nodeDocument, physicalDocumentElement } from './dom-state.js';
 import { nameIdentity, lowerASCII, qualifiedName, validAttributeLocalName } from './names.js';
 import { DOMException } from './dom-exception.js';
 import { eventString } from './event-state.js';
@@ -20,7 +20,7 @@ const tails = new WeakMap(), tailFor = tails.get.bind(tails), saveTail = tails.s
 function requireElement(value) { if (nodeInfo(value)?.kind !== 1) throw new NativeTypeError('An Element is required'); }
 function requireDocument(value) { if (nodeInfo(value)?.kind !== 9) throw new NativeTypeError('A Document is required'); }
 const normalizedNS = value => value == null || value === '' ? null : value;
-const html = element => nameIdentity(element)?.namespace === 'http://www.w3.org/1999/xhtml' && isHTML(element.ownerDocument);
+const html = element => nameIdentity(element)?.namespace === 'http://www.w3.org/1999/xhtml' && isHTML(nodeDocument(element));
 function nameFor(element, value) { value = eventString(value); return html(element) ? lowerASCII(value) : value; }
 function find(element, namespace, local, qualified = false) {
   for (let attr = element[NEXT]; nodeInfo(attr)?.kind === 2; attr = attr[NEXT]) {
@@ -38,7 +38,7 @@ function write(attr, value) { const data = requireAttribute(attr), old = attr[VA
 function append(element, attr, notifications) {
   const data = requireAttribute(attr); let previous = tailFor(element);
   if (!previous || (previous !== element && attributeInfo(previous)?.owner !== element) || nodeInfo(previous[NEXT])?.kind === 2) { previous = element; while (nodeInfo(previous[NEXT])?.kind === 2) previous = previous[NEXT]; }
-  setNodeDocument(attr, element.ownerDocument); setAttributeOwner(attr, element); knownSiblings(previous, attr, previous[NEXT]); saveTail(element, attr);
+  setNodeDocument(attr, nodeDocument(element)); setAttributeOwner(attr, element); knownSiblings(previous, attr, previous[NEXT]); saveTail(element, attr);
   if (notifications) notify(element, data, null, attr[VALUE]);
 }
 function remove(element, attr) {
@@ -51,7 +51,7 @@ export function nativeAttribute(owner, identity, value = '') {
 }
 export function parsedAttribute(element, namespace, qualified, value) {
   const at = indexOf(qualified, ':'), prefix = namespace !== null && at >= 0 ? slice(qualified, 0, at) : null, local = prefix === null ? qualified : slice(qualified, at + 1);
-  const attr = nativeAttribute(element.ownerDocument, { namespace, prefix, local, qualified }, value); append(element, attr, false); const data = requireAttribute(attr); syncClass(element, data, value); attributeReaction(element, local, null, value, namespace); return attr;
+  const attr = nativeAttribute(nodeDocument(element), { namespace, prefix, local, qualified }, value); append(element, attr, false); const data = requireAttribute(attr); syncClass(element, data, value); attributeReaction(element, local, null, value, namespace); return attr;
 }
 export function cloneAttribute(attr, owner) { const data = requireAttribute(attr); return nativeAttribute(owner, data, attr[VALUE]); }
 function required(n, count) { if (n < count) throw new NativeTypeError('Not enough arguments'); }
@@ -68,13 +68,13 @@ export const attributeMethods = {
   setAttribute(name, value) {
     requireElement(this); required(arguments.length, 2); const args = runDOMCallback(() => ({ __proto__: null, name: nameFor(this, name), value: eventString(value) }));
     if (!validAttributeLocalName(args.name)) throw new DOMException('Invalid attribute name', 'InvalidCharacterError');
-    const attr = find(this, null, args.name, true); if (attr) write(attr, args.value); else append(this, nativeAttribute(this.ownerDocument, { namespace: null, prefix: null, local: args.name, qualified: args.name }, args.value), true);
+    const attr = find(this, null, args.name, true); if (attr) write(attr, args.value); else append(this, nativeAttribute(nodeDocument(this), { namespace: null, prefix: null, local: args.name, qualified: args.name }, args.value), true);
   },
   setAttributeNS(namespace, qualified, value) {
     requireElement(this); required(arguments.length, 3); const args = runDOMCallback(() => ({ __proto__: null, namespace: namespace == null ? null : eventString(namespace), qualified: eventString(qualified), value: eventString(value) }));
     const id = qualifiedName(args.namespace, args.qualified, 2, DOMException, true), attr = find(this, id.namespace, id.local);
     if (attr) write(attr, args.value);
-    else append(this, nativeAttribute(this.ownerDocument, id, args.value), true);
+    else append(this, nativeAttribute(nodeDocument(this), id, args.value), true);
   },
   removeAttribute(name) { name = byName(this, name, arguments.length); const attr = find(this, null, name, true); if (attr) remove(this, attr); },
   removeAttributeNS(namespace, local) { const key = byNS(this, namespace, local, arguments.length), attr = find(this, key.namespace, key.local); if (attr) remove(this, attr); },
@@ -84,14 +84,14 @@ export const attributeMethods = {
   toggleAttribute(name, force = undefined) {
     name = byName(this, name, arguments.length); if (!validAttributeLocalName(name)) throw new DOMException('Invalid attribute name', 'InvalidCharacterError');
     const attr = find(this, null, name, true); if (attr) { if (arguments.length < 2 || !force) { remove(this, attr); return false; } return true; }
-    if (arguments.length < 2 || force) { append(this, nativeAttribute(this.ownerDocument, { namespace: null, prefix: null, local: name, qualified: name }), true); return true; } return false;
+    if (arguments.length < 2 || force) { append(this, nativeAttribute(nodeDocument(this), { namespace: null, prefix: null, local: name, qualified: name }), true); return true; } return false;
   },
 };
 function setNode(element, attr, count) {
   requireElement(element); required(count, 1); const data = requireAttribute(attr);
   if (data.owner && data.owner !== element) throw new DOMException('The attribute belongs to another element', 'InUseAttributeError');
   const old = find(element, data.namespace, data.local); if (old === attr) return attr;
-  if (old) { const before = old[PREV], after = old[NEXT], previous = old[VALUE]; knownAdjacent(before, after); setAttributeOwner(old, null); old[PREV] = old[NEXT] = null; setNodeDocument(attr, element.ownerDocument); setAttributeOwner(attr, element); knownSiblings(before, attr, after); if (tailFor(element) === old) saveTail(element, attr); notify(element, data, previous, attr[VALUE]); }
+  if (old) { const before = old[PREV], after = old[NEXT], previous = old[VALUE]; knownAdjacent(before, after); setAttributeOwner(old, null); old[PREV] = old[NEXT] = null; setNodeDocument(attr, nodeDocument(element)); setAttributeOwner(attr, element); knownSiblings(before, attr, after); if (tailFor(element) === old) saveTail(element, attr); notify(element, data, previous, attr[VALUE]); }
   else append(element, attr, true);
   return old;
 }

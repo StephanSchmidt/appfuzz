@@ -77,7 +77,11 @@ struct PageLoader;
 impl Loader for PageLoader {
     fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str, _: Option<ImportAttributes<'js>>) -> Result<Module<'js, Declared>> {
         match call::<_, Option<String>>(ctx, "file", (name,))? {
-            Some(code) => Module::declare(ctx.clone(), name, code),
+            Some(code) => {
+                let module = Module::declare(ctx.clone(), name, code)?;
+                module.meta()?.set("url", name)?;
+                Ok(module)
+            }
             None => Err(Error::new_loading_message(name, "no answer has this module")),
         }
     }
@@ -211,6 +215,20 @@ fn compile<'js>(ctx: &Ctx<'js>, url: &str, code: &str, module: bool) -> Option<V
     if v.is_exception() {
         let _ = ctx.catch();
         return None;
+    }
+    if module {
+        if unsafe { qjs::JS_VALUE_GET_TAG(v.as_raw()) } != qjs::JS_TAG_MODULE {
+            return None;
+        }
+        // SAFETY: a successful module-only compile returns a rooted module
+        // value. Its pointer remains valid while v is alive. Import metadata
+        // is a fresh null-prototype object, independent of page prototypes.
+        let meta = unsafe { Value::from_raw(ctx.clone(), qjs::JS_GetImportMeta(ctx.as_raw().as_ptr(), qjs::JS_VALUE_GET_PTR(v.as_raw()).cast())) };
+        if meta.is_exception() {
+            let _ = ctx.catch();
+            return None;
+        }
+        meta.into_object()?.set("url", url).ok()?;
     }
     Some(v)
 }
@@ -346,7 +364,11 @@ impl Page {
                     return;
                 };
                 let ok = if kind == "module" {
-                    match Module::declare(ctx.clone(), url.clone(), code).and_then(|m| m.eval()) {
+                    match Module::declare(ctx.clone(), url.clone(), code).and_then(|m| {
+                        let meta_url = s.get::<_, Option<String>>("metaURL")?.unwrap_or_else(|| url.clone());
+                        m.meta()?.set("url", meta_url)?;
+                        m.eval()
+                    }) {
                         Ok((_, promise)) => {
                             shim::<_, ()>(&ctx, "watch", (promise, url.clone()));
                             true
@@ -618,6 +640,39 @@ mod tests {
             assert!(out.contains(r#""url":"https://app.example/""#), "{out}");
             assert!(out.contains(r#""text":"sentinel""#), "{out}");
         }
+    }
+
+    #[test]
+    fn module_metadata_and_imports_use_the_preparation_base() {
+        let out = session(
+            r#"{"url":"https://app.example/index.html","html":"<base href='/nested/'><script type=module>import './dep.mjs';console.log('inline',import.meta.url)</script>","files":{"/nested/dep.mjs":"console.log('dependency',import.meta.url,Object.getPrototypeOf(import.meta)===null)"}}"#,
+        );
+        assert!(out.contains(r#""text":"inline https://app.example/nested/""#), "{out}");
+        assert!(out.contains(r#""text":"dependency https://app.example/nested/dep.mjs true""#), "{out}");
+        assert!(out.contains(r#""errors":[]"#), "{out}");
+    }
+
+    #[test]
+    fn external_module_metadata_does_not_invoke_object_prototype_setters() {
+        let out = session(
+            r#"{"url":"https://app.example/","html":"<script>Object.defineProperty(Object.prototype,'url',{set(){throw Error('author url')},configurable:true})</script><script type=module src='/entry.mjs'></script>","files":{"/entry.mjs":"console.log('external',import.meta.url,Object.getPrototypeOf(import.meta)===null)"}}"#,
+        );
+        assert!(out.contains(r#""text":"external https://app.example/entry.mjs true""#), "{out}");
+        assert!(out.contains(r#""errors":[]"#), "{out}");
+    }
+
+    #[test]
+    fn precompiled_modules_initialize_their_import_metadata() {
+        let page = boot().unwrap();
+        page.precompile(
+            r#"{"modules":{"https://app.example/precompiled.mjs":"console.log('compiled',import.meta.url,Object.getPrototypeOf(import.meta)===null)"}}"#,
+        );
+        BOOTED.with(|slot| *slot.borrow_mut() = Some(page));
+        let out = session(
+            r#"{"url":"https://app.example/","html":"<script type=module src='/precompiled.mjs'></script>","files":{"/precompiled.mjs":"throw Error('should use compiled code')"}}"#,
+        );
+        assert!(out.contains(r#""text":"compiled https://app.example/precompiled.mjs true""#), "{out}");
+        assert!(out.contains(r#""errors":[]"#), "{out}");
     }
 
     #[test]

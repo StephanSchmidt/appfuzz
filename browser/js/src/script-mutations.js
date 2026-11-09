@@ -1,3 +1,4 @@
+import { installScriptAttributeHook } from './ce-hooks.js';
 import { installChildrenChangedHook } from './dom-mutations.js';
 import { physicalParent } from './dom-state.js';
 // Script preparation is a DOM mutation step, not an event-loop poll. Batch
@@ -125,6 +126,7 @@ export function installScriptMutations(L, changed) {
     return identity && (identity.namespace === 'http://www.w3.org/2000/svg'
       ? name === 'href' || name === 'xlink:href' : name === 'src');
   };
+  installScriptAttributeHook((node,name,namespace) => { if (namespace !== null && namespace !== 'http://www.w3.org/1999/xlink') return; if (!sourceAttribute(node,name)) return; depth++; try { note(node); } finally { finish(); } });
   const setAttribute = L.Element.prototype.setAttribute;
   L.Element.prototype.setAttribute = function (name, value) {
     depth++;
