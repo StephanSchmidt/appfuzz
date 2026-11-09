@@ -88,9 +88,11 @@ fn fragments_and_omitted_document_elements_keep_their_visible_body_content() {
 fn empty_documents_have_a_usable_html_head_and_body() {
     let (_, report) = visit("");
     assert_eq!(report["text"], "");
-    let (_, report) =
-        visit("<script>console.log(document.documentElement.localName,document.head.parentNode.localName,document.body.parentNode.localName);</script>");
-    assert_eq!(report["console"][0]["text"], "html html html");
+    let (_, report) = visit(
+        "<script>console.log(document.body===null);document.addEventListener('DOMContentLoaded',()=>console.log(document.documentElement.localName,document.head.parentNode.localName,document.body.parentNode.localName));</script>",
+    );
+    assert_eq!(report["console"][0]["text"], "true");
+    assert_eq!(report["console"][1]["text"], "html html html");
 }
 
 #[test]
@@ -206,7 +208,7 @@ fn svg_script_urls_use_href_then_xlink_href_and_ignore_src() {
 #[test]
 fn dynamically_created_scripts_keep_their_namespace_and_svg_names_are_case_sensitive() {
     let (r, _) = visit(
-        r#"<script>
+        r#"<body><script>
         for(const [ns,id] of [['http://www.w3.org/1998/Math/MathML','math'],[null,'null'],['urn:custom','custom'],['http://www.w3.org/2000/svg','svg'],['http://www.w3.org/1999/xhtml','html']]) {
             const s=document.createElementNS(ns,'script');s.textContent="fetch('/"+id+"');";document.body.append(s);
         }
@@ -223,7 +225,7 @@ fn dynamically_created_scripts_keep_their_namespace_and_svg_names_are_case_sensi
 #[test]
 fn element_creation_converts_names_once_and_only_folds_ascii_in_html() {
     let (r, report) = visit(
-        r#"<script>
+        r#"<body><script>
         let htmlNames=0,svgNames=0;
         const html=document.createElement({toString(){return ++htmlNames===1?'SCRIPT':'div';}});
         html.textContent="fetch('/coerced-html');";document.body.append(html);
@@ -241,13 +243,13 @@ fn element_creation_converts_names_once_and_only_folds_ascii_in_html() {
 #[test]
 fn shadowing_dom_names_and_namespaces_cannot_hide_real_scripts_or_activate_foreign_text() {
     let (r, _) = visit(
-        r#"<script>
+        r#"<body><script id=later type=module>fetch('/parsed-real');</script><script>
         const later=document.getElementById('later');Object.defineProperty(later,'namespaceURI',{value:'urn:inert'});Object.defineProperty(later,'localName',{value:'inert'});
         const real=document.createElement('script');real.textContent="fetch('/created-real');";
         Object.defineProperty(real,'namespaceURI',{value:'urn:inert'});Object.defineProperty(real,'localName',{value:'inert'});document.body.append(real);
         const math=document.createElementNS('http://www.w3.org/1998/Math/MathML','script');math.textContent="fetch('/inert-math');";
         Object.defineProperty(math,'namespaceURI',{value:'http://www.w3.org/1999/xhtml'});document.body.append(math);
-    </script><script id=later>fetch('/parsed-real');</script>"#,
+    </script>"#,
     );
     let mut paths: Vec<_> = r.events.iter().filter(|e| e.func == FETCH_OWN).map(|e| e.args["path"].as_str().unwrap()).collect();
     paths.sort_unstable();
@@ -257,7 +259,7 @@ fn shadowing_dom_names_and_namespaces_cannot_hide_real_scripts_or_activate_forei
 #[test]
 fn dynamically_inserted_batches_do_not_replace_remaining_page_or_parent_batch_scripts() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
         console.log('a');
         const d=document.createElement('script');d.textContent="console.log('d');const e=document.createElement('script');e.textContent=\"console.log('e');\";document.body.append(e);";document.body.append(d);
         const d2=document.createElement('script');d2.textContent="console.log('d2');";document.body.append(d2);
@@ -282,7 +284,7 @@ fn external_script_completion_events_keep_the_original_load_even_if_its_url_attr
 #[test]
 fn prefixed_html_and_svg_scripts_execute_with_their_local_names_and_namespaces() {
     let (r, report) = visit(
-        r#"<script>
+        r#"<body><script>
         for(const [ns,name,path] of [['http://www.w3.org/2000/svg','v:script','svg'],['http://www.w3.org/1999/xhtml','h:script','html'],['http://www.w3.org/1998/Math/MathML','m:script','math']]) {
             const s=document.createElementNS(ns,name);s.textContent="fetch('/"+path+"');";
             console.log(JSON.stringify([s.namespaceURI,s.prefix,s.localName,s.tagName,s.nodeName]));document.body.append(s);
@@ -330,7 +332,7 @@ fn namespace_names_follow_current_dom_rules_without_unnecessary_xml_restrictions
 #[test]
 fn cloned_namespace_elements_keep_prefixes_and_do_not_activate_literal_colon_or_mathml_tags() {
     let (r, report) = visit(
-        r#"<svg id=literal><v:script>fetch('/inert-literal');</v:script><v:></v:></svg>
+        r#"<body><svg id=literal><v:script>fetch('/inert-literal');</v:script><v:></v:></svg>
         <script>
         for(const ns of ['http://www.w3.org/2000/svg','http://www.w3.org/1999/xhtml','http://www.w3.org/1998/Math/MathML']) {
             const root=document.createElementNS(ns,'p:root'),s=document.createElementNS(ns,'p:script');
@@ -355,7 +357,7 @@ fn cloned_namespace_elements_keep_prefixes_and_do_not_activate_literal_colon_or_
 #[test]
 fn shallow_script_clones_keep_url_attributes_and_parsed_foreign_clones_keep_their_namespace() {
     let (r, report) = visit_planned(
-        r#"<math id=math><script>fetch('/inert-math');</script></math>
+        r#"<body><math id=math><script>fetch('/inert-math');</script></math>
         <svg id=svg><g><svg><circle></circle></svg></g></svg><script>
         const s=document.createElementNS('http://www.w3.org/2000/svg','v:script');s.setAttribute('href','/cloned.js');
         s.textContent="fetch('/inert-child');";Object.defineProperty(s,'namespaceURI',{value:'urn:shadow'});
@@ -378,7 +380,7 @@ fn shallow_script_clones_keep_url_attributes_and_parsed_foreign_clones_keep_thei
 #[test]
 fn namespace_creation_coerces_each_argument_once_and_checks_required_arguments_first() {
     let (r, report) = visit(
-        r#"<script>
+        r#"<body><script>
         let namespaces=0,names=0;const s=document.createElementNS({toString(){namespaces++;return 'http://www.w3.org/2000/svg';}},{toString(){names++;return 'v:script';}});s.textContent="fetch('/once');";document.body.append(s);console.log(namespaces,names);
         let missing=0;try{document.createElementNS({toString(){missing++;return 'urn:test';}});}catch(e){console.log(e.name,missing);}
         for(const [ns,name] of [[{toString(){return '';}},'v:script'],[Symbol('ns'),'script'],['urn:test',Symbol('name')]]){try{document.createElementNS(ns,name);console.log('none');}catch(e){console.log(e.name);}}
@@ -408,7 +410,7 @@ fn clones_use_the_owning_documents_element_class() {
 fn cloned_scripts_wait_for_the_active_page_and_can_run_after_adoption_or_in_shadow_trees() {
     for destination in ["detached", "page", "shadow"] {
         let html = format!(
-            r#"<script>
+            r#"<body><script>
             const d=new DOMParser().parseFromString('','text/html'),original=d.createElement('div'),script=d.createElement('script');
             script.textContent='fetch("/cloned");';original.append(script);
             const copy=original.cloneNode(true);
@@ -429,7 +431,7 @@ fn cloned_scripts_wait_for_the_active_page_and_can_run_after_adoption_or_in_shad
 #[test]
 fn deep_clones_schedule_scripts_in_tree_order() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
         const root=document.createElement('div');
         for(const text of ['a','b','c']) {
             const container=document.createElement('div'),s=document.createElement('script');
@@ -445,7 +447,7 @@ fn deep_clones_schedule_scripts_in_tree_order() {
 #[test]
 fn fresh_scripts_from_other_documents_execute_when_inserted_into_the_active_page() {
     let (r, _) = visit(
-        r#"<script>
+        r#"<body><script>
         const html=new DOMParser().parseFromString('','text/html'),xml=new DOMParser().parseFromString('<root/>','text/xml');
         for(const [owner,ns,name,path] of [[html,undefined,'SCRIPT','html'],[html,'http://www.w3.org/2000/svg','v:script','svg'],[xml,'http://www.w3.org/1999/xhtml','h:script','xml-html']]) {
             const s=ns===undefined?owner.createElement(name):owner.createElementNS(ns,name);s.textContent="fetch('/"+path+"');";document.body.append(s);
@@ -483,7 +485,7 @@ fn documents_created_by_domparser_share_namespace_validation_and_case_rules() {
 #[test]
 fn inserting_a_foreign_subtree_adopts_elements_attributes_text_and_fragments() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
         const foreign=new DOMParser().parseFromString('','text/html');
         for(const method of ['append','prepend','appendChild','insertBefore','replaceChild','before','after','replaceWith','replaceChildren','insertAdjacentElement','fragment']) {
             const target=document.createElement('div'),anchor=document.createElement('i');target.append(anchor);document.body.append(target);
@@ -537,7 +539,7 @@ fn text_and_comments_move_out_of_another_documents_tree() {
 #[test]
 fn adoption_callbacks_observe_the_destination_document() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
         const foreign=new DOMParser().parseFromString('','text/html');
         customElements.define('adoption-check',class extends HTMLElement {
             connectedCallback(){console.log('connected',this.ownerDocument===document?'main':'foreign',this.isConnected);}
@@ -565,7 +567,7 @@ fn adoption_callbacks_observe_the_destination_document() {
 #[test]
 fn adoption_keeps_the_old_documents_removal_observer_record() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
         const foreign=new DOMParser().parseFromString('','text/html'),el=document.createElement('div');document.body.append(el);
         const observer=new MutationObserver(records=>console.log('removed',records.reduce((n,r)=>n+r.removedNodes.length,0)));
         observer.observe(document.body,{childList:true});foreign.body.append(el);
@@ -578,7 +580,7 @@ fn adoption_keeps_the_old_documents_removal_observer_record() {
 #[test]
 fn adoption_updates_closed_shadow_roots_and_their_descendants() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
         const foreign=new DOMParser().parseFromString('','text/html'),host=foreign.createElement('div'),shadow=host.attachShadow({mode:'closed'}),child=foreign.createElement('span'),text=foreign.createTextNode('text');
         child.setAttribute('data-value','value');shadow.append(child,text);document.body.append(host);
         console.log(host.shadowRoot,[host,shadow,child,text,child.attributes[0]].every(n=>n.ownerDocument===document));
@@ -590,7 +592,7 @@ fn adoption_updates_closed_shadow_roots_and_their_descendants() {
 #[test]
 fn nested_adoption_drains_already_queued_reactions_and_preserves_their_arguments() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
         const logs=[],foreign=new DOMParser().parseFromString('','text/html');let moved=false;
         customElements.define('reaction-node',class extends HTMLElement {
             connectedCallback(){logs.push([this.id,'connected',this.ownerDocument===document?'main':'foreign']);}
@@ -624,7 +626,7 @@ fn nested_adoption_drains_already_queued_reactions_and_preserves_their_arguments
 #[test]
 fn queued_adoption_callbacks_keep_the_function_selected_before_earlier_reactions_run() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
         const logs=[],foreign=new DOMParser().parseFromString('','text/html');let child;
         customElements.define('change-callback',class extends HTMLElement {
             disconnectedCallback(){if(this.id==='parent')child.adoptedCallback=()=>logs.push('replacement');}
@@ -640,7 +642,7 @@ fn queued_adoption_callbacks_keep_the_function_selected_before_earlier_reactions
 #[test]
 fn observers_follow_their_target_when_it_moves_to_another_document() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
         const foreign=new DOMParser().parseFromString('','text/html'),el=document.createElement('div');document.body.append(el);
         const observer=new MutationObserver(records=>console.log('attribute',records.length));observer.observe(el,{attributes:true});
         foreign.body.append(el);el.setAttribute('data-value','changed');
@@ -666,7 +668,7 @@ fn observers_can_watch_other_documents_and_disconnecting_one_keeps_other_observe
 #[test]
 fn document_clones_use_a_fresh_registry_and_own_all_copied_nodes_without_adoption_callbacks() {
     let (_, report) = visit(
-        r#"<!doctype html><script>
+        r#"<!doctype html><body><script>
         const logs=[];customElements.define('clone-check',class extends HTMLElement {
             constructor(){super();logs.push('constructor');}
             connectedCallback(){logs.push('connected');}
@@ -684,7 +686,7 @@ fn document_clones_use_a_fresh_registry_and_own_all_copied_nodes_without_adoptio
 #[test]
 fn element_clones_preserve_the_class_implied_by_their_namespace() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
         for(const ns of [null,'urn:test','http://www.w3.org/1998/Math/MathML','http://www.w3.org/1999/xhtml','http://www.w3.org/2000/svg']) {
             const source=document.createElementNS(ns,'script'),copy=source.cloneNode(true);
             console.log(JSON.stringify([copy.namespaceURI,copy.constructor===source.constructor,copy instanceof HTMLElement]));
@@ -724,7 +726,7 @@ fn document_clones_keep_document_type_and_distinguish_shallow_from_deep_copies()
 #[test]
 fn page_overrides_of_weakmap_cannot_prevent_script_cloning() {
     let (r, report) = visit(
-        r#"<script>
+        r#"<body><script>
         const source=document.createElement('script');source.textContent="fetch('/cloned');";
         const NativeWeakMap=WeakMap,get=NativeWeakMap.prototype.get,set=NativeWeakMap.prototype.set;let calls=0,copy;
         WeakMap=function(){calls++;throw Error('page constructor');};
@@ -799,7 +801,7 @@ fn executed_script_state_survives_element_subtree_document_and_fragment_cloning(
 #[test]
 fn empty_inert_and_fresh_detached_scripts_can_execute_after_cloning() {
     let (_, report) = visit(
-        r#"<script id=empty></script><script id=inert type=application/json>console.log('inert-copy');</script><script>
+        r#"<body><script id=empty></script><script id=inert type=application/json>console.log('inert-copy');</script><script>
     const empty=document.getElementById('empty').cloneNode(true);empty.textContent="console.log('empty-copy');";document.body.append(empty);
     const inert=document.getElementById('inert').cloneNode(true);inert.type='';document.body.append(inert);
     const fresh=document.createElement('script');fresh.textContent="console.log('fresh-copy');";document.body.append(fresh.cloneNode(true));
@@ -812,7 +814,7 @@ fn empty_inert_and_fresh_detached_scripts_can_execute_after_cloning() {
 #[test]
 fn parsed_and_nomodule_scripts_do_not_restart_when_cloned_into_the_active_page() {
     let (r, _) = visit(
-        r#"<script id=nomodule nomodule>fetch('/nomodule');</script><script>
+        r#"<body><script id=nomodule nomodule>fetch('/nomodule');</script><script>
     const nomodule=document.getElementById('nomodule').cloneNode(true);nomodule.removeAttribute('nomodule');document.body.append(nomodule);
     const markup=code=>'<script>'+code+'</'+'script>';
     const holder=document.createElement('div');holder.innerHTML=markup("fetch('/fragment');");document.body.append(holder.firstChild.cloneNode(true));
@@ -826,7 +828,7 @@ fn parsed_and_nomodule_scripts_do_not_restart_when_cloned_into_the_active_page()
 #[test]
 fn dynamically_inserted_inline_scripts_execute_before_insertion_returns() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const outer=document.currentScript,s=document.createElement('script');s.text='console.log("dynamic",document.currentScript===window.dynamic);';window.dynamic=s;
     console.log('before');document.head.append(s);console.log('after',document.currentScript===outer);
     document.body.append(s.cloneNode(true));
@@ -840,7 +842,7 @@ fn dynamically_inserted_inline_scripts_execute_before_insertion_returns() {
 #[test]
 fn script_insertion_prepares_the_entire_batch_before_running_its_first_script() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const a=document.createElement('script'),b=document.createElement('script');window.second=b;
     a.text='console.log("first",second.isConnected);document.body.append(second.cloneNode(true));';b.text='console.log("second");';
     document.body.append(a,b);
@@ -853,7 +855,7 @@ fn script_insertion_prepares_the_entire_batch_before_running_its_first_script() 
 #[test]
 fn scripts_prepared_in_inert_documents_stay_inert_after_moving_and_cloning() {
     let (r, _) = visit(
-        r#"<script>
+        r#"<body><script>
     const d=new DOMParser().parseFromString('','text/html'),s=d.createElement('script');s.text='fetch("/inactive");';d.body.append(s);
     document.body.append(s.cloneNode(true));document.body.append(s);
     const markup=code=>'<script>'+code+'</'+'script>';
@@ -872,7 +874,7 @@ fn scripts_prepared_in_inert_documents_stay_inert_after_moving_and_cloning() {
 #[test]
 fn contextual_fragments_and_initial_template_scripts_execute_after_insertion() {
     let (_, report) = visit(
-        r#"<template id=t><script>console.log('template');</script></template><script>
+        r#"<body><template id=t><script>console.log('template');</script></template><script>
     document.body.append(document.getElementById('t').content.cloneNode(true));
     const range=document.createRange();range.selectNodeContents(document.body);
     document.body.append(range.createContextualFragment('<script>console.log("contextual");</'+'script>'));
@@ -885,7 +887,7 @@ fn contextual_fragments_and_initial_template_scripts_execute_after_insertion() {
 #[test]
 fn script_preparation_reads_child_text_and_reacts_to_connected_text_changes() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const s=document.createElement('script'),span=document.createElement('span');span.textContent='console.log("descendant");';s.append(span);document.body.append(s);
     s.append('console.log("direct");');
     const t=document.createElement('script'),text=document.createTextNode('');t.append(text);document.head.append(t);text.data='console.log("data");';
@@ -917,7 +919,7 @@ fn external_script_preparation_survives_cloning_source_changes_and_coerced_attri
 #[test]
 fn nested_inline_execution_restores_current_script_and_reports_errors_without_throwing_from_append() {
     let (_, report) = visit_unchecked(
-        r#"<script>
+        r#"<body><script>
     const outer=document.currentScript;
     const inner=document.createElement('script');window.innerScript=inner;
     inner.text='console.log("inner",document.currentScript===innerScript);const nested=document.createElement("script");nested.text="console.log(123);";document.body.append(nested);throw Error("inner failure");';
@@ -935,7 +937,7 @@ fn nested_inline_execution_restores_current_script_and_reports_errors_without_th
 #[test]
 fn scripts_in_closed_shadow_trees_prepare_when_the_host_connects_despite_public_host_shadows() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const host=document.createElement('div'),root=host.attachShadow({mode:'closed'}),s=document.createElement('script');
     Object.defineProperty(root,'host',{value:document.createElement('div')});
     s.text='console.log("shadow");';root.append(s);console.log('detached');document.body.append(host);console.log('connected');
@@ -949,7 +951,7 @@ fn scripts_in_closed_shadow_trees_prepare_when_the_host_connects_despite_public_
 #[test]
 fn script_mime_types_language_and_nomodule_keep_browser_preparation_behavior() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     for(const type of ['text/javascript1.5','text/livescript','application/x-javascript',' \ttext/javascript\r\n','\u00a0text/javascript\u00a0']){
       const s=document.createElement('script');s.type=type;s.text='console.log('+JSON.stringify(type)+');';document.head.append(s);
     }
@@ -965,7 +967,7 @@ fn script_mime_types_language_and_nomodule_keep_browser_preparation_behavior() {
 #[test]
 fn adopting_a_prepared_script_into_another_document_cancels_its_execution_without_restarting_it() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     window.foreign=new DOMParser().parseFromString('','text/html');
     const a=document.createElement('script'),b=document.createElement('script');window.second=b;
     a.text='console.log("first");foreign.body.append(second);';b.text='console.log("moved");';
@@ -979,7 +981,7 @@ fn adopting_a_prepared_script_into_another_document_cancels_its_execution_withou
 #[test]
 fn an_empty_script_source_reports_error_asynchronously_and_keeps_clones_started() {
     let (r, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const s=document.createElement('script');s.src='';s.addEventListener('error',()=>console.log('error'));
     document.body.append(s);s.removeAttribute('src');s.text='console.log("reran");';document.body.append(s.cloneNode(true));console.log('after');
     </script>"#,
@@ -1006,7 +1008,7 @@ fn fragment_parsers_do_not_mark_scripts_created_by_custom_element_constructors_a
 #[test]
 fn fragment_tree_building_uses_table_and_svg_contexts_and_keeps_parsed_scripts_inert() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const table=document.createElement('table');table.innerHTML='<tr><td>cell</td></tr>';console.log(table.innerHTML);
     table.firstChild.insertAdjacentHTML('beforeend','<tr><td>second</td></tr>');console.log(table.rows?.length??table.querySelectorAll('tr').length);
     const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.innerHTML='<g><circle/></g><foreignObject><div>html</div></foreignObject><script>console.log("parsed");</'+'script>';
@@ -1048,7 +1050,7 @@ fn script_preparation_uses_real_attributes_and_child_text_despite_public_accesso
 #[test]
 fn public_document_type_and_script_owner_shadows_do_not_change_preparation_or_execution() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     window.inertDoc=new DOMParser().parseFromString('','text/html');
     const a=document.createElement('script'),b=document.createElement('script');window.second=b;
     a.text='Object.defineProperty(second,"ownerDocument",{value:inertDoc});console.log("first");';b.text='console.log("second");';document.body.append(a,b);
@@ -1075,7 +1077,7 @@ fn template_cloning_copies_nested_contents_only_when_deep_and_keeps_them_indepen
 #[test]
 fn template_light_children_and_contents_remain_separate_when_read_cloned_and_inserted() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const t=document.createElement('template'),light=document.createElement('i');light.textContent='light';t.append(light);
     console.log(t.childNodes.length,t.content.childNodes.length);t.innerHTML='<b>content</b>';const content=t.content;
     const copy=t.cloneNode(true);console.log(copy.childNodes.length,copy.content.childNodes.length,copy.firstChild?.textContent,copy.content.firstChild?.textContent,copy.content===copy.content);
@@ -1102,7 +1104,7 @@ fn template_contents_use_a_shared_inert_document_and_document_clones_get_their_o
 #[test]
 fn cloned_template_contents_preserve_script_preparation_state() {
     let (r, report) = visit(
-        r#"<template id=t><script>fetch('/template-ran');</script></template><script>
+        r#"<body><template id=t><script>fetch('/template-ran');</script></template><script>
     const t=document.getElementById('t'),copy=t.cloneNode(true);document.body.append(copy);console.log('connected-template');document.body.append(copy.content);
     const parsed=new DOMParser().parseFromString('<template><script>fetch("/parsed-reran");</'+'script></template>','text/html');document.body.append(parsed.querySelector('template').cloneNode(true).content);
     const ran=document.createElement('script');ran.text='console.log("ran");';document.body.append(ran);const saved=document.createElement('template');saved.content.append(ran);document.body.append(saved.cloneNode(true).content);
@@ -1132,7 +1134,7 @@ fn template_contents_survive_cloning_through_elements_fragments_and_documents() 
 #[test]
 fn template_parsing_and_cloning_delay_custom_element_construction_until_insertion() {
     let (_, report) = visit(
-        r#"<template id=t><x-probe data-a=v></x-probe></template><script>
+        r#"<body><template id=t><x-probe data-a=v></x-probe></template><script>
     let constructed=0;customElements.define('x-probe',class extends HTMLElement{constructor(){super();constructed++;}connectedCallback(){console.log('connected');}});
     const t=document.getElementById('t'),copy=t.cloneNode(true);console.log('cloned',constructed,copy.content.childNodes.length);document.body.append(copy.content);console.log('inserted',constructed);
     const fresh=document.createElement('template');fresh.innerHTML='<x-probe></x-probe>';console.log('parsed',constructed);const fragment=fresh.content.cloneNode(true);console.log('content-cloned',constructed);document.body.append(fragment);console.log('content-inserted',constructed);
@@ -1145,7 +1147,7 @@ fn template_parsing_and_cloning_delay_custom_element_construction_until_insertio
 #[test]
 fn upgrading_inserted_template_contents_preserves_attributes_and_only_reports_real_mutations() {
     let (_, report) = visit(
-        r#"<template id=t><x-probe data-a=v></x-probe></template><script>
+        r#"<body><template id=t><x-probe data-a=v></x-probe></template><script>
     customElements.define('x-probe',class extends HTMLElement{static observedAttributes=['data-a'];constructor(){super();console.log('constructor',this.isConnected,this.getAttribute('data-a'));this.setAttribute('data-a','changed');}attributeChangedCallback(name,oldValue,value){console.log('attribute',name,oldValue,value);}connectedCallback(){console.log('connected');}});
     const copy=document.getElementById('t').cloneNode(true),child=copy.content.firstChild;
     if(child){const observer=new MutationObserver(()=>{});observer.observe(child,{attributes:true});document.body.append(copy.content);console.log('records',observer.takeRecords().map(r=>r.type+':'+r.attributeName).join(','));observer.disconnect();}
@@ -1183,7 +1185,7 @@ fn template_serialization_includes_nested_contents_without_copying_its_light_chi
 #[test]
 fn adopting_templates_retargets_nested_contents_to_the_destinations_inert_document() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const foreign=new DOMParser().parseFromString('<template id=t><template><p data-p=v>text</p></template></template>','text/html');
     const t=foreign.getElementById('t'),old=t.content.ownerDocument,content=t.content,nested=content.firstChild;
     const expected=document.createElement('template').content.ownerDocument,light=foreign.createElement('i');light.textContent='light';t.append(light);document.body.append(t);
@@ -1207,7 +1209,7 @@ fn cloning_and_serializing_templates_do_not_consult_public_content_getters() {
 #[test]
 fn template_upgrade_callbacks_run_fresh_inline_scripts_before_the_callback_returns() {
     let (r, report) = visit(
-        r#"<template id=t><x-script></x-script></template><script>
+        r#"<body><template id=t><x-script></x-script></template><script>
     customElements.define('x-script',class extends HTMLElement{constructor(){super();const s=document.createElement('script');s.text='console.log("constructor-script");fetch("/constructor");';document.head.append(s);document.head.append(s.cloneNode(true));console.log('constructor-after');}connectedCallback(){const s=document.createElement('script');s.text='console.log("connected-script");';document.head.append(s);console.log('connected-after');}});
     document.body.append(document.getElementById('t').cloneNode(true).content);console.log('inserted');
     </script>"#,
@@ -1235,7 +1237,7 @@ fn deeply_nested_template_contents_clone_without_losing_inner_trees() {
 #[test]
 fn failed_template_custom_element_upgrades_report_once_and_do_not_throw_from_insertion() {
     let (_, report) = visit_unchecked(
-        r#"<template id=t><x-fail></x-fail></template><script>
+        r#"<body><template id=t><x-fail></x-fail></template><script>
     customElements.define('x-fail',class extends HTMLElement{constructor(){super();console.log('constructor');throw Error('upgrade failed');}connectedCallback(){console.log('connected');}});
     const fragment=document.getElementById('t').cloneNode(true).content,child=fragment.firstChild;
     document.body.append(fragment);console.log('returned');child.remove();document.body.append(child);console.log('reinserted');
@@ -1284,7 +1286,7 @@ fn html_templates_in_xml_documents_keep_xml_inert_owners_and_clone_their_content
 fn cloned_template_contents_keep_svg_owners_namespaces_and_executable_script_identity() {
     for kind in ["template", "document"] {
         let html = format!(
-            r#"<template id=t><svg><g><circle/></g><script>fetch('/svg-cloned');</script></svg><math><script>fetch('/math-cloned');</script></math></template><script>
+            r#"<body><template id=t><svg><g><circle/></g><script>fetch('/svg-cloned');</script></svg><math><script>fetch('/math-cloned');</script></math></template><script>
         const original=document.getElementById('t'),copy='{kind}'==='template'?original.cloneNode(true):document.cloneNode(true).getElementById('t'),svg=copy.content.firstChild,g=svg.firstChild;
         console.log(svg.ownerSVGElement,g.ownerSVGElement===svg,g.firstChild.ownerSVGElement===svg,svg.lastChild.ownerSVGElement===svg,copy.content.lastChild.namespaceURI);
         document.body.append(copy.content);
@@ -1326,7 +1328,7 @@ fn importing_fragments_and_plain_nodes_preserves_types_values_and_source_ownersh
 #[test]
 fn imported_custom_elements_construct_with_the_completed_copy_and_destination_registry() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const foreign=new DOMParser().parseFromString('','text/html');
     customElements.define('x-import',class extends HTMLElement{constructor(){super();console.log('constructor',this.getAttribute('data-a'),this.childNodes.length,this.ownerDocument===document,this.isConnected);}static observedAttributes=['data-a'];attributeChangedCallback(name,oldValue,value){console.log('attribute',name,oldValue,value);}adoptedCallback(){console.log('adopted');}connectedCallback(){console.log('connected');}});
     const source=foreign.createElement('x-import');source.setAttribute('data-a','v');source.append(foreign.createElement('b'));const copy=document.importNode(source,true);console.log('imported',copy instanceof customElements.get('x-import'));
@@ -1379,7 +1381,7 @@ fn import_rejects_documents_shadow_roots_and_non_nodes_without_calling_guest_met
 #[test]
 fn imported_scripts_keep_their_preparation_state_while_fresh_scripts_execute_after_insertion() {
     let (r, report) = visit(
-        r#"<script id=ran>console.log('original');</script><script>
+        r#"<body><script id=ran>console.log('original');</script><script>
     document.body.append(document.importNode(document.getElementById('ran'),true));
     const other=new DOMParser().parseFromString('<script>fetch("/parsed-reran");</'+'script>','text/html');document.body.append(document.importNode(other.querySelector('script'),true));
     const fresh=other.createElement('script');fresh.text='fetch("/fresh-import");';const copy=document.importNode(fresh,true);console.log(copy.ownerDocument===document,copy.firstChild.ownerDocument===document);document.body.append(copy);
@@ -1493,7 +1495,7 @@ fn nested_import_before_super_does_not_consume_an_outer_upgrade_construction_tok
 #[test]
 fn failed_import_constructors_do_not_throw_from_import_or_cancel_later_child_upgrades() {
     let (_, report) = visit_unchecked(
-        r#"<script>
+        r#"<body><script>
     customElements.define('x-parent',class extends HTMLElement{constructor(){super();console.log('parent');throw Error('import failed');}connectedCallback(){console.log('failed-connected');}});
     customElements.define('x-child',class extends HTMLElement{constructor(){super();console.log('child',this.ownerDocument===document,this.isConnected);}connectedCallback(){console.log('child-connected');}});
     const other=new DOMParser().parseFromString('<x-parent><x-child></x-child></x-parent>','text/html');const copy=document.importNode(other.body.firstChild,true);console.log('returned',copy.firstChild instanceof customElements.get('x-child'));document.body.append(copy);
@@ -1525,7 +1527,7 @@ fn changing_or_removing_is_does_not_change_the_definition_used_by_clones_and_imp
 #[test]
 fn adding_an_is_attribute_does_not_create_a_customized_builtin() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     let count=0;class A extends HTMLButtonElement{constructor(){super();count++;}}
     const fake=document.createElement('button');fake.setAttribute('is','x-a');document.body.append(fake);customElements.define('x-a',A,{extends:'button'});
     const copy=fake.cloneNode(true),imported=document.importNode(fake);customElements.upgrade(fake);console.log(count,fake instanceof A,copy instanceof A,imported instanceof A);
@@ -1550,7 +1552,7 @@ fn unknown_customized_builtins_keep_their_builtin_interface_without_a_registry_d
 #[test]
 fn registered_script_constructors_register_script_identity_before_the_constructor_body() {
     let (r, report) = visit(
-        r#"<script>
+        r#"<body><script>
     class CustomScript extends HTMLScriptElement{constructor(){super();this.text='console.log("executed");fetch("/direct-script");';document.body.append(this);console.log('constructor-after');}}
     customElements.define('x-script',CustomScript,{extends:'script'});const s=new CustomScript();console.log('returned',s instanceof HTMLScriptElement);document.body.append(s.cloneNode(true));
     </script>"#,
@@ -1591,7 +1593,7 @@ fn serializing_customized_builtins_preserves_creation_identity_without_construct
 #[test]
 fn late_definitions_use_creation_identity_even_if_the_is_attribute_has_been_removed() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const button=document.createElement('button',{is:'x-later'});button.removeAttribute('is');document.body.append(button);let count=0;
     class A extends HTMLButtonElement{constructor(){super();count++;}}customElements.define('x-later',A,{extends:'button'});console.log(count,button instanceof A,button.getAttribute('is'));
     </script>"#,
@@ -1602,7 +1604,7 @@ fn late_definitions_use_creation_identity_even_if_the_is_attribute_has_been_remo
 #[test]
 fn custom_element_definitions_capture_callbacks_and_observed_attributes_once() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const observed=['a'];let reads=0;
     class Saved extends HTMLElement{static get observedAttributes(){reads++;return observed;}attributeChangedCallback(...a){console.log('saved',...a)}connectedCallback(){console.log('connected')}disconnectedCallback(){console.log('disconnected')}}
     customElements.define('x-saved',Saved);observed.push('b');Saved.prototype.attributeChangedCallback=()=>console.log('replacement');Saved.prototype.connectedCallback=()=>console.log('replacement-connected');
@@ -1616,7 +1618,7 @@ fn custom_element_definitions_capture_callbacks_and_observed_attributes_once() {
 #[test]
 fn recursive_construction_during_an_upgrade_cannot_reuse_the_element() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     let recurse=false;class Recursive extends HTMLElement{constructor(){super();if(recurse){recurse=false;try{new Recursive();}catch(e){console.log('recursive',e.name)}}}}
     const candidate=document.createElement('x-recursive');document.body.append(candidate);recurse=true;customElements.define('x-recursive',Recursive);console.log('upgraded',candidate instanceof Recursive);
     </script>"#,
@@ -1744,7 +1746,7 @@ fn registered_constructors_and_upgrades_do_not_read_a_public_constructor_propert
 #[test]
 fn invalid_create_element_constructors_return_a_failed_unknown_element_without_retrying() {
     let (_, report) = visit_unchecked(
-        r#"<script>
+        r#"<body><script>
     let calls=0;class Bad extends HTMLElement{constructor(){super();calls++;this.setAttribute('invalid','yes')}}customElements.define('x-bad',Bad);const bad=document.createElement('x-bad');console.log(bad instanceof HTMLUnknownElement,bad instanceof Bad,bad.getAttribute('invalid'));document.body.append(bad);customElements.upgrade(bad);console.log(calls);
     </script>"#,
         json!({}),
@@ -1758,7 +1760,7 @@ fn invalid_create_element_constructors_return_a_failed_unknown_element_without_r
 #[test]
 fn custom_element_names_follow_current_dom_rules_without_becoming_css_selectors() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     for(const name of ['x-!','x-a?','x-a:']){const node=document.createElement(name);document.body.append(node);class A extends HTMLElement{}customElements.define(name,A);console.log(name,node instanceof A,new A().localName)}
     for(const name of ['x-A','x- a','annotation-xml']){try{customElements.define(name,class extends HTMLElement{})}catch(e){console.log(name,e.name)}}
     </script>"#,
@@ -1830,7 +1832,7 @@ fn a_throwing_disabled_features_getter_leaves_the_name_constructor_and_registry_
 #[test]
 fn disabled_shadow_prevents_upgrading_an_existing_closed_root_without_running_the_constructor() {
     let (_, report) = visit_unchecked(
-        r#"<script>
+        r#"<body><script>
     let count=0;const node=document.createElement('x-closed');node.attachShadow({mode:'closed'});document.body.append(node);class Closed extends HTMLElement{static disabledFeatures=['shadow'];constructor(){super();count++}}customElements.define('x-closed',Closed);customElements.upgrade(node);console.log(count,node instanceof Closed);console.log(new Closed() instanceof Closed,count);
     </script>"#,
         json!({}),
@@ -1844,7 +1846,7 @@ fn disabled_shadow_prevents_upgrading_an_existing_closed_root_without_running_th
 #[test]
 fn hostile_thrown_values_do_not_escape_construction_or_cancel_later_reactions() {
     let (_, report) = visit_unchecked(
-        r#"<script>
+        r#"<body><script>
     const bomb={};for(const key of ['name','message','stack'])Object.defineProperty(bomb,key,{get(){console.log('unexpected-property',key);throw Error('property getter')}});bomb[Symbol.toPrimitive]=()=>{console.log('primitive');throw Error('conversion')};
     customElements.define('x-bad',class extends HTMLElement{constructor(){super();throw bomb}});try{console.log('returned',document.createElement('x-bad') instanceof HTMLUnknownElement)}catch(e){console.log('escaped')}
     customElements.define('x-throw',class extends HTMLElement{connectedCallback(){throw bomb}});customElements.define('x-later',class extends HTMLElement{connectedCallback(){console.log('later')}});const a=document.createElement('x-throw'),b=document.createElement('x-later');try{document.body.append(a,b);console.log('append-returned')}catch(e){console.log('append-escaped')}
@@ -2074,7 +2076,7 @@ fn canceled_rejection_notifications_do_not_stringify_the_reason_or_leak_it_as_an
 #[test]
 fn failed_upgrade_construction_stacks_are_cleared_before_error_handlers_construct_the_same_class() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     let fail=true,candidate;class A extends HTMLElement{constructor(){super();if(fail){fail=false;throw Error('upgrade failed')}console.log('fresh',this===candidate)}}candidate=document.createElement('x-stack');document.body.append(candidate);onerror=()=>{try{console.log('handler-new',new A() instanceof A)}catch(e){console.log('handler-error',e.name)}return true};customElements.define('x-stack',A);console.log('after');
     </script>"#,
     );
@@ -2095,7 +2097,7 @@ fn event_creation_and_error_reporting_do_not_call_the_pages_date_now() {
 #[test]
 fn cancellation_respects_private_event_flags_and_return_value_cannot_uncancel_an_event() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     for(const cancelable of [false,true]){const event=new Event('notice',{cancelable});event.preventDefault();console.log(cancelable,event.defaultPrevented,event.returnValue)}
     const event=new Event('notice',{cancelable:true});Object.defineProperty(event,'cancelable',{value:false});event.returnValue=false;console.log(event.defaultPrevented,event.returnValue);event.returnValue=true;console.log(event.defaultPrevented,event.returnValue);Object.defineProperty(event,'defaultPrevented',{value:false});console.log(document.body.dispatchEvent(event));
     </script>"#,

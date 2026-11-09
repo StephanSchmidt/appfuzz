@@ -8,9 +8,10 @@ import { collectionHTMLDocument } from './collection-data.js';
 import { Node } from '../node_modules/linkedom/esm/interface/node.js';
 import { ParentNode } from '../node_modules/linkedom/esm/mixin/parent-node.js';
 import { Element } from '../node_modules/linkedom/esm/interface/element.js';
+import { SVGElement } from '../node_modules/linkedom/esm/svg/element.js';
 import { CharacterData } from '../node_modules/linkedom/esm/interface/character-data.js';
 import { END, NEXT, PREV, START } from '../node_modules/linkedom/esm/shared/symbols.js';
-import { nodeInfo, physicalParent, physicalRoot, shadowInfo, nodeDocument } from './dom-state.js';
+import { nodeInfo, physicalParent, physicalRoot, shadowInfo, nodeDocument, physicalOwnerSVG } from './dom-state.js';
 import { runDOMCallback } from './dom-callbacks.js';
 const upper = Function.prototype.call.bind(String.prototype.toUpperCase);
 const define = Object.defineProperty, describe = Object.getOwnPropertyDescriptor, keys = Reflect.ownKeys, NativeTypeError = TypeError;
@@ -23,6 +24,8 @@ function previous(node) { if (!physicalParent(node)) return null; const value = 
 function element(node, step) { for (let value = node; value; value = step(value)) if (nodeInfo(value)?.kind === 1) return value; return null; }
 function root(node, composed) { let value = physicalRoot(node), shadow; while (composed && (shadow = shadowInfo(value))) value = physicalRoot(shadow.host); return value; }
 export function installTreeAccessors() {
+  const svg = { get ownerSVGElement() { requireNode(this); if (nameIdentity(this)?.namespace !== 'http://www.w3.org/2000/svg') throw new NativeTypeError('An SVGElement is required'); return physicalOwnerSVG(this); } };
+  define(SVGElement.prototype,'ownerSVGElement',{ ...describe(svg,'ownerSVGElement'), enumerable: true });
   const fields = {
     get nodeName() { requireNode(this); const data = nodeInfo(this), kind = data.kind;
       if (kind === 1) { const id = nameIdentity(this); if (!id) return data.local; if (id.namespace !== 'http://www.w3.org/1999/xhtml' || !collectionHTMLDocument(nodeDocument(this))) return id.qualified; let result = ''; for (let i = 0; i < id.qualified.length; i++) { const c = id.qualified[i]; result += c >= 'a' && c <= 'z' ? upper(c) : c; } return result; }

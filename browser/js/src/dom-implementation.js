@@ -9,7 +9,7 @@ import { DocumentType } from '../node_modules/linkedom/esm/interface/document-ty
 import { createBareElement } from './creation.js';
 import { createNativeText, insertNativeNode, replaceAllText } from './dom-mutations.js';
 import { backendChildNodes, collectionDescendants } from './collection-data.js';
-import { nodeInfo, nodeDocument, physicalDocumentElement } from './dom-state.js';
+import { nodeInfo, nodeDocument, physicalDocumentElement, physicalHead, physicalBody } from './dom-state.js';
 import { qualifiedName, nameIdentity } from './names.js';
 import { rememberDocumentMode, rememberDocumentScripting, rememberDocumentURL, installDocumentFactory } from './document-state.js';
 import { adoptNativeNode } from './adoption.js';
@@ -94,6 +94,8 @@ for (const key of ['createDocumentType','createDocument','createHTMLDocument','h
 export function installDOMImplementation(L) {
   const html = Object.prototype.isPrototypeOf.bind(HTMLDocument.prototype), svg = Object.prototype.isPrototypeOf.bind(SVGDocument.prototype);
   installDocumentFactory(doc => html(doc) ? new HTMLDocument() : svg(doc) ? new SVGDocument() : new NativeXMLDocument());
+  const tree = { get head() { requireDocument(this); return physicalHead(this); }, get body() { requireDocument(this); return physicalBody(this); } };
+  for (const key of ['head','body']) { delete HTMLDocument.prototype[key]; define(L.Document.prototype,key,{ ...Object.getOwnPropertyDescriptor(tree,key), enumerable: true }); }
   const base = { get baseURI() { const kind = nodeInfo(this)?.kind; if (kind === undefined) throw new NativeTypeError('A Node is required'); return documentBaseURL(kind === 9 ? this : nodeDocument(this)); } };
   define(L.Node.prototype,'baseURI',Object.getOwnPropertyDescriptor(base,'baseURI'));
   const href = { get href() { if (!matches(this,HTML,'base')) throw new NativeTypeError('An HTMLBaseElement is required'); const href = apply(getAttribute,this,['href']); return href === null ? '' : resolveDocumentURL(href,nodeDocument(this)); }, set href(value) { if (!matches(this,HTML,'base')) throw new NativeTypeError('An HTMLBaseElement is required'); value = runDOMCallback(() => eventString(value)); withReactions(() => apply(setAttribute,this,['href',value])); } };

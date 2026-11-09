@@ -213,7 +213,7 @@ fn form_method_reflection() {
 
 fn navigate(script: &str) -> (RunRecord, Value) {
     let browser = Browser::shared().unwrap();
-    let input = json!({"url":"https://app.example/","html":format!("<script>{script}</script>")});
+    let input = json!({"url":"https://app.example/","html":format!("<body><script>{script}</script>")});
     let run = browser.app.run(&browser.app.spec(browser.app.export(SESSION).unwrap(), vec![json!(input.to_string())], network_plan(), 1));
     assert_eq!(run.outcome.kind, OutcomeKind::Ok, "{:?}", run.outcome);
     let report: Value = serde_json::from_str(run.result.as_ref().unwrap().as_str().unwrap()).unwrap();

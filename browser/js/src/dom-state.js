@@ -115,3 +115,11 @@ export function physicalHead(document) {
   }
   return null;
 }
+
+export function physicalOwnerSVG(node) {
+  for (let parent = physicalParent(node); parent; parent = physicalParent(parent)) {
+    const id = nameIdentity(parent);
+    if (id?.namespace === 'http://www.w3.org/2000/svg' && id.local === 'svg') return parent;
+  }
+  return null;
+}

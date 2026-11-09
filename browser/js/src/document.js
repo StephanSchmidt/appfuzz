@@ -2,7 +2,7 @@ import { initializeDocumentCSP } from './document-csp.js';
 import { rememberDocumentURL } from './document-state.js';
 import { parsedAttribute } from './attributes.js';
 import { backendChildNodes } from './collection-data.js';
-import { nodeInfo } from './dom-state.js';
+import { nodeInfo, physicalOwnerSVG } from './dom-state.js';
 // Build the initial HTML document with the HTML tree-building rules, then
 // copy its nodes into linkedom. No serialization/reparse: raw text,
 // namespaces and inert template contents must keep their parsed meaning.
@@ -61,7 +61,6 @@ function appendTree(doc, target, nodes, inertScripts, svg = null, elements = [])
         node = createBareElement(owner, { namespace: source.namespaceURI, prefix: null, local: source.tagName, qualified: source.tagName }, is ?? null);
         elements.push(node);
         if (source.tagName === 'script') rememberScript(node, { namespace: source.namespaceURI, local: source.tagName }, inertScripts);
-        if (source.namespaceURI === SVG) node.ownerSVGElement = svg;
         for (const attr of source.attrs) {
           const name = attr.prefix ? attr.prefix + ':' + attr.name : attr.name;
           parsedAttribute(node, attr.namespace || null, name, attr.value);
@@ -83,7 +82,7 @@ export const fragmentElements = fragments.get.bind(fragments);
 // Each copied script gets its parser state explicitly. API calls made by
 // custom-element constructors during this work are ordinary fresh scripts.
 export function parseHTMLFragment(markup, context, doc, inertScripts = true) {
-  const svg = context?.namespaceURI === SVG ? (context.localName === 'svg' ? context : context.ownerSVGElement) : null;
+  const svg = context?.namespaceURI === SVG ? (context.localName === 'svg' ? context : physicalOwnerSVG(context)) : null;
   if (!context || context.nodeType !== 1) context = null;
   if (!context || (nameIdentity(context)?.namespace === HTML && context.localName === 'html')) {
     context = defaultTreeAdapter.createElement('body', HTML, []);

@@ -14,6 +14,7 @@ use rquickjs::module::Declared;
 use rquickjs::{Context, Ctx, Error, FromJs, Function, IntoJs, Module, Object, Persistent, Result, Runtime, Value, qjs};
 
 const SHIM: &str = include_str!("../../js/dist/shim.js");
+const PARSER: &str = include_str!("../../js/dist/parser.js");
 
 /// Virtual time the page gets after load, after each action, and at the
 /// end, in milliseconds.
@@ -252,6 +253,7 @@ type Compiled = std::collections::HashMap<(String, bool), Persistent<Value<'stat
 struct Page {
     // Dropped before the runtime it lives in.
     compiled: std::cell::RefCell<Compiled>,
+    _parser_ctx: Context,
     rt: Runtime,
     ctx: Context,
 }
@@ -321,6 +323,16 @@ impl Page {
         let n: usize = self.ctx.with(|ctx| shim(&ctx, "newScripts", ()));
         if n > 0 {
             self.scripts(n);
+        }
+    }
+
+    /// Alternate parser-blocking batches with tree building. Every script's
+    /// microtask checkpoint runs before the parser reaches later elements.
+    fn initial_scripts(&self, n: usize) {
+        let mut batch = Some(n);
+        while let Some(n) = batch {
+            self.scripts(n);
+            batch = self.ctx.with(|ctx| shim(&ctx, "resumeParser", ()));
         }
     }
 
@@ -487,8 +499,18 @@ fn boot() -> std::result::Result<Page, String> {
     rt.set_host_promise_rejection_tracker(Some(Box::new(|ctx, promise, reason, handled| {
         let _ = if handled { call::<_, ()>(&ctx, "handled", (promise,)) } else { call::<_, ()>(&ctx, "rejected", (promise, reason)) };
     })));
+    let parser_ctx = Context::full(&rt).map_err(|e| format!("parser context: {e}"))?;
+    let parser_factory = parser_ctx.with(|ctx| {
+        ctx.eval::<(), _>(PARSER).map_err(|e| fail(&ctx, e))?;
+        let factory: Function = ctx.globals().get("__appfuzzParser").map_err(|e| fail(&ctx, e))?;
+        Ok::<_, String>(Persistent::save(&ctx, factory))
+    })?;
     let ctx = Context::full(&rt).map_err(|e| format!("context: {e}"))?;
     ctx.with(|ctx| crate::web::install(&ctx).map_err(|e| fail(&ctx, e)))?;
+    ctx.with(|ctx| {
+        let native: Object = ctx.globals().get("__native").map_err(|e| fail(&ctx, e))?;
+        native.set("htmlParser", parser_factory.restore(&ctx).map_err(|e| fail(&ctx, e))?).map_err(|e| fail(&ctx, e))
+    })?;
     ctx.with(|ctx| {
         ctx.eval::<(), _>(SHIM).map_err(|e| fail(&ctx, e))?;
         let handle: Object = ctx.globals().get("__af").map_err(|e| fail(&ctx, e))?;
@@ -514,7 +536,7 @@ fn boot() -> std::result::Result<Page, String> {
         }
         Ok::<_, String>(())
     })?;
-    Ok(Page { compiled: Default::default(), rt, ctx })
+    Ok(Page { compiled: Default::default(), _parser_ctx: parser_ctx, rt, ctx })
 }
 
 thread_local! {
@@ -525,14 +547,14 @@ thread_local! {
 /// starts every session with the shim already evaluated, and with the
 /// scripts on stdin (an app's static scripts) already compiled.
 pub fn initialize() {
-    let page = boot().ok();
-    if let Some(page) = &page {
-        let scripts = std::io::read_to_string(std::io::stdin()).unwrap_or_default();
-        if !scripts.is_empty() {
-            page.precompile(&scripts);
-        }
+    // A snapshot without a working browser would fail every session. Surface
+    // boot failures during the build instead of silently snapshotting None.
+    let page = boot().unwrap_or_else(|message| panic!("browser boot failed: {message}"));
+    let scripts = std::io::read_to_string(std::io::stdin()).unwrap_or_default();
+    if !scripts.is_empty() {
+        page.precompile(&scripts);
     }
-    BOOTED.with(|b| *b.borrow_mut() = page);
+    BOOTED.with(|b| *b.borrow_mut() = Some(page));
 }
 
 /// One page session. `input` is JSON: `{url, html, files, responses,
@@ -552,7 +574,7 @@ pub fn session(input: &str) -> String {
         Err(e) => return format!(r#"{{"fatal":{e:?}}}"#),
     };
     timer.mark("init");
-    page.scripts(n);
+    page.initial_scripts(n);
     timer.mark("scripts");
     page.ctx.with(|ctx| shim::<_, ()>(&ctx, "ready", ()));
     page.flush();

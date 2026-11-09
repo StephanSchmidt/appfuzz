@@ -42,6 +42,9 @@ const collectionSites = {
 async function readDOM(path) {
   let source = await readFile(path, 'utf8');
   const key = path.split('/linkedom/esm/')[1], sites = collectionSites[key];
+  if (key === 'svg/element.js') source = replace(source, '    this.ownerSVGElement = ownerSVGElement;', '    // Ownership follows the physical ancestor tree.');
+  if (key === 'interface/element.js') source = replace(source, '    svg.ownerSVGElement = element.ownerSVGElement;', '    // SVG ownership is derived from the copied tree.');
+  if (key === 'shared/parse-from-string.js') source = replace(source, '          node.ownerSVGElement = ownerSVGElement;', '          // SVG ownership follows native ancestry.');
   if (key === 'interface/css-style-declaration.js') { source = replace(source, '  get[PRIVATE]() { return this; }', ''); source = replace(source, '    refs.set(this, element);', '    refs.set(this, element); this[PRIVATE] = this;'); source = replace(source, '    return new Proxy(this, handler);', '    const proxy = new Proxy(this, handler); proxy[PRIVATE] = this; return proxy;'); }
   if (sites) {
     for (const [before, after] of sites) {
@@ -166,4 +169,12 @@ await build({
     });
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\].*\.js$/ }, async ({ path }) => ({ contents: await readDOM(path), loader: 'js' }));
   } }],
+});
+
+// Resumable document parsing must keep running after author scripts mutate
+// their realm. Give the native driver a separate bundle for a private context.
+await build({
+  entryPoints: ['src/parser-realm.js'], bundle: true,
+  format: 'iife', target: 'es2023', minify: true, legalComments: 'none',
+  outfile: 'dist/parser.js',
 });

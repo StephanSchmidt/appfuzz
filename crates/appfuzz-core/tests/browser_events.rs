@@ -24,7 +24,7 @@ fn logs(report: &Value) -> Vec<&str> {
 #[test]
 fn capture_precedes_target_and_bubbling_and_also_runs_for_non_bubbling_events() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const root=document.createElement('div'),child=document.createElement('span');root.append(child);document.body.append(root);
     for(const [name,node]of[['window',window],['doc',document],['root',root],['child',child]])for(const capture of [true,false])node.addEventListener('order',function(e){console.log(name,capture,e.eventPhase,e.target===child,e.currentTarget===node,this===node)},{capture});
     child.dispatchEvent(new Event('order',{bubbles:true}));child.dispatchEvent(new Event('order'));root.remove();
@@ -53,7 +53,7 @@ fn capture_precedes_target_and_bubbling_and_also_runs_for_non_bubbling_events() 
 #[test]
 fn stopping_propagation_preserves_same_phase_listeners_but_cannot_be_undone() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const root=document.createElement('div'),child=document.createElement('span');root.append(child);document.body.append(root);
     root.addEventListener('stop',e=>{console.log('root-first');e.cancelBubble=true;e.cancelBubble=false},true);root.addEventListener('stop',()=>console.log('root-second'),true);child.addEventListener('stop',()=>console.log('unexpected-target'));child.dispatchEvent(new Event('stop',{bubbles:true}));
     child.addEventListener('self',e=>{console.log('target-capture');e.stopPropagation()},true);child.addEventListener('self',()=>console.log('unexpected-bubble'));child.dispatchEvent(new Event('self',{bubbles:true}));root.remove();
@@ -86,7 +86,7 @@ fn current_listener_lists_are_snapshotted_while_later_phases_see_new_listeners()
 #[test]
 fn event_type_bubbles_and_parent_shadows_do_not_change_native_routing() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     const root=document.createElement('div'),child=document.createElement('span');root.append(child);document.body.append(root);child.addEventListener('real',e=>console.log('child',e.type,e.eventPhase));root.addEventListener('real',()=>console.log('parent'));const event=new Event('real',{bubbles:true});Object.defineProperty(event,'type',{value:'fake'});Object.defineProperty(event,'bubbles',{value:false});Object.defineProperty(child,'_getParent',{value:()=>{console.log('unexpected-parent');return null}});child.dispatchEvent(event);console.log('after',event.target===child,event.currentTarget,event.eventPhase);root.remove();
     </script>"#,
     );
@@ -116,7 +116,7 @@ fn aborted_signals_remove_listeners_independently_of_abort_event_propagation() {
 #[test]
 fn composed_shadow_events_retarget_at_hosts_and_closed_paths_hide_private_descendants() {
     let (_, report) = visit(
-        r#"<script>
+        r#"<body><script>
     for(const mode of ['open','closed']){const host=document.createElement('div');document.body.append(host);const shadow=host.attachShadow({mode}),child=document.createElement('span');shadow.append(child);const name=n=>n===child?'child':n===shadow?'shadow':n===host?'host':n===document.body?'body':n===document.documentElement?'html':n===document?'doc':'window';
     for(const [label,node]of[['host',host],['shadow',shadow],['child',child]])for(const capture of [true,false])node.addEventListener('test',event=>console.log(mode,label,capture,event.eventPhase,name(event.target),event.composedPath().map(name).join('/')),{capture});child.dispatchEvent(new Event('test',{bubbles:true,composed:true}));host.remove()}
     </script>"#,
@@ -143,7 +143,7 @@ fn composed_shadow_events_retarget_at_hosts_and_closed_paths_hide_private_descen
 #[test]
 fn capture_and_bubble_registrations_have_distinct_identity_and_ignore_callback_call_shadows() {
     let (_, report) = visit(
-        r#"<script>const log=(...a)=>console.log(...a);
+        r#"<body><script>const log=(...a)=>console.log(...a);
  const root=document.createElement('div'),child=document.createElement('span');root.append(child);document.body.append(root);const fn=function(e){log('dual',e.eventPhase)};fn.call=()=>log('unexpected-call');root.addEventListener('dual',fn,true);root.addEventListener('dual',fn,false);child.dispatchEvent(new Event('dual',{bubbles:true}));root.removeEventListener('dual',fn,true);child.dispatchEvent(new Event('dual',{bubbles:true}));root.remove();
 </script>"#,
     );
@@ -179,7 +179,7 @@ fn listener_dictionary_conversion_and_duplicate_signals_follow_registration_orde
 #[test]
 fn default_passive_listeners_apply_only_at_document_and_window_targets() {
     let (_, report) = visit(
-        r#"<script>const log=(...a)=>console.log(...a);
+        r#"<body><script>const log=(...a)=>console.log(...a);
  for(const [label,target]of[['window',window],['document',document],['html',document.documentElement],['body',document.body],['local',document.createElement('span')]]){const fn=e=>e.preventDefault();target.addEventListener('wheel',fn);const event=new Event('wheel',{cancelable:true});log('default-passive',label,target.dispatchEvent(event),event.defaultPrevented);target.removeEventListener('wheel',fn)}
 </script>"#,
     );
@@ -198,7 +198,7 @@ fn default_passive_listeners_apply_only_at_document_and_window_targets() {
 #[test]
 fn non_bubbling_composed_events_reach_hosts_and_related_targets_remain_private() {
     let (_, report) = visit(
-        r#"<script>const log=(...a)=>console.log(...a);
+        r#"<body><script>const log=(...a)=>console.log(...a);
  const host=document.createElement('div');document.body.append(host);const root=host.attachShadow({mode:'closed'}),a=document.createElement('span'),b=document.createElement('span');root.append(a,b);for(const [label,target]of[['host',host],['root',root],['child',a]])for(const capture of [true,false])target.addEventListener('composed',e=>log('nonbubble',label,capture,e.eventPhase),{capture});const event=new Event('composed',{composed:true});a.dispatchEvent(event);log('nonbubble-after',event.target===host,event.currentTarget,event.composedPath().length);host.addEventListener('related',()=>log('unexpected-related'));root.addEventListener('related',e=>log('related',e.target===a,e.relatedTarget===b));const mouse=new MouseEvent('related',{bubbles:true,composed:true,relatedTarget:b});a.dispatchEvent(mouse);log('related-after',mouse.target,mouse.relatedTarget);host.remove();
 </script>"#,
     );
@@ -220,7 +220,7 @@ fn non_bubbling_composed_events_reach_hosts_and_related_targets_remain_private()
 #[test]
 fn slotted_light_dom_events_cross_closed_roots_without_exposing_private_path_entries() {
     let (_, report) = visit(
-        r#"<script>const log=(...a)=>console.log(...a);
+        r#"<body><script>const log=(...a)=>console.log(...a);
  const host=document.createElement('div');document.body.append(host);const light=document.createElement('span');light.id='light';light.slot='named';host.append(light);const root=host.attachShadow({mode:'closed'}),slot=document.createElement('slot');slot.name='named';root.append(slot);const name=n=>n===light?'light':n===slot?'slot':n===root?'root':n===host?'host':n===document.body?'body':n===document.documentElement?'html':n===document?'doc':'window';for(const [label,target]of[['light',light],['slot',slot],['host',host]])target.addEventListener('slot',e=>log('slot',label,name(e.target),e.composedPath().map(name).join('/')));light.dispatchEvent(new Event('slot',{bubbles:true}));host.remove();
 </script>"#,
     );

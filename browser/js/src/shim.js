@@ -67,6 +67,9 @@ import { installSelectorPlatform } from './selector-engine.js';
 import { NodeList, HTMLCollection, NamedNodeMap, installCollections } from './collections.js';
 import { scriptRecord, rememberScript, scriptOwner } from './script-state.js';
 import { installScriptMutations, scriptAttribute, scriptText, scriptShadowHost } from './script-mutations.js';
+import { backendList } from './collection-data.js';
+import { beginHTML } from './html-parser.js';
+import { createBareElement } from './creation.js';
 
 installTreeAccessors();
 const G = globalThis;
@@ -1155,6 +1158,7 @@ function installWindow(doc) {
   Object.assign(G, { InputEvent, DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch, DOMParser, NodeList, HTMLCollection, NamedNodeMap });
   installHTMLConstructors(G, L);
   const createInternal = installRegistry(upgradeCopies, BrowserDOMException, (name, e) => error('custom-element:' + name, e));
+  S.parserCreate = (owner,identity,is) => owner === doc ? createInternal(owner,identity,is) : createBareElement(owner,identity,is);
   G.DOMImplementation = DOMImplementation; G.XMLDocument = XMLDocument;
   nativeSetPrototype(XMLDocument,L.Document);
   G.Document = L.Document;
@@ -1699,14 +1703,22 @@ function scriptKind(s) {
   if (!identity || identity.local !== 'script' || (identity.namespace !== HTML_NS && identity.namespace !== SVG_NS)) return null;
   const type = scriptAttribute(s, 'type');
   const language = identity.namespace === HTML_NS ? scriptAttribute(s, 'language') : null;
-  const t = (type == null ? (language ? 'text/' + language : '') : type).toLowerCase();
-  const mime = type == null ? t : t.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '');
-  // Firefox also accepts ASCII whitespace around module. Keep that browser
-  // behavior without accepting non-ASCII whitespace as a JavaScript MIME.
+  const t = nativeLower(type == null ? (language ? 'text/' + language : '') : type);
+  let first = 0, last = t.length;
+  const whitespace = c => c === ' ' || c === '\t' || c === '\n' || c === '\f' || c === '\r';
+  if (type != null) { while (first < last && whitespace(t[first])) first++; while (last > first && whitespace(t[last - 1])) last--; }
+  const mime = stringSlice(t,first,last);
+  // Firefox accepts ASCII whitespace around module. Do not delegate native
+  // script classification to author String/RegExp prototype methods.
   if (mime === 'module') return 'module';
   if (t === 'importmap' || t === 'speculationrules') return t;
-  if (t === '' || /^(text|application)\/(x-)?(java|ecma)script$/.test(mime)
-    || /^text\/(javascript1\.[0-5]|jscript|livescript)$/.test(mime)) return 'classic';
+  if (t === '') return 'classic';
+  switch (mime) {
+    case 'text/javascript': case 'application/javascript': case 'text/ecmascript': case 'application/ecmascript':
+    case 'text/x-javascript': case 'application/x-javascript': case 'text/x-ecmascript': case 'application/x-ecmascript':
+    case 'text/javascript1.0': case 'text/javascript1.1': case 'text/javascript1.2': case 'text/javascript1.3': case 'text/javascript1.4': case 'text/javascript1.5':
+    case 'text/jscript': case 'text/livescript': return 'classic';
+  }
   return null;
 }
 
@@ -1729,7 +1741,7 @@ function scriptDocument(node) {
 // return earlier and can still be prepared by a later mutation.
 function prepareScript(s) {
   const record = scriptRecord(s);
-  if (!record || record.alreadyStarted) return null;
+  if (!record || record.alreadyStarted || record.parserPending) return null;
   const src = scriptSource(s), code = scriptText(s);
   if (src == null && code === '') return null;
   const document = scriptDocument(s);
@@ -1814,19 +1826,27 @@ function nextScript(el) {
 // The document's scripts in the order a browser runs them: blocking ones,
 // then deferred and module ones, then async ones. Preparation happens when
 // reached, so empty/data-block scripts keep their unstarted state.
-function pageScripts() {
-  const all = [...G.document.querySelectorAll('script')];
-  const blocking = [], deferred = [], later = [];
-  for (const s of all) {
-    const kind = scriptKind(s);
-    if (!kind) continue;
-    const src = scriptSource(s) != null;
-    if (scriptAttribute(s, 'async') != null && (src || kind === 'module')) later.push(s);
-    else if (kind === 'module' || (src && scriptAttribute(s, 'defer') != null)) deferred.push(s);
-    else blocking.push(s);
-  }
-  S.scripts = [...blocking, ...deferred, ...later];
-  return S.scripts.length;
+let documentParser = null, parserStarted = false, parserFinished = false;
+let parserBlocking = null, parserDeferred = null, parserLater = null;
+function parserScript(node) {
+  const record = scriptRecord(node); if (record) record.parserPending = false;
+  if (scriptDocument(node) !== S.document) return false;
+  const kind = scriptKind(node); if (!kind) return false;
+  const src = scriptSource(node) != null, async = scriptAttribute(node,'async') != null;
+  if (kind === 'classic' && !(src && (async || scriptAttribute(node,'defer') != null))) { parserBlocking = node; return true; }
+  const prepared = prepareScript(node);
+  if (prepared) { const list = async && (src || kind === 'module') ? parserLater : parserDeferred; list[list.length] = node; }
+  return false;
+}
+function resumeParser(markup = null) {
+  if (parserFinished) return null;
+  parserBlocking = null;
+  const paused = parserStarted ? documentParser.resume() : documentParser.start(markup);
+  parserStarted = true;
+  const scripts = backendList();
+  if (paused) { if (parserBlocking) scripts[scripts.length] = parserBlocking; }
+  else { parserFinished = true; for (let i = 0; i < parserDeferred.length; i++) scripts[scripts.length] = parserDeferred[i]; for (let i = 0; i < parserLater.length; i++) scripts[scripts.length] = parserLater[i]; }
+  S.scripts = scripts; return scripts.length;
 }
 
 function newScripts() {
@@ -1890,12 +1910,14 @@ G.__af = {
       for (let i = 1; S.cookies.has(name); i++) name = base + '_' + i;
       S.cookies.seed(name, s.probe_cookie.value, urlPart(S.url, 'href'));
     }
-    const doc = parseHTML(s.html || '', true, { __proto__: null, url: () => urlPart(S.url,'href'), policies: s.csp || [] });
-    S.document = doc;
-    installWindow(doc);
-    return pageScripts();
+    const parsing = beginHTML({ __proto__: null, url: () => urlPart(S.url,'href'), policies: s.csp || [], create: (owner,identity,is) => S.parserCreate(owner,identity,is) });
+    const doc = parsing.doc; S.document = doc; installWindow(doc);
+    parserDeferred = backendList(); parserLater = backendList();
+    documentParser = parsing.start(parserScript);
+    return resumeParser(s.html || '');
   },
   scriptAt,
+  resumeParser: () => resumeParser(),
   scriptList: () => copyScriptBatch(S.scripts),
   scriptDone,
   newScripts,

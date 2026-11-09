@@ -10,6 +10,16 @@ use rquickjs::{ArrayBuffer, Ctx, Function, Object, Result, Value, qjs};
 use url::{Url, form_urlencoded, quirks};
 
 pub fn install(ctx: &Ctx<'_>) -> Result<()> {
+    // QuickJS's base64 initializer only adds DOMException in the runtime's
+    // first context. The browser realm needs its own constructor/prototype
+    // even when a private parser context already registered the native class.
+    if ctx.globals().get::<_, Value>("DOMException")?.is_undefined() {
+        // SAFETY: ctx is live and locked; this intrinsic initializer owns its
+        // allocations and supports an already-registered runtime class.
+        if unsafe { qjs::JS_AddIntrinsicDOMException(ctx.as_raw().as_ptr()) } < 0 {
+            return Err(rquickjs::Error::Exception);
+        }
+    }
     let n = Object::new(ctx.clone())?;
     n.set("url", Function::new(ctx.clone(), url_parse_js)?)?;
     n.set(
@@ -296,6 +306,23 @@ fn input_color<'js>(ctx: Ctx<'js>, value: String, alpha: bool, p3: bool) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_intrinsics_are_installed_after_another_context_exists() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let parser = rquickjs::Context::full(&runtime).unwrap();
+        let page = rquickjs::Context::full(&runtime).unwrap();
+        parser.with(|ctx| {
+            ctx.eval::<(), _>("DOMException.prototype.parserOnly = true").unwrap();
+        });
+        page.with(|ctx| {
+            install(&ctx).unwrap();
+            let value: String = ctx
+                .eval("const e=new DOMException('message','SecurityError');[e.name,e.message,e.code,e instanceof Error,e.parserOnly===undefined].join(' ')")
+                .unwrap();
+            assert_eq!(value, "SecurityError message 18 true true");
+        });
+    }
 
     fn host(input: &str) -> Option<String> {
         url_parse(input.into(), Some("https://app.example/shop/item?x=1".into())).map(|p| p[6].clone())

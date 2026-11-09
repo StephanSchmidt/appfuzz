@@ -118,16 +118,12 @@ export function installCloning(L, shareObservers, onScript, upgradeCopies, DOMEr
     const source = sourceView(original);
     const clone = cloneElement.call(source, deep);
     ownNodes(clone, owner);
-    const nearestSVG = new NativeWeakMap();
     for (let i = 0; i < copies.length; i++) {
       const copy = copies[i], identity = identities[i];
       copyInputState(originals[i], copy);
       copyControlValue(originals[i], copy);
       const content = templateContent(copy);
       if (content && deep) templateJobs.push([templateContent(originals[i]), content]);
-      const svg = weakGet(nearestSVG, copy.parentNode) || null;
-      if (identity.namespace === SVG) copy.ownerSVGElement = svg;
-      weakSet(nearestSVG, copy, identity.namespace === SVG && identity.local === 'svg' ? copy : svg);
     }
     return clone;
   };
