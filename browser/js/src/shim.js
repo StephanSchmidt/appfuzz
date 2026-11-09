@@ -1,3 +1,4 @@
+import { platformConstructor } from './constructors.js';
 import { FileReader, installFileReaderTasks } from './file-reader.js';
 import { installFileInputs } from './file-inputs.js';
 import { DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch, installPayloadTasks, serializeFileList } from './event-payloads.js';
@@ -63,6 +64,18 @@ const isShadowRoot = Object.prototype.isPrototypeOf.bind(L.ShadowRoot.prototype)
 const isDocument = Object.prototype.isPrototypeOf.bind(L.Document.prototype);
 const CAP = 200;
 const nativeDefine = Object.defineProperty, nativeCreate = Object.create, nativeEntries = Object.entries, nativeIsArray = Array.isArray, nativeSetPrototype = Object.setPrototypeOf;
+// Export names are stable interface identities. Restore them once during
+// bootstrap, before any page can replace descriptors or freeze constructors.
+for (const [name, C] of Object.entries(L)) if (/^[A-Z]/.test(name) && typeof C === 'function') {
+  nativeDefine(C, 'name', { __proto__: null, value: name, configurable: true });
+  const backing = Object.getOwnPropertyDescriptor(C.prototype || {}, 'constructor')?.value;
+  if (typeof backing === 'function' && backing !== C) nativeDefine(backing, 'name', { __proto__: null, value: name, configurable: true });
+}
+const DOMParser = platformConstructor(L.DOMParser, 'DOMParser');
+const NodeList = platformConstructor(L.NodeList, 'NodeList', 0, true);
+// The backend uses array-like list storage; the public interface constructor
+// has the ordinary Web IDL function parent.
+nativeSetPrototype(NodeList, Function.prototype);
 const nativeLower = Function.prototype.call.bind(String.prototype.toLowerCase);
 const nativeString = String, diagnosticSlice = Function.prototype.call.bind(String.prototype.slice);
 
@@ -412,20 +425,17 @@ installEventAttributeHook((node, name, code) => {
   });
 });
 const iteratorSymbol = Symbol.iterator;
-const signalToken = {}, controllerSignals = new WeakMap();
+const controllerSignals = new WeakMap();
 const controllerSignal = controllerSignals.get.bind(controllerSignals), rememberController = controllerSignals.set.bind(controllerSignals);
-class AbortSignal {
-  constructor(token) {
-    if (token !== signalToken) throw new NativeTypeError('Illegal AbortSignal constructor');
-    initializeEventTarget(this); initializeSignal(this);
-  }
+let AbortSignal = class AbortSignal {
+  constructor() { throw new NativeTypeError('Illegal AbortSignal constructor'); }
   get aborted() { return signalState(this).aborted; }
   get reason() { return signalState(this).reason; }
   get onabort() { return getHandler(this, 'abort'); }
   set onabort(value) { setHandler(this, 'abort', value); }
   throwIfAborted() { const state = signalState(this); if (state.aborted) throw state.reason; }
   static abort(reason) {
-    const signal = new AbortSignal(signalToken), state = signalState(signal);
+    const signal = createSignal(), state = signalState(signal);
     state.aborted = true; state.reason = reason === undefined ? new BrowserDOMException('The operation was aborted', 'AbortError') : reason;
     return signal;
   }
@@ -445,29 +455,31 @@ class AbortSignal {
         const signal = step.value; signalState(signal); result[result.length] = signal;
       }
     });
-    return dependSignal(new AbortSignal(signalToken), inputs);
+    return dependSignal(createSignal(), inputs);
   }
   static timeout(ms) {
     if (!arguments.length) throw new NativeTypeError('timeout requires a delay');
     const delay = truncateNumber(+ms);
     if (!finiteNumber(delay) || delay < 0 || delay >= 18446744073709551616) throw new NativeTypeError('Invalid timeout');
-    const signal = new AbortSignal(signalToken);
+    const signal = createSignal();
     addTimer(() => abort(signal, new BrowserDOMException('The operation timed out', 'TimeoutError')), delay, [], false, 'abort-timeout', false);
     return signal;
   }
 }
+function createSignal() { const signal = nativeCreate(AbortSignal.prototype); initializeEventTarget(signal); initializeSignal(signal); return signal; }
 function abort(signal, reason) {
   if (signalState(signal).aborted) return;
   if (reason === undefined) reason = new BrowserDOMException('The operation was aborted', 'AbortError');
   abortSignal(signal, reason);
 }
 nativeSetPrototype(AbortSignal, L.EventTarget); nativeSetPrototype(AbortSignal.prototype, L.EventTarget.prototype);
-nativeDefine(AbortSignal, 'name', { value: 'AbortSignal', configurable: true });
-class AbortController {
-  constructor() { markPlatform(this); rememberController(this, new AbortSignal(signalToken)); }
+AbortSignal = platformConstructor(AbortSignal, 'AbortSignal', 0, true);
+let AbortController = class AbortController {
+  constructor() { markPlatform(this); rememberController(this, createSignal()); }
   get signal() { const signal = controllerSignal(this); if (!signal) throw new NativeTypeError('Illegal AbortController receiver'); return signal; }
   abort(reason) { const signal = controllerSignal(this); if (!signal) throw new NativeTypeError('Illegal AbortController receiver'); abort(signal, reason); }
 }
+AbortController = platformConstructor(AbortController, 'AbortController');
 setAbortEventDispatcher(signal => fireEvent(signal, createNativeEvent('abort')));
 Object.assign(G, { AbortSignal, AbortController });
 
@@ -602,13 +614,13 @@ function convertRequest(input, init, argumentCount) {
   if (body !== null && (method === 'GET' || method === 'HEAD')) throw new NativeTypeError('GET and HEAD requests cannot have a body');
   if (sourceBody && body !== null && options.body == null && sourceBody.used) throw new NativeTypeError('Body has already been consumed.');
   const source = options.signal === undefined ? src?.signal : options.signal;
-  const signal = new AbortSignal(signalToken); if (source) dependSignal(signal, [source]);
+  const signal = createSignal(); if (source) dependSignal(signal, [source]);
   const guard = mode === 'no-cors' ? 'request-no-cors' : 'request';
   const headers = options.headers !== undefined ? headersFromConverted(options.headers, guard) : src ? filterHeaders(src.headers, guard) : headersFromConverted([], guard);
   if (extracted !== null && extracted.type !== null && headerValue(headers, 'content-type') === null) appendNativeHeader(headers, 'content-type', extracted.type);
   return { url, method, headers, signal, credentials, mode, cache, redirect, body, sourceBody: options.body == null ? sourceBody : null };
 }
-class Request {
+let Request = class Request {
   constructor(input, init = undefined) {
     const data = runDOMCallback(() => convertRequest(input, init, arguments.length));
     saveRequest(this, data); initializeBody(this, data.body);
@@ -628,7 +640,7 @@ class Request {
   clone() {
     const data = requireRequest(this), body = requireBody(this);
     if (body.used) throw new NativeTypeError('Body has already been consumed.');
-    const result = createFetchObject(Request.prototype), signal = dependSignal(new AbortSignal(signalToken), [data.signal]);
+    const result = createFetchObject(Request.prototype), signal = dependSignal(createSignal(), [data.signal]);
     saveRequest(result, { ...data, headers: copyHeaders(data.headers), signal }); cloneBody(this, result); return result;
   }
   text() { return readBody(this, requireRequest, bytes => decodeBytes(bytes)); }
@@ -656,7 +668,7 @@ function validateResponse(data, present) {
 function nativeResponse(bytes, data) {
   const response = createFetchObject(Response.prototype); saveResponse(response, data); initializeBody(response, bytes); return response;
 }
-class Response {
+let Response = class Response {
   constructor(body = null, init = undefined) {
     const data = runDOMCallback(() => {
       const converted = convertBody(body), options = responseInit(init); validateResponse(options, converted.kind !== 'none');
@@ -706,6 +718,7 @@ class Response {
     });
   }
 }
+Request = platformConstructor(Request, 'Request'); Response = platformConstructor(Response, 'Response');
 Object.defineProperty(Request, 'name', { __proto__: null, value: 'Request', configurable: true });
 Object.defineProperty(Response, 'name', { __proto__: null, value: 'Response', configurable: true });
 Object.assign(G, { Headers, Request, Response });
@@ -799,9 +812,9 @@ G.fetch = function fetch(input, init = undefined) {
   });
 };
 
-class XMLHttpRequest extends L.EventTarget {
+let XMLHttpRequest = class XMLHttpRequest {
   constructor() {
-    super();
+    initializeEventTarget(this);
     Object.assign(this, { readyState: 0, status: 0, statusText: '', responseText: '', response: '', responseType: '', responseURL: '', responseXML: null, timeout: 0, withCredentials: false });
     this._h = {};
     this._rh = {};
@@ -847,6 +860,8 @@ class XMLHttpRequest extends L.EventTarget {
     fireEvent(this, ev);
   }
 }
+nativeSetPrototype(XMLHttpRequest, L.EventTarget); nativeSetPrototype(XMLHttpRequest.prototype, L.EventTarget.prototype);
+XMLHttpRequest = platformConstructor(XMLHttpRequest, 'XMLHttpRequest');
 ['UNSENT', 'OPENED', 'HEADERS_RECEIVED', 'LOADING', 'DONE'].forEach((k, i) => { XMLHttpRequest[k] = i; XMLHttpRequest.prototype[k] = i; });
 G.XMLHttpRequest = XMLHttpRequest;
 
@@ -920,7 +935,7 @@ function formIterator(receiver, kind) {
 
 const constructingForms = new WeakSet();
 const isConstructingForm = constructingForms.has.bind(constructingForms), beginForm = constructingForms.add.bind(constructingForms), endForm = constructingForms.delete.bind(constructingForms);
-class FormData {
+let FormData = class FormData {
   constructor(form, submitter = null) {
     const list = []; nativeSetPrototype(list, null); saveForm(this, list);
     if (form !== undefined && htmlName(form) !== 'form') throw new NativeTypeError('An HTMLFormElement is required');
@@ -984,8 +999,9 @@ class FormData {
   values() { return formIterator(this, 'values'); }
 }
 nativeDefine(FormData.prototype, iteratorSymbol, { value: FormData.prototype.entries, writable: true, configurable: true });
+FormData = platformConstructor(FormData, 'FormData', 0);
 G.FormData = FormData;
-class FormDataEvent {
+let FormDataEvent = class FormDataEvent {
   constructor(type, options) {
     if (arguments.length < 2) throw new NativeTypeError('FormDataEvent requires a type and options');
     const init = runDOMCallback(() => {
@@ -1004,6 +1020,7 @@ nativeSetPrototype(FormDataEvent, Ev); nativeSetPrototype(FormDataEvent.prototyp
 nativeDefine(FormDataEvent, 'name', { value: 'FormDataEvent', configurable: true });
 nativeDefine(FormDataEvent.prototype, 'formData', { get: Object.getOwnPropertyDescriptor(FormDataEvent.prototype, 'formData').get, enumerable: true, configurable: true });
 nativeDefine(FormDataEvent.prototype, Symbol.toStringTag, { value: 'FormDataEvent', configurable: true });
+FormDataEvent = platformConstructor(FormDataEvent, 'FormDataEvent');
 G.FormDataEvent = FormDataEvent;
 
 function makeStorage(kind) {
@@ -1161,7 +1178,7 @@ function installWindow(doc) {
   for (const [k, v] of Object.entries(L)) {
     if (/^[A-Z]/.test(k) && typeof v === 'function') G[k] = v;
   }
-  Object.assign(G, { InputEvent, DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch });
+  Object.assign(G, { InputEvent, DataTransfer, DataTransferItem, DataTransferItemList, FileList, StaticRange, AbstractRange, NodeRange, Touch, DOMParser, NodeList });
   installHTMLConstructors(G, L);
   const createInternal = installRegistry(upgradeCopies, BrowserDOMException, (name, e) => error('custom-element:' + name, e));
   G.Document = L.Document;

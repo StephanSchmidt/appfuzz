@@ -1,3 +1,4 @@
+import { platformConstructor } from './constructors.js';
 // Port links, queues and transfer holders are platform slots. Posting captures
 // data synchronously; only a ready port task deserializes it for the receiver.
 import { EventTarget, initializeEventTarget, fireEvent, getHandler, setHandler } from './event-target.js';
@@ -85,11 +86,12 @@ function postingTransfers(options) {
   }
   return transferOptions(options);
 }
-export function MessagePort() { throw new NativeTypeError('Illegal MessagePort constructor'); }
+export let MessagePort = function MessagePort() { throw new NativeTypeError('Illegal MessagePort constructor'); };
 const portPrototype = create(EventTarget.prototype);
 define(MessagePort, 'name', { value: 'MessagePort', configurable: true });
 define(MessagePort, 'prototype', { value: portPrototype, writable: false });
 setPrototype(MessagePort, EventTarget);
+MessagePort = platformConstructor(MessagePort, 'MessagePort', 0, true);
 define(portPrototype, 'constructor', { value: MessagePort, writable: true, configurable: true });
 define(portPrototype, Symbol.toStringTag, { value: 'MessagePort', configurable: true });
 const methods = {
@@ -117,7 +119,7 @@ const methods = {
   set onmessageerror(value) { requirePort(this); setHandler(this, 'messageerror', value); },
 };
 for (const key of ['postMessage', 'start', 'close', 'onmessage', 'onmessageerror']) define(portPrototype, key, Object.getOwnPropertyDescriptor(methods, key));
-export function MessageChannel() {
+export let MessageChannel = function MessageChannel() {
   if (!new.target) throw new NativeTypeError('MessageChannel requires new');
   const port1 = allocate(), port2 = allocate(), first = requirePort(port1), second = requirePort(port2);
   first.peer = second; second.peer = first;
@@ -126,6 +128,7 @@ export function MessageChannel() {
 const channelPrototype = create(Object.prototype);
 define(MessageChannel, 'name', { value: 'MessageChannel', configurable: true });
 define(MessageChannel, 'prototype', { value: channelPrototype, writable: false });
+MessageChannel = platformConstructor(MessageChannel, 'MessageChannel');
 define(channelPrototype, 'constructor', { value: MessageChannel, writable: true, configurable: true });
 define(channelPrototype, Symbol.toStringTag, { value: 'MessageChannel', configurable: true });
 const channelFields = { get port1() { return requireChannel(this).port1; }, get port2() { return requireChannel(this).port2; } };

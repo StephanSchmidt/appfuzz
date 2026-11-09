@@ -1,3 +1,4 @@
+import { platformConstructor } from './constructors.js';
 import { markPlatform } from './platform-state.js';
 // A Headers object owns a private ordered list and a guard. Public helpers
 // can be replaced by a page without changing native copying or routing.
@@ -187,7 +188,7 @@ class HeaderIterator {
   [Symbol.iterator]() { return this; }
 }
 define(HeaderIterator.prototype, Symbol.toStringTag, { configurable: true, value: 'Headers Iterator' });
-export class Headers {
+export let Headers = class Headers {
   constructor(init) {
     const pairs = init === undefined ? privateList() : convertHeadersInit(init);
     save(this, { guard: 'none', list: privateList(), pairs: null });
@@ -222,4 +223,5 @@ export class Headers {
   values() { return new HeaderIterator(this, 'values'); }
   [Symbol.iterator]() { return new HeaderIterator(this, 'entries'); }
 }
+Headers = platformConstructor(Headers, 'Headers', 0);
 define(Headers.prototype, Symbol.toStringTag, { configurable: true, value: 'Headers' });

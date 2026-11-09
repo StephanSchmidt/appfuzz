@@ -1,3 +1,4 @@
+import { platformConstructor } from './constructors.js';
 import { markPlatform } from './platform-state.js';
 // The DOM algorithms use these slots, never public property shadows.
 import { runDOMCallback } from './dom-callbacks.js';
@@ -47,7 +48,7 @@ export function initializeEvent(event, type, bubbles = false, cancelable = false
 }
 export { reset as resetEvent };
 export function markEventUninitialized(event) { eventState(event).initialized = false; }
-export class Event {
+export let Event = class Event {
   constructor(type, options = undefined) {
     markPlatform(this);
     if (!arguments.length) throw new NativeTypeError('Event requires a type');
@@ -103,7 +104,8 @@ export class Event {
   get AT_TARGET() { return 2; }
   get BUBBLING_PHASE() { return 3; }
 }
-export class CustomEvent {
+Event = platformConstructor(Event, 'Event');
+export let CustomEvent = class CustomEvent {
   constructor(type, options = undefined) {
     if (!arguments.length) throw new NativeTypeError('CustomEvent requires a type');
     const data = runDOMCallback(() => {
@@ -123,6 +125,7 @@ export class CustomEvent {
     if (!s.dispatching) { reset(s, type, !!bubbles, !!cancelable); s.detail = detail; }
   }
 }
+CustomEvent = platformConstructor(CustomEvent, 'CustomEvent');
 define(Event.prototype, Symbol.toStringTag, { configurable: true, value: 'Event' });
 define(CustomEvent.prototype, Symbol.toStringTag, { configurable: true, value: 'CustomEvent' });
 

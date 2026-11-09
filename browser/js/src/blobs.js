@@ -1,3 +1,4 @@
+import { platformConstructor } from './constructors.js';
 // Immutable Blob bytes and File metadata, independently of public codecs,
 // buffer properties, interface constructors and prototype replacements.
 import { eventString, eventDictionary } from './event-state.js';
@@ -113,11 +114,12 @@ function allocate(bytes, type, name = undefined, modified = undefined) {
   const value = create(name === undefined ? blobPrototype : filePrototype);
   save(value, data(bytes, type, name, modified)); return value;
 }
-export function Blob(parts = undefined, bag = undefined) {
+export let Blob = function Blob(parts = undefined, bag = undefined) {
   if (!new.target) throw new NativeTypeError('Blob requires new');
   const converted = runDOMCallback(() => { const values = convertParts(parts, true), opt = options(bag, false); return { bytes: process(values, opt.endings), type: opt.type }; });
   save(this, data(converted.bytes, converted.type));
 }
+Blob = platformConstructor(Blob, 'Blob');
 const blobPrototype = Blob.prototype;
 define(Blob, 'prototype', { writable: false });
 define(blobPrototype, tagSymbol, { configurable: true, value: 'Blob' });
@@ -136,7 +138,7 @@ const methods = {
   },
 };
 for (const key of ['size', 'type', 'text', 'arrayBuffer', 'bytes', 'slice']) define(blobPrototype, key, descriptor(methods, key));
-export function File(parts, name, bag = undefined) {
+export let File = function File(parts, name, bag = undefined) {
   if (!new.target) throw new NativeTypeError('File requires new');
   if (arguments.length < 2) throw new NativeTypeError('File requires parts and a name');
   const converted = runDOMCallback(() => { const values = convertParts(parts, false), filename = usv(name), opt = options(bag, true); return { bytes: process(values, opt.endings), name: filename, type: opt.type, modified: opt.modified }; });
@@ -144,6 +146,7 @@ export function File(parts, name, bag = undefined) {
 }
 const filePrototype = File.prototype;
 setPrototype(File, Blob); setPrototype(filePrototype, blobPrototype);
+File = platformConstructor(File, 'File');
 define(File, 'prototype', { writable: false });
 define(filePrototype, tagSymbol, { configurable: true, value: 'File' });
 const fields = { get name() { return requireFile(this).name; }, get lastModified() { return requireFile(this).lastModified; } };

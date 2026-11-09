@@ -1,3 +1,4 @@
+import { platformConstructor } from './constructors.js';
 import './error-stacks.js';
 // Keep the runtime's native DOMException slots, getters, constants and stack.
 // The adapter supplies Web IDL's prototype fallback and preserves Error identity
@@ -31,10 +32,10 @@ const fields = { get name() { const data = copyFor(this); return data ? data.nam
 for (const key of ['name', 'message', 'code']) define(NativeDOMException.prototype, key, descriptor(fields, key));
 export const isError = { isError(value) { return nativeIsError(value) || nativeBrand(value); } }.isError;
 define(Error, 'isError', { value: isError, writable: true, configurable: true });
-export function DOMException(message = '', name = 'Error') {
+export let DOMException = function DOMException(message = '', name = 'Error') {
   if (!new.target) throw new NativeTypeError('DOMException requires new');
   // Ordinary construction resolves new.target.prototype before conversion.
-  // Reuse it, including the Object.prototype fallback, without a second read.
+  // Reuse the selected prototype without another public getter.
   const target = prototype(this);
   const result = runDOMCallback(() => construct(NativeDOMException, [message, name]));
   setPrototype(result, target);
@@ -43,5 +44,6 @@ export function DOMException(message = '', name = 'Error') {
 define(DOMException, 'name', { value: 'DOMException', configurable: true });
 const proto = NativeDOMException.prototype;
 define(DOMException, 'prototype', { value: proto, writable: false });
+DOMException = platformConstructor(DOMException, 'DOMException');
 define(proto, 'constructor', { value: DOMException, writable: true, configurable: true });
 for (const key of keys(NativeDOMException)) if (key !== 'name' && key !== 'length' && key !== 'prototype') define(DOMException, key, descriptor(NativeDOMException, key));

@@ -1,3 +1,4 @@
+import { platformConstructor } from './constructors.js';
 // Web IDL conversion and private slots shared by public constructors and
 // user-agent event creation. Constructor inheritance is ordinary public data;
 // it never selects the native initializer.
@@ -159,7 +160,8 @@ function interfaceType(name, Parent, fieldTypes = { __proto__: null }) {
   }
   define(Interface, 'name', { __proto__: null, value: name, configurable: true });
   define(Interface, 'prototype', { __proto__: null, value: spec.prototype, writable: false });
-  setPrototype(Interface, Parent); saveType(Interface, spec);
+  setPrototype(Interface, Parent);
+  Interface = platformConstructor(Interface, name); saveType(Interface, spec);
   define(spec.prototype, 'constructor', { __proto__: null, value: Interface, writable: true, configurable: true });
   define(spec.prototype, Symbol.toStringTag, { __proto__: null, value: name, configurable: true });
   for (let i = 0; i < keys.length; i++) attribute(spec, keys[i]);
@@ -220,10 +222,11 @@ export const CompositionEvent = interfaceType('CompositionEvent', UIEvent, { dat
 export const ClipboardEvent = interfaceType('ClipboardEvent', Event, { clipboardData: 'transfer' });
 export const TouchEvent = interfaceType('TouchEvent', ModifiedEvent, { changedTouches: 'touches', targetTouches: 'touches', touches: 'touches' });
 setPrototype(TouchEvent, UIEvent); setPrototype(TouchEvent.prototype, UIEvent.prototype);
+export let TouchList = function TouchList() { throw new NativeTypeError('Illegal constructor'); };
+TouchList = platformConstructor(TouchList, 'TouchList', 0, true);
 const touchPrototype = TouchList.prototype;
 define(TouchList, 'prototype', { value: touchPrototype, writable: false });
 const touchLists = new WeakMap(), touchListFor = touchLists.get.bind(touchLists), saveTouchList = touchLists.set.bind(touchLists);
-export function TouchList() { throw new NativeTypeError('Illegal constructor'); }
 function requireTouchList(value) { const data = touchListFor(value); if (!data) throw new NativeTypeError('A TouchList is required'); return data; }
 define(TouchList, 'name', { value: 'TouchList', configurable: true });
 define(TouchList.prototype, Symbol.toStringTag, { value: 'TouchList', configurable: true });

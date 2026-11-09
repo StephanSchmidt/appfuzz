@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 const eventTarget = fileURLToPath(new URL('./src/event-target.js', import.meta.url));
 const platformState = fileURLToPath(new URL('./src/platform-state.js', import.meta.url));
 const domState = fileURLToPath(new URL('./src/dom-state.js', import.meta.url));
+const nodeLists = fileURLToPath(new URL('./src/node-lists.js', import.meta.url));
 const eventState = fileURLToPath(new URL('./src/event-state.js', import.meta.url));
 const replace = (source, before, after) => {
   if (!source.includes(before)) throw new Error('The pinned DOM event sites changed: ' + before);
@@ -23,7 +24,10 @@ await build({
     plugin.onLoad({ filter: /[/\\]linkedom[/\\]esm[/\\](dom[/\\](parser|token-list)|interface[/\\](range|tree-walker|node-list|mutation-observer))\.js$/ }, async ({ path }) => {
       let source = await readFile(path, 'utf8');
       if (path.endsWith('/dom/parser.js')) source = replace(source, 'export class DOMParser {', 'export class DOMParser { constructor() { markPlatform(this); }');
-      else if (path.endsWith('/interface/node-list.js')) source = replace(source, 'export class NodeList extends Array {', 'const allocateArray = Reflect.construct, NativeArray = Array; export class NodeList extends Array { constructor(...values) { return markPlatform(allocateArray(NativeArray, values, new.target)); }');
+      else if (path.endsWith('/interface/node-list.js')) {
+        source = replace(source, 'export class NodeList extends Array {', 'export class NodeList { constructor(...values) { initializeNodeList(this, values); }');
+        source = `import {initializeNodeList,installNodeListPrototype} from ${JSON.stringify(nodeLists)};\n${source}\ninstallNodeListPrototype(NodeList.prototype);`;
+      }
       else if (path.endsWith('/dom/token-list.js')) source = replace(source, '    super();', '    super(); markPlatform(this);');
       else if (path.endsWith('/interface/range.js')) source = replace(source, '  constructor() {', '  constructor() { markPlatform(this);');
       else if (path.endsWith('/interface/tree-walker.js')) source = replace(source, '  constructor(root, whatToShow = SHOW_ALL) {', '  constructor(root, whatToShow = SHOW_ALL) { markPlatform(this);');

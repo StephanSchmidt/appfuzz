@@ -1,3 +1,4 @@
+import { platformConstructor } from './constructors.js';
 import { markPlatform } from './platform-state.js';
 // URL records and query lists are platform slots. Public JavaScript fields,
 // accessors and serializers never participate in their native algorithms.
@@ -79,7 +80,7 @@ class ParamsIterator {
   [Symbol.iterator]() { return this; }
 }
 define(ParamsIterator.prototype, Symbol.toStringTag, { configurable: true, value: 'URLSearchParams Iterator' });
-export class URLSearchParams {
+export let URLSearchParams = class URLSearchParams {
   constructor(init = '') { const list = runDOMCallback(() => convertInit(init)); saveParams(this, { list, url: null }); }
   get size() { return requireParams(this).list.length; }
   append(name, value) {
@@ -131,6 +132,7 @@ export class URLSearchParams {
   values() { return new ParamsIterator(this, 'value'); }
   toString() { return formSerialize(requireParams(this).list); }
 }
+URLSearchParams = platformConstructor(URLSearchParams, 'URLSearchParams');
 define(URLSearchParams.prototype, iteratorSymbol, { configurable: true, writable: true, value: URLSearchParams.prototype.entries });
 define(URLSearchParams.prototype, Symbol.toStringTag, { configurable: true, value: 'URLSearchParams' });
 function parsed(input, base, count) {
@@ -141,7 +143,7 @@ function parsed(input, base, count) {
 function initialize(url, parts) { saveURL(url, { parts, query: null }); return url; }
 let makeObjectURL, revokeObjectURL;
 export function setObjectURLHooks(make, revoke) { makeObjectURL = make; revokeObjectURL = revoke; }
-export class URL {
+export let URL = class URL {
   constructor(input, base = undefined) {
     const result = parsed(input, base, arguments.length); if (!result) throw new NativeTypeError('Invalid URL'); initialize(this, result);
   }
@@ -157,6 +159,7 @@ export class URL {
   static createObjectURL(blob) { required(arguments.length, 1); return makeObjectURL(blob); }
   static revokeObjectURL(value) { required(arguments.length, 1); revokeObjectURL(runDOMCallback(() => usv(value))); }
 }
+URL = platformConstructor(URL, 'URL');
 for (let i = 0; i < parts.length; i++) define(URL.prototype, parts[i], {
   configurable: true, enumerable: true, get() { return requireURL(this).parts[i]; },
   set: i === 1 ? undefined : function(value) { setURLPart(this, parts[i], value); },

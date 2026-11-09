@@ -1106,6 +1106,22 @@ constructor inheritance cannot select the platform's initializer. The controller
 form construction and rejection/error delivery initialize native event data
 without running public dictionary conversion.
 
+Core event, messaging, byte, fetch, form, URL, abort and payload constructors
+share a captured initialization path. Legal construction reads
+`newTarget.prototype` once, preserves public argument conversion, and uses the
+interface prototype when the result is primitive. Illegal interfaces reject
+construction before that lookup. These follow
+[Web IDL](https://webidl.spec.whatwg.org/#new) and Firefox; Chromium currently
+uses Object.prototype for the fallback and looks up the prototype on illegal
+construction. Public names, lengths, readonly prototype properties and
+constructor identities are covered by isolated native reference fixtures.
+DOM/HTML interface names are restored during bootstrap. HTML constructor
+registration rules continue to use the registry's dedicated construction path.
+A private allocation target is restored after nested calls or exceptions;
+platform-created objects use captured prototypes and private records. NodeList
+storage is array-like rather than an Array exotic object, so borrowed array
+operations do not consult its constructor or author species getters.
+
 Focus checks native HTML eligibility, including connection, disabled/hidden/inert
 state and tabindex. Focus events carry their related target and view;
 Document/ShadowRoot active-element queries use physical state and retargeting.

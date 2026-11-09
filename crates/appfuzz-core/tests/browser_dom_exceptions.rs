@@ -168,7 +168,7 @@ fn exception_interface() {
 fn exception_allocation_order() {
     assert_eq!(
         visit("exception-allocation-order"),
-        ["exception-allocation-order [[\"prototype\",\"message\",\"name\",\"prototype\"],true]", "exception-allocation-order fallback false  "]
+        ["exception-allocation-order [[\"prototype\",\"message\",\"name\",\"prototype\"],true]", "exception-allocation-order fallback true AbortError 20"]
     );
 }
 

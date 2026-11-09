@@ -1,3 +1,4 @@
+import { constructorMetadata } from './constructors.js';
 import { HTMLElement } from '../node_modules/linkedom/esm/html/element.js';
 import { Classes } from '../node_modules/linkedom/esm/interface/custom-element-registry.js';
 import { builtinInterface, additionalInterfaces } from './creation.js';
@@ -8,6 +9,7 @@ const isHTML = Object.prototype.isPrototypeOf.bind(HTMLElement.prototype);
 const construct = Reflect.construct, define = Object.defineProperty;
 const setPrototype = Object.setPrototypeOf;
 const TypeErrorClass = TypeError, NativeProxy = Proxy;
+const named = new WeakSet(), hasName = named.has.bind(named), saveName = named.add.bind(named);
 
 export function installHTMLConstructors(G, L) {
   const wrappers = new WeakMap();
@@ -16,6 +18,7 @@ export function installHTMLConstructors(G, L) {
     if (typeof Class !== 'function' || (Class !== HTMLElement && !isHTML(Class.prototype))) continue;
     let wrapped = get(Class);
     if (!wrapped) {
+      if (!hasName(Class)) { constructorMetadata(Class, name, 0); saveName(Class); }
       wrapped = new NativeProxy(Class, { construct(_target, _args, NewTarget) {
         if (NewTarget === wrapped) throw new TypeErrorClass('Illegal HTML constructor');
         const info = infoFor(NewTarget), definition = definitionForClass(NewTarget);

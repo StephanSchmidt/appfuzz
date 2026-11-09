@@ -1,3 +1,4 @@
+import { platformConstructor } from './constructors.js';
 // Native message data is private. Public constructors perform Web IDL
 // conversion; queued delivery initializes the same slots without callbacks.
 import { Event, eventState, eventString, eventDictionary, initializeEvent, resetEvent } from './event-state.js';
@@ -30,7 +31,7 @@ function frozenPorts(sequence) {
     append(result, value);
   }
 }
-export function MessageEvent(type, options = undefined) {
+export let MessageEvent = function MessageEvent(type, options = undefined) {
   if (!new.target) throw new NativeTypeError('MessageEvent requires new');
   if (!arguments.length) throw new NativeTypeError('MessageEvent requires a type');
   const converted = runDOMCallback(() => {
@@ -51,6 +52,7 @@ const prototype = create(Event.prototype);
 define(MessageEvent, 'name', { value: 'MessageEvent', configurable: true });
 define(MessageEvent, 'prototype', { value: prototype, writable: false });
 Object.setPrototypeOf(MessageEvent, Event);
+MessageEvent = platformConstructor(MessageEvent, 'MessageEvent');
 define(prototype, 'constructor', { value: MessageEvent, writable: true, configurable: true });
 define(prototype, Symbol.toStringTag, { value: 'MessageEvent', configurable: true });
 const fields = {

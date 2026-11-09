@@ -1,3 +1,4 @@
+import { platformConstructor } from './constructors.js';
 // Synthetic drag/clipboard stores and immutable event payloads. Native
 // allocation uses captured prototypes and private brands, never public parents.
 import { registerEventPayload } from './event-interfaces.js';
@@ -36,9 +37,11 @@ function methods(prototype, source) { const names = keys(source); for (let i = 0
 function need(read, value, name) { const data = read(value); if (!data) throw new NativeTypeError('A ' + name + ' is required'); return data; }
 
 const ranges = new WeakMap(), rangeFor = ranges.get.bind(ranges), saveRange = ranges.set.bind(ranges);
-export function AbstractRange() { throw new NativeTypeError('Illegal constructor'); }
-export function NodeRange() { throw new NativeTypeError('Illegal constructor'); }
-export function StaticRange(init) {
+export let AbstractRange = function AbstractRange() { throw new NativeTypeError('Illegal constructor'); };
+AbstractRange = platformConstructor(AbstractRange, 'AbstractRange', 0, true);
+export let NodeRange = function NodeRange() { throw new NativeTypeError('Illegal constructor'); };
+NodeRange = platformConstructor(NodeRange, 'NodeRange', 0, true);
+export let StaticRange = function StaticRange(init) {
   if (!new.target) throw new NativeTypeError('StaticRange requires new');
   required(arguments.length, 1);
   const data = runDOMCallback(() => {
@@ -55,6 +58,7 @@ export function StaticRange(init) {
   saveRange(this, data); registerEventPayload('range', this);
 }
 identity(AbstractRange, 'AbstractRange'); identity(NodeRange, 'NodeRange', AbstractRange); identity(StaticRange, 'StaticRange', NodeRange);
+StaticRange = platformConstructor(StaticRange, 'StaticRange');
 const rangeKeys = list(); rangeKeys[0] = 'endContainer'; rangeKeys[1] = 'endOffset'; rangeKeys[2] = 'startContainer'; rangeKeys[3] = 'startOffset';
 for (const key of ['startOffset','endOffset']) getter(AbstractRange.prototype, key, value => need(rangeFor, value, 'AbstractRange')[key]);
 getter(AbstractRange.prototype, 'collapsed', value => { const d = need(rangeFor, value, 'AbstractRange'); return d.startContainer === d.endContainer && d.startOffset === d.endOffset; });
@@ -63,7 +67,7 @@ for (const key of ['startContainer','endContainer']) getter(NodeRange.prototype,
 const touches = new WeakMap(), touchFor = touches.get.bind(touches), saveTouch = touches.set.bind(touches);
 const touchFields = { __proto__: null, altitudeAngle: 'double', azimuthAngle: 'double', clientX: 'double', clientY: 'double', force: 'float', identifier: 'long', pageX: 'double', pageY: 'double', radiusX: 'float', radiusY: 'float', rotationAngle: 'float', screenX: 'double', screenY: 'double', target: 'target', touchType: 'enum' };
 const touchKeys = keys(touchFields); touchKeys.sort(); setPrototype(touchKeys, null);
-export function Touch(init) {
+export let Touch = function Touch(init) {
   if (!new.target) throw new NativeTypeError('Touch requires new');
   required(arguments.length, 1);
   const data = runDOMCallback(() => {
@@ -84,6 +88,7 @@ export function Touch(init) {
   saveTouch(this, data); registerEventPayload('touch', this);
 }
 identity(Touch, 'Touch');
+Touch = platformConstructor(Touch, 'Touch');
 for (let i = 0; i < touchKeys.length; i++) { const key = touchKeys[i]; getter(Touch.prototype, key, value => need(touchFor, value, 'Touch')[key]); }
 
 const stores = new WeakMap(), storeFor = stores.get.bind(stores), saveStore = stores.set.bind(stores);
@@ -92,17 +97,21 @@ const items = new WeakMap(), itemFor = items.get.bind(items), saveItem = items.s
 const files = new WeakMap(), filesFor = files.get.bind(files), saveFiles = files.set.bind(files);
 let enqueue = () => { throw new NativeTypeError('Task queue unavailable'); }, callbackError = () => {};
 export function installPayloadTasks(queue, report) { enqueue = queue; callbackError = report; }
-export function DataTransfer() {
+export let DataTransfer = function DataTransfer() {
   if (!new.target) throw new NativeTypeError('DataTransfer requires new');
   const data = { __proto__: null, entries: list(), fileEntries: list(), types: freeze([]), dropEffect: 'none', effectAllowed: 'none', image: null, itemList: null, fileList: null };
   data.itemList = indexedObject(itemListPrototype, () => data.entries); saveItemList(data.itemList, data); markPlatform(data.itemList);
   data.fileList = makeFileList(data.fileEntries);
   saveStore(this, data); registerEventPayload('transfer', this);
 }
-export function DataTransferItemList() { throw new NativeTypeError('Illegal constructor'); }
-export function DataTransferItem() { throw new NativeTypeError('Illegal constructor'); }
-export function FileList() { throw new NativeTypeError('Illegal constructor'); }
-identity(DataTransfer, 'DataTransfer'); identity(DataTransferItemList, 'DataTransferItemList'); identity(DataTransferItem, 'DataTransferItem'); identity(FileList, 'FileList');
+export let DataTransferItemList = function DataTransferItemList() { throw new NativeTypeError('Illegal constructor'); };
+DataTransferItemList = platformConstructor(DataTransferItemList, 'DataTransferItemList', 0, true);
+export let DataTransferItem = function DataTransferItem() { throw new NativeTypeError('Illegal constructor'); };
+DataTransferItem = platformConstructor(DataTransferItem, 'DataTransferItem', 0, true);
+export let FileList = function FileList() { throw new NativeTypeError('Illegal constructor'); };
+FileList = platformConstructor(FileList, 'FileList', 0, true);
+identity(DataTransfer, 'DataTransfer');
+DataTransfer = platformConstructor(DataTransfer, 'DataTransfer'); identity(DataTransferItemList, 'DataTransferItemList'); identity(DataTransferItem, 'DataTransferItem'); identity(FileList, 'FileList');
 const itemListPrototype = DataTransferItemList.prototype, itemPrototype = DataTransferItem.prototype, fileListPrototype = FileList.prototype;
 export function makeFileList(entries) { const value = indexedObject(fileListPrototype, () => entries); saveFiles(value, entries); return value; }
 export function fileListEntries(value) { return filesFor(value); }

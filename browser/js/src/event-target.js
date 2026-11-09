@@ -1,3 +1,4 @@
+import { platformConstructor } from './constructors.js';
 import { markPlatform } from './platform-state.js';
 import { DOMException as BrowserDOMException } from './dom-exception.js';
 // Listener identity, options, removal and the dispatch path are native
@@ -188,7 +189,7 @@ export function initializeEventTarget(value) {
   markPlatform(value); remember(value, { exposed: value, listeners: privateList(), handlers: new NativeMap(), window: false });
   return value;
 }
-export class EventTarget {
+export let EventTarget = class EventTarget {
   constructor() { initializeEventTarget(this); }
   addEventListener(type, callback, options) {
     const target = canonicalTarget(this);
@@ -205,4 +206,5 @@ export class EventTarget {
   dispatchEvent(event) { return fireEvent(this, event, false); }
   _getParent() { return null; }
 }
+EventTarget = platformConstructor(EventTarget, 'EventTarget');
 define(EventTarget.prototype, Symbol.toStringTag, { configurable: true, value: 'EventTarget' });

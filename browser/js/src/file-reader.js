@@ -1,3 +1,4 @@
+import { constructorPrototype } from './constructors.js';
 // FileReader state and task ownership are private. Page setters, helper
 // methods, codec replacements and constructor inheritance cannot select the
 // platform algorithm. Public encoding conversion remains observable.
@@ -9,7 +10,7 @@ import { eventString } from './event-state.js';
 import { mimeCharset } from './mime-types.js';
 import { runDOMCallback } from './dom-callbacks.js';
 const NativeTypeError = TypeError, NativeProxy = Proxy, create = Object.create, define = Object.defineProperty, descriptor = Object.getOwnPropertyDescriptor;
-const setPrototype = Object.setPrototypeOf, getProperty = Reflect.get, keys = Object.keys, fromCode = String.fromCharCode;
+const setPrototype = Object.setPrototypeOf, keys = Object.keys, fromCode = String.fromCharCode;
 const wellFormed = Function.prototype.call.bind(String.prototype.toWellFormed), decode = globalThis.__native.decodeFileText;
 const states = new WeakMap(), read = states.get.bind(states), save = states.set.bind(states);
 let enqueue = () => { throw new NativeTypeError('File reading task queue unavailable'); }, cancel = () => {}, checkpoint = () => {};
@@ -24,8 +25,7 @@ define(Constructor, 'prototype', { __proto__: null, writable: false });
 // A construct trap reads newTarget.prototype exactly once with the Web IDL
 // fallback, including proxy and derived constructors. No public parent runs.
 export const FileReader = new NativeProxy(Constructor, { __proto__: null, construct(target, args, newTarget) {
-  const requested = runDOMCallback(() => getProperty(newTarget, 'prototype'));
-  const value = create(requested !== null && (typeof requested === 'object' || typeof requested === 'function') ? requested : prototype);
+  const value = create(constructorPrototype(newTarget, prototype));
   initializeEventTarget(value); save(value, { __proto__: null, state: 0, result: null, error: null, operation: null }); return value;
 } });
 define(prototype, 'constructor', { __proto__: null, value: FileReader, writable: true, configurable: true });
