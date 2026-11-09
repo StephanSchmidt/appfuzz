@@ -1122,6 +1122,19 @@ platform-created objects use captured prototypes and private records. NodeList
 storage is array-like rather than an Array exotic object, so borrowed array
 operations do not consult its constructor or author species getters.
 
+XMLHttpRequest uses private branded records for state, routing, headers,
+credentials, responses and pending work. Prototype helpers and instance fields
+do not select the native request. Open/send/header operations enforce state and
+conversion rules; abort, re-open and timeout cancel the pending operation.
+Readonly getters expose state at each transition. Readystatechange uses Event;
+transfer events use trusted ProgressEvent instances with byte counts. Upload
+objects have the XMLHttpRequestUpload/EventTarget hierarchy. Response bytes are
+packaged privately as text, JSON, buffers, blobs or inert documents; MIME
+charsets, overrides and BOMs affect text decoding. XML response documents are
+validated and namespace-resolved by roxmltree, without an external entity
+resolver. Native loopback fixtures and simulated-host argument checks cover
+these paths, including callback and microtask cancellation.
+
 Focus checks native HTML eligibility, including connection, disabled/hidden/inert
 state and tabindex. Focus events carry their related target and view;
 Document/ShadowRoot active-element queries use physical state and retargeting.

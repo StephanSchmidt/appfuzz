@@ -1,3 +1,5 @@
+import { parseNetworkDocument } from './network-documents.js';
+import { XMLHttpRequest, XMLHttpRequestEventTarget, XMLHttpRequestUpload, installXHRPlatform } from './xml-http-request.js';
 import { platformConstructor } from './constructors.js';
 import { FileReader, installFileReaderTasks } from './file-reader.js';
 import { installFileInputs } from './file-inputs.js';
@@ -742,7 +744,7 @@ function networkAnswer(status, body, rawHeaders, url, acceptCookies, delayed, la
     if (key === 'set-cookie') setCookies[setCookies.length] = value;
     else if (key !== 'set-cookie2') headers[key] = headers[key] == null ? value : headers[key] + ', ' + value;
   }
-  const r = { status, body, headers, url, acceptCookies, setCookies, received: false, latency };
+  const r = { __proto__: null, status, body, headers, url, acceptCookies, setCookies, received: false, latency, error: null };
   return delayed ? r : receive(r);
 }
 function respond(method, url, body, headers, kind, credentials = 'same-origin', delayed = false) {
@@ -773,7 +775,7 @@ function respond(method, url, body, headers, kind, credentials = 'same-origin', 
     for (let i = 0; i < entries.length; i++) pairs[i] = [nativeString(entries[i][0]), nativeString(entries[i][1])];
     const answer = h.fetch(kind, method, own, target, pairs, body == null ? null : bufferOfBytes(body), [!!S.gesture, S.now]);
     const status = answer[0], rh = answer[1], text = wireBytes(answer[2]), failed = answer[3], latency = answer[4];
-    if (failed != null) return { status: 0, error: failed, body: '', headers: {}, url: urlPart(u, 'href'), latency: latency ?? S.latency };
+    if (failed != null) return { __proto__: null, status: 0, error: failed, body: '', headers: nativeCreate(null), url: urlPart(u, 'href'), latency: latency ?? S.latency };
     return networkAnswer(status, text, rh, urlPart(u, 'href'), include, delayed, latency ?? S.latency);
   }
   const plain = own ? urlPart(u, 'pathname') : urlPart(u, 'origin') + urlPart(u, 'pathname');
@@ -812,58 +814,13 @@ G.fetch = function fetch(input, init = undefined) {
   });
 };
 
-let XMLHttpRequest = class XMLHttpRequest {
-  constructor() {
-    initializeEventTarget(this);
-    Object.assign(this, { readyState: 0, status: 0, statusText: '', responseText: '', response: '', responseType: '', responseURL: '', responseXML: null, timeout: 0, withCredentials: false });
-    this._h = {};
-    this._rh = {};
-    this.upload = new L.EventTarget();
-    for (const h of ['readystatechange', 'load', 'error', 'abort', 'loadstart', 'loadend', 'progress', 'timeout']) this['on' + h] = null;
-  }
-  open(method, url) { this._m = String(method).toUpperCase(); this._u = String(url); this._aborted = false; this.readyState = 1; this._fire('readystatechange'); }
-  setRequestHeader(k, v) { this._h[String(k).toLowerCase()] = String(v); }
-  overrideMimeType() {}
-  getResponseHeader(k) { const v = this._rh[String(k).toLowerCase()]; return v == null ? null : v; }
-  getAllResponseHeaders() { return Object.entries(this._rh).map(([k, v]) => k + ': ' + v + '\r\n').join(''); }
-  abort() { this._aborted = true; this.readyState = 0; this._fire('abort'); }
-  send(body) {
-    const r = respond(this._m, this._u, bodyBytes(body), this._h, 'xhr', this.withCredentials ? 'include' : 'same-origin', true);
-    this._fire('loadstart');
-    addTimer(() => {
-      if (this._aborted) return;
-      if (r.error != null) {
-        this.readyState = 4; this._fire('readystatechange');
-        this._fire('error');
-        this._fire('loadend');
-        return;
-      }
-      receive(r);
-      this.status = r.status;
-      this.statusText = r.status === 200 ? 'OK' : '';
-      this._rh = Object.fromEntries(Object.entries(r.headers).map(([k, v]) => [k.toLowerCase(), String(v)]));
-      this.responseURL = r.url;
-      this.responseText = decodeBytes(r.body);
-      if (this.responseType === 'json') { try { this.response = parseBodyJSON(decodeBytes(r.body)); } catch { this.response = null; } }
-      else if (this.responseType === 'arraybuffer') this.response = copyBytesBuffer(r.body);
-      else if (this.responseType === 'blob') this.response = blobFromBytes(r.body, extractMime(r.headers['content-type'] ?? null));
-      else this.response = decodeBytes(r.body);
-      this.readyState = 2; this._fire('readystatechange');
-      this.readyState = 3; this._fire('readystatechange');
-      this.readyState = 4; this._fire('readystatechange');
-      this._fire('load');
-      this._fire('loadend');
-    }, r.latency, [], false, 'xhr', false);
-  }
-  _fire(type) {
-    const ev = createNativeUIEvent(ProgressEvent, type);
-    fireEvent(this, ev);
-  }
-}
-nativeSetPrototype(XMLHttpRequest, L.EventTarget); nativeSetPrototype(XMLHttpRequest.prototype, L.EventTarget.prototype);
-XMLHttpRequest = platformConstructor(XMLHttpRequest, 'XMLHttpRequest');
-['UNSENT', 'OPENED', 'HEADERS_RECEIVED', 'LOADING', 'DONE'].forEach((k, i) => { XMLHttpRequest[k] = i; XMLHttpRequest.prototype[k] = i; });
-G.XMLHttpRequest = XMLHttpRequest;
+installXHRPlatform({
+  base: () => urlPart(S.url, 'href'), now: () => S.now,
+  enqueue: (fn, delay) => addTimer(fn, delay, [], false, 'xhr', false), cancel: id => mapDelete(S.timers, id),
+  checkpoint: messageListenerCheckpoint, respond, receive, convertBody, extractBody: extractConvertedBody, entries: nativeEntries,
+  document: parseNetworkDocument,
+});
+Object.assign(G, { XMLHttpRequest, XMLHttpRequestEventTarget, XMLHttpRequestUpload });
 
 class Inert extends L.EventTarget {
   constructor(name, url) {
@@ -885,12 +842,6 @@ G.SharedWorker = class SharedWorker extends Inert { constructor(u) { super('Shar
 G.BroadcastChannel = class BroadcastChannel extends Inert { constructor() { super('BroadcastChannel'); } };
 
 Object.assign(G, { Blob, File, FileReader });
-for (const [Class, types] of [[XMLHttpRequest, ['readystatechange', 'load', 'error', 'abort', 'loadstart', 'loadend', 'progress', 'timeout']]]) {
-  for (const type of types) Object.defineProperty(Class.prototype, 'on' + type, { configurable: true, enumerable: true,
-    get() { return getHandler(this, type); }, set(value) { setHandler(this, type, value); },
-  });
-}
-
 // --- The page's document ----------------------------------------------------
 
 // FormData conversions run before changing the entry list. The list keeps

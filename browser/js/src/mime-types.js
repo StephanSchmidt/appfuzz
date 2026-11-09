@@ -74,3 +74,11 @@ export function extractMime(value) {
 
 // Private File API charset extraction reuses the MIME Sniffing parser.
 export function mimeCharset(value) { const mime = parse(value); return mime && own(mime.params, 'charset') ? mime.params.charset : null; }
+
+// XHR overrideMimeType parses one MIME type, unlike Fetch header extraction.
+export function normalizeMime(value) { const mime = parse(value); return mime ? serialize(mime) : null; }
+export function utf8Mime(value) {
+  const mime = parse(value); if (!mime) return value;
+  if (own(mime.params, 'charset') && lowerASCII(mime.params.charset) !== 'utf-8') mime.params.charset = 'UTF-8';
+  return serialize(mime);
+}

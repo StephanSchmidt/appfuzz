@@ -23,6 +23,7 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     n.set("encodeUtf8", Function::new(ctx.clone(), encode_utf8)?)?;
     n.set("decodeUtf8", Function::new(ctx.clone(), decode_utf8)?)?;
     n.set("decodeFileText", Function::new(ctx.clone(), decode_file_text)?)?;
+    n.set("xmlTree", Function::new(ctx.clone(), xml_tree_js)?)?;
     n.set("encodeBase64", Function::new(ctx.clone(), encode_base64)?)?;
     // The pinned runtime has native DOMException slots but its Error.isError
     // predicate does not recognize them. Read the engine brand without invoking
@@ -61,6 +62,62 @@ fn decode_file_text(value: ArrayBuffer<'_>, label: Option<String>, charset: Opti
         .or_else(|| charset.as_deref().and_then(|s| encoding_rs::Encoding::for_label(s.as_bytes())))
         .unwrap_or(encoding_rs::UTF_8);
     encoding.decode(bytes).0.into_owned()
+}
+
+// Parse network XML before creating any page-visible DOM objects. No external
+// entity resolver is installed; roxmltree bounds recursive entity expansion.
+fn xml_tree(value: &str) -> Option<serde_json::Value> {
+    use roxmltree::{Document, NodeType, ParsingOptions};
+    let doc = Document::parse_with_options(value, ParsingOptions { allow_dtd: true, ..ParsingOptions::default() }).ok()?;
+    let mut nodes = Vec::new();
+    for node in doc.descendants() {
+        let parent = node.parent().map(|p| p.id().get_usize());
+        let data = match node.node_type() {
+            NodeType::Root => serde_json::json!(["root", parent]),
+            NodeType::Element => {
+                let source = &value[node.range()];
+                let name = source[1..].split([' ', '\t', '\r', '\n', '/', '>']).next()?;
+                let mut attrs = Vec::new();
+                for attr in node.attributes() {
+                    attrs.push(serde_json::json!([&value[attr.range_qname()], attr.namespace(), attr.value()]));
+                }
+                // Namespace declarations are omitted from roxmltree's attribute
+                // iterator. Recover their names from the validated opening tag,
+                // while taking their normalized values from the namespace map.
+                let mut rest = &source[1 + name.len()..];
+                loop {
+                    rest = rest.trim_start_matches([' ', '\t', '\r', '\n']);
+                    if rest.starts_with(['/', '>']) {
+                        break;
+                    }
+                    let end = rest.find([' ', '\t', '\r', '\n', '='])?;
+                    let key = &rest[..end];
+                    rest = rest[end..].trim_start_matches([' ', '\t', '\r', '\n']).strip_prefix('=')?.trim_start_matches([' ', '\t', '\r', '\n']);
+                    let quote = rest.chars().next()?;
+                    rest = &rest[quote.len_utf8()..];
+                    let end = rest.find(quote)?;
+                    if key == "xmlns" || key.starts_with("xmlns:") {
+                        let prefix = key.strip_prefix("xmlns:");
+                        let uri = node.lookup_namespace_uri(prefix).unwrap_or("");
+                        attrs.push(serde_json::json!([key, roxmltree::NS_XMLNS_URI, uri]));
+                    }
+                    rest = &rest[end + quote.len_utf8()..];
+                }
+                serde_json::json!(["element", parent, name, node.tag_name().namespace(), attrs])
+            }
+            NodeType::Text => serde_json::json!(["text", parent, node.text().unwrap_or_default()]),
+            NodeType::Comment => serde_json::json!(["comment", parent, node.text().unwrap_or_default()]),
+            NodeType::PI => {
+                let pi = node.pi()?;
+                serde_json::json!(["pi", parent, pi.target, pi.value.unwrap_or_default()])
+            }
+        };
+        nodes.push(data);
+    }
+    Some(serde_json::Value::Array(nodes))
+}
+fn xml_tree_js<'js>(ctx: Ctx<'js>, value: String) -> Result<Value<'js>> {
+    private_json(&ctx, xml_tree(&value).unwrap_or(serde_json::Value::Null))
 }
 
 fn encode_base64(value: ArrayBuffer<'_>) -> String {
@@ -276,6 +333,33 @@ mod tests {
 
     fn host(input: &str) -> Option<String> {
         url_parse(input.into(), Some("https://app.example/shop/item?x=1".into())).map(|p| p[6].clone())
+    }
+
+    #[test]
+    fn xhr_xml_validation_and_namespaces() {
+        let value = xml_tree("<r xmlns='urn:r' xmlns:p='urn:p' p:id='A&amp;B'><p:c/>text<!--c--></r>").unwrap();
+        assert_eq!(value[1][2], "r");
+        assert_eq!(value[1][3], "urn:r");
+        assert!(value[1][4].as_array().unwrap().contains(&serde_json::json!(["p:id", "urn:p", "A&B"])));
+        assert!(value[1][4].as_array().unwrap().contains(&serde_json::json!(["xmlns:p", roxmltree::NS_XMLNS_URI, "urn:p"])));
+        assert_eq!(value[2][2], "p:c");
+        assert_eq!(value[2][3], "urn:p");
+        for input in ["", "<r><x></r>", "<p:r/>", "<r a='1' a='2'/>", "<r>&missing;</r>"] {
+            assert!(xml_tree(input).is_none(), "{input}");
+        }
+    }
+    #[test]
+    fn xhr_xml_internal_entities_and_external_subset() {
+        let value = xml_tree("<!DOCTYPE r [<!ENTITY a 'synthetic'>]><r>&a;</r>").unwrap();
+        assert_eq!(value[2][2], "synthetic");
+        assert!(xml_tree("<!DOCTYPE r SYSTEM 'https://synthetic.invalid/unused'><r/>").is_some());
+        assert!(xml_tree("<!DOCTYPE r [<!ENTITY a SYSTEM 'https://synthetic.invalid/unused'>]><r>&a;</r>").is_none());
+    }
+    #[test]
+    fn xhr_xml_native_records_ignore_array_setters() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {install(&ctx).unwrap();let result:String=ctx.eval(r#"(()=>{let calls=0;Object.defineProperty(Array.prototype,'0',{configurable:true,set(){calls++}});try{const tree=__native.xmlTree('<r><x/></r>');return tree[1][2]+' '+tree[2][2]+' '+calls}finally{delete Array.prototype[0]}})()"#).unwrap();assert_eq!(result,"r x 0");});
     }
 
     #[test]

@@ -52,6 +52,7 @@ browser:
 	  echo "parse5 entities: $$(node -p 'require("./browser/js/node_modules/parse5/node_modules/entities/package.json").version')"; \
 	  echo "psl: $$($(call BROWSER_LOCK,psl))"; \
 	  echo "encoding_rs: $$($(call BROWSER_LOCK,encoding_rs))"; \
+	  echo "roxmltree: $$($(call BROWSER_LOCK,roxmltree))"; \
 	  echo "unicode-bidi: $$($(call BROWSER_LOCK,unicode-bidi))"; \
 	  echo "color: $$($(call BROWSER_LOCK,color))"; \
 	  echo "cssparser: $$($(call BROWSER_LOCK,cssparser))"; \
