@@ -21,6 +21,7 @@ serde_json = "1"
 encoding_rs = "0.8"
 roxmltree = "=0.21.1"
 wit-bindgen = "0.63"
+xml = "=1.4.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = "0.3"

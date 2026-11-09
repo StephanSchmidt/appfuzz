@@ -1,3 +1,4 @@
+import { setNodeDocument } from './attribute-state.js';
 // Linkedom moves node ranges without adopting them. Use its private ranges
 // and shadow-root/element records so attributes and closed trees move too.
 import { END, NEXT, PREV } from '../node_modules/linkedom/esm/shared/symbols.js';
@@ -59,9 +60,9 @@ export function installAdoption(Element, shareObservers, onError, DOMError) {
   };
   setReactionErrorHandler(onError);
   const includes = Function.prototype.call.bind(Array.prototype.includes);
-  installCEHooks((node, name, oldValue, value) => {
+  installCEHooks((node, name, oldValue, value, namespace) => {
     const definition = elementDefinition(node);
-    if (customElement(node) && definition && includes(definition.observed, name)) withReactions(() => enqueue(node, 'attributeChangedCallback', [name, oldValue, value, null]));
+    if (customElement(node) && definition && includes(definition.observed, name)) withReactions(() => enqueue(node, 'attributeChangedCallback', [name, oldValue, value, namespace]));
   }, root => {
     const nodes = shadowTreeNodes(root);
     for (let i = 0; i < nodes.length; i++) {
@@ -105,7 +106,7 @@ export function installAdoption(Element, shareObservers, onError, DOMError) {
       // the old owner document before ownership changes.
       for (const reaction of reactions) reaction.info.connected = false;
       if (oldParent) detach(node);
-      for (const { node: descendant, document: owner } of nodes) { shareObservers(owner); descendant.ownerDocument = owner; }
+      for (const { node: descendant, document: owner } of nodes) { shareObservers(owner); setNodeDocument(descendant, owner); }
       for (const reaction of reactions) reaction.info.connected = true;
       inserting = true;
       return insert.call(this, node, before);

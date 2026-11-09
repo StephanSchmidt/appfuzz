@@ -1,3 +1,4 @@
+import { parsedAttribute } from './attributes.js';
 // Build the initial HTML document with the HTML tree-building rules, then
 // copy its nodes into linkedom. No serialization/reparse: raw text,
 // namespaces and inert template contents must keep their parsed meaning.
@@ -22,8 +23,6 @@ const comment = Document.prototype.createComment;
 const doctype = Document.prototype.createDocumentType;
 const fragment = Document.prototype.createDocumentFragment;
 const insert = Object.getPrototypeOf(Element.prototype).insertBefore;
-const setAttribute = Element.prototype.setAttribute;
-const setAttributeNS = Element.prototype.setAttributeNS;
 
 export function parseHTML(markup, scriptingEnabled) {
   const tree = parse(String(markup), { scriptingEnabled });
@@ -60,8 +59,7 @@ function appendTree(doc, target, nodes, inertScripts, svg = null, elements = [])
         if (source.namespaceURI === SVG) node.ownerSVGElement = svg;
         for (const attr of source.attrs) {
           const name = attr.prefix ? attr.prefix + ':' + attr.name : attr.name;
-          if (attr.namespace) setAttributeNS.call(node, attr.namespace, name, attr.value);
-          else setAttribute.call(node, name, attr.value);
+          parsedAttribute(node, attr.namespace || null, name, attr.value);
         }
         initializeParsedValue(node);
         const content = templateContent(node);

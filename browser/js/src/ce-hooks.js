@@ -5,9 +5,8 @@ export function installCEHooks(onAttribute, onConnection) { attribute = onAttrib
 let eventAttribute = () => {}, controlAttribute = () => {}, controlConnection = () => {};
 export function installControlHooks(onAttribute, onConnection) { controlAttribute = onAttribute; controlConnection = onConnection; }
 export function installEventAttributeHook(callback) { eventAttribute = callback; }
-export function attributeReaction(element, name, oldValue, value) {
-  eventAttribute(element, name, value);
-  controlAttribute(element, name, value, oldValue);
-  attribute(element, name, oldValue, value);
+export function attributeReaction(element, name, oldValue, value, namespace = null) {
+  if (namespace === null) { eventAttribute(element, name, value); controlAttribute(element, name, value, oldValue); }
+  attribute(element, name, oldValue, value, namespace);
 }
 export function connectionReaction(root, connected) { controlConnection(root, connected); connection(root, connected); }

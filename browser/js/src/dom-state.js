@@ -1,9 +1,10 @@
+import { attributeInfo } from './attribute-state.js';
 // Allocation metadata and physical links provide event parents independently
 // of public nodeType/parentNode/_getParent/host properties.
 import { END, NEXT, PREV, START, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
 import { nameIdentity } from './names.js';
 import { shadowRoots } from '../node_modules/linkedom/esm/shared/shadow-roots.js';
-const setPrototype = Object.setPrototypeOf;
+const setPrototype = Object.setPrototypeOf, NativeTypeError = TypeError;
 const nodes = new WeakMap(), shadows = new WeakMap(), windows = new WeakMap();
 const node = nodes.get.bind(nodes), saveNode = nodes.set.bind(nodes);
 export function initializeNode(value, kind, local) { saveNode(value, { kind, local }); }
@@ -45,7 +46,7 @@ export function closedAncestors(value) {
   return roots;
 }
 export function eventAttribute(element, name) {
-  for (let attr = element[NEXT]; node(attr)?.kind === 2; attr = attr[NEXT]) if (node(attr).local === name) return attr[VALUE];
+  for (let attr = element[NEXT]; node(attr)?.kind === 2; attr = attr[NEXT]) if (node(attr).local === name && (attributeInfo(attr)?.namespace ?? null) === null) return attr[VALUE];
   return null;
 }
 function assignedSlot(value) {
@@ -89,6 +90,8 @@ function firstElement(parent) {
   for (let value = parent[NEXT]; value && value !== parent[END]; value = value[END] ? value[END][NEXT] : value[NEXT]) if (node(value)?.kind === 1) return value;
   return null;
 }
+export function physicalDocumentElement(document) { if (node(document)?.kind !== 9) throw new NativeTypeError('A Document is required'); return firstElement(document); }
+
 export function physicalBody(document) {
   const html = firstElement(document), identity = html && nameIdentity(html);
   if (identity?.namespace !== 'http://www.w3.org/1999/xhtml' || identity.local !== 'html') return null;

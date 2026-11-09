@@ -1,3 +1,6 @@
+import { requireParser } from './parser-state.js';
+import { serializeDocument } from './document-body.js';
+import { installAttributes } from './attributes.js';
 import { parseNetworkDocument } from './network-documents.js';
 import { XMLHttpRequest, XMLHttpRequestEventTarget, XMLHttpRequestUpload, installXHRPlatform } from './xml-http-request.js';
 import { platformConstructor } from './constructors.js';
@@ -73,6 +76,7 @@ for (const [name, C] of Object.entries(L)) if (/^[A-Z]/.test(name) && typeof C =
   const backing = Object.getOwnPropertyDescriptor(C.prototype || {}, 'constructor')?.value;
   if (typeof backing === 'function' && backing !== C) nativeDefine(backing, 'name', { __proto__: null, value: name, configurable: true });
 }
+installAttributes();
 const DOMParser = platformConstructor(L.DOMParser, 'DOMParser');
 const NodeList = platformConstructor(L.NodeList, 'NodeList', 0, true);
 // The backend uses array-like list storage; the public interface constructor
@@ -817,7 +821,8 @@ G.fetch = function fetch(input, init = undefined) {
 installXHRPlatform({
   base: () => urlPart(S.url, 'href'), now: () => S.now,
   enqueue: (fn, delay) => addTimer(fn, delay, [], false, 'xhr', false), cancel: id => mapDelete(S.timers, id),
-  checkpoint: messageListenerCheckpoint, respond, receive, convertBody, extractBody: extractConvertedBody, entries: nativeEntries,
+  checkpoint: messageListenerCheckpoint, respond, receive, convertBody: body => nodeInfo(body)?.kind === 9 ? { __proto__: null, kind: 'document', value: body } : convertBody(body),
+  extractBody: body => body.kind === 'document' ? { __proto__: null, bytes: textBytes(serializeDocument(body.value)), type: documentMode(body.value) !== undefined ? 'text/html;charset=UTF-8' : 'application/xml;charset=UTF-8' } : extractConvertedBody(body), entries: nativeEntries,
   document: parseNetworkDocument,
 });
 Object.assign(G, { XMLHttpRequest, XMLHttpRequestEventTarget, XMLHttpRequestUpload });
@@ -1320,9 +1325,12 @@ function installWindow(doc) {
       if (position === 'afterbegin') this.prepend(content); else this.append(content);
     } else throw new BrowserDOMException('Invalid insertion position', 'SyntaxError');
   }, 'insertAdjacentHTML', 1);
-  const parseDocument = L.DOMParser.prototype.parseFromString;
-  L.DOMParser.prototype.parseFromString = parsing(function (markup, mime, ...rest) {
-    return mime === 'text/html' ? parseHTML(markup, false) : parseDocument.call(this, markup, mime, ...rest);
+  L.DOMParser.prototype.parseFromString = parsing(function (markup, mime) {
+    requireParser(this); if (arguments.length < 2) throw new NativeTypeError('Two arguments are required');
+    const args = runDOMCallback(() => ({ __proto__: null, markup: domString(markup), mime: domString(mime) }));
+    if (args.mime === 'text/html') return parseHTML(args.markup, false);
+    if (args.mime !== 'application/xml' && args.mime !== 'text/xml' && args.mime !== 'application/xhtml+xml' && args.mime !== 'image/svg+xml') throw new NativeTypeError('Unsupported document type');
+    return parseNetworkDocument(args.markup, args.mime, urlPart(S.url, 'href')) || parseNetworkDocument('<parsererror xmlns="http://www.mozilla.org/newlayout/xml/parsererror.xml">XML parsing error</parsererror>', args.mime, urlPart(S.url, 'href'));
   });
   const rangePrototype = Object.getPrototypeOf(doc.createRange());
   const contextualFragment = rangePrototype.createContextualFragment;

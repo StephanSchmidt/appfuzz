@@ -29,12 +29,14 @@ export function lowerASCII(value) {
 
 export const validElementLocalName = name => apply(exec, elementName, [name]) !== null;
 
+export function validAttributeLocalName(value) { if (!value.length) return false; for (let i = 0; i < value.length; i++) { const c = value[i]; if (c === '\0' || c === ' ' || c === '\t' || c === '\n' || c === '\f' || c === '\r' || c === '/' || c === '=' || c === '>') return false; } return true; }
+
 function domString(value) {
   if (typeof value === 'symbol') throw new TypeErrorClass('A Symbol cannot be converted to a DOMString');
   return toString(value);
 }
 
-export function qualifiedName(namespace, name, argumentCount, DOMError) {
+export function qualifiedName(namespace, name, argumentCount, DOMError, attribute = false) {
   if (argumentCount < 2) throw new TypeErrorClass('createElementNS requires namespace and qualifiedName');
   namespace = namespace == null ? null : domString(namespace);
   if (namespace === '') namespace = null;
@@ -42,7 +44,7 @@ export function qualifiedName(namespace, name, argumentCount, DOMError) {
   const colon = apply(indexOf, qualified, [':']);
   const prefix = colon < 0 ? null : apply(slice, qualified, [0, colon]);
   const local = colon < 0 ? qualified : apply(slice, qualified, [colon + 1]);
-  if ((prefix !== null && !apply(exec, prefixName, [prefix])) || !apply(exec, elementName, [local])) {
+  if ((prefix !== null && !apply(exec, prefixName, [prefix])) || !(attribute ? validAttributeLocalName(local) : apply(exec, elementName, [local]))) {
     throw new DOMError('Invalid element name', 'InvalidCharacterError');
   }
   if ((prefix !== null && namespace === null)

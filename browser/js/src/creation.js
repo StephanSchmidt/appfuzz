@@ -1,3 +1,4 @@
+import { setNodeDocument } from './attribute-state.js';
 import { validName } from './custom-name.js';
 import { HTMLUnknownElement } from '../node_modules/linkedom/esm/html/unknown-element.js';
 import { HTMLElement } from '../node_modules/linkedom/esm/html/element.js';
@@ -46,6 +47,6 @@ export function createBareElement(owner, identity, is = null, failed = false) {
   const Class = identity.namespace === 'http://www.w3.org/1999/xhtml' ? (failed ? HTMLUnknownElement : builtinInterface(identity.local))
     : identity.namespace === 'http://www.w3.org/2000/svg' ? SVGElement : Element;
   const node = new Class(construction, identity.local);
-  for (let current = node, stop = node[END][NEXT]; current !== stop; current = current[NEXT]) current.ownerDocument = owner;
+  for (let current = node, stop = node[END][NEXT]; current !== stop; current = current[NEXT]) setNodeDocument(current, owner);
   return initializeElement(node, identity, is);
 }

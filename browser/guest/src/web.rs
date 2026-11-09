@@ -24,6 +24,7 @@ pub fn install(ctx: &Ctx<'_>) -> Result<()> {
     n.set("decodeUtf8", Function::new(ctx.clone(), decode_utf8)?)?;
     n.set("decodeFileText", Function::new(ctx.clone(), decode_file_text)?)?;
     n.set("xmlTree", Function::new(ctx.clone(), xml_tree_js)?)?;
+    n.set("decodeXHRText", Function::new(ctx.clone(), decode_xhr_text)?)?;
     n.set("encodeBase64", Function::new(ctx.clone(), encode_base64)?)?;
     // The pinned runtime has native DOMException slots but its Error.isError
     // predicate does not recognize them. Read the engine brand without invoking
@@ -64,60 +65,15 @@ fn decode_file_text(value: ArrayBuffer<'_>, label: Option<String>, charset: Opti
     encoding.decode(bytes).0.into_owned()
 }
 
-// Parse network XML before creating any page-visible DOM objects. No external
-// entity resolver is installed; roxmltree bounds recursive entity expansion.
-fn xml_tree(value: &str) -> Option<serde_json::Value> {
-    use roxmltree::{Document, NodeType, ParsingOptions};
-    let doc = Document::parse_with_options(value, ParsingOptions { allow_dtd: true, ..ParsingOptions::default() }).ok()?;
-    let mut nodes = Vec::new();
-    for node in doc.descendants() {
-        let parent = node.parent().map(|p| p.id().get_usize());
-        let data = match node.node_type() {
-            NodeType::Root => serde_json::json!(["root", parent]),
-            NodeType::Element => {
-                let source = &value[node.range()];
-                let name = source[1..].split([' ', '\t', '\r', '\n', '/', '>']).next()?;
-                let mut attrs = Vec::new();
-                for attr in node.attributes() {
-                    attrs.push(serde_json::json!([&value[attr.range_qname()], attr.namespace(), attr.value()]));
-                }
-                // Namespace declarations are omitted from roxmltree's attribute
-                // iterator. Recover their names from the validated opening tag,
-                // while taking their normalized values from the namespace map.
-                let mut rest = &source[1 + name.len()..];
-                loop {
-                    rest = rest.trim_start_matches([' ', '\t', '\r', '\n']);
-                    if rest.starts_with(['/', '>']) {
-                        break;
-                    }
-                    let end = rest.find([' ', '\t', '\r', '\n', '='])?;
-                    let key = &rest[..end];
-                    rest = rest[end..].trim_start_matches([' ', '\t', '\r', '\n']).strip_prefix('=')?.trim_start_matches([' ', '\t', '\r', '\n']);
-                    let quote = rest.chars().next()?;
-                    rest = &rest[quote.len_utf8()..];
-                    let end = rest.find(quote)?;
-                    if key == "xmlns" || key.starts_with("xmlns:") {
-                        let prefix = key.strip_prefix("xmlns:");
-                        let uri = node.lookup_namespace_uri(prefix).unwrap_or("");
-                        attrs.push(serde_json::json!([key, roxmltree::NS_XMLNS_URI, uri]));
-                    }
-                    rest = &rest[end + quote.len_utf8()..];
-                }
-                serde_json::json!(["element", parent, name, node.tag_name().namespace(), attrs])
-            }
-            NodeType::Text => serde_json::json!(["text", parent, node.text().unwrap_or_default()]),
-            NodeType::Comment => serde_json::json!(["comment", parent, node.text().unwrap_or_default()]),
-            NodeType::PI => {
-                let pi = node.pi()?;
-                serde_json::json!(["pi", parent, pi.target, pi.value.unwrap_or_default()])
-            }
-        };
-        nodes.push(data);
-    }
-    Some(serde_json::Value::Array(nodes))
-}
+use crate::xml::xml_tree;
 fn xml_tree_js<'js>(ctx: Ctx<'js>, value: String) -> Result<Value<'js>> {
     private_json(&ctx, xml_tree(&value).unwrap_or(serde_json::Value::Null))
+}
+
+fn decode_xhr_text<'js>(ctx: Ctx<'js>, value: ArrayBuffer<'js>, label: Option<String>, xml: bool, strict: bool) -> Result<Value<'js>> {
+    // SAFETY: the rooted buffer is borrowed without executing JavaScript.
+    let bytes = unsafe { value.as_bytes() }.unwrap_or_default();
+    private_json(&ctx, crate::xml::decode(bytes, label.as_deref(), xml, strict))
 }
 
 fn encode_base64(value: ArrayBuffer<'_>) -> String {
@@ -351,7 +307,7 @@ mod tests {
     #[test]
     fn xhr_xml_internal_entities_and_external_subset() {
         let value = xml_tree("<!DOCTYPE r [<!ENTITY a 'synthetic'>]><r>&a;</r>").unwrap();
-        assert_eq!(value[2][2], "synthetic");
+        assert!(value.as_array().unwrap().iter().any(|n| n[0] == "text" && n[2] == "synthetic"));
         assert!(xml_tree("<!DOCTYPE r SYSTEM 'https://synthetic.invalid/unused'><r/>").is_some());
         assert!(xml_tree("<!DOCTYPE r [<!ENTITY a SYSTEM 'https://synthetic.invalid/unused'>]><r>&a;</r>").is_none());
     }

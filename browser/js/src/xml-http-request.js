@@ -9,7 +9,7 @@ import { headersFromConverted, appendNativeHeader, headerValue, headerObject, he
 import { blobFromBytes, bufferOfBytes, byteCount, copyBytesBuffer, decodeBytes, textBytes } from './blobs.js';
 import { extractMime, mimeCharset, normalizeMime, utf8Mime } from './mime-types.js';
 import { runDOMCallback } from './dom-callbacks.js';
-const native = globalThis.__native, parseURL = native.url, updateURL = native.urlSet, decodeText = native.decodeFileText;
+const native = globalThis.__native, parseURL = native.url, updateURL = native.urlSet, decodeText = native.decodeXHRText;
 const NativeTypeError = TypeError, create = Object.create, define = Object.defineProperty, descriptor = Object.getOwnPropertyDescriptor, ownKeys = Reflect.ownKeys;
 const setPrototype = Object.setPrototypeOf, finite = Number.isFinite, trunc = Math.trunc, max = Math.max;
 const codeAt = Function.prototype.call.bind(String.prototype.charCodeAt), slice = Function.prototype.call.bind(String.prototype.slice);
@@ -68,12 +68,18 @@ function finish(target, data, op, answer) {
 }
 function responseMIME(data) { return data.answer ? extractMime(data.answer.headers['content-type'] ?? null) || 'text/xml' : 'text/xml'; }
 function finalMIME(data) { return data.mime ?? responseMIME(data); }
-function text(data) { if (data.bytes === null) return ''; const label = (data.mime === null ? null : mimeCharset(data.mime)) ?? mimeCharset(responseMIME(data)); return decodeText(bufferOfBytes(data.bytes), label, null); }
+function xmlMIME(mime) { const end = indexOf(mime, ';'), essence = end < 0 ? mime : slice(mime, 0, end); return essence === 'text/xml' || essence === 'application/xml' || slice(essence, -4) === '+xml'; }
+function decoded(data, document = false) {
+  const label = (data.mime === null ? null : mimeCharset(data.mime)) ?? mimeCharset(responseMIME(data));
+  return decodeText(bufferOfBytes(data.bytes), label, xmlMIME(finalMIME(data)) && (document || data.type === ''), document);
+}
+function text(data) { return data.bytes === null ? '' : decoded(data).text; }
+
 function documentResponse(data) {
   if (!data.packaged) {
     data.packaged = true;
     const mime = finalMIME(data), end = indexOf(mime, ';'), essence = end < 0 ? mime : slice(mime, 0, end);
-    if (data.bytes !== null && (essence === 'text/html' ? data.type === 'document' : essence === 'text/xml' || essence === 'application/xml' || slice(essence, -4) === '+xml')) data.object = hooks.document(text(data), essence, data.answer.url);
+    if (data.bytes !== null && (essence === 'text/html' ? data.type === 'document' : essence === 'text/xml' || essence === 'application/xml' || slice(essence, -4) === '+xml')) { const value = decoded(data, essence !== 'text/html'); if (value.valid) data.object = hooks.document(value.text, essence, data.answer.url, value.encoding); }
   }
   return data.object;
 }

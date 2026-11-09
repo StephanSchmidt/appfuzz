@@ -1,3 +1,4 @@
+import { attributeInfo } from './attribute-state.js';
 // Serialize the existing tree. In particular, a text element must never
 // clone itself (and run a custom constructor) to obtain its start tag.
 import { END, NEXT, VALUE } from '../node_modules/linkedom/esm/shared/symbols.js';
@@ -42,7 +43,7 @@ function serialize(root, inner) {
     let start = '<' + name, attrs = '', hasIs = false;
     for (let attr = node[NEXT]; attr.nodeType === 2; attr = attr[NEXT]) {
       if (attr.localName === 'is') hasIs = true;
-      attrs += ' ' + attr.localName + '="' + escapeAttribute(attr[VALUE]) + '"';
+      attrs += ' ' + (attributeInfo(attr)?.qualified ?? attr.localName) + '="' + escapeAttribute(attr[VALUE]) + '"';
     }
     const is = elementIs(node);
     if (is !== null && !hasIs) start += ' is="' + escapeAttribute(is) + '"';

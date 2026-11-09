@@ -53,6 +53,7 @@ browser:
 	  echo "psl: $$($(call BROWSER_LOCK,psl))"; \
 	  echo "encoding_rs: $$($(call BROWSER_LOCK,encoding_rs))"; \
 	  echo "roxmltree: $$($(call BROWSER_LOCK,roxmltree))"; \
+	  echo "xml: $$($(call BROWSER_LOCK,xml))"; \
 	  echo "unicode-bidi: $$($(call BROWSER_LOCK,unicode-bidi))"; \
 	  echo "color: $$($(call BROWSER_LOCK,color))"; \
 	  echo "cssparser: $$($(call BROWSER_LOCK,cssparser))"; \

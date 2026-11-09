@@ -29,3 +29,5 @@ pub(crate) mod component {
         }
     }
 }
+
+mod xml;

@@ -1,3 +1,6 @@
+import { setNodeDocument } from './attribute-state.js';
+import { doctypeInfo } from './doctype-state.js';
+import { cloneAttribute } from './attributes.js';
 // Clone into the destination document from the start: copying a document
 // must not construct its source document's custom elements and then adopt
 // those copies. Local names also stay distinct from qualified names.
@@ -37,7 +40,7 @@ function ownNodes(root, owner) {
   const stop = (root[END] || root)[NEXT];
   let node = root;
   do {
-    node.ownerDocument = owner;
+    setNodeDocument(node, owner);
     node = node[NEXT];
   } while (node !== stop);
 }
@@ -53,11 +56,11 @@ export function installCloning(L, shareObservers, onScript, upgradeCopies, DOMEr
   const isShadow = Object.prototype.isPrototypeOf.bind(L.ShadowRoot.prototype);
   const isRegistry = Object.prototype.isPrototypeOf.bind(CustomElementRegistry.prototype);
   const plainCloners = [
-    [Attr, 2, (node, owner) => new Attr(owner, node.localName, node[VALUE])],
+    [Attr, 2, (node, owner) => cloneAttribute(node, owner)],
     [CDATASection, 4, (node, owner) => new CDATASection(owner, node[VALUE])],
     [Text, 3, (node, owner) => new Text(owner, node[VALUE])],
     [Comment, 8, (node, owner) => new Comment(owner, node[VALUE])],
-    [DocumentType, 10, (node, owner) => new DocumentType(owner, node.name, node.publicId, node.systemId)],
+    [DocumentType, 10, (node, owner) => { const d = doctypeInfo(node); return new DocumentType(owner, d.name, d.publicId, d.systemId); }],
   ].map(([Class, type, copy]) => ({ matches: Object.prototype.isPrototypeOf.bind(Class.prototype), type, copy }));
   const plainCloner = node => {
     for (let i = 0; i < plainCloners.length; i++) if (plainCloners[i].matches(node)) return plainCloners[i];

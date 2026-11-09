@@ -1135,6 +1135,23 @@ validated and namespace-resolved by roxmltree, without an external entity
 resolver. Native loopback fixtures and simulated-host argument checks cover
 these paths, including callback and microtask cancellation.
 
+XML response parsing preserves CDATA boundaries, processing instructions,
+comments, doctypes and ordered namespace attributes. The native `xml` event
+parser retains those nodes while roxmltree validates namespaces and resolves
+internal entities; neither parser fetches external resources. XML declarations,
+HTTP charsets and BOMs select decoding, with malformed XML byte sequences
+rejected. DOMParser XML inputs use the same validated tree builder.
+
+Attribute names, namespaces, prefixes, owners and document ownership use private
+records. Namespace-aware queries and updates, Attr cloning, adoption, mutation
+records and custom-element reactions retain those identities. Existing attribute
+prefixes stay unchanged when setAttributeNS changes their values. Parsed event
+attributes still activate their native handler slots. XHR Document bodies are
+serialized from physical state, preserving XML namespaces or HTML serialization
+rules without public serializer callbacks. Shadow-tree traversal also avoids
+public array iteration. Browser differences in encoding metadata and XML
+serialization are documented alongside the isolated native regression fixtures.
+
 Focus checks native HTML eligibility, including connection, disabled/hidden/inert
 state and tabindex. Focus events carry their related target and view;
 Document/ShadowRoot active-element queries use physical state and retargeting.
