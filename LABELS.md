@@ -49,7 +49,9 @@ carry `<i>'"../;$(x)`, and the fuzzer adds attack strings for each sink.
 
 A path is dot-separated field names. It goes through lists, options and
 the `ok` side of results. An empty path, `result = "secret"`, is the whole
-result.
+result. A list of (string, value) pairs is a map: a segment names a key,
+and `*` every key. For `scan: func() -> list<tuple<string, string>>`,
+`result = { "*" = "json" }` labels every value and leaves the keys alone.
 
 | Label | Means | Check |
 |-------|-------|-------|
@@ -332,6 +334,9 @@ values drop the repeats, and the duplicate probe skips the function, so
 there is no `duplicate_sensitivity` for a duplicate the database can't
 hold. Use the path of the list; `""` is the whole result.
 
+In a list of (string, value) pairs a segment names a key and `*` every
+key, as in result labels: `values = { "*" = "enum:on,off" }`.
+
 ```toml
 [entry]
 values = { "query.days" = "range:1..31", "query.sort" = "enum:name,date" }
@@ -341,6 +346,26 @@ values = { score = "range:0..100", name = "len:1..80" }
 
 [functions."acme:web/bookings#list-for-day"]
 values = { "" = "unique:pod_id,date,hour" }
+```
+
+Request fields that go together, such as a route and its method, are
+`[[entry.rules]]`: a request that matches `when` keeps to `values` as
+well. `when` takes the matchers of host rules (below). The fuzzer keeps
+to the rules like it keeps to `values`, and a run that breaks one has
+its findings lowered to info. Without them, a GET to a handler only
+the platform's POST reaches looks like a `write_on_safe_method`.
+
+```toml
+[entry]
+values = { handler = "enum:list,save,delete" }
+
+[[entry.rules]]
+when = { handler = "save" }
+values = { "req.method" = "enum:POST" }
+
+[[entry.rules]]
+when = { handler = { regex = "^(list|show)$" } }
+values = { "req.method" = "enum:GET,HEAD" }
 ```
 
 ## Rules: `rules = [ { when = {…}, return = … } ]`
@@ -394,5 +419,5 @@ in the manifest; a plan rule with `result` is an error.
 When the export takes several parameters, a path starts with the
 parameter's name: for `handle(route: string, req: request)`,
 `fields = { "req.now" = "clock.rfc3339" }`. `@1.now` names the second
-argument by position. The same goes for `[entry] values` and
+argument by position. The same goes for `[entry] values`, `[[entry.rules]]` and
 `input_values`. With one parameter, paths start inside it, as before.

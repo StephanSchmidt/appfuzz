@@ -210,7 +210,8 @@ Parameter labels:
 | `user-id` | names a user | a value that is not the caller: `foreign_user_access` |
 
 Result labels, for the whole result or a field path (paths go through
-lists, options and `ok`):
+lists, options and `ok`; in a list of (string, value) pairs a segment
+names a key, and `*` every key):
 
 | Label | Means |
 |-------|-------|
@@ -254,6 +255,9 @@ Value constraints say what the platform promises: `values = { score =
 `len:a..b`, `enum:x,y`, `format:date|time|datetime|email|int|uuid`, and
 `unique[:fields]` for a list without repeats (a unique key). Generated
 values keep to them, so a finding is about a value that can happen.
+Request fields that go together (a route and its method) are
+`[[entry.rules]]` with `when = { handler = "save" }` and `values = {
+"req.method" = "enum:POST" }`; `when` takes the matchers of host rules.
 `user_errors = true` on a function says its error texts are written for
 users: showing them is no `leaky_error`.
 

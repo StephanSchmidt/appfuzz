@@ -429,7 +429,7 @@ fn arg<'a>(args: &'a [(String, Value)], param: &str) -> Option<&'a Value> {
     args.iter().find(|(n, _)| n == param || n.replace('-', "_") == param).map(|(_, v)| v)
 }
 
-fn matcher_ok(m: &Value) -> Result<()> {
+pub(crate) fn matcher_ok(m: &Value) -> Result<()> {
     if let Some(Value::String(re)) = m.as_object().and_then(|o| o.get("regex")) {
         Regex::new(re).with_context(|| format!("bad regex {re:?}"))?;
     }

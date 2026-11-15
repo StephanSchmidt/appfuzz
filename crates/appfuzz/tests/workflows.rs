@@ -3858,3 +3858,92 @@ fn api_redirects_may_return_cookies_to_the_owner_but_not_to_another_origin() {
         assert_eq!(out["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "secret_leak"), leaks, "{out}");
     }
 }
+
+#[test]
+fn labels_and_values_name_the_keys_of_a_pair_list() {
+    let f = Fixture::new(false);
+    // scan() -> list<tuple<string, string>>, a key-value store's entries.
+    let wit = "package test:workflow; interface kv { scan: func() -> list<tuple<string, string>>; } world app { import kv; export run: func(n: u32) -> u32; }";
+    let wat = r#"
+        (module
+          (import "test:workflow/kv" "scan" (func $scan (param i32)))
+          (memory (export "memory") 1)
+          (global $next (mut i32) (i32.const 1024))
+          (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (local i32)
+            (local.set 4 (global.get $next))
+            (global.set $next (i32.and (i32.add (i32.add (global.get $next) (local.get 3)) (i32.const 7)) (i32.const -8)))
+            (local.get 4))
+          (func (export "run") (param i32) (result i32) (call $scan (i32.const 0)) (i32.const 0)))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    let scan = |run: &Value| -> Vec<Value> {
+        let call = run["host_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["func"].as_str().is_some_and(|x| x.ends_with("kv#scan")))
+            .unwrap_or_else(|| panic!("{run}"));
+        call["result"].as_array().unwrap_or_else(|| panic!("{run}")).clone()
+    };
+    let manifest = std::fs::read_to_string(&f.manifest).unwrap();
+    let with = |extra: &str| std::fs::write(&f.manifest, format!("{manifest}{extra}")).unwrap();
+    // `*` labels every value; the keys stay plain text.
+    with("[functions.\"test:workflow/kv#scan\"]\nresult = { \"*\" = \"json\" }\n");
+    let (code, run) = f.cli(&["run", "--trace", "--plan", r#"{"_defaults": {"generate": {"list_len": 3}}}"#]);
+    assert_eq!(code, 0, "{run}");
+    let pairs = scan(&run);
+    assert_eq!(pairs.len(), 3, "{run}");
+    for p in &pairs {
+        assert!(serde_json::from_str::<Value>(p[1].as_str().unwrap()).is_ok(), "{p}");
+    }
+    // `values` take `*` too.
+    with("[functions.\"test:workflow/kv#scan\"]\nvalues = { \"*\" = \"enum:on,off\" }\n");
+    let (_, run) = f.cli(&["run", "--trace"]);
+    assert!(scan(&run).iter().all(|p| p[1] == "on" || p[1] == "off"), "{run}");
+    // A path past the value is no path.
+    with("[functions.\"test:workflow/kv#scan\"]\nresult = { \"*.doc\" = \"json\" }\n");
+    let (code, bad) = f.cli(&["run"]);
+    assert_eq!(code, 3, "{bad}");
+    assert!(bad["error"].as_str().unwrap().contains("\"*.doc\""), "{bad}");
+}
+
+#[test]
+fn entry_rules_keep_requests_to_what_the_platform_sends() {
+    let f = Fixture::new(true);
+    // run(handler, method) crashes on save with a method other than POST.
+    let wit = "package test:workflow; world app { export run: func(handler: string, method: string) -> string; }";
+    let wat = r#"(module (memory (export "memory") 1)
+        (global $next (mut i32) (i32.const 1024))
+        (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (local i32)
+          (local.set 4 (global.get $next))
+          (global.set $next (i32.and (i32.add (i32.add (global.get $next) (local.get 3)) (i32.const 8)) (i32.const -8)))
+          (local.get 4))
+        (func (export "run") (param i32 i32 i32 i32) (result i32)
+          (if (i32.and (i32.eq (i32.load8_u (local.get 0)) (i32.const 115)) (i32.ne (i32.load8_u (local.get 2)) (i32.const 80)))
+            (then unreachable))
+          (i32.store (i32.const 0) (i32.const 0))
+          (i32.store (i32.const 4) (i32.const 0))
+          (i32.const 0)))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    f.edit("request = \"safe\"", "request = [\"save\", \"POST\"]\nvalues = { handler = \"enum:list,save\" }");
+    let plain = std::fs::read_to_string(&f.manifest).unwrap();
+    let rule = "[[entry.rules]]\nwhen = { handler = \"save\" }\nvalues = { method = \"enum:POST\" }\n";
+    std::fs::write(&f.manifest, format!("{plain}{rule}")).unwrap();
+    let crash = |run: &Value| run["findings"].as_array().unwrap().iter().find(|x| x["kind"] == "crash").map(|x| x["severity"].clone());
+    let (code, ok) = f.cli(&["run"]);
+    assert_eq!((code, crash(&ok)), (0, None), "{ok}");
+    // A request the platform never sends: its crash is a hint.
+    let (_, never) = f.cli(&["run", "--args", r#"["save", "GET"]"#]);
+    assert_eq!(crash(&never), Some(json!("info")), "{never}");
+    // The fuzzer mostly keeps to the rule, and a crash outside it is a
+    // hint; without the rule the crash is a fail.
+    let (_, fuzzed) = f.cli(&["fuzz", "--runs", "60", "--fresh"]);
+    assert_ne!(crash(&fuzzed), Some(json!("fail")), "{fuzzed}");
+    std::fs::write(&f.manifest, &plain).unwrap();
+    let (_, unruled) = f.cli(&["fuzz", "--runs", "60", "--fresh"]);
+    assert_eq!(crash(&unruled), Some(json!("fail")), "{unruled}");
+    // A misspelt field is an error, not a rule that never matches.
+    std::fs::write(&f.manifest, format!("{plain}{}", rule.replace("handler", "handlr"))).unwrap();
+    let (code, bad) = f.cli(&["run"]);
+    assert_eq!(code, 3, "{bad}");
+    assert!(bad["error"].as_str().unwrap().contains("entry.rules[0].when \"handlr\""), "{bad}");
+}

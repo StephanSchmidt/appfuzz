@@ -247,8 +247,17 @@ fn segs(p: &str) -> Vec<&str> {
     p.split('.').filter(|s| !s.is_empty()).collect()
 }
 
+/// The value type of a list of (string, value) pairs: a map, where a
+/// path segment names a key and `*` every key.
+fn pair_value(element: &Type) -> Option<Type> {
+    let Type::Tuple(t) = element else { return None };
+    let parts: Vec<Type> = t.types().collect();
+    (parts.len() == 2 && parts[0] == Type::String).then(|| parts[1].clone())
+}
+
 fn path_ok(ty: &Type, segs: &[&str], id: bool) -> bool {
     match ty {
+        Type::List(l) if !segs.is_empty() && pair_value(&l.ty()).is_some() => pair_value(&l.ty()).is_some_and(|v| path_ok(&v, &segs[1..], id)),
         Type::List(l) => path_ok(&l.ty(), segs, id),
         Type::Option(o) => path_ok(&o.ty(), segs, id),
         Type::Result(r) => r.ok().is_some_and(|t| path_ok(&t, segs, id)),
@@ -262,6 +271,7 @@ fn path_ok(ty: &Type, segs: &[&str], id: bool) -> bool {
 fn path_exists(ty: &Type, segs: &[&str]) -> bool {
     match ty {
         _ if segs.is_empty() => true,
+        Type::List(l) if pair_value(&l.ty()).is_some() => pair_value(&l.ty()).is_some_and(|v| path_exists(&v, &segs[1..])),
         Type::List(l) => path_exists(&l.ty(), segs),
         Type::FixedLengthList(l) => path_exists(&l.ty(), segs),
         Type::Option(o) => path_exists(&o.ty(), segs),
@@ -315,9 +325,23 @@ fn walk_mut(v: &mut Value, segs: &[&str], f: &mut dyn FnMut(&mut String)) {
     })
 }
 
+/// Whether a JSON array is a WIT list of (string, value) pairs.
+fn is_pairs(a: &[Value]) -> bool {
+    !a.is_empty() && a.iter().all(|x| x.as_array().is_some_and(|p| p.len() == 2 && p[0].is_string()))
+}
+
 /// Calls `f` on every scalar at the path (strings, numbers, booleans).
+/// Paths go through lists, options and `ok`; in a list of (string, value)
+/// pairs a segment names a key, and `*` every key.
 pub fn walk_leaves_mut(v: &mut Value, segs: &[&str], f: &mut dyn FnMut(&mut Value)) {
     match v {
+        Value::Array(a) if !segs.is_empty() && is_pairs(a) => {
+            for pair in a.iter_mut().filter_map(Value::as_array_mut) {
+                if segs[0] == "*" || pair[0].as_str() == Some(segs[0]) {
+                    walk_leaves_mut(&mut pair[1], &segs[1..], f);
+                }
+            }
+        }
         Value::Array(a) => a.iter_mut().for_each(|x| walk_leaves_mut(x, segs, f)),
         Value::Object(o) if o.len() == 1 && o.contains_key("ok") && segs.first() != Some(&"ok") => walk_leaves_mut(o.get_mut("ok").expect("checked"), segs, f),
         Value::Object(o) if o.len() == 1 && o.contains_key("err") && segs.first() != Some(&"err") => {}
@@ -1146,6 +1170,24 @@ mod tests {
         mark(&mut v, &[("token".into(), Label::Secret), ("user.email".into(), Label::Pii)], 1, "1000");
         assert!(v["ok"]["token"].as_str().unwrap().starts_with("sk_"));
         assert!(v["ok"]["user"]["email"].as_str().unwrap().ends_with("@mail.example"));
+    }
+
+    #[test]
+    fn pairs_are_maps() {
+        // list<tuple<string, string>>: a segment names a key, `*` every key.
+        let v = json!({"ok": [["cart:1", "a"], ["cart:2", "b"]]});
+        assert_eq!(values_at(&v, "*"), vec!["a", "b"]);
+        assert_eq!(values_at(&v, "cart:2"), vec!["b"]);
+        assert_eq!(values_at(&v, ""), vec!["cart:1", "a", "cart:2", "b"]);
+        let mut v = json!([["k", "x"], ["j", "y"]]);
+        mark(&mut v, &[("*".into(), Label::Json)], 3, "1000");
+        assert_eq!((&v[0][0], &v[1][0]), (&json!("k"), &json!("j")), "keys stay");
+        assert!(serde_json::from_str::<Value>(v[1][1].as_str().unwrap()).is_ok(), "{v}");
+        // A value that is a record: the path goes on into it.
+        let v = json!([["a", {"email": "x@y.z"}]]);
+        assert_eq!(values_at(&v, "*.email"), vec!["x@y.z"]);
+        // Lists of records are no pairs.
+        assert_eq!(values_at(&json!([{"name": "n"}]), "name"), vec!["n"]);
     }
 
     #[test]

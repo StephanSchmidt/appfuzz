@@ -184,9 +184,42 @@ pub struct Entry {
     /// Accepted guest input domains; unlike `values`, invalid values can arrive.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub input_values: BTreeMap<String, crate::value_contract::Domain>,
+    /// What the platform lets through for some requests only: request
+    /// fields that go together (a route and its method).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<EntryRule>,
+}
+
+/// `[[entry.rules]]`: a request whose fields match `when` keeps to
+/// `values`, on top of `[entry] values`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntryRule {
+    /// Request path → matcher (a value, or `{regex|range|contains|not|any}`). All must match.
+    pub when: BTreeMap<String, Value>,
+    pub values: BTreeMap<String, crate::constraints::Constraint>,
 }
 
 impl Entry {
+    /// Whether the platform limits request fields, always or by rule.
+    pub fn constrains(&self) -> bool {
+        !self.values.is_empty() || !self.rules.is_empty()
+    }
+
+    /// The `values` of the rules whose `when` the request matches.
+    pub fn rule_values(&self, args: &[Value]) -> Vec<(String, crate::constraints::Constraint)> {
+        self.rules
+            .iter()
+            .filter(|r| r.when.iter().all(|(p, m)| self.field(args, p).is_some_and(|v| crate::plan::matches(m, v))))
+            .flat_map(|r| r.values.iter().map(|(p, c)| (p.clone(), c.clone())))
+            .collect()
+    }
+
+    /// Every constraint on this request: `values`, then the matching rules'.
+    pub fn values_for(&self, args: &[Value]) -> Vec<(String, crate::constraints::Constraint)> {
+        self.values.iter().map(|(p, c)| (p.clone(), c.clone())).chain(self.rule_values(args)).collect()
+    }
+
     /// The argument a request path is in, and the path inside it. For an
     /// export with several parameters, a path that starts with a
     /// parameter's name (`req.now`, or `handler` alone) is in that
@@ -811,6 +844,45 @@ mod tests {
         assert_eq!(Entry::args_of(&e.examples[0], 2).len(), 2);
         // A one-parameter export takes an array as its single argument.
         assert_eq!(Entry::args_of(&json!(["a", "b"]), 1), vec![json!(["a", "b"])]);
+    }
+
+    #[test]
+    fn entry_rules_tie_request_fields_together() {
+        let mut m: Manifest = toml::from_str(
+            r#"
+            [app]
+            wasm = "a.wasm"
+            [entry]
+            export = "acme:web/handler#start"
+            values = { handler = "enum:list,save,delete" }
+            [[entry.rules]]
+            when = { handler = "save" }
+            values = { "req.method" = "enum:POST" }
+            [[entry.rules]]
+            when = { handler = { regex = "^(list|show)$" } }
+            values = { "req.method" = "enum:GET,HEAD" }
+            "#,
+        )
+        .unwrap();
+        m.entry.as_mut().unwrap().params = vec!["handler".into(), "req".into()];
+        let e = m.entry.as_ref().unwrap();
+        let req = |h: &str, method: &str| vec![json!(h), json!({"method": method, "path": "/"})];
+        // The rule that matches adds its values; `values` always apply.
+        assert_eq!(e.values_for(&req("save", "GET")).len(), 2);
+        assert_eq!(e.values_for(&req("delete", "GET")).len(), 1);
+        assert!(crate::constraints::broken_request(&req("save", "POST"), &m).is_empty());
+        assert!(crate::constraints::broken_request(&req("delete", "PUT"), &m).is_empty(), "no rule for delete");
+        let broken = crate::constraints::broken_request(&req("save", "GET"), &m);
+        assert_eq!(broken.iter().map(|(p, _, _)| p.as_str()).collect::<Vec<_>>(), ["req.method"]);
+        // Conforming keeps generated requests to the rules, after `values`.
+        for seed in 0..32 {
+            let mut args = req("x", "GET");
+            crate::constraints::conform_request(&mut args, &m, seed);
+            assert!(crate::constraints::broken_request(&args, &m).is_empty(), "{args:?}");
+        }
+        let mut args = req("save", "GET");
+        crate::constraints::conform_request(&mut args, &m, 1);
+        assert_eq!(args[1]["method"], "POST");
     }
 
     #[test]

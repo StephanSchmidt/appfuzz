@@ -237,7 +237,7 @@ fn visit(value: &mut Value, ty: &Type, path: &[&str], c: &Constraint, generator:
                 {
                     let parts: Vec<_> = tuple.types().collect();
                     if parts.len() == 2 && parts[0] == Type::String {
-                        if element.get(0).and_then(Value::as_str) == Some(path[0]) {
+                        if path[0] == "*" || element.get(0).and_then(Value::as_str) == Some(path[0]) {
                             visit(element.get_mut(1).context("expected a key/value pair")?, &parts[1], &path[1..], c, generator, seed, repair)?;
                         }
                         continue;
@@ -283,20 +283,25 @@ pub(crate) fn conform_request_typed(args: &mut [Value], app: &crate::harness::Ap
         f.conform(export, args);
     }
     let Some(entry) = &app.manifest.entry else { return Ok(()) };
-    if entry.values.is_empty() || !crate::harness::fn_key_eq(&entry.export, export) {
+    if !entry.constrains() || !crate::harness::fn_key_eq(&entry.export, export) {
         return Ok(());
     }
-    // Each argument keeps to the guarantees on its own paths.
+    // Each argument keeps to the guarantees on its own paths; the rules see
+    // the request after `values` shaped it.
     let types: Vec<Type> = app.export(export)?.ty.params().map(|(_, t)| t).collect();
-    let mut by_arg: BTreeMap<usize, Vec<(String, Constraint)>> = BTreeMap::new();
-    for (path, c) in &entry.values {
-        let (i, rest) = entry.locate(path);
-        by_arg.entry(i).or_default().push((rest.to_string(), c.clone()));
-    }
-    for (i, constraints) in by_arg {
-        let ty = types.get(i).context("request guarantees need an argument")?;
-        let request = args.get_mut(i).context("missing request argument")?;
-        conform_host(request, ty, &constraints, seed)?;
+    let always: Vec<(String, Constraint)> = entry.values.iter().map(|(p, c)| (p.clone(), c.clone())).collect();
+    for phase in 0..2 {
+        let constraints = if phase == 0 { always.clone() } else { entry.rule_values(args) };
+        let mut by_arg: BTreeMap<usize, Vec<(String, Constraint)>> = BTreeMap::new();
+        for (path, c) in constraints {
+            let (i, rest) = entry.locate(&path);
+            by_arg.entry(i).or_default().push((rest.to_string(), c));
+        }
+        for (i, constraints) in by_arg {
+            let ty = types.get(i).context("request guarantees need an argument")?;
+            let request = args.get_mut(i).context("missing request argument")?;
+            conform_host(request, ty, &constraints, seed)?;
+        }
     }
     Ok(())
 }

@@ -2001,6 +2001,7 @@ fn check_entry(manifest: &mut Manifest, exports: &[FuncInfo]) -> Result<()> {
             let (ty, rest) = param(path, "values")?;
             crate::constraints::validate_type(&ty, &rest, constraint).with_context(|| format!("entry.values {path:?}"))?;
         }
+        check_entry_rules(entry, &params)?;
         let mut typed = Vec::new();
         for path in entry.input_values.keys() {
             typed.push(param(path, "input_values")?);
@@ -2017,8 +2018,34 @@ fn check_entry(manifest: &mut Manifest, exports: &[FuncInfo]) -> Result<()> {
                 crate::value::json_to_val(a, ty).with_context(|| format!("entry.examples[{n}], argument {name}"))?;
             }
         }
-    } else if manifest.entry.as_ref().is_some_and(|e| !e.values.is_empty() || !e.input_values.is_empty()) {
+    } else if manifest.entry.as_ref().is_some_and(|e| e.constrains() || !e.input_values.is_empty()) {
         bail!("values export not found");
+    }
+    Ok(())
+}
+
+/// `[[entry.rules]]`: every `when` path is a request field, every matcher
+/// compiles, and every constraint fits its field's type.
+fn check_entry_rules(entry: &crate::manifest::Entry, params: &[(String, Type)]) -> Result<()> {
+    let param = |path: &str| -> Result<(Type, String)> {
+        let (i, rest) = entry.locate(path);
+        let (_, ty) = params.get(i).context("entry.rules needs a request argument")?;
+        Ok((ty.clone(), rest.to_string()))
+    };
+    let names = if params.len() > 1 { format!(" (paths start with a parameter: {})", entry.params.join(", ")) } else { String::new() };
+    for (n, rule) in entry.rules.iter().enumerate() {
+        if rule.when.is_empty() || rule.values.is_empty() {
+            bail!("entry.rules[{n}] needs `when` (the requests it is about) and `values` (what they keep to)");
+        }
+        for (path, m) in &rule.when {
+            let (ty, rest) = param(path)?;
+            crate::constraints::path_type(&ty, &rest).with_context(|| format!("entry.rules[{n}].when {path:?}: no such field in {}{names}", entry.export))?;
+            crate::plan::matcher_ok(m).with_context(|| format!("entry.rules[{n}].when {path:?}"))?;
+        }
+        for (path, constraint) in &rule.values {
+            let (ty, rest) = param(path)?;
+            crate::constraints::validate_type(&ty, &rest, constraint).with_context(|| format!("entry.rules[{n}].values {path:?}"))?;
+        }
     }
     Ok(())
 }

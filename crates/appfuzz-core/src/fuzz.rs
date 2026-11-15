@@ -1501,7 +1501,7 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
             }
         }
         // Fields the platform guarantees (a route from a list) keep to it.
-        if n > 0 && entry.is_some_and(|e| !e.values.is_empty()) {
+        if n > 0 && entry.is_some_and(crate::manifest::Entry::constrains) {
             let seed = req.seed;
             let export = req.export.clone();
             crate::constraints::conform_request_typed(&mut req.args, app, &export, seed).ok();

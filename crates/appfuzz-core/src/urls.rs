@@ -118,6 +118,29 @@ const PASSIVE: &[&str] = &[
     "contenteditable",
     "style",
 ];
+/// Attributes whose value names a vocabulary, not a place: XML namespaces
+/// (`xmlns`, `xmlns:xlink`; the parser writes a foreign `xmlns` as
+/// `:xmlns`) and microdata types. Nothing fetches them.
+fn names_a_vocabulary(attr: &str) -> bool {
+    let a = attr.trim_start_matches(':');
+    a == "xmlns" || a.starts_with("xmlns:") || a == "itemtype"
+}
+
+/// The namespace names of HTML, SVG, MathML, XLink and XML: URLs by shape,
+/// identifiers by definition. A script passes them to `createElementNS`.
+pub(crate) fn is_namespace(url: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "http://www.w3.org/1999/xhtml",
+        "http://www.w3.org/2000/svg",
+        "http://www.w3.org/1998/math/mathml",
+        "http://www.w3.org/1999/xlink",
+        "http://www.w3.org/xml/1998/namespace",
+        "http://www.w3.org/2000/xmlns",
+    ];
+    let u = url.trim().trim_end_matches('/').to_ascii_lowercase();
+    NAMES.contains(&u.as_str())
+}
+
 /// Words that say a request goes out without the user doing anything.
 pub(crate) const SELF_WORDS: &[&str] = &["load", "revealed", "intersect", "every", "init", "visible", "poll", "interval", "mount", "mounted"];
 /// Response headers that never hold a URL to follow.
@@ -258,7 +281,7 @@ fn find_in_html(html: &str) -> Vec<Found> {
         let form_method = |a: &str, default: &str| el.get(a).map(|m| m.to_ascii_uppercase()).unwrap_or(default.into());
         let mut pieces: Vec<&str> = Vec::new();
         for (k, v) in &el.attrs {
-            if k.starts_with("aria-") {
+            if k.starts_with("aria-") || names_a_vocabulary(k) {
                 continue;
             }
             if k == "style" {
@@ -335,6 +358,7 @@ fn find_in_html(html: &str) -> Vec<Found> {
     }
     // URLs in text between tags.
     from_text(&doc.text, "text", &mut out);
+    out.retain(|f| !is_namespace(&f.url));
     out
 }
 
@@ -349,12 +373,12 @@ fn css_urls(css: &str, tag: &str, out: &mut Vec<Found>) {
 
 /// Absolute URLs in plain text.
 pub fn text_urls(s: &str) -> Vec<String> {
-    TEXT_URL.find_iter(s).map(|m| m.as_str().trim_end_matches(['.', ',', ')', ';']).to_string()).collect()
+    TEXT_URL.find_iter(s).map(|m| m.as_str().trim_end_matches(['.', ',', ')', ';']).to_string()).filter(|u| !is_namespace(u)).collect()
 }
 
 fn from_text(s: &str, source: &str, out: &mut Vec<Found>) {
-    for m in TEXT_URL.find_iter(s) {
-        out.push(Found::new(m.as_str().trim_end_matches(['.', ',', ')', ';']), "GET", source, "text", ""));
+    for u in text_urls(s) {
+        out.push(Found::new(&u, "GET", source, "text", ""));
     }
 }
 
@@ -728,6 +752,19 @@ mod tests {
         assert!(has(r#"<i data-a="/ad" data-b="min/wipe"></i>"#, "/admin/wipe", "unknown"));
         // Not URLs.
         assert!(found(r##"<div class="a b" hx-target="#r" hx-swap="outerHTML" x-show="open"></div>"##).is_empty());
+    }
+
+    #[test]
+    fn names_that_look_like_urls_are_not_fetched() {
+        // Namespaces and microdata types name a vocabulary; nothing loads them.
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><use xlink:href="/i.svg#a"/></svg>"#;
+        assert_eq!(found(svg), [("/i.svg#a".to_string(), "xlink:href".to_string(), "link".to_string())]);
+        assert!(found(r#"<div itemscope itemtype="https://schema.org/Person"></div>"#).is_empty());
+        assert!(found(r#"<html xmlns="http://www.w3.org/1999/xhtml"><math xmlns="http://www.w3.org/1998/Math/MathML"></math></html>"#).is_empty());
+        let js = r#"<script>const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); fetch("https://t.example/p");</script>"#;
+        assert_eq!(found(js), [("https://t.example/p".to_string(), "script".to_string(), "unknown".to_string())]);
+        // A namespace attribute naming another host is still no fetch.
+        assert!(found(r#"<svg xmlns:a="https://evil.example/ns"></svg>"#).is_empty());
     }
 
     #[test]

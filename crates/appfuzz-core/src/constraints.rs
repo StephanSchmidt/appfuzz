@@ -343,11 +343,11 @@ fn conform_node(v: &mut Value, segs: &[&str], c: &Constraint, seed: u64, n: &mut
 /// The request fields that break their constraint: (path, constraint, value).
 pub fn broken_request(args: &[Value], m: &crate::manifest::Manifest) -> Vec<(String, String, Value)> {
     let Some(e) = &m.entry else { return Vec::new() };
-    e.values
-        .iter()
+    e.values_for(args)
+        .into_iter()
         .filter_map(|(p, c)| {
-            let v = e.field(args, p)?;
-            (!c.holds(v)).then(|| (p.clone(), c.to_string(), v.clone()))
+            let v = e.field(args, &p)?;
+            (!c.holds(v)).then(|| (p, c.to_string(), v.clone()))
         })
         .collect()
 }
@@ -376,9 +376,14 @@ pub fn broken_request_for(record: &crate::record::RunRecord, m: &crate::manifest
 /// Makes the request's constrained fields keep to their constraints.
 pub fn conform_request(args: &mut [Value], m: &crate::manifest::Manifest, seed: u64) {
     let Some(e) = &m.entry else { return };
-    for (i, (p, c)) in e.values.iter().enumerate() {
-        if let Some(slot) = e.field_mut(args, p) {
-            *slot = c.conform(slot, seed.wrapping_add(i as u64));
+    // The rules see the request after `values` shaped it.
+    let always: Vec<_> = e.values.iter().map(|(p, c)| (p.clone(), c.clone())).collect();
+    for phase in 0..2 {
+        let constraints = if phase == 0 { always.clone() } else { e.rule_values(args) };
+        for (i, (p, c)) in constraints.iter().enumerate() {
+            if let Some(slot) = e.field_mut(args, p) {
+                *slot = c.conform(slot, seed.wrapping_add(i as u64));
+            }
         }
     }
 }

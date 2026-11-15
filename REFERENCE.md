@@ -180,6 +180,23 @@ argument with the `http.` roles, or the first. Clock roles fill the field
 from the virtual clock and follow it when `probe times` or the fuzzer moves
 the clock: `clock.rfc3339` as `2026-11-02T10:00:00Z`.
 
+Fields that go together are `[[entry.rules]]`. Here the platform routes
+`POST /signup` to the handler and nothing else, so `req.method` follows
+`route`:
+
+```toml
+[[entry.rules]]
+when = { route = "POST /signup" }
+values = { "req.method" = "enum:POST" }
+```
+
+A request that matches `when` (all of its matchers, the ones of host
+rules) keeps to `values` too, after `[entry] values`. The fuzzer keeps
+to them as it keeps to `values`, and a run that breaks one has its
+findings lowered to info with `detail.invalid_request`. A `when` path the
+export doesn't have is an error. On a platform (`platform.toml`), the
+rules are the platform's, like `values`.
+
 ## Structured payload search
 
 `fuzz` and the fuzz phase of `review` recognize JSON objects/arrays and
