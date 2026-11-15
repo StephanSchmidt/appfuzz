@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.1
+
+- `[[entry.rules]]`: request fields that go together. A request that
+  matches `when` keeps to the rule's `values` too:
+  `when = { handler = "save" }`, `values = { "req.method" = "enum:POST" }`.
+  The fuzzer keeps to the rules, and a run that breaks one has its
+  findings lowered to info, so a GET to a handler only POST reaches is no
+  longer a `write_on_safe_method` fail.
+- Label and `values` paths name keys in a list of (string, value) pairs,
+  and `*` is every key: `result = { "*" = "json" }` labels every value a
+  key-value scan returns.
+- XML namespaces (`xmlns`, `xmlns:xlink`), microdata types (`itemtype`)
+  and the W3C namespace URLs a script passes to `createElementNS` are no
+  longer counted as destinations: an inline SVG is no
+  `unexpected_destination`.
+
 ## 0.8.0
 
 **Manifests**
