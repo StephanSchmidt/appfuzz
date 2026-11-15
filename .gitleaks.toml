@@ -20,3 +20,7 @@ regexes = [
 description = "finding ids that tests compare with (hashes, not keys)"
 regexTarget = "match"
 regexes = ['''f4a3de7ef2287523b1e5a4f215486b038''']
+
+[[allowlists]]
+description = "SHA-256 hashes of vendored files, next to names with api and key"
+paths = ['''^browser/vendor/rquickjs-sys/UPSTREAM\.json$''']
