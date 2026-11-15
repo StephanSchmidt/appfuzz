@@ -211,7 +211,8 @@ Parameter labels:
 
 Result labels, for the whole result or a field path (paths go through
 lists, options and `ok`; in a list of (string, value) pairs a segment
-names a key, and `*` every key):
+names a key, and `*` every key; `$` reads text as JSON and goes on
+inside it, `{ "" = "json", "$.email" = "pii" }`):
 
 | Label | Means |
 |-------|-------|
@@ -237,6 +238,10 @@ Content-Security-Policy (`[entry] csp`, the response header or a meta tag;
 all apply) that keeps them on the app's origin and `[grants] hosts`.
 `review` then opens those pages in a browser and runs their scripts
 (`probe scripts`): what the scripts do counts, not only the markup.
+An app that answers with host calls (`page#set-html`, `page#redirect`)
+and returns nothing gets its response from `[entry.response]`, which
+names the calls that set the status, body and headers; see
+[LABELS](LABELS.md#a-response-made-from-host-calls-entryresponse).
 
 Host argument requirements come from the platform's function descriptions:
 `param_values = { date = "format:date", quantity = "range:1..6" }` on a

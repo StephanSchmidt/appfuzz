@@ -108,16 +108,13 @@ pub fn values(app: &App, base: &RunSpec, only: Option<&str>, run: Runner) -> (Ve
     let base = RunSpec { plan: steady(&base.plan), ..base.clone() };
     let mut probes = Vec::new();
     let mut findings = Vec::new();
-    let funcs = app
-        .imports
-        .iter()
-        .filter(|i| i.kind == ImportKind::Platform)
-        .flat_map(|i| i.funcs.iter())
-        .filter(|f| app.manifest.function(&f.key).and_then(|s| s.fails) != Some(false));
+    let funcs = app.imports.iter().filter(|i| i.kind == ImportKind::Platform).flat_map(|i| i.funcs.iter());
     let mut tries = Vec::new();
     for f in funcs.filter(|f| only.is_none_or(|o| f.key.contains(o))) {
         let Some(t) = f.ty.results().next() else { continue };
-        for (variant, opts) in variants(&t) {
+        // A call that never fails still answers with odd values.
+        let never_fails = app.manifest.function(&f.key).and_then(|s| s.fails) == Some(false);
+        for (variant, opts) in variants(&t).into_iter().filter(|(v, _)| !(never_fails && *v == "err")) {
             let mut spec = base.clone();
             if let Some(q) = app.manifest.function(&f.key).and_then(|s| s.query.as_ref()) {
                 if matches!(variant, "empty list" | "long list") {

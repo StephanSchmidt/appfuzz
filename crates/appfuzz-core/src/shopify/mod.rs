@@ -329,6 +329,7 @@ fn entry(export: String) -> Entry {
         values: Default::default(),
         input_values: Default::default(),
         rules: Vec::new(),
+        response: Default::default(),
     }
 }
 

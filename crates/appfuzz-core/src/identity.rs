@@ -322,6 +322,7 @@ fn records<'a>(v: &'a Value, segs: &[&str], out: &mut Vec<&'a Map<String, Value>
     match v {
         Value::Array(a) => a.iter().for_each(|x| records(x, segs, out)),
         Value::Object(o) if o.len() == 1 && o.contains_key("ok") && segs.first() != Some(&"ok") => records(&o["ok"], segs, out),
+        Value::Object(o) if o.len() == 1 && o.contains_key("some") && segs.first() != Some(&"some") => records(&o["some"], segs, out),
         Value::Object(o) if o.len() == 1 && o.contains_key("err") => {}
         Value::Object(o) if segs.is_empty() => out.push(o),
         Value::Object(o) => {

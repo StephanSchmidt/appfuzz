@@ -341,6 +341,9 @@ pub fn merge(host: &HostManifest, mut app: Manifest, app_toml: &toml::Table) -> 
             if !ae.rules.is_empty() && !same(&ae.rules, &he.rules) {
                 return Err(owned("entry.rules (what the platform lets through)".into()));
             }
+            if !ae.response.is_empty() && !same(&ae.response, &he.response) {
+                return Err(owned("entry.response (how the platform answers)".into()));
+            }
             if ae.request.is_some() {
                 e.request = ae.request;
             }

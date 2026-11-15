@@ -337,7 +337,9 @@ pub fn grow(ty: &Type, template: Option<&Value>, n: usize, seed: u64, opts: &Gen
             let given: Vec<Value> = template.and_then(Value::as_array).cloned().unwrap_or_default();
             let mut g = Generator::new(seed, GenOpts { list_len: Some(1), ..opts.clone() });
             let base = if given.is_empty() { vec![g.gen_json(&elem)] } else { given.clone() };
-            let max_id = base.iter().filter_map(|e| e.get("id").and_then(Value::as_u64)).max().unwrap_or(0);
+            // Copies count on from the largest id (or number, in a list of
+            // numbers), so they repeat no value the template has.
+            let max_id = base.iter().filter_map(|e| e.get("id").and_then(Value::as_u64).or_else(|| e.as_u64())).max().unwrap_or(0);
             let mut out = Vec::with_capacity(n);
             for k in 0..n {
                 let mut e = base[k % base.len()].clone();
@@ -370,7 +372,7 @@ fn uniquify(e: &mut Value, k: u64, max_id: u64) {
             if let Some(id) = o.get_mut("id")
                 && id.is_number()
             {
-                *id = json!(max_id + k + 1);
+                *id = json!(max_id.wrapping_add(k).wrapping_add(1));
             } else if let Some((_, v)) = o.iter_mut().find(|(_, v)| v.is_number()) {
                 *v = json!(k + 1);
             }
@@ -379,7 +381,7 @@ fn uniquify(e: &mut Value, k: u64, max_id: u64) {
                 *v = json!(format!("{s} #{}", k + 1));
             }
         }
-        Value::Number(_) => *e = json!(k),
+        Value::Number(_) => *e = json!(max_id.wrapping_add(k).wrapping_add(1)),
         Value::String(s) => *e = json!(format!("{s} #{}", k + 1)),
         _ => {}
     }
@@ -1534,5 +1536,42 @@ fn dedupe_by_law(reports: &mut [ScaleReport]) {
             o.insert("also_with".into(), serde_json::json!(modes));
         }
         f.title = format!("{} (and {} more modes)", f.title, modes.len());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The result type of `test:shop/items#<f>`.
+    fn result_type(f: &str) -> Type {
+        let wit = "package test:shop; interface items { record big { id: u64 } ids: func() -> list<u32>; bigs: func() -> list<big>; } world app { import items; export run: func() -> u32; }";
+        let wat = r#"
+            (module
+              (import "test:shop/items" "ids" (func (param i32)))
+              (import "test:shop/items" "bigs" (func (param i32)))
+              (memory (export "memory") 1)
+              (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
+              (func (export "run") (result i32) (i32.const 0)))"#;
+        let mut resolve = wit_parser::Resolve::new();
+        let pkg = resolve.push_str("test.wit", wit).unwrap();
+        let world = resolve.select_world(&[pkg], Some("app")).unwrap();
+        let mut bytes = wat::parse_str(wat).unwrap();
+        wit_component::embed_component_metadata(&mut bytes, &resolve, world, wit_component::StringEncoding::UTF8, false).unwrap();
+        let bytes = wit_component::ComponentEncoder::default().module(&bytes).unwrap().validate(true).encode().unwrap();
+        let app = App::from_bytes(crate::manifest::Manifest::for_wasm(std::path::Path::new("test.wasm")), bytes).unwrap();
+        let key = format!("test:shop/items#{f}");
+        app.imports.iter().flat_map(|i| &i.funcs).find(|x| x.key == key).unwrap().ty.results().next().unwrap()
+    }
+
+    #[test]
+    fn copies_of_a_number_list_do_not_repeat_the_template() {
+        let v = grow(&result_type("ids"), Some(&json!([1, 2, 3])), 6, 1, &GenOpts::default()).unwrap();
+        assert_eq!(v, json!([1, 2, 3, 7, 8, 9]));
+        // Ids count on from the largest; the largest u64 wraps.
+        let v = grow(&result_type("bigs"), Some(&json!([{"id": 4}, {"id": 2}])), 3, 1, &GenOpts::default()).unwrap();
+        assert_eq!(v, json!([{"id": 4}, {"id": 2}, {"id": 7}]));
+        let v = grow(&result_type("bigs"), Some(&json!([{"id": u64::MAX}])), 2, 1, &GenOpts::default()).unwrap();
+        assert_eq!(v, json!([{"id": u64::MAX}, {"id": 1}]));
     }
 }

@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- `[entry.response]`: a response made from host calls. On a platform
+  where the app calls `page#set-html(name, html)` or `page#redirect(path)`
+  and returns nothing, the manifest names the calls that set the status,
+  body and headers. The run's result is that response, so output labels
+  (`html:safe`, `url:local`), `no_pii` and the response checks apply.
+- Label paths go into JSON text: `$` reads a string as JSON,
+  `result = { "" = "json", "$.email" = "pii" }` for a store of JSON
+  records, also in rules by key. Generated records carry the labelled
+  fields.
+- Label paths go through an option's value in recorded results, where
+  some labels were missed before.
+- `scale`: copies of a list of numbers count on from the largest, so they
+  no longer repeat the template's values.
+- A canary's raw `<i>` inside a quoted attribute value whose quote is
+  escaped is no longer a `reflection`: there it is text.
+- `probe auth`: `Bearer null` that the app passes to a host function
+  (which then lets it in) is the host's decision, as with the other
+  forged credentials, and no `auth_bypass`.
+- `probe values` tries odd values of functions marked `fails = false`
+  too; it leaves out only the error.
+
 ## 0.8.1
 
 - `[[entry.rules]]`: request fields that go together. A request that

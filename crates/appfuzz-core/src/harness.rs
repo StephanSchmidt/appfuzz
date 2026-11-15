@@ -124,6 +124,8 @@ struct Platform {
     infallible: BTreeSet<String>,
     /// Functions whose effect changes something (write, delete, external).
     changing: BTreeSet<String>,
+    /// `[entry.response]`: the response fields host calls set, by function.
+    response: BTreeMap<String, Vec<crate::response::Bound>>,
 }
 
 /// How a run instantiates the app.
@@ -242,6 +244,8 @@ struct Host {
     /// wasi:http resources and requests in flight.
     http: http::Http,
     router: Option<Router>,
+    /// Response fields host calls set (`[entry.response]`), in call order.
+    response_parts: Vec<(String, Value)>,
 }
 
 impl WasiView for Host {
@@ -510,10 +514,14 @@ impl App {
             handles: None,
             infallible: BTreeSet::new(),
             changing: BTreeSet::new(),
+            response: BTreeMap::new(),
         };
         crate::labels::check_names(&written, &imports)?;
         crate::labels::check_wit(&manifest, &imports)?;
         check_entry(&mut manifest, &exports)?;
+        if let Some(e) = &manifest.entry {
+            platform.response = crate::response::bind(&e.response, &imports)?;
+        }
         crate::dataset::validate(&manifest.datasets)?;
         if let Some(suite) = &manifest.acceptance {
             suite.validate(&manifest)?;
@@ -701,6 +709,29 @@ impl App {
             let names: Vec<_> = self.exports.iter().map(|e| e.key.as_str()).collect();
             anyhow!("no export {name:?}; exports: {}", names.join(", "))
         })
+    }
+
+    /// The response the app sent, from wherever this platform keeps it.
+    fn take_response(&self, export: &FuncInfo, store: &mut Store<Host>, record: &mut RunRecord) {
+        // An HTTP response already sent to the client remains output even if
+        // guest execution or draining pending host calls subsequently fails.
+        if matches!(self.pre, Pre::Core { .. }) {
+            let (response, incomplete) = store.data_mut().handles.take_response();
+            record.result = response;
+            if incomplete && record.outcome.kind == OutcomeKind::Ok {
+                record.outcome =
+                    Outcome { kind: OutcomeKind::Trap, message: Some("the app ended with an incomplete streaming response body".into()), stack: vec![] };
+            }
+        } else if crate::wasi_http::is_handler(export) {
+            record.result = store.data_mut().http.result.take();
+        } else if let Some(e) = self.manifest.entry.as_ref().filter(|e| !e.response.is_empty() && fn_key_eq(&export.key, &e.export)) {
+            // The response the platform sends from what host calls set.
+            // Parts already set stay output when the app fails afterwards.
+            let parts = std::mem::take(&mut store.data_mut().response_parts);
+            if record.outcome.kind == OutcomeKind::Ok || !parts.is_empty() {
+                record.result = Some(crate::response::build(&e.response, &parts, record.result.take()));
+            }
+        }
     }
 
     /// The entry export from the manifest, or the only exported function.
@@ -963,6 +994,7 @@ impl App {
             http: Default::default(),
             resource_rep: 0,
             router,
+            response_parts: Vec::new(),
         };
         let mut store = Store::new(&self.engine, host);
         store.limiter(|h| &mut h.limiter);
@@ -1114,18 +1146,7 @@ impl App {
             }
         }
 
-        // An HTTP response already sent to the client remains output even if
-        // guest execution or draining pending host calls subsequently fails.
-        if matches!(self.pre, Pre::Core { .. }) {
-            let (response, incomplete) = store.data_mut().handles.take_response();
-            record.result = response;
-            if incomplete && record.outcome.kind == OutcomeKind::Ok {
-                record.outcome =
-                    Outcome { kind: OutcomeKind::Trap, message: Some("the app ended with an incomplete streaming response body".into()), stack: vec![] };
-            }
-        } else if crate::wasi_http::is_handler(&export) {
-            record.result = store.data_mut().http.result.take();
-        }
+        self.take_response(&export, &mut store, record);
         let data = store.data_mut();
         let c = clock.with(|c| c.clone());
         record.memory_limit_hit = data.limiter.budget.hit();
@@ -1452,6 +1473,11 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
     });
 
     let records = data.records.as_ref().filter(|c| c.watches(key)).map(|c| c.count_call(&args)).unwrap_or_default();
+    // The response fields this call sets, from the whole arguments: the
+    // trace keeps only the start of long texts.
+    for b in platform.response.get(key).into_iter().flatten() {
+        data.response_parts.extend(b.take(&args).map(|v| (b.field.clone(), v)));
+    }
     let mut event = HostCall {
         n: data.events.len() as u32 + 1,
         func: key.to_string(),
@@ -1979,6 +2005,13 @@ fn check_entry(manifest: &mut Manifest, exports: &[FuncInfo]) -> Result<()> {
         let params: Vec<(String, Type)> = export.ty.params().map(|(n, t)| (n.to_string(), t)).collect();
         if params.len() > 1 {
             entry.params = params.iter().map(|(n, _)| n.clone()).collect();
+        }
+        // A response made from host calls has the fields of any other.
+        if !entry.response.is_empty() {
+            let o = &mut entry.output;
+            o.status.get_or_insert_with(|| "status".into());
+            o.body.get_or_insert_with(|| "body".into());
+            o.headers.get_or_insert_with(|| "headers".into());
         }
         let param = |path: &str, what: &str| -> Result<(Type, String)> {
             let (i, rest) = entry.locate(path);

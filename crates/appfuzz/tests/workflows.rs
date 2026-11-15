@@ -3947,3 +3947,128 @@ fn entry_rules_keep_requests_to_what_the_platform_sends() {
     assert_eq!(code, 3, "{bad}");
     assert!(bad["error"].as_str().unwrap().contains("entry.rules[0].when \"handlr\""), "{bad}");
 }
+
+#[test]
+fn labels_reach_into_stored_json() {
+    let f = Fixture::new(false);
+    // run() logs the record get("k") returns.
+    let wit = "package test:workflow; interface kv { get: func(key: string) -> option<string>; log: func(msg: string); } world app { import kv; export run: func(n: u32) -> u32; }";
+    let wat = r#"
+        (module
+          (import "test:workflow/kv" "get" (func $get (param i32 i32 i32)))
+          (import "test:workflow/kv" "log" (func $log (param i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 16) "k")
+          (global $next (mut i32) (i32.const 1024))
+          (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (local i32)
+            (local.set 4 (global.get $next))
+            (global.set $next (i32.and (i32.add (i32.add (global.get $next) (local.get 3)) (i32.const 8)) (i32.const -8)))
+            (local.get 4))
+          (func (export "run") (param i32) (result i32)
+            (call $get (i32.const 16) (i32.const 1) (i32.const 32))
+            (if (i32.load8_u (i32.const 32)) (then (call $log (i32.load (i32.const 36)) (i32.load (i32.const 40)))))
+            (i32.const 0)))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    let manifest = std::fs::read_to_string(&f.manifest).unwrap();
+    let kinds = |labels: &str| -> Vec<(String, String)> {
+        let line = if labels.starts_with("rules") { labels.to_string() } else { format!("result = {labels}") };
+        std::fs::write(&f.manifest, format!("{manifest}[functions.\"test:workflow/kv#get\"]\n{line}\n")).unwrap();
+        let (_, run) = f.cli(&["run", "--plan", r#"{"_defaults": {"generate": {"options": "some"}}}"#]);
+        run["findings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{run}"))
+            .iter()
+            .map(|x| (x["kind"].as_str().unwrap().to_string(), x["severity"].as_str().unwrap().to_string()))
+            .collect()
+    };
+    // The email inside the stored record goes to the log.
+    assert!(kinds(r#"{ "" = "json", "$.email" = "pii" }"#).contains(&("pii_leak".into(), "fail".into())));
+    assert!(kinds(r#"{ "$.attendees.email" = "pii" }"#).contains(&("pii_leak".into(), "fail".into())), "`$` alone makes it JSON");
+    assert!(!kinds(r#""json""#).iter().any(|(k, _)| k == "pii_leak"));
+    // By key, in a rule: records under some keys hold personal data.
+    assert!(kinds(r#"rules = [{ when = { key = { regex = "^k" } }, result = { "$.email" = "pii" } }]"#).contains(&("pii_leak".into(), "fail".into())));
+    assert!(!kinds(r#"rules = [{ when = { key = "other" }, result = { "$.email" = "pii" } }]"#).iter().any(|(k, _)| k == "pii_leak"));
+}
+
+#[test]
+fn a_response_made_from_host_calls_meets_output_labels() {
+    let f = Fixture::new(false);
+    // run(next) returns nothing: it shows the user's email with
+    // page#set-html("page", …) and redirects to `next` with page#redirect.
+    let wit = "package test:workflow; interface page { set-html: func(name: string, html: string); redirect: func(path: string); } interface users { email: func() -> string; } world app { import page; import users; export run: func(next: string); }";
+    let wat = r#"
+        (module
+          (import "test:workflow/page" "set-html" (func $set_html (param i32 i32 i32 i32)))
+          (import "test:workflow/page" "redirect" (func $redirect (param i32 i32)))
+          (import "test:workflow/users" "email" (func $email (param i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 16) "page")
+          (global $next (mut i32) (i32.const 1024))
+          (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (local i32)
+            (local.set 4 (global.get $next))
+            (global.set $next (i32.and (i32.add (i32.add (global.get $next) (local.get 3)) (i32.const 8)) (i32.const -8)))
+            (local.get 4))
+          (func (export "run") (param i32 i32)
+            (call $email (i32.const 64))
+            (call $set_html (i32.const 16) (i32.const 4) (i32.load (i32.const 64)) (i32.load (i32.const 68)))
+            (call $redirect (local.get 0) (local.get 1))))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    let base = "[app]\nwasm = \"app.wasm\"\n[entry]\nexport = \"run\"\nrequest = \"/home\"\nresult = { \"headers.location\" = \"url:local\" }\nno_pii = true\n";
+    let response = r#"
+[entry.response]
+body = { call = "test:workflow/page#set-html", arg = "html", when = { name = "page" } }
+"headers.location" = { call = "test:workflow/page#redirect" }
+status = [{ value = 200 }, { call = "test:workflow/page#redirect", value = 303 }]
+"#;
+    let rest = "[functions.\"test:workflow/users#email\"]\nresult = \"pii\"\n[limits]\nfuel = 1000000\n";
+    let kinds = |run: &Value| -> Vec<String> {
+        run["findings"].as_array().unwrap_or_else(|| panic!("{run}")).iter().map(|x| x["kind"].as_str().unwrap().to_string()).collect()
+    };
+
+    std::fs::write(&f.manifest, format!("{base}{response}{rest}")).unwrap();
+    let (_, run) = f.cli(&["run"]);
+    let result = &run["result"];
+    assert_eq!((&result["status"], &result["headers"]), (&json!(303), &json!([["location", "/home"]])), "{run}");
+    assert!(result["body"].as_str().is_some_and(|b| b.ends_with("@mail.example")), "{run}");
+    // no_pii holds for the page; set-html's html is the response, no host parameter.
+    let titles: Vec<&str> = run["findings"].as_array().unwrap().iter().filter(|x| x["kind"] == "pii_leak").map(|x| x["title"].as_str().unwrap()).collect();
+    assert!(titles.len() == 1 && titles[0].contains("response body"), "{run}");
+    let (_, evil) = f.cli(&["run", "--args", r#"["https://evil.example/"]"#]);
+    assert!(kinds(&evil).iter().any(|k| k == "open_redirect" || k == "non_local_url"), "url:local holds for the redirect: {evil}");
+
+    // Without [entry.response] the app returns nothing: no response to judge.
+    std::fs::write(&f.manifest, format!("{base}{rest}")).unwrap();
+    let (_, run) = f.cli(&["run", "--args", r#"["https://evil.example/"]"#]);
+    assert!(run["result"].is_null(), "{run}");
+    assert!(!kinds(&run).iter().any(|k| k == "open_redirect" || k == "non_local_url"), "{run}");
+
+    // A misspelt function the app imports is an error.
+    std::fs::write(&f.manifest, format!("{base}{}{rest}", response.replace("page#redirect\" }", "page#redirct\" }"))).unwrap();
+    let (code, out) = f.cli(&["run"]);
+    assert_eq!(code, 3, "{out}");
+    assert!(out.to_string().contains("did you mean"), "{out}");
+}
+
+#[test]
+fn a_call_that_never_fails_still_gets_odd_values() {
+    let f = Fixture::new(false);
+    // run() traps when count() says less than 2 or more than 1000.
+    let wit = "package test:workflow; interface db { count: func() -> result<u32, string>; } world app { import db; export run: func(n: u32) -> u32; }";
+    let wat = r#"
+        (module
+          (import "test:workflow/db" "count" (func $count (param i32)))
+          (memory (export "memory") 1)
+          (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
+          (func (export "run") (param i32) (result i32)
+            (call $count (i32.const 32))
+            (if (i32.and (i32.eqz (i32.load8_u (i32.const 32))) (i32.gt_u (i32.sub (i32.load (i32.const 36)) (i32.const 2)) (i32.const 998))) (then unreachable))
+            (i32.const 0)))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    let manifest = std::fs::read_to_string(&f.manifest).unwrap();
+    std::fs::write(&f.manifest, format!("{manifest}[functions.\"test:workflow/db#count\"]\nfails = false\n")).unwrap();
+    let (_, out) = f.cli(&["probe", "values", "--fn", "count"]);
+    // Edge numbers and the string variants, but no error: the platform says it never fails.
+    assert_eq!(out["probes"], 8, "{out}");
+    let crash: Vec<&Value> = out["findings"].as_array().unwrap().iter().filter(|x| x["kind"] == "crash_on_host_value").collect();
+    assert!(crash.len() == 1 && crash[0]["title"].as_str().unwrap().contains("returns edge numbers"), "{out}");
+}

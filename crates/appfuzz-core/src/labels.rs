@@ -263,6 +263,8 @@ fn path_ok(ty: &Type, segs: &[&str], id: bool) -> bool {
         Type::Result(r) => r.ok().is_some_and(|t| path_ok(&t, segs, id)),
         _ if segs.is_empty() && id => is_scalar_id(ty),
         _ if segs.is_empty() => crate::fuzz::has_string(ty),
+        // `$`: the JSON document inside the text, any path in it.
+        Type::String => segs[0] == "$",
         Type::Record(r) => r.fields().find(|f| f.name == segs[0]).is_some_and(|f| path_ok(&f.ty, &segs[1..], id)),
         _ => false,
     }
@@ -332,9 +334,16 @@ fn is_pairs(a: &[Value]) -> bool {
 
 /// Calls `f` on every scalar at the path (strings, numbers, booleans).
 /// Paths go through lists, options and `ok`; in a list of (string, value)
-/// pairs a segment names a key, and `*` every key.
+/// pairs a segment names a key, and `*` every key. `$` goes into the JSON
+/// document a string holds (text that is no JSON has nothing there).
 pub fn walk_leaves_mut(v: &mut Value, segs: &[&str], f: &mut dyn FnMut(&mut Value)) {
     match v {
+        Value::String(s) if segs.first() == Some(&"$") => {
+            if let Ok(mut doc) = serde_json::from_str::<Value>(s) {
+                walk_leaves_mut(&mut doc, &segs[1..], f);
+                *s = doc.to_string();
+            }
+        }
         Value::Array(a) if !segs.is_empty() && is_pairs(a) => {
             for pair in a.iter_mut().filter_map(Value::as_array_mut) {
                 if segs[0] == "*" || pair[0].as_str() == Some(segs[0]) {
@@ -344,7 +353,11 @@ pub fn walk_leaves_mut(v: &mut Value, segs: &[&str], f: &mut dyn FnMut(&mut Valu
         }
         Value::Array(a) => a.iter_mut().for_each(|x| walk_leaves_mut(x, segs, f)),
         Value::Object(o) if o.len() == 1 && o.contains_key("ok") && segs.first() != Some(&"ok") => walk_leaves_mut(o.get_mut("ok").expect("checked"), segs, f),
+        Value::Object(o) if o.len() == 1 && o.contains_key("some") && segs.first() != Some(&"some") => {
+            walk_leaves_mut(o.get_mut("some").expect("checked"), segs, f)
+        }
         Value::Object(o) if o.len() == 1 && o.contains_key("err") && segs.first() != Some(&"err") => {}
+        Value::Object(o) if segs.first() == Some(&"*") => o.values_mut().for_each(|x| walk_leaves_mut(x, &segs[1..], f)),
         Value::Object(o) if segs.is_empty() => o.values_mut().for_each(|x| walk_leaves_mut(x, segs, f)),
         Value::Object(o) => {
             if let Some(x) = o.get_mut(segs[0]) {
@@ -378,32 +391,123 @@ pub fn id_text(v: &Value) -> String {
 /// paths with JSON text around them, and ids at
 /// `identity` and `owner` paths with the run's caller (`identity`) or,
 /// for about half the owners, someone else (`identity + 1`).
+///
+/// Paths through `$` come last, after `json` made the documents: they
+/// write the fields they name into the document, so a generated record
+/// holds the email its label promises.
 pub fn mark(v: &mut Value, labels: &[(String, Label)], seed: u64, identity: &str) {
     let mut n = 0u64;
     let other = identity.parse::<u64>().map(|k| (k + 1).to_string()).unwrap_or_else(|_| format!("{identity}x"));
-    for (p, l) in labels.iter().filter(|(_, l)| l.is_id()) {
-        walk_leaves_mut(v, &segs(p), &mut |x| {
-            n += 1;
-            let mine = *l == Label::Identity || (seed.wrapping_add(n).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 63) == 0;
-            let id = if mine { identity } else { other.as_str() };
-            *x = match x {
-                Value::Number(_) => id.parse::<u64>().map(Value::from).unwrap_or(Value::from(0)),
-                _ => Value::String(id.to_string()),
-            };
-        });
-    }
-    for (p, l) in labels {
-        let mut f = |s: &mut String| {
+    let in_json = |p: &str| segs(p).contains(&"$");
+    let (outside, inside): (Vec<_>, Vec<_>) = labels.iter().partition(|(p, _)| !in_json(p));
+    for (phase, (p, l)) in outside
+        .iter()
+        .filter(|(_, l)| l.is_id())
+        .map(|x| (0, x))
+        .chain(outside.iter().filter(|(_, l)| !l.is_id()).map(|x| (0, x)))
+        .chain(inside.iter().map(|x| (1, x)))
+    {
+        let mut f = |x: &mut Value| {
             n += 1;
             let h = seed.wrapping_add(n).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-            match l {
-                Label::Pii => *s = format!("p{:08x}@mail.example", h >> 32),
-                Label::Secret => *s = format!("sk_{h:016x}"),
-                Label::Json => *s = json_text(s, h),
-                _ => {}
+            if l.is_id() {
+                let mine = *l == Label::Identity || (h >> 63) == 0;
+                let id = if mine { identity } else { other.as_str() };
+                *x = match x {
+                    Value::Number(_) => id.parse::<u64>().map(Value::from).unwrap_or(Value::from(0)),
+                    _ => Value::String(id.to_string()),
+                };
+                return;
+            }
+            if let Value::String(s) = x {
+                match l {
+                    Label::Pii => *s = format!("p{:08x}@mail.example", h >> 32),
+                    Label::Secret => *s = format!("sk_{h:016x}"),
+                    Label::Json => *s = json_text(s, h),
+                    _ => {}
+                }
             }
         };
-        walk_mut(v, &segs(p), &mut f);
+        if phase == 0 {
+            walk_leaves_mut(v, &segs(p), &mut f);
+        } else {
+            walk_create(v, &segs(p), &mut f);
+        }
+    }
+}
+
+/// [`walk_leaves_mut`], except that inside JSON text (after `$`) it makes
+/// the fields the path names: text that is no JSON becomes an object, a
+/// missing field is added, an empty list gets one element.
+fn walk_create(v: &mut Value, segs: &[&str], f: &mut dyn FnMut(&mut Value)) {
+    match v {
+        Value::String(s) if segs.first() == Some(&"$") => {
+            let mut doc = serde_json::from_str::<Value>(s).unwrap_or(Value::Null);
+            create_in(&mut doc, &segs[1..], f);
+            *s = doc.to_string();
+        }
+        Value::Array(a) if !segs.is_empty() && is_pairs(a) => {
+            for pair in a.iter_mut().filter_map(Value::as_array_mut) {
+                if segs[0] == "*" || pair[0].as_str() == Some(segs[0]) {
+                    walk_create(&mut pair[1], &segs[1..], f);
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| walk_create(x, segs, f)),
+        Value::Object(o) if o.len() == 1 && o.contains_key("ok") && segs.first() != Some(&"ok") => walk_create(o.get_mut("ok").expect("checked"), segs, f),
+        Value::Object(o) if o.len() == 1 && o.contains_key("some") && segs.first() != Some(&"some") => {
+            walk_create(o.get_mut("some").expect("checked"), segs, f)
+        }
+        Value::Object(o) if o.len() == 1 && o.contains_key("err") && segs.first() != Some(&"err") => {}
+        Value::Object(o) if !segs.is_empty() => {
+            if let Some(x) = o.get_mut(segs[0]) {
+                walk_create(x, &segs[1..], f)
+            }
+        }
+        _ => {}
+    }
+}
+
+fn create_in(doc: &mut Value, segs: &[&str], f: &mut dyn FnMut(&mut Value)) {
+    let Some((head, rest)) = segs.split_first() else {
+        match doc {
+            Value::Array(a) => {
+                if a.is_empty() {
+                    a.push(Value::String(String::new()));
+                }
+                a.iter_mut().for_each(|x| create_in(x, &[], f));
+            }
+            Value::Object(_) | Value::Null => {
+                *doc = Value::String(String::new());
+                f(doc);
+            }
+            x => f(x),
+        }
+        return;
+    };
+    match doc {
+        Value::String(s) if *head == "$" => {
+            let mut inner = serde_json::from_str::<Value>(s).unwrap_or(Value::Null);
+            create_in(&mut inner, rest, f);
+            *s = inner.to_string();
+        }
+        Value::Array(a) => {
+            if a.is_empty() {
+                a.push(Value::Null);
+            }
+            a.iter_mut().for_each(|x| create_in(x, segs, f));
+        }
+        Value::Object(o) if *head == "*" => {
+            if o.is_empty() {
+                o.insert("1".into(), Value::Null);
+            }
+            o.values_mut().for_each(|x| create_in(x, rest, f));
+        }
+        Value::Object(o) => create_in(o.entry(head.to_string()).or_insert(Value::Null), rest, f),
+        _ => {
+            *doc = Value::Object(serde_json::Map::new());
+            create_in(doc, segs, f);
+        }
     }
 }
 
@@ -738,6 +842,10 @@ pub(crate) fn leaks_from(r: &RunRecord, m: &Manifest, traced: &[Traced]) -> Vec<
             texts.clear();
             str_leaves(a, &mut texts);
             let label = m.param_label(&e.func, p);
+            // A parameter that is the response is judged as the response.
+            if entry.is_some_and(|en| en.response_param(&e.func, p, arguments.len())) {
+                continue;
+            }
             for i in find.hits_any(&texts) {
                 if label != Some(traced[i].label) {
                     add(i, format!("the parameter {p} of {}", e.func), Severity::Fail, json!({"n": e.n}));
@@ -1188,6 +1296,34 @@ mod tests {
         assert_eq!(values_at(&v, "*.email"), vec!["x@y.z"]);
         // Lists of records are no pairs.
         assert_eq!(values_at(&json!([{"name": "n"}]), "name"), vec!["n"]);
+    }
+
+    #[test]
+    fn labels_reach_into_json_text() {
+        // option<string> holding a stored record.
+        let labels = [(String::new(), Label::Json), ("$.email".to_string(), Label::Pii), ("$.attendees.name".to_string(), Label::Pii)];
+        for seed in 0..32 {
+            let mut v = json!("Ann");
+            mark(&mut v, &labels, seed, "1000");
+            let doc: Value = serde_json::from_str(v.as_str().unwrap()).unwrap_or_else(|e| panic!("{v}: {e}"));
+            for p in ["$.email", "$.attendees.name"] {
+                let found = values_at(&v, p);
+                assert!(!found.is_empty() && found.iter().all(|s| s.ends_with("@mail.example")), "{p}: {doc}");
+            }
+        }
+        // `$` alone makes the text JSON; ids go in too.
+        let mut v = json!({"ok": {"doc": "x"}});
+        mark(&mut v, &[("doc.$.owner".into(), Label::Owner)], 1, "1000");
+        let owner = ids_at(&v, "doc.$.owner");
+        assert!(owner == ["1000"] || owner == ["1001"], "{v}");
+        // Options as records write them: `{"some": …}`.
+        let mut v = json!({"some": {"email": "e", "doc": "x"}});
+        mark(&mut v, &[("email".into(), Label::Pii), ("doc.$.email".into(), Label::Pii)], 1, "1000");
+        assert!(values_at(&v, "email")[0].ends_with("@mail.example"), "{v}");
+        assert!(values_at(&v, "doc.$.email")[0].ends_with("@mail.example"), "{v}");
+        // Reading text that is no JSON finds nothing; `*` is every key of an object.
+        assert!(values_at(&json!("no json"), "$.email").is_empty());
+        assert_eq!(values_at(&json!(r#"{"a": {"e": "x"}, "b": {"e": "y"}}"#), "$.*.e"), vec!["x", "y"]);
     }
 
     #[test]

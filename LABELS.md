@@ -53,6 +53,16 @@ result. A list of (string, value) pairs is a map: a segment names a key,
 and `*` every key. For `scan: func() -> list<tuple<string, string>>`,
 `result = { "*" = "json" }` labels every value and leaves the keys alone.
 
+A segment `$` reads text as JSON and goes on inside it, for stores that
+hold documents. For `get: func(key: string) -> option<string>`,
+`result = { "" = "json", "$.email" = "pii" }` says the record is JSON and
+its `email` is personal data; `$.attendees.email` goes through the list
+of attendees, and inside JSON `*` is every field of an object. Generated
+records then have the field, so the marker sits where the app reads it.
+Text that is no JSON has nothing at a `$` path. With `rules` (below)
+the labels can depend on the key:
+`rules = [{ when = { key = { regex = "^user/" } }, result = { "$.email" = "pii" } }]`.
+
 | Label | Means | Check |
 |-------|-------|-------|
 | `untrusted` | the default: text that must not reach sinks or HTML unescaped | `stored_reflection`, sink findings |
@@ -275,6 +285,37 @@ escapes are undone first.
 result = { body = "html:safe", "headers.location" = "url:local" }
 sensitive_paths = ["/admin", "/settings"]
 ```
+
+### A response made from host calls: `[entry.response]`
+
+Some platforms take the response from host calls: the app calls
+`page#set-html(name, html)` or `page#redirect(path)` and returns nothing.
+`[entry.response]` says which calls set the status, the body and the
+headers. The run's result is then that response, and output labels,
+`no_pii` and the response checks apply as to any other.
+
+```toml
+[entry.response]
+body = { call = "acme:web/page#set-html", arg = "html", when = { name = "page" } }
+"headers.location" = { call = "acme:web/page#redirect", arg = "path" }
+status = [
+  { value = 200 },
+  { call = "acme:web/page#set-status", arg = "code" },
+  { call = "acme:web/page#redirect", value = 303 },
+]
+```
+
+A source names the `call` and its parameter (`arg`, by default the only
+one) or a fixed `value`, with `when` matchers on the call's arguments as
+in rules. A source without `call` is the default. When several calls set
+a field, the last one wins. Bytes become text, and a status may come as
+text (`"404"`). The parameter counts as the response, not as a host
+parameter: personal data in it is judged by `no_pii`. What the export
+returns, if anything, stays under `return`. Labels and `output` use the
+fields `status`, `body` and `headers`:
+`result = { body = "html:safe", "headers.location" = "url:local" }`.
+A call the app doesn't import is skipped, a misspelt one it imports is an
+error, and the platform owns `[entry.response]`.
 
 With output labels the fuzzer also tries `//evil.example/`,
 `javascript:alert(1)`, markup with event handlers, and text that ends a

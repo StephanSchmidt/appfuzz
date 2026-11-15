@@ -133,6 +133,7 @@ fn from_str(text: &str, dir: &Path, component: Option<&str>) -> Result<Manifest>
             values: Default::default(),
             input_values: Default::default(),
             rules: Vec::new(),
+            response: Default::default(),
         });
     }
 

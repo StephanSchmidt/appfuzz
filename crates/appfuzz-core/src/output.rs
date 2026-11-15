@@ -683,11 +683,14 @@ fn breakout(body: &str, id: &str) -> Option<(&'static str, String)> {
     let marked = format!("{id}<i>");
     if body.contains(&marked) {
         let script = doc.elements.iter().find(|e| e.is_script() && e.body.as_ref().is_some_and(|b| b.contains(&marked)));
-        return Some(match script {
-            Some(e) if is_js(e.get("type")) => ("script", "into a script unescaped, where `</script>` in it ends the script".into()),
-            Some(_) => ("json", "into a data block unescaped, where `</script>` in it ends the block".into()),
-            None => ("text", "into its HTML output unescaped".into()),
-        });
+        match script {
+            Some(e) if is_js(e.get("type")) => return Some(("script", "into a script unescaped, where `</script>` in it ends the script".into())),
+            Some(_) => return Some(("json", "into a data block unescaped, where `</script>` in it ends the block".into())),
+            // `<` needs no escape in a quoted attribute value: there the
+            // canary's `<i>` is text, and only its quote can break out.
+            None if outside_quoted_values(body).contains(&marked) => return Some(("text", "into its HTML output unescaped".into())),
+            None => {}
+        }
     }
     for e in &doc.elements {
         if let Some((k, _)) = e.attrs.iter().find(|(_, v)| v.contains(id))
@@ -703,6 +706,48 @@ fn breakout(body: &str, id: &str) -> Option<(&'static str, String)> {
             crate::js::Breakout::Code => (s.context, format!("into {} as JavaScript code", s.place)),
         })
     })
+}
+
+/// The markup without the values of quoted attributes: what a browser
+/// reads as text and tags. Elements whose content is text (`noscript`
+/// with scripting on, `style`, `textarea`, …) keep it whole: a quote in
+/// there starts no attribute value, and inside SVG a style is markup.
+fn outside_quoted_values(body: &str) -> String {
+    let b = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let (mut i, mut last) = (0, 0);
+    let skip_to = |from: usize, end: &str| body[from..].find(end).map_or(b.len(), |p| from + p + end.len());
+    while i < b.len() {
+        if body[i..].starts_with("<!--") {
+            i = skip_to(i, "-->");
+        } else if b[i] == b'<' && b.get(i + 1).is_some_and(u8::is_ascii_alphabetic) {
+            let name_end = b[i + 1..].iter().position(|c| !c.is_ascii_alphanumeric()).map_or(b.len(), |p| i + 1 + p);
+            let name = body[i + 1..name_end].to_ascii_lowercase();
+            let mut j = name_end;
+            while j < b.len() && b[j] != b'>' {
+                if b[j] == b'=' {
+                    let k = b[j + 1..].iter().position(|c| !c.is_ascii_whitespace()).map_or(b.len(), |p| j + 1 + p);
+                    if let Some(&q) = b.get(k).filter(|c| matches!(c, b'"' | b'\'')) {
+                        let end = b[k + 1..].iter().position(|c| *c == q).map_or(b.len(), |p| k + 1 + p);
+                        out.push_str(&body[last..=k]);
+                        last = end;
+                        j = end + 1;
+                        continue;
+                    }
+                }
+                j += 1;
+            }
+            i = j + 1;
+            if matches!(name.as_str(), "script" | "style" | "noscript" | "textarea" | "title" | "xmp" | "iframe" | "noembed" | "noframes") && i < b.len() {
+                let close = format!("</{name}");
+                i = body[i..].to_ascii_lowercase().find(&close).map_or(b.len(), |p| i + p);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&body[last.min(b.len())..]);
+    out
 }
 
 /// Where `alert(1)` of an attack string runs as code in the HTML body:
@@ -1003,6 +1048,28 @@ mod tests {
     fn percentages() {
         assert_eq!(impossible_percentages("used 40 % of 400% and -5%"), vec!["400%".to_string(), "-5%".to_string()]);
         assert_eq!(impossible_percentages("<p>200<!>%<span> booked</span></p>"), vec!["200%".to_string()]);
+    }
+
+    /// `<` needs no escape in a quoted attribute value, and some SSR
+    /// frameworks escape only `&` and `"` there. The quote is escaped, so
+    /// the value can't end, and the canary's raw `<i>` is text.
+    #[test]
+    fn raw_markup_inside_a_quoted_attribute_is_no_reflection() {
+        assert_eq!(breakout(r#"<p title="cnry12341<i>'&quot;">x</p>"#, "cnry12341"), None);
+        assert_eq!(breakout(r#"<p title='cnry12341<i>&#39;"'>x</p>"#, "cnry12341"), None);
+        assert_eq!(breakout(r#"<p title="cnry12341<i>'"">x</p>"#, "cnry12341").map(|v| v.0), Some("attribute"));
+        // Text is text, also after such an attribute or a script with tags in strings.
+        for body in [
+            r#"<p title="cnry12341<i>'&quot;">cnry12341<i>'"</p>"#,
+            r#"<script>var s = '<a href="';</script><p>cnry12341<i>'"</p>"#,
+            r#"<p class=x>cnry12341<i>'"</p>"#,
+            // With scripting on, a noscript's content is text: its `</noscript>` ends it.
+            r#"<noscript><p title="cnry12341<i>'&quot;">Turn on JavaScript</p></noscript>"#,
+            // Inside SVG a style holds markup.
+            r#"<svg><style>.i-cnry12341<i>'" { fill: red }</style></svg>"#,
+        ] {
+            assert_eq!(breakout(body, "cnry12341").map(|v| v.0), Some("text"), "{body}");
+        }
     }
 
     #[test]

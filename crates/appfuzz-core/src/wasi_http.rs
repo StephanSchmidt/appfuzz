@@ -151,6 +151,7 @@ pub fn default_manifest(manifest: &mut Manifest, imports: &[Interface], exports:
             values: Default::default(),
             input_values: Default::default(),
             rules: Vec::new(),
+            response: Default::default(),
         });
         // A handler named for the other wasi:http version (spin.toml says
         // nothing about which one a build exports) is this one.

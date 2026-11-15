@@ -62,7 +62,7 @@ pub fn forged(anon: &Value) -> Vec<Forged> {
     let cookies = |v: &str| COOKIES.iter().map(|c| format!("{c}={v}")).collect::<Vec<_>>().join("; ");
     let list: Vec<(&'static str, Vec<&'static str>, &str, String)> = vec![
         ("a made-up bearer token", vec![TOKEN], "authorization", format!("Bearer {TOKEN}")),
-        ("Bearer null", vec![], "authorization", "Bearer null".into()),
+        ("Bearer null", vec!["Bearer null", "=null"], "authorization", "Bearer null".into()),
         ("an unsigned JWT (alg none)", vec![JWT_NONE], "authorization", format!("Bearer {JWT_NONE}")),
         ("a JWT with a wrong signature", vec![JWT_FORGED], "authorization", format!("Bearer {JWT_FORGED}")),
         ("Basic admin:admin", vec![BASIC, "admin"], "authorization", format!("Basic {BASIC}")),
@@ -79,9 +79,11 @@ pub fn forged(anon: &Value) -> Vec<Forged> {
         .collect()
 }
 
+/// Whether `v` holds the trace `t`: a text that contains it, or, for
+/// `=t`, a text that is exactly `t` (`null` is a common word).
 fn has_text(v: &Value, t: &str) -> bool {
     match v {
-        Value::String(s) => s.contains(t),
+        Value::String(s) => t.strip_prefix('=').map_or_else(|| s.contains(t), |exact| s == exact),
         Value::Array(a) => a.iter().any(|x| has_text(x, t)),
         Value::Object(o) => o.values().any(|x| has_text(x, t)),
         _ => false,
@@ -333,6 +335,36 @@ mod tests {
         let f = forged(&anon);
         assert!(f.iter().all(|f| f.request["headers"].as_array().unwrap().len() == 2));
         assert!(anonymous(&json!({"path": "/"})).is_none());
+    }
+
+    #[test]
+    fn a_forged_credential_the_host_checked_is_no_bypass() {
+        let m: Manifest =
+            toml::from_str("[app]\nwasm = 'x.wasm'\n[entry]\nexport = 'h'\noutput = { status = 'status', headers = 'headers', body = 'body' }\n").unwrap();
+        let run = |status: u16, sent: &[&str]| {
+            let mut r = crate::envelope::Trace::default().to_record();
+            r.spec.export = "h".into();
+            r.result = Some(json!({"status": status, "headers": [], "body": ""}));
+            r.events = sent
+                .iter()
+                .map(|t| crate::record::HostCall {
+                    func: "a:b/tokens#check".into(),
+                    args: [("token".to_string(), json!(t))].into_iter().collect(),
+                    ..Default::default()
+                })
+                .collect();
+            r
+        };
+        let anon = run(401, &[]);
+        let all = forged(&json!({"method": "GET", "uri": "/", "headers": [], "body": ""}));
+        let null = all.iter().find(|f| f.what == "Bearer null").unwrap();
+        // Let in without asking anyone: the app's bypass.
+        assert!(check(&anon, &[(null, &run(200, &[]))], &m).is_some());
+        // The app asked the token service, with the header or the token alone.
+        assert!(check(&anon, &[(null, &run(200, &["Bearer null"]))], &m).is_none());
+        assert!(check(&anon, &[(null, &run(200, &["null"]))], &m).is_none());
+        // `null` in some other text is no sign it asked.
+        assert!(check(&anon, &[(null, &run(200, &["{\"user\": null}"]))], &m).is_some());
     }
 
     #[test]

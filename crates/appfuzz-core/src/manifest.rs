@@ -188,6 +188,11 @@ pub struct Entry {
     /// fields that go together (a route and its method).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<EntryRule>,
+    /// The response the platform sends, made from host calls: for an app
+    /// that answers with `page#set-html` and returns nothing. Keys are
+    /// `status`, `body` and `headers.<name>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub response: BTreeMap<String, crate::response::Sources>,
 }
 
 /// `[[entry.rules]]`: a request whose fields match `when` keeps to
@@ -202,6 +207,16 @@ pub struct EntryRule {
 
 impl Entry {
     /// Whether the platform limits request fields, always or by rule.
+    /// Whether the parameter `param` of host function `func` (which takes
+    /// `n_params`) is a field of `[entry.response]`.
+    pub fn response_param(&self, func: &str, param: &str, n_params: usize) -> bool {
+        self.response.values().flat_map(|s| s.all()).any(|s| {
+            s.value.is_none()
+                && s.call.as_deref().is_some_and(|c| crate::harness::fn_key_eq(c, func))
+                && s.arg.as_deref().map_or(n_params == 1, |a| a == param || a.replace('-', "_") == param.replace('-', "_"))
+        })
+    }
+
     pub fn constrains(&self) -> bool {
         !self.values.is_empty() || !self.rules.is_empty()
     }

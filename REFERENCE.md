@@ -1471,6 +1471,16 @@ millisecond budgets remain readable. The Rust API uses `natural::Natural` for
 timing fields and search maxima; ordinary counters stay inline, with big integers
 used only when necessary.
 
+### Responses made from host calls
+
+On a platform where the app answers with host calls (`page#set-html`,
+`page#redirect`) and returns nothing, the platform's manifest maps them
+to the response with `[entry.response]`: per field (`status`, `body`,
+`headers.<name>`), the call and parameter that set it, fixed values and
+defaults. appfuzz takes the parameters whole, before the trace shortens
+long texts, and makes the run's result `{status, headers, body}`. See
+[LABELS](LABELS.md#a-response-made-from-host-calls-entryresponse).
+
 ### wasi:http handlers
 
 A component that exports `wasi:http/incoming-handler` (0.2.x) or
