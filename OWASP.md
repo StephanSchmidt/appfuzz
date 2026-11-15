@@ -50,10 +50,10 @@ app misbehaving.
 under other random seeds (`predictable_token`). The platform's part: TLS, keys and how
 secrets are stored.
 
-**A05 Injection.** SQL, shell, HTML, regex and header injection, text
+**A05 Injection.** SQL, shell, HTML, regex, JSON and header injection, text
 escaped by hand, request or stored text in a page unescaped, request text
 that becomes code in the page's scripts. Needs the platform's sinks
-labelled (`sql`, `shell`, `path`, `url`, `html`, `regex`).
+labelled (`sql`, `shell`, `path`, `url`, `html`, `regex`, `json`).
 
 **A06 Insecure Design.** A Content-Security-Policy that lets scripts reach
 other hosts (`weak_csp`), arguments outside what the platform accepts

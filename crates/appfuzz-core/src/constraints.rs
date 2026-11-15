@@ -20,7 +20,7 @@ mod typed;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
-pub(crate) use typed::{conform_host, conform_request_typed, validate_type};
+pub(crate) use typed::{conform_host, conform_request_typed, path_type, validate_type};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constraint {
@@ -343,11 +343,10 @@ fn conform_node(v: &mut Value, segs: &[&str], c: &Constraint, seed: u64, n: &mut
 /// The request fields that break their constraint: (path, constraint, value).
 pub fn broken_request(args: &[Value], m: &crate::manifest::Manifest) -> Vec<(String, String, Value)> {
     let Some(e) = &m.entry else { return Vec::new() };
-    let Some(req) = args.first() else { return Vec::new() };
     e.values
         .iter()
         .filter_map(|(p, c)| {
-            let v = crate::harness::field(req, p)?;
+            let v = e.field(args, p)?;
             (!c.holds(v)).then(|| (p.clone(), c.to_string(), v.clone()))
         })
         .collect()
@@ -377,9 +376,8 @@ pub fn broken_request_for(record: &crate::record::RunRecord, m: &crate::manifest
 /// Makes the request's constrained fields keep to their constraints.
 pub fn conform_request(args: &mut [Value], m: &crate::manifest::Manifest, seed: u64) {
     let Some(e) = &m.entry else { return };
-    let Some(req) = args.first_mut() else { return };
     for (i, (p, c)) in e.values.iter().enumerate() {
-        if let Some(slot) = crate::harness::field_mut(req, p) {
+        if let Some(slot) = e.field_mut(args, p) {
             *slot = c.conform(slot, seed.wrapping_add(i as u64));
         }
     }

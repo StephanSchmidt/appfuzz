@@ -37,6 +37,7 @@ function doesn't have.
 | `url` | a URL to fetch | control of the scheme or host: `ssrf` (fail; warn when the platform refused the request, as Spin does for hosts outside `allowed_outbound_hosts`); `../` intact in the path, so other endpoints of the API are reachable: `url_path_injection` (fail) |
 | `html` | markup | `<i>` intact: `html_injection` (fail) |
 | `regex` | a regular expression | `(` intact: `regex_injection` (warn) |
+| `json` | JSON text the app builds (a record to store, a body to send) | `"` intact, so text breaks out of its JSON string: `json_injection` (fail) |
 | `pii` | may receive personal data | no `pii_leak` for it; still `cleartext_transport` to a plain `http://` URL |
 | `secret` | may receive secrets | no `secret_leak` for it; still `cleartext_transport` to a plain `http://` URL |
 | `user-id` | names a user; must be the caller | a value that is not the caller's identity: `foreign_user_access` (fail) |
@@ -54,9 +55,9 @@ result.
 |-------|-------|-------|
 | `untrusted` | the default: text that must not reach sinks or HTML unescaped | `stored_reflection`, sink findings |
 | `html` | trusted markup | no `stored_reflection` or `html_injection` for it |
+| `json` | JSON text: a stored record, a config, a response body | generated values are JSON documents, so the app's parser gets past the first character; in fuzzing, JSON the app wrote to a `json` parameter comes back here (below) |
 | `pii` | personal data | `pii_leak`: fail in logs, error pages, and host parameters not labelled `pii`; warn in a URL or header; nothing in an ordinary page, unless `[entry] no_pii = true` (below) |
 | `secret` | a secret | `secret_leak`: fail anywhere in the output, logs, or host parameters not labelled `secret` |
-
 | `identity` | who the caller is (a user id) | the run's caller for `user-id` and `owner` |
 | `owner` | who the record that holds this field belongs to | `missing_owner_check` (fail): another user's record shows in a page with a status below 400, or the app changes or deletes it |
 
@@ -65,6 +66,17 @@ Generated values at `pii` and `secret` paths are traceable markers
 numbers. Generated identities are the run's caller, and about half the
 generated owners are the caller too. An app that checks ownership shows
 the record in some runs and refuses it in others.
+
+A `json` result holds what was stored, and a store gives back what was
+put in, or what someone else put there. Generated documents never have
+the app's own fields; JSON the app wrote does. In fuzzing, JSON written
+to a `json` parameter comes back from `json` results: a read is answered
+with a document written under a key of the same collection (the
+parameter both functions have, sharing its start up to the last `/` or
+`:`), so a page that only reads gets the records a form wrote. For
+records the app reads before it writes any, put examples in a plan or in
+`rules`. Text that is no JSON at all comes from `probe values` and the
+fuzzer: an app that parses stored text has to handle that.
 
 A literal value the request itself carries may be echoed in the response:
 the user typed it. `reflection` covers request text. A labelled host value
@@ -375,6 +387,12 @@ in the manifest; a plan rule with `result` is an error.
 
 | Role | Means |
 |------|-------|
-| `clock.date`, `clock.time`, `clock.datetime` | filled from the virtual clock, varied with it |
+| `clock.date`, `clock.time`, `clock.datetime`, `clock.rfc3339` | filled from the virtual clock, varied with it (`2026-11-02`, `10:00`, `2026-11-02T10:00:00`, `2026-11-02T10:00:00Z`) |
 | `http.method`, `http.path`, `http.query`, `http.form` | the parts of an HTTP request; used for crawling and for `write_on_safe_method`. Without roles, fields named `method`, `path`, `query`, `form` count |
 | `identity` | the caller's user id, put in the request by the platform |
+
+When the export takes several parameters, a path starts with the
+parameter's name: for `handle(route: string, req: request)`,
+`fields = { "req.now" = "clock.rfc3339" }`. `@1.now` names the second
+argument by position. The same goes for `[entry] values` and
+`input_values`. With one parameter, paths start inside it, as before.

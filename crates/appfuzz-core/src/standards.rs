@@ -212,7 +212,7 @@ pub enum Need {
 impl Need {
     pub fn why(self) -> &'static str {
         match self {
-            Need::Sinks => "no parameter is labelled sql, shell, path, url, html or regex",
+            Need::Sinks => "no parameter is labelled sql, shell, path, url, html, regex or json",
             Need::Identity => "no identity labels: appfuzz doesn't know who the caller is",
             Need::Owners => "no dataset declares an owner",
             Need::Sensitive => "no pii or secret labels",
@@ -247,6 +247,7 @@ pub fn of(kind: &str) -> Option<Standard> {
         "command_injection" => s(78, None, Some(Sinks)),
         "html_injection" => s(79, None, Some(Sinks)),
         "regex_injection" => s(74, None, Some(Sinks)),
+        "json_injection" => s(116, None, Some(Sinks)),
         "escaped_by_hand" => s(116, None, Some(Sinks)),
         "path_traversal" => s(22, None, Some(Sinks)),
         "ssrf" | "url_path_injection" => s(918, Some("API7"), Some(Sinks)),
@@ -337,6 +338,7 @@ pub const KINDS: &[&str] = &[
     "command_injection",
     "html_injection",
     "regex_injection",
+    "json_injection",
     "escaped_by_hand",
     "path_traversal",
     "ssrf",

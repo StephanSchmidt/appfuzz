@@ -69,7 +69,7 @@ pub(crate) enum Cmd {
         export: Option<String>,
         #[command(flatten)]
         spec: SpecArgs,
-        /// Start fuzzing from the example request, not the stored corpus.
+        /// Start fuzzing from the example requests, not the stored corpus.
         #[arg(long)]
         fresh: bool,
         /// Most findings to confirm (worst first).
@@ -245,7 +245,7 @@ pub(crate) enum Cmd {
         /// Seed of the fuzzer's own choices.
         #[arg(long = "search-seed", visible_alias = "rng", default_value_t = 1)]
         rng: u64,
-        /// Start from the example request only, not the stored corpus.
+        /// Start from the example requests only, not the stored corpus.
         #[arg(long)]
         fresh: bool,
         #[arg(long)]
@@ -574,7 +574,10 @@ pub(crate) struct SpecArgs {
     /// The single argument as JSON (for one-parameter exports).
     #[arg(long)]
     pub(crate) request: Option<String>,
-    /// JSON merged into the default request (from the manifest).
+    /// Start from the manifest's example N (`[entry] examples`, counted from 0).
+    #[arg(long, conflicts_with_all = ["args", "request"])]
+    pub(crate) example: Option<usize>,
+    /// JSON merged into the request (from the manifest); `{"<param>": …}` per argument for several.
     #[arg(long, conflicts_with_all = ["args", "request"])]
     pub(crate) set: Vec<String>,
     /// Host plan: a file, or inline JSON.
@@ -595,12 +598,14 @@ pub(crate) struct SpecArgs {
 pub(crate) enum SequenceCmd {
     /// Execute a scenario against persistent simulated data.
     Run {
+        /// A scenario file, or the name of a `[sequences.NAME]` in the manifest.
         scenario: PathBuf,
         #[arg(long)]
         out: Option<PathBuf>,
     },
     /// Search request orderings and repetitions, then shrink a failure.
     Fuzz {
+        /// A scenario file, or the name of a `[sequences.NAME]` in the manifest.
         scenario: PathBuf,
         #[arg(long, default_value_t = 100)]
         runs: u64,

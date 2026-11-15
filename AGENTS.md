@@ -55,6 +55,13 @@ latency_ms = 4.0             # virtual latency of one call
 cost = 1
 ```
 
+`[entry] examples` adds more example requests; fuzzing starts from all of
+them, and `run --example N` runs one (counted from 0). For an export with
+several parameters, `request` and each example are arrays with one value
+per parameter, and paths in `fields` and `values` start with the
+parameter's name: `fields = { "req.now" = "clock.rfc3339" }`. TOML has no
+null: `{ none = true }` is an option's none in rules, sequences and checks.
+
 Without a manifest, `appfuzz --wasm app.wasm inspect` still works. The
 request is then generated from the WIT types.
 
@@ -143,7 +150,8 @@ appfuzz run --plan '{"acme:web/items#all": {"return": []}}'
 Precedence per call: `on_call[n]` > the first matching rule > `default` >
 the function's `return`/`generate`/`trap` > `_defaults` > generated values.
 Results are WIT-shaped JSON: `{"ok": …}` or `{"err": …}` for results, and
-`null` or the value for options. A plan may describe functions the app
+`null` or the value for options (in the manifest's TOML, `{ none = true }`
+or `generate = { options = "none" }`). A plan may describe functions the app
 doesn't import, so one plan serves several apps. A key that misspells one it
 imports, or a rule on a parameter the function doesn't have, is an error.
 
@@ -197,6 +205,7 @@ Parameter labels:
 | `url` | a URL to fetch | control of the scheme or host: `ssrf`; `../` intact in the path: `url_path_injection` |
 | `html` | markup | `<i>` intact: `html_injection` |
 | `regex` | a regular expression | `(` intact: `regex_injection` (warn) |
+| `json` | JSON text | `"` intact: `json_injection` |
 | `pii`, `secret` | may receive personal data or secrets | (no sink check) |
 | `user-id` | names a user | a value that is not the caller: `foreign_user_access` |
 
@@ -207,6 +216,7 @@ lists, options and `ok`):
 |-------|-------|
 | `untrusted` | the default: text that must not reach sinks or HTML unescaped |
 | `html` | trusted markup: no `stored_reflection` or `html_injection` for it |
+| `json` | JSON text (a stored record): generated as JSON documents; in fuzzing, JSON the app wrote to a `json` parameter comes back here |
 | `pii` | personal data: `pii_leak` fail in logs, error pages and host parameters not labelled `pii`; warn in a URL or header; nothing in an ordinary page, unless `[entry] no_pii = true`: then fail anywhere in the export's output |
 | `secret` | `secret_leak` fail anywhere in the output, logs, or host parameters not labelled `secret` |
 | `identity` | the caller's user id |
@@ -340,7 +350,7 @@ the checks that ran, the checks a missing label kept from running
 | `duplicate_sensitivity`, `order_dependence`, `nondeterminism`, `error_ignored`, `continues_after_error` | the answer changes when it should not, or stays the same when it should change |
 | `invalid_response`, `broken_markup`, `inconsistent_response`, `leaky_error` | bad output: impossible status or headers, a wrong Content-Length, unbalanced HTML, an error page with status 200, internal error text |
 | `reflection`, `stored_reflection`, `input_passthrough` | request or host text reaches HTML unescaped, breaks out of the attribute, script string or event handler it was put in (`detail.context`: `text`, `attribute`, `script`, `handler`, `url`, `json`), or reaches a host call unchanged |
-| `sql_injection`, `path_traversal`, `command_injection`, `ssrf`, `url_path_injection`, `html_injection`, `regex_injection`, `escaped_by_hand` | request or host text reaches a labelled sink (§4) |
+| `sql_injection`, `path_traversal`, `command_injection`, `ssrf`, `url_path_injection`, `html_injection`, `regex_injection`, `json_injection`, `escaped_by_hand` | request or host text reaches a labelled sink (§4) |
 | `pii_leak`, `secret_leak` | a labelled value reaches a place it must not (§4) |
 | `cleartext_transport` | a `secret` or `pii` value goes to a plain `http://` URL off the platform's network |
 | `log_injection` | request text with a line break reaches the log as it came: the request can add log lines of its own (warn) |

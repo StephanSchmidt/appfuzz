@@ -143,6 +143,15 @@ pub struct Entry {
     /// or an array of arguments.
     #[serde(default)]
     pub request: Option<Value>,
+    /// More example requests, shaped like `request`: the fuzzer starts from
+    /// each of them too (one per route, form or mode the app has).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<Value>,
+    /// The export's parameter names, when it has more than one: a request
+    /// path may start with one (`req.now`) to be in that argument. Set when
+    /// the app is loaded.
+    #[serde(skip)]
+    pub params: Vec<String>,
     /// Roles of request fields (`clock.date`, `clock.time`, `http.query`, …).
     #[serde(default)]
     pub fields: BTreeMap<String, String>,
@@ -175,6 +184,80 @@ pub struct Entry {
     /// Accepted guest input domains; unlike `values`, invalid values can arrive.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub input_values: BTreeMap<String, crate::value_contract::Domain>,
+}
+
+impl Entry {
+    /// The argument a request path is in, and the path inside it. For an
+    /// export with several parameters, a path that starts with a
+    /// parameter's name (`req.now`, or `handler` alone) is in that
+    /// argument; any other path is in the first, as for one parameter.
+    pub fn locate<'p>(&self, path: &'p str) -> (usize, &'p str) {
+        // `@1.now`, as `sweep` and `scale` write it.
+        if path.starts_with('@') {
+            return crate::scale::split_arg(path);
+        }
+        if self.params.len() > 1 {
+            let (head, rest) = path.split_once('.').unwrap_or((path, ""));
+            if let Some(i) = self.params.iter().position(|p| p == head || p.replace('-', "_") == head) {
+                return (i, rest);
+            }
+        }
+        (0, path)
+    }
+
+    /// The value at a request path ([`Entry::locate`]).
+    pub fn field<'a>(&self, args: &'a [Value], path: &str) -> Option<&'a Value> {
+        let (i, p) = self.locate(path);
+        crate::harness::field(args.get(i)?, p)
+    }
+
+    pub fn field_mut<'a>(&self, args: &'a mut [Value], path: &str) -> Option<&'a mut Value> {
+        let (i, p) = self.locate(path);
+        crate::harness::field_mut(args.get_mut(i)?, p)
+    }
+
+    /// A request path as `sweep` and `scale` write it: `@1.now` for a path
+    /// in the second argument, unchanged in the first.
+    pub fn arg_path(&self, path: &str) -> String {
+        match self.locate(path) {
+            (0, rest) => rest.to_string(),
+            (i, "") => format!("@{i}"),
+            (i, rest) => format!("@{i}.{rest}"),
+        }
+    }
+
+    /// The roles of `fields` in argument `i`, by path inside it.
+    pub fn fields_in(&self, i: usize) -> BTreeMap<String, String> {
+        self.fields
+            .iter()
+            .filter_map(|(p, r)| {
+                let (j, rest) = self.locate(p);
+                (j == i).then(|| (rest.to_string(), r.clone()))
+            })
+            .collect()
+    }
+
+    /// The argument that holds the request (`http.path`, `http.query`, …):
+    /// the one the `http.` roles name, else the first.
+    pub fn request_arg(&self) -> usize {
+        self.fields.iter().find(|(_, r)| r.starts_with("http.")).map_or(0, |(p, _)| self.locate(p).0)
+    }
+
+    /// Sets the fields with a clock role to `now`, in every argument.
+    pub fn set_clock(&self, args: &mut [Value], now: &str) {
+        for (i, a) in args.iter_mut().enumerate() {
+            crate::harness::set_clock_fields(a, &self.fields_in(i), now);
+        }
+    }
+
+    /// The arguments of one example (`request` or one of `examples`): an
+    /// array of them for an export with several parameters.
+    pub fn args_of(example: &Value, params: usize) -> Vec<Value> {
+        match example {
+            Value::Array(a) if params != 1 => a.clone(),
+            v => vec![v.clone()],
+        }
+    }
 }
 
 /// Where to find things in the export's result. Paths are dot-separated
@@ -509,7 +592,41 @@ impl Manifest {
         }
         crate::labels::check_positions(&m).with_context(|| format!("in {}", path.display()))?;
         m.validate_timing().with_context(|| format!("in {}", path.display()))?;
+        m.toml_none();
         Ok(m)
+    }
+
+    /// TOML has no null: `{ none = true }` stands for it in every
+    /// WIT-shaped value of the manifest (requests, rules, sequences, checks).
+    pub fn toml_none(&mut self) {
+        use crate::value::toml_none as none;
+        if let Some(e) = &mut self.entry {
+            e.request.iter_mut().for_each(none);
+            e.examples.iter_mut().for_each(none);
+        }
+        for f in self.functions.values_mut() {
+            f.rules.iter_mut().for_each(crate::plan::Rule::toml_none);
+        }
+        for s in self.sequences.values_mut() {
+            s.plan.toml_none();
+            for step in &mut s.steps {
+                step.request.iter_mut().for_each(none);
+                step.args.iter_mut().flatten().for_each(none);
+                step.plan.toml_none();
+            }
+        }
+        for c in self.acceptance.iter_mut().flat_map(|a| a.checks.values_mut()) {
+            c.request.iter_mut().for_each(none);
+            c.args.iter_mut().flatten().for_each(none);
+            c.plan.toml_none();
+            c.when.values_mut().for_each(none);
+            if let Some(x) = &mut c.expect {
+                none(&mut x.equals);
+            }
+            if let Some(r) = &mut c.relation {
+                r.set.values_mut().for_each(none);
+            }
+        }
     }
 
     /// A manifest for a bare `.wasm` without `appfuzz.toml`.
@@ -652,6 +769,49 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn entry_paths_name_the_parameter_and_toml_writes_none() {
+        let mut m: Manifest = toml::from_str(
+            r#"
+            [app]
+            wasm = "a.wasm"
+            [entry]
+            export = "acme:web/handler#handle"
+            request = ["GET /", { path = "/", now = "", query = [["day", ""]] }]
+            examples = [["POST /signup", { path = "/signup", now = "", query = [] }]]
+            fields = { "req.now" = "clock.rfc3339", "@1.query.day" = "clock.date" }
+            [functions."acme:web/store#get"]
+            rules = [{ when = { key = "gone" }, return = { none = true } }, { when = { key = "kept" }, return = { none = false } }]
+            "#,
+        )
+        .unwrap();
+        m.toml_none();
+        let rules = &m.functions["acme:web/store#get"].rules;
+        assert_eq!(rules[0].response.ret, Some(Value::Null));
+        assert_eq!(rules[1].response.ret, Some(json!({"none": false})), "only none = true is null");
+        let e = m.entry.as_mut().unwrap();
+        // One parameter: paths start inside it, whatever their first word.
+        assert_eq!(e.locate("req.now"), (0, "req.now"));
+        e.params = vec!["route".into(), "req".into()];
+        assert_eq!(e.locate("req.now"), (1, "now"));
+        assert_eq!(e.locate("@1.now"), (1, "now"));
+        assert_eq!(e.locate("route"), (0, ""));
+        assert_eq!(e.locate("path"), (0, "path"));
+        assert_eq!(e.arg_path("req.now"), "@1.now");
+        assert_eq!(e.arg_path("route"), "");
+        assert_eq!(e.fields_in(0), BTreeMap::new());
+        let mut args = Entry::args_of(e.request.as_ref().unwrap(), 2);
+        e.set_clock(&mut args, "2026-11-02T10:00:00");
+        assert_eq!(args[1]["now"], "2026-11-02T10:00:00Z");
+        assert_eq!(args[1]["query"][0][1], "2026-11-02");
+        assert_eq!(args[0], "GET /", "the clock leaves other arguments alone");
+        assert_eq!(e.field(&args, "req.path"), Some(&json!("/")));
+        assert_eq!(Entry::args_of(&e.examples[0], 2).len(), 2);
+        // A one-parameter export takes an array as its single argument.
+        assert_eq!(Entry::args_of(&json!(["a", "b"]), 1), vec![json!(["a", "b"])]);
+    }
 
     #[test]
     fn contract_identity_tracks_the_embedded_browser_build() {

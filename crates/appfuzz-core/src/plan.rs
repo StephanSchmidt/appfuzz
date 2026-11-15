@@ -61,6 +61,10 @@ impl Response {
     pub fn decides(&self) -> bool {
         self.ret.is_some() || self.generate.is_some() || self.trap.is_some() || self.commit_then_trap.is_some()
     }
+
+    fn toml_none(&mut self) {
+        self.ret.iter_mut().for_each(crate::value::toml_none);
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -78,6 +82,12 @@ pub struct Rule {
 }
 
 impl Rule {
+    /// `{ none = true }` in a TOML rule is null ([`crate::value::toml_none`]).
+    pub(crate) fn toml_none(&mut self) {
+        self.when.values_mut().for_each(crate::value::toml_none);
+        self.response.toml_none();
+    }
+
     /// Whether the rule answers the call, not only labels it.
     fn answers(&self) -> bool {
         self.result.is_none() || self.response.decides()
@@ -158,6 +168,16 @@ impl Plan {
 
     pub fn load(path: &std::path::Path) -> Result<Self> {
         Self::parse(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)
+    }
+
+    /// A plan written in TOML: `{ none = true }` is null ([`crate::value::toml_none`]).
+    pub fn toml_none(&mut self) {
+        for f in self.0.values_mut() {
+            f.response.toml_none();
+            f.rules.iter_mut().for_each(Rule::toml_none);
+            f.on_call.values_mut().for_each(Response::toml_none);
+            f.default.iter_mut().for_each(Response::toml_none);
+        }
     }
 
     pub fn validate(&self) -> Result<()> {

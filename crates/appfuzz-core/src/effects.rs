@@ -20,8 +20,8 @@ pub const SAFE_METHODS: &[&str] = &["GET", "HEAD", "OPTIONS"];
 
 /// The request's HTTP method, if the request has one.
 pub fn method(r: &RunRecord, m: &Manifest) -> Option<String> {
-    let req = r.spec.args.first()?;
-    let fields = m.entry.as_ref().map(|e| e.fields.clone()).unwrap_or_default();
+    let (i, fields) = crate::fuzz::request_fields_of(m);
+    let req = r.spec.args.get(i)?;
     let p = crate::fuzz::role_path(&fields, req, "method")?;
     crate::harness::field(req, &p)?.as_str().map(str::to_ascii_uppercase)
 }

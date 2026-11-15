@@ -141,7 +141,8 @@ pub fn apply(app: &App, base: &RunSpec, knob: &Knob, n: u64) -> Result<RunSpec> 
             spec.plan.0.insert(info.key.clone(), fp);
         }
         Knob::Field(p) | Knob::FieldLen(p) => {
-            let (i, path) = split_arg(p);
+            // `@1.now`, or `req.now` for a parameter the manifest's export names.
+            let (i, path) = app.manifest.entry.as_ref().map_or_else(|| split_arg(p), |e| e.locate(p));
             let req = spec.args.get_mut(i).ok_or_else(|| anyhow!("the export has no argument {i}"))?;
             let len = matches!(knob, Knob::FieldLen(_));
             if path.is_empty() {
@@ -1228,7 +1229,7 @@ pub fn discover(app: &App, base: &RunSpec, dict_limit: usize, run: Runner) -> Re
     knobs.extend(fields.iter().cloned());
 
     // 1. Modes from plain string fields (`method=POST`), clock fields aside.
-    let clock: BTreeSet<String> = app.manifest.entry.iter().flat_map(|e| e.fields.keys().cloned()).collect();
+    let clock: BTreeSet<String> = app.manifest.entry.iter().flat_map(|e| e.fields.keys().map(|p| e.arg_path(p))).collect();
     let in_pairs = |p: &str| pair_lists.iter().any(|l| p.starts_with(&format!("{l}.")) || l == "@0");
     let mut tries: Vec<(String, String, RunSpec)> = Vec::new();
     for k in &fields {
@@ -1260,13 +1261,13 @@ pub fn discover(app: &App, base: &RunSpec, dict_limit: usize, run: Runner) -> Re
 
     // 1b. Pages the base page links to and forms it submits (`POST /add`
     //     needs two fields at once; the app's own form has both).
-    let entry_fields = app.manifest.entry.as_ref().map(|e| e.fields.clone()).unwrap_or_default();
+    let (request, entry_fields) = crate::fuzz::request_fields(app);
     let inputs = base_run.result.as_ref().map(crate::fuzz::form_inputs).unwrap_or_default();
     let ones: Vec<String> = inputs.iter().map(|_| "1".to_string()).collect();
     let mut crawl: Vec<(String, RunSpec)> = Vec::new();
     for u in crate::urls::extract_output(&base_run, &app.manifest).into_iter().filter(|u| u.kind == "same_host").take(MAX_CRAWL) {
         let mut spec = base.clone();
-        if let Some(req) = spec.args.first_mut()
+        if let Some(req) = spec.args.get_mut(request)
             && crate::fuzz::crawl_into(req, &entry_fields, &u.url, &u.method, &inputs, &ones)
             && !crawl.iter().any(|(_, s)| s.args == spec.args)
         {
@@ -1296,10 +1297,11 @@ pub fn discover(app: &App, base: &RunSpec, dict_limit: usize, run: Runner) -> Re
     key_words.extend(COMMON_KEYS.iter().map(|k| k.to_string()).filter(|k| !words.contains(k)));
     // A whole URL (Fastly, wasi:http): the keys of its query, as `uri?key`.
     let mut prefixes: Vec<String> = pair_lists.iter().map(|l| format!("{l}.")).collect();
-    if let Some(req) = base.args.first() {
-        let fields = app.manifest.entry.as_ref().map(|e| e.fields.clone()).unwrap_or_default();
+    let (request, fields) = crate::fuzz::request_fields(app);
+    if let Some(req) = base.args.get(request) {
+        let at = if request == 0 { String::new() } else { format!("@{request}.") };
         if let Some(p) = crate::fuzz::role_path(&fields, req, "uri").filter(|p| crate::harness::field(req, p).is_some_and(Value::is_string)) {
-            prefixes.push(format!("{p}?"));
+            prefixes.push(format!("{at}{p}?"));
         }
     }
     for c in 0..=field_ctxs {

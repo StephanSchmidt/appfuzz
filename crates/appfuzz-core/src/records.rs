@@ -363,7 +363,7 @@ fn starts(app: &App, base: &RunSpec, run: Runner) -> Vec<RunSpec> {
     if first.outcome.kind != OutcomeKind::Ok {
         return out;
     }
-    let fields = app.manifest.entry.as_ref().map(|e| e.fields.clone()).unwrap_or_default();
+    let (request, fields) = crate::fuzz::request_fields(app);
     let inputs = first.result.as_ref().map(crate::fuzz::form_inputs).unwrap_or_default();
     let ones: Vec<String> = inputs.iter().map(|_| "1".to_string()).collect();
     for u in crate::urls::extract_output(&first, &app.manifest).into_iter().filter(|u| u.kind == "same_host") {
@@ -371,7 +371,7 @@ fn starts(app: &App, base: &RunSpec, run: Runner) -> Vec<RunSpec> {
             break;
         }
         let mut spec = base.clone();
-        if let Some(req) = spec.args.first_mut()
+        if let Some(req) = spec.args.get_mut(request)
             && crate::fuzz::crawl_into(req, &fields, &u.url, &u.method, &inputs, &ones)
             && !out.iter().any(|s| s.args == spec.args)
         {

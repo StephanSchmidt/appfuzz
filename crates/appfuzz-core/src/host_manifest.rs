@@ -341,6 +341,9 @@ pub fn merge(host: &HostManifest, mut app: Manifest, app_toml: &toml::Table) -> 
             if ae.request.is_some() {
                 e.request = ae.request;
             }
+            if !ae.examples.is_empty() {
+                e.examples = ae.examples;
+            }
             if ae.now.is_some() {
                 e.now = ae.now;
             }

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::detect::Finding;
 use crate::fuzz::{first_list, first_list_mut, nodes};
-use crate::harness::{App, set_clock_fields};
+use crate::harness::App;
 use crate::metamorphic::{self, Change};
 use crate::par::{self, Runner};
 use crate::plan::{FnPlan, Response};
@@ -299,8 +299,8 @@ fn candidates(app: &App, s: &RunSpec, base: &[Value], lows: &Lows) -> Vec<Cand> 
     for now in [start.clone(), s.now.clone()] {
         let mut c = s.clone();
         c.now = now.clone();
-        if let (Some(e), Some(a)) = (entry, c.args.first_mut()) {
-            set_clock_fields(a, &e.fields, &now);
+        if let Some(e) = entry {
+            e.set_clock(&mut c.args, &now);
         }
         if c != *s {
             tiers[0].push(c.into());

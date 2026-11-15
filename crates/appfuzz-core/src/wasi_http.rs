@@ -139,6 +139,8 @@ pub fn default_manifest(manifest: &mut Manifest, imports: &[Interface], exports:
         let entry = manifest.entry.get_or_insert_with(|| Entry {
             export: handler.key.clone(),
             request: None,
+            examples: vec![],
+            params: vec![],
             fields: Default::default(),
             output: Output::default(),
             now: None,

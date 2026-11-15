@@ -227,7 +227,8 @@ impl Browser {
                     if let Some(first) = s.args.first_mut() {
                         *first = request;
                         if let Some(entry) = &m.entry {
-                            crate::harness::set_clock_fields(first, &entry.fields, &s.now);
+                            let now = s.now.clone();
+                            entry.set_clock(&mut s.args, &now);
                         }
                     }
                     // Each request is a run of its own, as the fuzzer's are:

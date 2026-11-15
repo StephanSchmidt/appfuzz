@@ -527,12 +527,16 @@ fn build_spec(app: &App, export: Option<&str>, a: &SpecArgs) -> Result<RunSpec> 
             None => request,
         }]
     } else {
-        let mut args = app.default_args(&export, &now)?;
-        for s in &a.set {
-            let patch = parse_json_arg(s)?;
-            if let Some(first) = args.first_mut() {
-                merge(first, patch);
+        let mut args = match a.example {
+            Some(n) => {
+                let all = app.example_args(&export, &now);
+                let Some(args) = all.get(n) else { bail!("--example {n}: [entry] has {} examples for {}, counted from 0", all.len(), export.key) };
+                args.clone()
             }
+            None => app.default_args(&export, &now)?,
+        };
+        for s in &a.set {
+            set_args(app, &export, &mut args, parse_json_arg(s)?);
         }
         args
     };
@@ -548,6 +552,28 @@ fn build_spec(app: &App, export: Option<&str>, a: &SpecArgs) -> Result<RunSpec> 
         spec.fuel = f;
     }
     Ok(spec)
+}
+
+/// Merges `--set` JSON into the request: into the argument with the
+/// request's roles, or per argument when its keys are parameter names.
+fn set_args(app: &App, export: &appfuzz_core::wit::FuncInfo, args: &mut [Value], patch: Value) {
+    let names: Vec<&str> = export.ty.params().map(|(n, _)| n).collect();
+    if let Value::Object(o) = &patch
+        && names.len() > 1
+        && !o.is_empty()
+        && o.keys().all(|k| names.contains(&k.as_str()))
+    {
+        for (k, v) in o.clone() {
+            if let Some(a) = names.iter().position(|n| *n == k).and_then(|i| args.get_mut(i)) {
+                merge(a, v);
+            }
+        }
+        return;
+    }
+    let entry = app.manifest.entry.as_ref().filter(|e| appfuzz_core::harness::fn_key_eq(&e.export, &export.key));
+    if let Some(a) = args.get_mut(entry.map_or(0, |e| e.request_arg())) {
+        merge(a, patch);
+    }
 }
 
 fn merge(base: &mut Value, patch: Value) {

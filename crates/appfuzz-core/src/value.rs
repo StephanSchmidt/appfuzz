@@ -121,6 +121,18 @@ fn float_json(f: f64) -> Value {
     serde_json::Number::from_f64(f).map(Value::Number).unwrap_or_else(|| json!(f.to_string()))
 }
 
+/// TOML has no null. In a manifest, the table `{ none = true }` stands for
+/// it wherever a WIT-shaped value goes: an absent option
+/// (`return = { none = true }`, also inside `{ ok = { none = true } }`).
+pub fn toml_none(v: &mut Value) {
+    match v {
+        Value::Object(m) if m.len() == 1 && m.get("none") == Some(&Value::Bool(true)) => *v = Value::Null,
+        Value::Object(m) => m.values_mut().for_each(toml_none),
+        Value::Array(a) => a.iter_mut().for_each(toml_none),
+        _ => {}
+    }
+}
+
 pub fn json_to_val(v: &Value, ty: &Type) -> Result<Val> {
     Ok(match ty {
         Type::Bool => Val::Bool(v.as_bool().ok_or_else(|| expected("bool", v))?),
@@ -578,6 +590,13 @@ pub fn fakeable(ty: &Type) -> bool {
 #[cfg(test)]
 mod generation_tests {
     use super::*;
+
+    #[test]
+    fn toml_none_is_null_at_any_depth() {
+        let mut v = json!({"ok": [{"none": true}, {"none": true, "x": 1}, {"some": {"none": true}}], "n": {"none": "yes"}});
+        toml_none(&mut v);
+        assert_eq!(v, json!({"ok": [null, {"none": true, "x": 1}, {"some": null}], "n": {"none": "yes"}}));
+    }
 
     #[test]
     fn fixed_integral_notation_is_exact_and_casting_is_explicit() {

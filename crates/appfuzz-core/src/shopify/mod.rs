@@ -317,6 +317,8 @@ fn entry(export: String) -> Entry {
     Entry {
         export,
         request: None,
+        examples: vec![],
+        params: vec![],
         fields: Default::default(),
         output: Default::default(),
         now: None,

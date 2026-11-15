@@ -229,10 +229,14 @@ impl Check {
         if !self.forbid_effects.is_empty() && r.events.iter().any(|e| m.function(&e.func).and_then(|f| f.effect).is_none()) {
             return false;
         }
-        let Some(req) = r.spec.args.first() else {
+        if r.spec.args.is_empty() {
             return self.when.is_empty() && self.input_class.is_none();
+        }
+        let at = |path: &str| match &m.entry {
+            Some(e) => e.field(&r.spec.args, path),
+            None => crate::harness::field(&r.spec.args[0], path),
         };
-        if !self.when.iter().all(|(path, v)| crate::harness::field(req, path) == Some(v)) {
+        if !self.when.iter().all(|(path, v)| at(path) == Some(v)) {
             return false;
         }
         let Some(class) = self.input_class else {
@@ -254,7 +258,7 @@ impl Check {
             let Some(domain) = entry.input_values.get(path) else {
                 return false;
             };
-            let value = crate::harness::field(req, path);
+            let value = at(path);
             if !domain.exercised(value) {
                 continue;
             }

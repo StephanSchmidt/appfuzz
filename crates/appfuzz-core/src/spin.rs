@@ -121,6 +121,8 @@ fn from_str(text: &str, dir: &Path, component: Option<&str>) -> Result<Manifest>
         m.entry = Some(Entry {
             export: "wasi:http/incoming-handler#handle".into(),
             request: Some(json!({ "method": "GET", "uri": format!("https://app.example{base}/"), "headers": [], "body": "" })),
+            examples: vec![],
+            params: vec![],
             fields: Default::default(),
             output: Default::default(),
             now: None,

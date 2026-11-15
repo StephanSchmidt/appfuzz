@@ -1,9 +1,9 @@
 //! Labels: what the manifest says host function parameters and results
 //! mean. A parameter label names a sink (`sql`, `path`, `shell`, `url`,
-//! `html`, `regex`) or says the parameter may receive personal data or
-//! secrets (`pii`, `secret`). A result label says what a host function
-//! returns: `untrusted` text (the default), trusted `html`, personal data
-//! (`pii`) or a `secret`.
+//! `html`, `regex`, `json`) or says the parameter may receive personal data
+//! or secrets (`pii`, `secret`). A result label says what a host function
+//! returns: `untrusted` text (the default), trusted `html`, `json` text
+//! (still untrusted), personal data (`pii`) or a `secret`.
 //!
 //! Sinks are checked with canaries: a request field or host string whose
 //! canary tail (`<i>'"../;$(x)`) reaches a labelled parameter intact. Personal
@@ -37,6 +37,9 @@ pub enum Label {
     Url,
     Html,
     Regex,
+    /// A parameter: JSON text the app builds. A result: JSON text the app
+    /// parses (still untrusted: anyone may have written it).
+    Json,
     Untrusted,
     Pii,
     Secret,
@@ -58,6 +61,7 @@ impl Label {
             Label::Url => "url",
             Label::Html => "html",
             Label::Regex => "regex",
+            Label::Json => "json",
             Label::Untrusted => "untrusted",
             Label::Pii => "pii",
             Label::Secret => "secret",
@@ -69,7 +73,7 @@ impl Label {
 
     /// A parameter that interprets text: a canary tail must not reach it intact.
     pub fn is_sink(self) -> bool {
-        matches!(self, Label::Sql | Label::Path | Label::Shell | Label::Url | Label::Html | Label::Regex)
+        matches!(self, Label::Sql | Label::Path | Label::Shell | Label::Url | Label::Html | Label::Regex | Label::Json)
     }
 
     fn for_param(self) -> bool {
@@ -77,7 +81,7 @@ impl Label {
     }
 
     fn for_result(self) -> bool {
-        matches!(self, Label::Untrusted | Label::Html | Label::Pii | Label::Secret | Label::Identity | Label::Owner)
+        matches!(self, Label::Untrusted | Label::Html | Label::Json | Label::Pii | Label::Secret | Label::Identity | Label::Owner)
     }
 
     /// Labels on ids, which may be numbers as well as text.
@@ -128,7 +132,7 @@ pub fn check_positions(m: &Manifest) -> Result<()> {
         for (p, l) in &f.params {
             if !l.for_param() {
                 bail!(
-                    "[functions.\"{k}\"] params.{p} = \"{}\": a parameter label is one of sql, path, shell, url, html, regex, pii, secret, user-id",
+                    "[functions.\"{k}\"] params.{p} = \"{}\": a parameter label is one of sql, path, shell, url, html, regex, json, pii, secret, user-id",
                     l.name()
                 );
             }
@@ -136,7 +140,7 @@ pub fn check_positions(m: &Manifest) -> Result<()> {
         for (p, l) in f.result.iter().chain(f.rules.iter().filter_map(|r| r.result.as_ref())).flat_map(ResultLabels::paths) {
             if !l.for_result() {
                 let at = if p.is_empty() { "result".to_string() } else { format!("result.{p}") };
-                bail!("[functions.\"{k}\"] {at} = \"{}\": a result label is one of untrusted, html, pii, secret, identity, owner", l.name());
+                bail!("[functions.\"{k}\"] {at} = \"{}\": a result label is one of untrusted, html, json, pii, secret, identity, owner", l.name());
             }
         }
     }
@@ -271,6 +275,26 @@ fn is_scalar_id(ty: &Type) -> bool {
     matches!(ty, Type::String | Type::U8 | Type::U16 | Type::U32 | Type::U64 | Type::S8 | Type::S16 | Type::S32 | Type::S64)
 }
 
+/// Sets every string at a result path to `text`.
+pub(crate) fn set_strings(v: &mut Value, path: &str, text: &str) {
+    walk_mut(v, &segs(path), &mut |s| *s = text.to_string());
+}
+
+/// JSON text for a `json` result path, around the generated text `s`: an
+/// object, a list, a plain value or an empty object. Always JSON: the
+/// app's parser gets past the first character. Text that is no JSON at
+/// all comes from `probe values` and the fuzzer.
+fn json_text(s: &str, h: u64) -> String {
+    let doc = match (h >> 40) % 5 {
+        0 => json!({"id": (h >> 20) % 1000, "name": s, "items": [s], "done": false}),
+        1 => json!([{"id": 1, "name": s}, {"id": 2, "name": s}]),
+        2 => json!({"value": s, "n": (h >> 8) % 100}),
+        3 => json!({}),
+        _ => json!(s),
+    };
+    doc.to_string()
+}
+
 /// The strings at a result path, in WIT-shaped JSON.
 pub fn values_at(v: &Value, path: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -326,7 +350,8 @@ pub fn id_text(v: &Value) -> String {
 }
 
 /// Replaces generated strings at `pii` and `secret` result paths with
-/// traceable values (`p1a2b3c4d@mail.example`, `sk_…`), and ids at
+/// traceable values (`p1a2b3c4d@mail.example`, `sk_…`), strings at `json`
+/// paths with JSON text around them, and ids at
 /// `identity` and `owner` paths with the run's caller (`identity`) or,
 /// for about half the owners, someone else (`identity + 1`).
 pub fn mark(v: &mut Value, labels: &[(String, Label)], seed: u64, identity: &str) {
@@ -350,6 +375,7 @@ pub fn mark(v: &mut Value, labels: &[(String, Label)], seed: u64, identity: &str
             match l {
                 Label::Pii => *s = format!("p{:08x}@mail.example", h >> 32),
                 Label::Secret => *s = format!("sk_{h:016x}"),
+                Label::Json => *s = json_text(s, h),
                 _ => {}
             }
         };
@@ -501,6 +527,9 @@ pub(crate) fn sink_problem(label: Label, s: &str, start: usize, end: usize, sent
         }
         Label::Html if sent.contains("<i>") && t.starts_with("<i>") => Some(("html_injection", Severity::Fail, "markup")),
         Label::Regex if sent.contains('(') && unescaped(t, "(") => Some(("regex_injection", Severity::Warn, "(")),
+        // A JSON serializer writes `\"`; pasted text keeps its quote and
+        // ends the string early: the text adds keys and values of its own.
+        Label::Json if sent.contains('"') && unescaped(t, "\"") => Some(("json_injection", Severity::Fail, "a double quote")),
         Label::Url => {
             let auth_end = match s.find("://") {
                 None => 0,
@@ -564,6 +593,7 @@ fn sinks(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
                         Label::Shell => "shell command",
                         Label::Url => "URL",
                         Label::Html => "HTML",
+                        Label::Json => "JSON text",
                         _ => "regular expression",
                     };
                     let noun = if kind == "url_path_injection" { "URL path" } else { noun };
@@ -1037,6 +1067,8 @@ fn param_guess(n: &str) -> Option<Label> {
         Some(Label::Html)
     } else if has(&["regex", "pattern"]) {
         Some(Label::Regex)
+    } else if has(&["json"]) {
+        Some(Label::Json)
     } else {
         name_guess(n)
     }
@@ -1114,6 +1146,28 @@ mod tests {
         mark(&mut v, &[("token".into(), Label::Secret), ("user.email".into(), Label::Pii)], 1, "1000");
         assert!(v["ok"]["token"].as_str().unwrap().starts_with("sk_"));
         assert!(v["ok"]["user"]["email"].as_str().unwrap().ends_with("@mail.example"));
+    }
+
+    #[test]
+    fn json_results_are_json_and_quotes_must_be_escaped() {
+        for seed in 0..64 {
+            let mut v = json!({"ok": {"doc": "abc", "name": "abc"}});
+            mark(&mut v, &[("doc".into(), Label::Json)], seed, "1000");
+            let doc = v["ok"]["doc"].as_str().unwrap();
+            assert!(serde_json::from_str::<Value>(doc).is_ok(), "{doc}");
+            assert_eq!(v["ok"]["name"], "abc");
+        }
+        const FULL: &str = "<i>'\"../;$(x)";
+        let c = "cnry12ab7";
+        // A JSON serializer escapes the quote; pasting does not.
+        let safe = json!({"name": format!("{c}{FULL}")}).to_string();
+        let s = safe.find(c).unwrap();
+        assert!(sink_problem(Label::Json, &safe, s, s + c.len(), FULL).is_none(), "{safe}");
+        let pasted = format!("{{\"name\": \"{c}{FULL}\"}}");
+        let s = pasted.find(c).unwrap();
+        assert_eq!(sink_problem(Label::Json, &pasted, s, s + c.len(), FULL).unwrap().0, "json_injection");
+        // Without a quote from the request, a quote in the sink is the app's own.
+        assert!(sink_problem(Label::Json, &pasted, s, s + c.len(), "<i>").is_none());
     }
 
     #[test]

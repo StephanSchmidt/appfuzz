@@ -1279,7 +1279,10 @@ fn replay_distinguishes_exact_builds_from_regression_checks() {
     let a05 = &review["owasp"][4];
     assert_eq!(a05["id"], "A05", "{}", review["owasp"]);
     assert!(a05["found"].as_u64().unwrap() >= 1, "{a05}");
-    assert!(a05["not_checked"]["no parameter is labelled sql, shell, path, url, html or regex"].as_array().unwrap().contains(&json!("sql_injection")), "{a05}");
+    assert!(
+        a05["not_checked"]["no parameter is labelled sql, shell, path, url, html, regex or json"].as_array().unwrap().contains(&json!("sql_injection")),
+        "{a05}"
+    );
     let case = reflection["case"].as_str().unwrap();
     assert_eq!(f.cli(&["replay", case]).0, 0);
     let wasm = f.dir.join("app.wasm");
@@ -2931,6 +2934,69 @@ fn measured_scaling_breaks_keep_large_exact_costs_and_replay() {
     let (code, replayed) = f.cli(&["replay", confirmed["case"].as_str().unwrap()]);
     assert_eq!(code, 0, "{replayed}");
     assert_eq!(replayed["reproduced"], true);
+}
+
+#[test]
+fn a_crash_with_every_host_value_is_not_blamed_on_one() {
+    let f = Fixture::new(false);
+    let wit = "package test:workflow; interface db { get: func(id: u32) -> u32; } world app { import db; export run: func(n: u32) -> u32; }";
+    let always = r#"(module (import "test:workflow/db" "get" (func $get (param i32) (result i32)))
+        (func (export "run") (param i32) (result i32) (drop (call $get (local.get 0))) unreachable))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, always)).unwrap();
+    let (_, probed) = f.cli(&["probe", "values"]);
+    let kinds: Vec<&str> = probed["findings"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap()).collect();
+    assert!(!kinds.contains(&"crash_on_host_value"), "{probed}");
+    assert!(kinds.contains(&"crash"), "{probed}");
+    // Trapping on anything but the planned 7 is the value's doing.
+    let odd = r#"(module (import "test:workflow/db" "get" (func $get (param i32) (result i32)))
+        (func (export "run") (param i32) (result i32) (local i32)
+          (local.set 1 (call $get (local.get 0)))
+          (if (i32.ne (local.get 1) (i32.const 7)) (then unreachable))
+          (local.get 1)))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, odd)).unwrap();
+    let (_, probed) = f.cli(&["probe", "values", "--plan", r#"{"test:workflow/db#get": {"return": 7}}"#]);
+    let blamed: Vec<&Value> = probed["findings"].as_array().unwrap().iter().filter(|x| x["kind"] == "crash_on_host_value").collect();
+    assert!(!blamed.is_empty(), "{probed}");
+}
+
+#[test]
+fn examples_and_entry_paths_reach_every_argument() {
+    let f = Fixture::new(true);
+    // run(route, req) returns req.
+    let wit = "package test:workflow; world app { export run: func(route: string, req: string) -> string; }";
+    let wat = r#"
+        (module
+          (memory (export "memory") 4)
+          (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
+          (func (export "run") (param i32 i32 i32 i32) (result i32)
+            (i32.store (i32.const 0) (local.get 2))
+            (i32.store (i32.const 4) (local.get 3))
+            (i32.const 0)))"#;
+    std::fs::write(f.dir.join("app.wasm"), component(wit, wat)).unwrap();
+    f.edit("request = \"safe\"", "request = [\"GET /\", \"\"]\nexamples = [[\"POST /x\", \"typed\"]]\nfields = { req = 'clock.rfc3339' }");
+    let (code, run) = f.cli(&["run", "--now", "2027-03-04T05:06:07"]);
+    assert_eq!(code, 0, "{run}");
+    assert_eq!(run["result"], "2027-03-04T05:06:07Z", "the clock fills the second argument by its name");
+    let (_, example) = f.cli(&["run", "--example", "0", "--now", "2027-03-04T05:06:07"]);
+    assert_eq!(example["result"], "2027-03-04T05:06:07Z", "and the examples' too");
+    f.edit("fields = { req = 'clock.rfc3339' }", "");
+    let (code, example) = f.cli(&["run", "--example", "0"]);
+    assert_eq!(code, 0, "{example}");
+    assert_eq!(example["result"], "typed");
+    let (_, set) = f.cli(&["run", "--set", r#"{"req": "set"}"#]);
+    assert_eq!(set["result"], "set", "--set merges per argument");
+    let (code, missing) = f.cli(&["run", "--example", "1"]);
+    assert_eq!(code, 3, "{missing}");
+    assert!(missing["error"].as_str().unwrap().contains("1 examples"), "{missing}");
+    f.edit("examples = [[\"POST /x\", \"typed\"]]", "examples = [[\"POST /x\", \"typed\"]]\nfields = { rq = 'clock.date' }");
+    let (code, typo) = f.cli(&["run"]);
+    assert_eq!(code, 3, "{typo}");
+    assert!(typo["error"].as_str().unwrap().contains("paths start with a parameter: route, req"), "{typo}");
+    f.edit("fields = { rq = 'clock.date' }", "examples = [[\"one\"]]");
+    std::fs::write(&f.manifest, std::fs::read_to_string(&f.manifest).unwrap().replace("examples = [[\"POST /x\", \"typed\"]]\n", "")).unwrap();
+    let (code, short) = f.cli(&["run"]);
+    assert_eq!(code, 3, "{short}");
+    assert!(short["error"].as_str().unwrap().contains("entry.examples[0]"), "{short}");
 }
 
 #[test]

@@ -4,6 +4,7 @@ use super::{Constraint, Decimal, integer_json};
 use crate::value::{GenOpts, Generator, json_to_val, val_to_json};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use wasmtime::component::Type;
 
 fn segments(path: &str) -> Vec<&str> {
@@ -16,6 +17,12 @@ fn list_element(ty: &Type) -> Option<Type> {
         Type::FixedLengthList(l) => Some(l.ty()),
         _ => None,
     }
+}
+
+/// The WIT type at a request path (through options, lists and `[key,
+/// value]` pairs), or why there is none.
+pub(crate) fn path_type(ty: &Type, path: &str) -> Result<Type> {
+    selected_type(ty, &segments(path), &Constraint::Enum(Vec::new()))
 }
 
 fn selected_type(ty: &Type, path: &[&str], c: &Constraint) -> Result<Type> {
@@ -279,8 +286,17 @@ pub(crate) fn conform_request_typed(args: &mut [Value], app: &crate::harness::Ap
     if entry.values.is_empty() || !crate::harness::fn_key_eq(&entry.export, export) {
         return Ok(());
     }
-    let (_, ty) = app.export(export)?.ty.params().next().context("request guarantees need an argument")?;
-    let request = args.first_mut().context("missing request argument")?;
-    let constraints: Vec<_> = entry.values.iter().map(|(path, c)| (path.clone(), c.clone())).collect();
-    conform_host(request, &ty, &constraints, seed)
+    // Each argument keeps to the guarantees on its own paths.
+    let types: Vec<Type> = app.export(export)?.ty.params().map(|(_, t)| t).collect();
+    let mut by_arg: BTreeMap<usize, Vec<(String, Constraint)>> = BTreeMap::new();
+    for (path, c) in &entry.values {
+        let (i, rest) = entry.locate(path);
+        by_arg.entry(i).or_default().push((rest.to_string(), c.clone()));
+    }
+    for (i, constraints) in by_arg {
+        let ty = types.get(i).context("request guarantees need an argument")?;
+        let request = args.get_mut(i).context("missing request argument")?;
+        conform_host(request, ty, &constraints, seed)?;
+    }
+    Ok(())
 }

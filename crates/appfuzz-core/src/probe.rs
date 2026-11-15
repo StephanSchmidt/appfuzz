@@ -101,7 +101,9 @@ pub fn variants(t: &Type) -> Vec<(&'static str, GenOpts)> {
 }
 
 /// Runs every value class of every host function (or those matching
-/// `only`). Returns the probes and the findings they produced.
+/// `only`). Returns the probes and the findings they produced. A crash or
+/// hang there is `crash_on_host_value` / `hang_on_host_value`, unless the
+/// request fails the same way without the odd value.
 pub fn values(app: &App, base: &RunSpec, only: Option<&str>, run: Runner) -> (Vec<ValueProbe>, Vec<Finding>) {
     let base = RunSpec { plan: steady(&base.plan), ..base.clone() };
     let mut probes = Vec::new();
@@ -137,11 +139,15 @@ pub fn values(app: &App, base: &RunSpec, only: Option<&str>, run: Runner) -> (Ve
         }
     }
     let runs = par::map(&tries, |(_, _, s)| run(s));
+    // A crash the request has without the odd value is not its doing.
+    let own = run(&base);
+    let always: Vec<String> =
+        crate::detect::per_run_checked(app, &own).into_iter().filter(|x| matches!(x.kind.as_str(), "crash" | "hang")).map(|x| x.title).collect();
     for ((f, variant, _), r) in tries.into_iter().zip(runs) {
         probes.push(ValueProbe { func: f.key.clone(), variant: variant.into(), run: r.id.clone(), outcome: r.outcome.kind, host_calls: r.totals.host_calls });
         for mut x in crate::detect::per_run_checked(app, &r) {
             // Name the value that caused it.
-            if matches!(x.kind.as_str(), "crash" | "hang") {
+            if matches!(x.kind.as_str(), "crash" | "hang") && !always.contains(&x.title) {
                 let kind = format!("{}_on_host_value", x.kind);
                 x = Finding::new(
                     &kind,
@@ -202,8 +208,8 @@ pub fn times(app: &App, base: &RunSpec, run: Runner) -> (Vec<TimeProbe>, Vec<Fin
             let mut spec = base.clone();
             spec.now = now.to_string();
             // Request fields that carry the clock follow `now`.
-            if let (Some(e), Some(a)) = (app.manifest.entry.as_ref(), spec.args.first_mut()) {
-                crate::harness::set_clock_fields(a, &e.fields, now);
+            if let Some(e) = app.manifest.entry.as_ref() {
+                e.set_clock(&mut spec.args, now);
             }
             spec
         })
@@ -425,7 +431,7 @@ fn predictable_tokens(app: &App, issuing: &[RunRecord], run: Runner, probes: &mu
             let mut later = RunSpec { now: format!("{d}T{hms}"), ..base.clone() };
             if let Some(e) = m.entry.as_ref().filter(|e| crate::harness::fn_key_eq(&e.export, &base.export)) {
                 let now = later.now.clone();
-                crate::harness::set_clock_fields(&mut later.args[0], &e.fields, &now);
+                e.set_clock(&mut later.args, &now);
             }
             specs.push(later);
         }

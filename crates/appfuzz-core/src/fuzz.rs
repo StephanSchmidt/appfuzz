@@ -30,7 +30,7 @@ use wasmtime::component::Type;
 use crate::assertion::{Assertion, Margin, Verdict};
 use crate::check::Property;
 use crate::detect::{Finding, panic_text};
-use crate::harness::{App, field, fn_key_eq, set_clock_fields};
+use crate::harness::{App, field, fn_key_eq};
 use crate::metamorphic;
 use crate::par;
 use crate::plan::{Plan, Response};
@@ -711,6 +711,21 @@ struct Mutator<'a> {
     /// Route prefixes from the binary's strings (`/bookings`, `/bookings/`).
     routes: &'a [String],
     rng: StdRng,
+    /// JSON the app wrote to `json` parameters, with the call's arguments.
+    written: Vec<(serde_json::Map<String, Value>, String)>,
+}
+
+/// Written JSON documents a worker keeps for `json` results.
+const MAX_WRITTEN: usize = 64;
+
+/// How much of the read key `read` the written key `written` shares,
+/// when it is from the same collection: the shared start reaches the
+/// read key's last `/` or `:` (`events/session/` of
+/// `events/session/42`), or half of a key without one.
+fn same_collection(read: &str, written: &str) -> Option<usize> {
+    let common = read.bytes().zip(written.bytes()).take_while(|(x, y)| x == y).count();
+    let cut = read.rfind(['/', ':']).map_or(read.len().div_ceil(2), |i| i + 1);
+    (common >= cut.max(1)).then_some(common)
 }
 
 /// The methods a field with the `http.method` role can hold.
@@ -753,6 +768,69 @@ pub(crate) fn routes(st: &Statics, limit: usize) -> Vec<String> {
 impl Mutator<'_> {
     fn pick<'b, T>(&mut self, items: &'b [T]) -> Option<&'b T> {
         (!items.is_empty()).then(|| &items[self.rng.random_range(0..items.len())])
+    }
+
+    /// JSON the app wrote to a `json` parameter comes back from a `json`
+    /// result: as a store gives back what was put in. Written documents
+    /// are pooled over the campaign, so a page that only reads gets the
+    /// records a form wrote. Each read in the parent is answered with the
+    /// document written under the closest key of the same collection
+    /// (`events/session/Y` gets the session written as
+    /// `events/session/X`), half the time changed, keeping its syntax. Generated JSON never has the fields the app
+    /// expects; its own does, so the code past the parser runs.
+    fn json_feedback(&mut self, r: &RunRecord, other: Option<&RunRecord>, plan: &mut Plan) -> Option<()> {
+        use crate::labels::Label;
+        let m = &self.app.manifest;
+        for e in std::iter::once(r).chain(other).flat_map(|r| r.events.iter().take(256)) {
+            for (p, v) in &e.args {
+                let Some(t) = v.as_str().filter(|_| m.param_label(&e.func, p) == Some(Label::Json)) else { continue };
+                if serde_json::from_str::<Value>(t).is_ok() && !self.written.iter().any(|(_, w)| w == t) {
+                    if self.written.len() >= MAX_WRITTEN {
+                        let i = self.rng.random_range(0..self.written.len());
+                        self.written.swap_remove(i);
+                    }
+                    self.written.push((e.args.clone(), t.to_string()));
+                }
+            }
+        }
+        let json_paths = |key: &str| m.result_labels(key).into_iter().filter(|(_, l)| *l == Label::Json).map(|(p, _)| p).collect::<Vec<_>>();
+        let reads: Vec<&crate::record::HostCall> = r.events.iter().take(256).filter(|e| !json_paths(&e.func).is_empty()).collect();
+        if self.written.is_empty() || reads.is_empty() {
+            return None;
+        }
+        let mut answered = BTreeSet::new();
+        let mut changed = false;
+        for e in reads.into_iter().take(16) {
+            // The read's text arguments, as the writer names them too.
+            let when: BTreeMap<String, Value> =
+                e.args.iter().filter(|(p, v)| v.is_string() && m.param_label(&e.func, p).is_none()).map(|(p, v)| (p.clone(), v.clone())).collect();
+            if !answered.insert((e.func.clone(), serde_json::to_string(&when).unwrap_or_default())) {
+                continue;
+            }
+            let near = |args: &serde_json::Map<String, Value>| -> Option<usize> {
+                when.iter().map(|(p, v)| same_collection(v.as_str().unwrap_or_default(), args.get(p)?.as_str()?)).sum()
+            };
+            let Some(best) = self.written.iter().filter_map(|(a, _)| near(a)).max() else { continue };
+            let close: Vec<usize> = (0..self.written.len()).filter(|&i| near(&self.written[i].0) == Some(best)).collect();
+            let i = *self.pick(&close)?;
+            let text = self.written[i].1.clone();
+            let text = if self.rng.random_bool(0.5) { crate::structured::mutate(&text, &mut self.rng, self.words, self.consts).unwrap_or(text) } else { text };
+            let Some((_, ty)) = self.funcs.iter().find(|(k, _)| *k == e.func) else { continue };
+            let opts = GenOpts { options: Some("some".into()), results: Some("ok".into()), ..Default::default() };
+            let mut value = crate::value::Generator::new(self.rng.random(), opts).gen_json(ty);
+            for p in json_paths(&e.func) {
+                crate::labels::set_strings(&mut value, &p, &text);
+            }
+            let answer = Response { ret: Some(value), ..Default::default() };
+            let f = plan.0.entry(e.func.clone()).or_default();
+            if when.is_empty() {
+                f.response = answer;
+            } else {
+                f.rules.insert(0, crate::plan::Rule { when, response: answer, result: None });
+            }
+            changed = true;
+        }
+        changed.then_some(())
     }
 
     fn word(&mut self) -> String {
@@ -826,10 +904,12 @@ impl Mutator<'_> {
 
     /// JSON pointers of the request's `http.method` and `http.path` fields.
     fn http_ptrs(&self, args: &[Value]) -> (Option<String>, Option<String>) {
-        let Some(req) = args.first() else { return (None, None) };
-        let fields = self.app.manifest.entry.as_ref().map(|e| e.fields.clone()).unwrap_or_default();
+        let (i, fields) = request_fields(self.app);
+        let Some(req) = args.get(i) else { return (None, None) };
         let ptr = |role| {
-            role_path(&fields, req, role).filter(|p| crate::harness::field(req, p).is_some_and(Value::is_string)).map(|p| format!("/0/{}", p.replace('.', "/")))
+            role_path(&fields, req, role)
+                .filter(|p| crate::harness::field(req, p).is_some_and(Value::is_string))
+                .map(|p| format!("/{i}/{}", p.replace('.', "/")))
         };
         (ptr("method"), ptr("path"))
     }
@@ -1053,6 +1133,9 @@ impl Mutator<'_> {
                 }
                 crate::constraints::conform_request_typed(&mut spec.args, self.app, &spec.export, self.rng.random()).ok()?;
             }
+            Stage::Structured
+                if rec.as_ref().is_some_and(|_| self.rng.random_bool(0.4))
+                    && self.json_feedback(rec.as_ref()?, other.and_then(|o| o.record.as_deref()), &mut spec.plan).is_some() => {}
             Stage::Structured => {
                 // Request strings and observed host-result strings use the same
                 // parser. Model-backed successes remain owned by their datasets.
@@ -1164,8 +1247,8 @@ impl Mutator<'_> {
                 if self.rng.random_bool(0.5) {
                     spec.seed = self.rng.random_range(0..1_000_000);
                 }
-                if let (Some(e), Some(a)) = (self.app.manifest.entry.as_ref(), spec.args.first_mut()) {
-                    set_clock_fields(a, &e.fields, &spec.now);
+                if let Some(e) = self.app.manifest.entry.as_ref() {
+                    e.set_clock(&mut spec.args, &spec.now);
                 }
             }
             Stage::Splice => {
@@ -1185,8 +1268,10 @@ impl Mutator<'_> {
                 let u = self.pick(refs)?.clone();
                 let words: Vec<String> =
                     (0..inputs.len()).map(|_| if self.rng.random_bool(0.5) { self.number(None).to_string() } else { self.word() }).collect();
-                let req = spec.args.first_mut()?;
-                if !crawl_into(req, &self.app.manifest.entry.as_ref()?.fields, &u.url, &u.method, inputs, &words) {
+                self.app.manifest.entry.as_ref()?;
+                let (i, fields) = request_fields(self.app);
+                let req = spec.args.get_mut(i)?;
+                if !crawl_into(req, &fields, &u.url, &u.method, inputs, &words) {
                     return None;
                 }
             }
@@ -1316,6 +1401,22 @@ pub(crate) fn form_inputs(v: &Value) -> Vec<String> {
     out.into_iter().take(20).collect()
 }
 
+/// The argument that holds the request's HTTP roles, and the roles by path
+/// inside it ([`crate::manifest::Entry::request_arg`]).
+pub(crate) fn request_fields(app: &App) -> (usize, BTreeMap<String, String>) {
+    request_fields_of(&app.manifest)
+}
+
+pub(crate) fn request_fields_of(m: &crate::manifest::Manifest) -> (usize, BTreeMap<String, String>) {
+    match m.entry.as_ref() {
+        Some(e) => {
+            let i = e.request_arg();
+            (i, e.fields_in(i))
+        }
+        None => (0, BTreeMap::new()),
+    }
+}
+
 /// Request fields by role: `http.path`, `http.query`, `http.method`,
 /// `http.form`; without roles, fields named `path`, `query`, `method`, `form`.
 pub(crate) fn role_path(fields: &BTreeMap<String, String>, req: &Value, role: &str) -> Option<String> {
@@ -1339,9 +1440,7 @@ fn call_shape(r: &RunRecord) -> String {
 fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type)]) -> Vec<RunSpec> {
     let mut out = Vec::new();
     let entry = app.manifest.entry.as_ref().filter(|e| fn_key_eq(&e.export, &base.export));
-    let fixed: Vec<&String> = entry
-        .map(|e| e.fields.iter().filter(|(_, r)| r.starts_with("clock.") || r.as_str() == "http.path" || r.as_str() == "http.method").map(|(p, _)| p).collect())
-        .unwrap_or_default();
+    let request = entry.map_or(0, |e| e.request_arg());
     // A URL sink also gets each canary as the host of a URL: SDKs parse
     // URLs and refuse the quotes of the plain canary before any request.
     let url_sink = app.manifest.functions.values().any(|f| f.params.values().any(|l| *l == crate::labels::Label::Url));
@@ -1349,11 +1448,16 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
         let make = |n: u64| if url { crate::output::url_canary(n) } else { crate::output::canary_for(&app.manifest, n) };
         let mut req = base.clone();
         let mut n = 0u64;
-        if let Some(a) = req.args.first_mut() {
+        // Every argument's free strings; the request's query and URL too.
+        for (i, a) in req.args.iter_mut().enumerate() {
+            let fields = entry.map(|e| e.fields_in(i)).unwrap_or_default();
+            let fixed: Vec<&String> =
+                fields.iter().filter(|(_, r)| r.starts_with("clock.") || r.as_str() == "http.path" || r.as_str() == "http.method").map(|(p, _)| p).collect();
+            // Keys found by discovery are paths as `scale` writes them.
+            let at = if i == 0 { String::new() } else { format!("@{i}.") };
             let mut ptrs = Vec::new();
             nodes(a, String::new(), &mut ptrs);
-            let fields = entry.map(|e| e.fields.clone()).unwrap_or_default();
-            let uri = role_path(&fields, a, "uri").filter(|p| crate::harness::field(a, p).is_some_and(Value::is_string));
+            let uri = role_path(&fields, a, "uri").filter(|p| i == request && crate::harness::field(a, p).is_some_and(Value::is_string));
             let skip = |p: &str| {
                 let dotted = p.trim_start_matches('/').replace('/', ".");
                 fixed.iter().any(|f| dotted == **f || dotted.starts_with(&format!("{f}.")))
@@ -1371,10 +1475,10 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
                     *v = json!(make(n));
                 }
             }
-            if let Some(q) = role_path(&entry.map(|e| e.fields.clone()).unwrap_or_default(), a, "query")
+            if let Some(q) = role_path(&fields, a, "query").filter(|_| i == request)
                 && let Some(Value::Array(pairs)) = crate::harness::field_mut(a, &q)
             {
-                for k in keys.iter().filter_map(|k| k.strip_prefix(&format!("{q}."))) {
+                for k in keys.iter().filter_map(|k| k.strip_prefix(&format!("{at}{q}."))) {
                     if !pairs.iter().any(|p| p[0].as_str() == Some(k)) {
                         n += 1;
                         pairs.push(json!([k, make(n)]));
@@ -1389,12 +1493,18 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
                 let origin = origin_of(slot.as_str().unwrap_or_default());
                 n += 1;
                 let mut u = format!("{origin}/{}", make(n));
-                for k in keys.iter().filter_map(|k| k.strip_prefix(&format!("{p}?"))) {
+                for k in keys.iter().filter_map(|k| k.strip_prefix(&format!("{at}{p}?"))) {
                     n += 1;
                     u = scale::with_query(&u, k, &make(n));
                 }
                 *slot = json!(u);
             }
+        }
+        // Fields the platform guarantees (a route from a list) keep to it.
+        if n > 0 && entry.is_some_and(|e| !e.values.is_empty()) {
+            let seed = req.seed;
+            let export = req.export.clone();
+            crate::constraints::conform_request_typed(&mut req.args, app, &export, seed).ok();
         }
         if n > 0 {
             out.push(req);
@@ -1549,6 +1659,13 @@ pub fn fuzz(
     // Seeds: the example request as is, on the happy path, and earlier entries.
     let steady_base = RunSpec { plan: steady(&base.plan), fuel: base.fuel.min(fuel), ..base.clone() };
     let mut seeds = vec![base.clone(), steady_base.clone()];
+    // The manifest's other example requests: one per route, form or mode.
+    if let Ok(export) = app.export(&base.export) {
+        for args in app.example_args(export, &base.now) {
+            seeds.push(RunSpec { args: args.clone(), ..base.clone() });
+            seeds.push(RunSpec { args, ..steady_base.clone() });
+        }
+    }
     let discovery_runs = std::sync::atomic::AtomicU64::new(0);
     let mut modes = Vec::new();
     let mut keys = Vec::new();
@@ -1641,6 +1758,7 @@ pub fn fuzz(
             keys: &keys,
             funcs: &funcs,
             routes: &routes,
+            written: Vec::new(),
             rng: StdRng::seed_from_u64(opts.seed.wrapping_add((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))),
         };
         loop {
@@ -1738,6 +1856,21 @@ pub fn fuzz(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn written_json_answers_reads_of_the_same_collection() {
+        use super::same_collection;
+        let read = "events/session/42";
+        assert_eq!(same_collection(read, "events/session/7"), Some(15));
+        assert_eq!(same_collection(read, "events/session/42"), Some(17));
+        assert_eq!(same_collection(read, "events/reg/42/1"), None);
+        assert_eq!(same_collection("user:42:cart", "user:42:profile"), Some(8));
+        assert_eq!(same_collection("user:42:cart", "user:7:cart"), None);
+        // Keys without separators match on their first half.
+        assert_eq!(same_collection("cart42", "cart7"), Some(4));
+        assert_eq!(same_collection("cart42", "user7"), None);
+        assert_eq!(same_collection("", "x"), None);
+    }
+
     #[test]
     fn generation_mutations_keep_constants_representable_in_the_new_type() {
         use crate::value::GenOpts;

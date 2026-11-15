@@ -258,8 +258,10 @@ pub fn sweep(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, path: &str,
     let mut specs = Vec::new();
     for v in &values {
         let mut s = base.clone();
-        let req = s.args.first_mut().ok_or_else(|| anyhow!("the export takes no arguments"))?;
-        set_value(req, path, v)?;
+        // `req.days` or `@1.days` for another argument than the first.
+        let (i, p) = app.manifest.entry.as_ref().map_or((0, path), |e| e.locate(path));
+        let req = s.args.get_mut(i).ok_or_else(|| anyhow!("the export takes no argument {i}"))?;
+        set_value(req, p, v)?;
         specs.push(s);
     }
     let runs = appfuzz_core::par::map(&specs, |s| run_cached(app, store, s)).into_iter().collect::<Result<Vec<_>>>()?;

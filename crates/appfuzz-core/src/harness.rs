@@ -513,24 +513,7 @@ impl App {
         };
         crate::labels::check_names(&written, &imports)?;
         crate::labels::check_wit(&manifest, &imports)?;
-        if let Some(entry) = &manifest.entry
-            && !entry.values.is_empty()
-        {
-            let export = exports.iter().find(|e| fn_key_eq(&e.key, &entry.export)).context("values export not found")?;
-            let (_, ty) = export.ty.params().next().context("values needs a request argument")?;
-            for (path, constraint) in &entry.values {
-                crate::constraints::validate_type(&ty, path, constraint).with_context(|| format!("entry.values {path:?}"))?;
-            }
-        }
-        if let Some(entry) = &mut manifest.entry
-            && !entry.input_values.is_empty()
-        {
-            let export = exports.iter().find(|e| fn_key_eq(&e.key, &entry.export)).context("input_values export not found")?;
-            let (_, ty) = export.ty.params().next().context("input_values needs a request argument")?;
-            for (path, domain) in &mut entry.input_values {
-                domain.validate_input_type(&ty, path).with_context(|| format!("input_values {path}"))?;
-            }
-        }
+        check_entry(&mut manifest, &exports)?;
         crate::dataset::validate(&manifest.datasets)?;
         if let Some(suite) = &manifest.acceptance {
             suite.validate(&manifest)?;
@@ -629,7 +612,7 @@ impl App {
                 let marks: Vec<_> = manifest
                     .result_labels(&f.key)
                     .into_iter()
-                    .filter(|(_, l)| matches!(l, crate::labels::Label::Pii | crate::labels::Label::Secret) || l.is_id())
+                    .filter(|(_, l)| matches!(l, crate::labels::Label::Pii | crate::labels::Label::Secret | crate::labels::Label::Json) || l.is_id())
                     .collect();
                 if !marks.is_empty() {
                     platform.marks.insert(f.key.clone(), marks);
@@ -763,9 +746,8 @@ impl App {
     pub fn default_args(&self, export: &FuncInfo, now: &str) -> Result<Vec<Value>> {
         let n = export.ty.params().len();
         let entry = self.manifest.entry.as_ref().filter(|e| fn_key_eq(&e.export, &export.key));
-        let mut args = match entry.and_then(|e| e.request.clone()) {
-            Some(Value::Array(a)) if n != 1 => a,
-            Some(v) => vec![v],
+        let mut args = match entry.and_then(|e| e.request.as_ref()) {
+            Some(v) => crate::manifest::Entry::args_of(v, n),
             None => {
                 let mut g = Generator::new(0, Default::default());
                 let mut args: Vec<Value> = export.ty.params().map(|(_, t)| g.gen_json(&t)).collect();
@@ -778,10 +760,25 @@ impl App {
         };
         // Clock fields are paths of the platform's request: every export
         // that has them gets them.
-        if let (Some(e), Some(first)) = (self.manifest.entry.as_ref(), args.first_mut()) {
-            set_clock_fields(first, &e.fields, now);
+        if let Some(e) = self.manifest.entry.as_ref() {
+            e.set_clock(&mut args, now);
         }
         Ok(args)
+    }
+
+    /// Arguments of the manifest's `[entry] examples` for this export, with
+    /// clock fields set to `now`.
+    pub fn example_args(&self, export: &FuncInfo, now: &str) -> Vec<Vec<Value>> {
+        let n = export.ty.params().len();
+        let Some(e) = self.manifest.entry.as_ref().filter(|e| fn_key_eq(&e.export, &export.key)) else { return Vec::new() };
+        e.examples
+            .iter()
+            .map(|x| {
+                let mut args = crate::manifest::Entry::args_of(x, n);
+                e.set_clock(&mut args, now);
+                args
+            })
+            .collect()
     }
 
     pub fn initial_state(&self, plan: &Plan, seed: u64) -> Result<crate::dataset::State> {
@@ -1331,7 +1328,7 @@ fn intercept_values(mut store: StoreContextMut<'_, Host>, key: &str, args: Vec<(
     let by_args: Option<Vec<_>> = platform.label_rules.get(key).map(|(own, rules)| {
         crate::plan::result_labels_for(own.as_ref(), rules, &args)
             .into_iter()
-            .filter(|(_, l)| matches!(l, crate::labels::Label::Pii | crate::labels::Label::Secret) || l.is_id())
+            .filter(|(_, l)| matches!(l, crate::labels::Label::Pii | crate::labels::Label::Secret | crate::labels::Label::Json) || l.is_id())
             .collect()
     });
     let value_checks = platform.argument_checks.get(key).map(|checks| checks.check(&args));
@@ -1972,8 +1969,62 @@ fn classify(err: &wasmtime::Error, host: &mut Host, fuel: u64) -> Outcome {
     Outcome { kind, message, stack }
 }
 
+/// Checks `[entry]` against its export: paths in `fields`, `values` and
+/// `input_values` (which may name any parameter of an export with
+/// several), and the arguments of each example.
+fn check_entry(manifest: &mut Manifest, exports: &[FuncInfo]) -> Result<()> {
+    if let Some(entry) = &mut manifest.entry
+        && let Some(export) = exports.iter().find(|e| fn_key_eq(&e.key, &entry.export))
+    {
+        let params: Vec<(String, Type)> = export.ty.params().map(|(n, t)| (n.to_string(), t)).collect();
+        if params.len() > 1 {
+            entry.params = params.iter().map(|(n, _)| n.clone()).collect();
+        }
+        let param = |path: &str, what: &str| -> Result<(Type, String)> {
+            let (i, rest) = entry.locate(path);
+            let (_, ty) = params.get(i).with_context(|| format!("{what} needs a request argument"))?;
+            Ok((ty.clone(), rest.to_string()))
+        };
+        // A clock field the path misses would stay as it is, unnoticed.
+        for (path, role) in entry.fields.iter().filter(|(_, r)| r.starts_with("clock.")) {
+            if !matches!(role.as_str(), "clock.date" | "clock.time" | "clock.datetime" | "clock.rfc3339") {
+                bail!("entry.fields {path:?}: unknown role {role:?}; clock roles are clock.date, clock.time, clock.datetime, clock.rfc3339");
+            }
+            let (ty, rest) = param(path, "fields")?;
+            let names = if params.len() > 1 { format!(" (paths start with a parameter: {})", entry.params.join(", ")) } else { String::new() };
+            let at = crate::constraints::path_type(&ty, &rest).with_context(|| format!("entry.fields {path:?}: no such field in {}{names}", entry.export))?;
+            if at != Type::String {
+                bail!("entry.fields {path:?}: {role} needs a text field");
+            }
+        }
+        for (path, constraint) in &entry.values {
+            let (ty, rest) = param(path, "values")?;
+            crate::constraints::validate_type(&ty, &rest, constraint).with_context(|| format!("entry.values {path:?}"))?;
+        }
+        let mut typed = Vec::new();
+        for path in entry.input_values.keys() {
+            typed.push(param(path, "input_values")?);
+        }
+        for ((path, domain), (ty, rest)) in entry.input_values.iter_mut().zip(typed) {
+            domain.validate_input_type(&ty, &rest).with_context(|| format!("input_values {path}"))?;
+        }
+        for (n, example) in entry.examples.iter().enumerate() {
+            let args = crate::manifest::Entry::args_of(example, params.len());
+            if args.len() != params.len() {
+                bail!("entry.examples[{n}]: {} gets {} arguments, the example has {}", entry.export, params.len(), args.len());
+            }
+            for (a, (name, ty)) in args.iter().zip(&params) {
+                crate::value::json_to_val(a, ty).with_context(|| format!("entry.examples[{n}], argument {name}"))?;
+            }
+        }
+    } else if manifest.entry.as_ref().is_some_and(|e| !e.values.is_empty() || !e.input_values.is_empty()) {
+        bail!("values export not found");
+    }
+    Ok(())
+}
+
 /// Sets request fields with a clock role (`clock.date`, `clock.time`,
-/// `clock.datetime`) to the run's start time. Paths are dot-separated;
+/// `clock.datetime`, `clock.rfc3339`) to the run's start time. Paths are dot-separated;
 /// a segment also matches the key of a `[key, value]` pair in a list.
 pub fn set_clock_fields(request: &mut Value, fields: &BTreeMap<String, String>, now: &str) {
     let Some(secs) = parse_datetime(now) else { return };
@@ -1983,6 +2034,7 @@ pub fn set_clock_fields(request: &mut Value, fields: &BTreeMap<String, String>, 
             "clock.date" => date.clone(),
             "clock.time" => time.clone(),
             "clock.datetime" => format!("{date}T{full_time}"),
+            "clock.rfc3339" => format!("{date}T{full_time}Z"),
             _ => continue,
         };
         if let Some(slot) = field_mut(request, path) {

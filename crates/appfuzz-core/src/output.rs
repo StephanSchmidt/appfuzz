@@ -780,15 +780,16 @@ pub(crate) fn strip_index(p: &str) -> String {
 pub(crate) fn request_place(m: &Manifest, args: &[Value], path: &str, canary: &str) -> String {
     let p = strip_index(path);
     // Request fields with an HTTP role, or named like one.
-    if let Some(req) = args.first() {
-        let none = std::collections::BTreeMap::new();
-        let roles = m.entry.as_ref().map_or(&none, |e| &e.fields);
+    let (i, roles) = crate::fuzz::request_fields_of(m);
+    let inside = if i == 0 { Some(p.as_str()) } else { path.strip_prefix(&format!("@{i}.")) };
+    if let (Some(req), Some(inside)) = (args.get(i), inside) {
+        let roles = &roles;
         for (role, say) in [("query", "the query parameter"), ("form", "the form field")] {
-            if let Some(k) = crate::fuzz::role_path(roles, req, role).and_then(|f| p.strip_prefix(&format!("{f}.")).map(str::to_string)) {
+            if let Some(k) = crate::fuzz::role_path(roles, req, role).and_then(|f| inside.strip_prefix(&format!("{f}.")).map(str::to_string)) {
                 return format!("{say} `{k}`");
             }
         }
-        if crate::fuzz::role_path(roles, req, "path").is_some_and(|f| f == p) {
+        if crate::fuzz::role_path(roles, req, "path").is_some_and(|f| f == inside) {
             return "the URL path".into();
         }
     }

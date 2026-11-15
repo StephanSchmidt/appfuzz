@@ -153,6 +153,33 @@ Reproduce the comparison:
 cargo test --release -p appfuzz-core --test feedback compare_equal_budgets -- --ignored --nocapture
 ```
 
+## Example requests and exports with several parameters
+
+`[entry] request` is the request fuzzing starts from. `[entry] examples`
+adds more, each a whole request; fuzzing starts from every one of them.
+`run --example N` (counted from 0) runs one; `--set`
+merges into it.
+
+```toml
+[entry]
+export = "acme:web/handler#handle"        # handle(route: string, req: request)
+request = ["GET /", { method = "GET", path = "/", form = [], now = "" }]
+examples = [
+  ["POST /signup", { method = "POST", path = "/signup", form = [["email", "a@acme.example"]], now = "" }],
+]
+fields = { "req.now" = "clock.rfc3339" }
+values = { "route" = "enum:GET /,POST /signup" }
+```
+
+With several parameters, `request` and each example are arrays with one
+value per parameter, and paths in `fields`, `values` and `input_values`
+start with the parameter's name (`req.now`), or with `@N.` for the N-th
+argument from 0 (`@1.now`). `--set '{"req": {"method": "POST"}}'` merges
+per argument; JSON whose keys are not parameter names goes into the
+argument with the `http.` roles, or the first. Clock roles fill the field
+from the virtual clock and follow it when `probe times` or the fuzzer moves
+the clock: `clock.rfc3339` as `2026-11-02T10:00:00Z`.
+
 ## Structured payload search
 
 `fuzz` and the fuzz phase of `review` recognize JSON objects/arrays and
@@ -172,6 +199,14 @@ schema, generate a valid starting document from nothing, or support every CSV
 dialect. Confirmation simplifies inside JSON/CSV as well as trying ordinary
 request/plan reductions; saved cases replay the original binary.
 
+A `json` label ([LABELS.md](LABELS.md)) on a host result makes generated
+values there JSON documents. In the `structured` stage, JSON the app wrote to a
+`json` parameter comes back from `json` results: each read is answered with a
+document written under a key of the same collection (the parameter both
+functions have, sharing its start up to the last `/` or `:`), half the time
+changed. Written documents are pooled over the campaign, so pages that only
+read get records a form wrote.
+
 The `structured` stage runs automatically. Its evaluations and kept inputs appear
 under `stages.structured` in fuzz reports. Findings use the existing detectors and
 ordinary `confirm`/`replay`.
@@ -188,6 +223,18 @@ A host plan's `"return": null` is an explicit response, including in rules,
 call-number overrides and defaults. Omitting `return` allows the next plan
 layer or generation to decide. A dataset query's explicit `missing: null`
 similarly overrides its usual wrapping for an empty lookup.
+
+TOML has no null. In `appfuzz.toml` (function rules, sequence plans and
+steps, acceptance checks), `{ none = true }` stands for `null`:
+
+```toml
+[functions."acme:web/store#get"]
+rules = [{ when = { key = "gone" }, return = { none = true } }]
+```
+
+`generate = { options = "none" }` makes every generated option of a
+function none. A record whose only field is `none = true` can't be
+written in TOML this way; put it in a JSON plan.
 
 ## WASI commands and exit status
 

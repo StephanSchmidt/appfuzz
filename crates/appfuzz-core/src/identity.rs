@@ -35,8 +35,9 @@ pub fn known_caller(spec: &RunSpec, m: &Manifest, world: &crate::dataset::World)
 }
 
 fn request_identity(spec: &RunSpec, m: &Manifest) -> Option<String> {
-    let (path, _) = m.entry.as_ref()?.fields.iter().find(|(_, r)| r.as_str() == ROLE)?;
-    crate::harness::field(spec.args.first()?, path).map(id_text)
+    let e = m.entry.as_ref()?;
+    let (path, _) = e.fields.iter().find(|(_, r)| r.as_str() == ROLE)?;
+    e.field(&spec.args, path).map(id_text)
 }
 
 /// Whether the manifest says where the caller's identity comes from.
