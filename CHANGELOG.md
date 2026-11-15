@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.8.0
+
+**Manifests**
+
+- `[entry] examples`: more example requests next to `request`. Fuzzing
+  starts from all of them; `run --example N` runs one.
+- Exports with several parameters: paths in `[entry] fields`, `values`
+  and `input_values` start with the parameter's name
+  (`fields = { "req.now" = "clock.rfc3339" }`), and `--set '{"req": …}'`
+  merges into that argument. A clock field whose path doesn't lead to
+  text is an error instead of being ignored.
+- New clock role `clock.rfc3339`: `2026-11-15T10:00:00Z`.
+- `{ none = true }` is an option's none in `appfuzz.toml`, where TOML has
+  no null.
+- `sequence run` and `sequence fuzz` take the name of a
+  `[sequences.NAME]` as well as a file; `--help` now says so.
+
+**JSON**
+
+- New label `json`. On a parameter, request text that breaks out of a
+  JSON string is `json_injection` (fail). On a result, generated values
+  are JSON documents, so the app's parser gets past the first character,
+  and the fuzzer answers reads with JSON the app wrote under a key of the
+  same collection: pages that only read get the records a form wrote.
+
+**Search**
+
+- `probe values` no longer blames a host value for a crash the request
+  has without it.
+
+**Apps that ship JavaScript**
+
+- Page scripts run in a browser that follows Firefox and Chrome in many
+  more places: events (propagation, default actions, focus and pointer),
+  forms and controls (select boxes, number, date and color inputs, file
+  selection), fetch and XMLHttpRequest (aborts, headers, binary bodies,
+  Blob and File), window messages and message ports, custom elements,
+  templates, live DOM collections and CSS selectors.
+- The page's Content-Security-Policy holds while its scripts run: scripts,
+  `eval` and connections it blocks don't happen, nonces, `integrity` and
+  `base-uri` count, and violations fire their events.
+- HTML is parsed in steps around blocking scripts, as browsers do: a
+  script sees the markup before it, not the markup after it.
+- Text checks ignore Leptos's `<!>` markers between text nodes: a page
+  that shows "200%" sends "200<!>%", and percentages and check selectors
+  now read "200%".
+- Input and textarea current values stay separate from defaults and DOM text.
+  Edits survive default changes, cloning and adoption, and form resets restore
+  defaults while respecting cancellation, form ownership and reset events.
+
+- FormData construction respects form ownership, disabled fieldsets, selected
+  options, image buttons, empty file inputs, character sets and directionality.
+  Formdata events can adjust the submitted fields without sharing later changes
+  with the returned snapshot; invalid and recursive construction is rejected.
+
+- FormData updates preserve field order and keep old values when replacement
+  conversion fails. Names, file overloads and live iteration follow browser
+  behavior even when page scripts replace public helpers.
+
+- Cookies stay private when page scripts replace collection methods, URL and
+  date helpers, serializers, or prototype properties. HttpOnly values cannot
+  escape through internal arrays or report snapshots. Public suffix and site
+  decisions use the same native parser as appfuzz core.
+
+- Timers use browser argument conversion, callback receivers, cancellation,
+  nesting and repeat ordering. Page changes to collection or arithmetic
+  helpers cannot disable scheduled work or erase unsupported API markers.
+  Date subclasses retain the virtual clock, and timer timestamps and seeded
+  randomness no longer depend on replaceable page helpers.
+
+- Page scripts cannot replace the browser driver's private hooks, host bridge,
+  or native parser. Replacing JSON functions or adding `toJSON` methods to
+  built-in prototypes no longer alters the browser's evidence report.
+
+- URL and query state stays private, including native request routing and
+  history origin checks when a page replaces URL accessors. Query iterators
+  and callbacks see live changes; Web IDL argument conversion and query body
+  serialization follow browser behavior.
+
 ## 0.7.0
 
 **Shopify Functions**
@@ -133,39 +212,6 @@
   get keys above 1,000,000; confirmation shrinks edits like other plan parts.
 
 **Apps that ship JavaScript**
-
-- Input and textarea current values stay separate from defaults and DOM text.
-  Edits survive default changes, cloning and adoption, and form resets restore
-  defaults while respecting cancellation, form ownership and reset events.
-
-- FormData construction respects form ownership, disabled fieldsets, selected
-  options, image buttons, empty file inputs, character sets and directionality.
-  Formdata events can adjust the submitted fields without sharing later changes
-  with the returned snapshot; invalid and recursive construction is rejected.
-
-- FormData updates preserve field order and keep old values when replacement
-  conversion fails. Names, file overloads and live iteration follow browser
-  behavior even when page scripts replace public helpers.
-
-- Cookies stay private when page scripts replace collection methods, URL and
-  date helpers, serializers, or prototype properties. HttpOnly values cannot
-  escape through internal arrays or report snapshots. Public suffix and site
-  decisions use the same native parser as appfuzz core.
-
-- Timers use browser argument conversion, callback receivers, cancellation,
-  nesting and repeat ordering. Page changes to collection or arithmetic
-  helpers cannot disable scheduled work or erase unsupported API markers.
-  Date subclasses retain the virtual clock, and timer timestamps and seeded
-  randomness no longer depend on replaceable page helpers.
-
-- Page scripts cannot replace the browser driver's private hooks, host bridge,
-  or native parser. Replacing JSON functions or adding `toJSON` methods to
-  built-in prototypes no longer alters the browser's evidence report.
-
-- URL and query state stays private, including native request routing and
-  history origin checks when a page replaces URL accessors. Query iterators
-  and callbacks see live changes; Web IDL argument conversion and query body
-  serialization follow browser behavior.
 
 - HTML is read as a browser reads it (the WHATWG parser of Servo,
   `html5ever`): `<noscript>`, SVG `<style>`, tables, templates and
