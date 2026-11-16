@@ -76,7 +76,11 @@ fn pick<'a>(s: &'a Statics, module: &Option<String>) -> Result<&'a ModuleInfo> {
 /// Function indices matching `index`, `module:index`, a host key, or a name regex.
 fn resolve(m: &ModuleInfo, f: &str) -> Result<Vec<u32>> {
     let f = f.rsplit_once(':').filter(|(a, _)| *a == m.id).map(|(_, b)| b).unwrap_or(f);
+    let count = m.func_imports + m.funcs.len() as u32;
     if let Ok(i) = f.parse::<u32>() {
+        if i >= count {
+            bail!("{} has no function {i} (it has {count}, numbered from 0); see `appfuzz wasm funcs`", m.id);
+        }
         return Ok(vec![i]);
     }
     let hosts: Vec<u32> = m.imports.iter().filter(|i| i.host.as_deref() == Some(f)).filter_map(|i| i.func).collect();
@@ -84,7 +88,7 @@ fn resolve(m: &ModuleInfo, f: &str) -> Result<Vec<u32>> {
         return Ok(hosts);
     }
     let re = Regex::new(f)?;
-    let all = (0..m.func_imports + m.funcs.len() as u32).filter(|i| m.func_name(*i).is_some_and(|n| re.is_match(&n))).collect::<Vec<_>>();
+    let all = (0..count).filter(|i| m.func_name(*i).is_some_and(|n| re.is_match(&n))).collect::<Vec<_>>();
     if all.is_empty() {
         bail!("no function matches {f:?}");
     }
@@ -269,4 +273,185 @@ fn tree_up(m: &ModuleInfo, callers: &BTreeMap<u32, Vec<(u32, u64)>>, f: u32, dep
     o["called_by"] = Value::Array(cs.into_iter().map(|c| tree_up(m, callers, c, depth - 1, path)).collect());
     path.pop();
     o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use appfuzz_core::record::{Frame, HostCall};
+
+    /// get 0 and log 1 are imports; fetch 2, again 3, dispatch 4, run 5, orphan 6.
+    const WAT: &str = r#"(module
+      (import "test:dig/db" "get" (func $get (param i32) (result i32)))
+      (import "env" "log" (func $log (param i32)))
+      (type $t (func (param i32) (result i32)))
+      (table 1 funcref)
+      (memory 1)
+      (data (i32.const 16) "fetchUsers\00ok\00view_mode")
+      (func $fetch (param i32) (result i32) (call $get (local.get 0)))
+      (func $again (param i32) (result i32) (call $again (local.get 0)))
+      (func $dispatch (param i32) (result i32) (call_indirect (type $t) (local.get 0) (i32.const 0)))
+      (func $run (export "run") (param i32) (result i32)
+        (call $log (local.get 0))
+        (drop (call $dispatch (local.get 0)))
+        (drop (call $again (local.get 0)))
+        (if (i32.eq (local.get 0) (i32.const 0x6b636162)) (then nop))
+        (call $fetch (local.get 0)))
+      (func $orphan))"#;
+
+    fn module() -> (Vec<u8>, Statics) {
+        let bytes = wat::parse_str(WAT).unwrap();
+        let statics = Statics::parse(&bytes).unwrap();
+        (bytes, statics)
+    }
+
+    fn error<T: std::fmt::Debug>(r: Result<T>) -> String {
+        r.unwrap_err().to_string()
+    }
+
+    #[test]
+    fn functions_resolve_by_index_module_index_host_key_and_name() {
+        let (_, s) = module();
+        let m = s.main().unwrap();
+        assert_eq!(resolve(m, "5").unwrap(), [5]);
+        assert_eq!(resolve(m, &format!("{}:2", m.id)).unwrap(), [2]);
+        assert_eq!(resolve(m, "test:dig/db#get").unwrap(), [0]);
+        // Names are regular expressions; other imports are named `module#name`.
+        assert_eq!(resolve(m, "^(fetch|again)$").unwrap(), [2, 3]);
+        assert_eq!(resolve(m, "env#log").unwrap(), [1]);
+        assert_eq!(error(resolve(m, "nosuch")), "no function matches \"nosuch\"");
+        assert!(error(resolve(m, "(")).contains("unclosed group"));
+        // Another module's prefix is no index into this one.
+        assert_eq!(error(resolve(m, "m000000:2")), "no function matches \"m000000:2\"");
+    }
+
+    #[test]
+    fn an_index_past_the_last_function_is_an_error() {
+        let (_, s) = module();
+        let m = s.main().unwrap();
+        assert_eq!(resolve(m, "6").unwrap(), [6]);
+        let e = error(resolve(m, "7"));
+        assert_eq!(e, format!("{} has no function 7 (it has 7, numbered from 0); see `appfuzz wasm funcs`", m.id));
+        assert!(error(resolve(m, &format!("{}:99", m.id))).contains("has no function 99"));
+    }
+
+    #[test]
+    fn modules_are_picked_by_id_or_index() {
+        let (_, s) = module();
+        let main = s.main().unwrap();
+        assert_eq!(pick(&s, &None).unwrap().id, main.id);
+        assert_eq!(pick(&s, &Some("0".into())).unwrap().id, main.id);
+        assert_eq!(pick(&s, &Some(main.id.clone())).unwrap().id, main.id);
+        assert_eq!(error(pick(&s, &Some("nope".into()))), "no module nope; see `appfuzz wasm info`");
+        assert_eq!(error(pick(&Statics { modules: vec![] }, &None)), "no main module");
+    }
+
+    #[test]
+    fn callees_stop_at_imports_recursion_and_depth() {
+        let (_, s) = module();
+        let m = s.main().unwrap();
+        assert_eq!(
+            tree_down(m, 5, 1, &mut vec![]),
+            json!({"func": 5, "name": "run", "calls": [
+                {"func": 1, "name": "env#log", "import": "env#log"},
+                {"func": 2, "name": "fetch", "more_callees": 1},
+                {"func": 3, "name": "again", "more_callees": 1},
+                {"func": 4, "name": "dispatch", "call_indirect": 1},
+            ]})
+        );
+        assert_eq!(tree_down(m, 3, 2, &mut vec![]), json!({"func": 3, "name": "again", "calls": [{"func": 3, "name": "again", "recursive": true}]}));
+        assert_eq!(tree_down(m, 2, 5, &mut vec![])["calls"], json!([{"func": 0, "name": "test:dig/db#get", "import": "test:dig/db#get"}]));
+        // An index without a body (resolve rejects it first) has no callees.
+        assert_eq!(tree_down(m, 40, 2, &mut vec![]), json!({"func": 40, "name": format!("{}:40", m.id)}));
+    }
+
+    #[test]
+    fn callers_stop_at_exports_recursion_and_depth() {
+        let (_, s) = module();
+        let m = s.main().unwrap();
+        let callers = m.callers();
+        assert_eq!(
+            tree_up(m, &callers, 0, 2, &mut vec![]),
+            json!({"func": 0, "name": "test:dig/db#get", "called_by": [
+                {"func": 2, "name": "fetch", "called_by": [{"func": 5, "name": "run", "exported": true}]}
+            ]})
+        );
+        assert_eq!(
+            tree_up(m, &callers, 3, 2, &mut vec![]),
+            json!({"func": 3, "name": "again", "called_by": [
+                {"func": 3, "name": "again", "recursive": true},
+                {"func": 5, "name": "run", "exported": true},
+            ]})
+        );
+        assert_eq!(tree_up(m, &callers, 2, 0, &mut vec![]), json!({"func": 2, "name": "fetch", "more_callers": 1}));
+        // Neither called nor exported.
+        assert_eq!(tree_up(m, &callers, 6, 2, &mut vec![]), json!({"func": 6, "name": "orphan"}));
+    }
+
+    #[test]
+    fn info_and_strings_of_a_core_module() {
+        let (bytes, s) = module();
+        let id = s.main().unwrap().id.clone();
+        let info = run(&WasmCmd::Info, &bytes, &[]).unwrap();
+        assert_eq!(info["modules"].as_array().unwrap().len(), 1);
+        let m = &info["modules"][0];
+        assert_eq!(m["role"], "main");
+        assert_eq!(m["host_imports"], json!(["test:dig/db#get"]));
+        assert_eq!(m["other_imports"], json!(["env#log"]));
+        assert_eq!(m["exports"], json!(["run"]));
+        assert_eq!((m["funcs"].as_u64(), m["func_imports"].as_u64(), m["has_names"].as_bool()), (Some(5), Some(2), Some(true)));
+        let strings = |grep: Option<&str>, min: usize| {
+            let v = run(&WasmCmd::Strings { grep: grep.map(str::to_string), min, module: None }, &bytes, &[]).unwrap();
+            assert_eq!(v["count"].as_u64().unwrap() as usize, v["strings"].as_array().unwrap().len());
+            v["strings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| (x["in"].as_str().unwrap().to_string(), x["text"].as_str().unwrap().to_string()))
+                .collect::<Vec<_>>()
+        };
+        let all = strings(None, 4);
+        assert!(all.contains(&("data".into(), "fetchUsers".into())), "{all:?}");
+        assert!(all.contains(&("data".into(), "view_mode".into())), "{all:?}");
+        // An integer constant that reads as text: 0x6b636162 is "back".
+        assert!(all.contains(&("code".into(), "back".into())), "{all:?}");
+        assert_eq!(strings(Some("^view"), 4), [("data".to_string(), "view_mode".to_string())]);
+        assert!(!strings(None, 5).iter().any(|(_, t)| t == "back"));
+        let one = run(&WasmCmd::Strings { grep: None, min: 4, module: Some(id) }, &bytes, &[]).unwrap();
+        assert_eq!(one["count"].as_u64().unwrap() as usize, all.len());
+        assert!(run(&WasmCmd::Strings { grep: Some("[".into()), min: 4, module: None }, &bytes, &[]).is_err());
+        assert!(run(&WasmCmd::Info, b"not wasm", &[]).is_err());
+    }
+
+    #[test]
+    fn sites_count_the_app_frames_of_stored_runs() {
+        let (bytes, s) = module();
+        let id = s.main().unwrap().id.clone();
+        let frame = |func: u32| Frame { module: id.clone(), func, name: None, offset: None };
+        let mut record: RunRecord = serde_json::from_value(json!({
+            "id": "r1", "outcome": {"kind": "ok"}, "events": [],
+            "spec": {"component": "c", "export": "run", "args": [1], "now": "2026-01-15T10:00:00", "seed": 1, "fuel": 1, "memory": 1, "ns_per_fuel": 1.0},
+            "totals": {"fuel": 0, "peak_memory": 0, "virtual_ns": 0, "guest_ns": 0, "host_ns": 0, "sleep_ns": 0, "host_calls": 0, "cost": 0,
+                       "clock_reads": 0, "random_bytes": 0, "wall_us": 0},
+        }))
+        .unwrap();
+        let call = |n: u32, func: &str, stack: Vec<Frame>| HostCall { n, func: func.into(), stack, ..Default::default() };
+        record.events = vec![
+            call(1, "test:dig/db#get", vec![frame(2), frame(5)]),
+            call(2, "test:dig/db#get", vec![frame(2), frame(5)]),
+            // A host function the code doesn't import under that name.
+            call(3, "other:pkg/svc#send", vec![frame(5)]),
+            // No guest frame: nothing to count.
+            call(4, "test:dig/db#get", vec![]),
+        ];
+        let sites = run(&WasmCmd::Sites, &bytes, &[record]).unwrap();
+        assert_eq!(sites["runs_used"], 1);
+        let get = &sites["host_functions"]["test:dig/db#get"];
+        assert_eq!(get["static_sites"].as_array().unwrap().len(), 1);
+        assert_eq!(get["static_sites"][0]["name"], "fetch");
+        assert_eq!(get["called_from_in_runs"], json!({"fetch": 2}));
+        assert_eq!(sites["host_functions"]["other:pkg/svc#send"], json!({"static_sites": [], "called_from_in_runs": {"run": 1}}));
+        // `env#log` is no host function: no entry.
+        assert_eq!(sites["host_functions"].as_object().unwrap().len(), 2);
+    }
 }

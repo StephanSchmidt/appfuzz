@@ -260,7 +260,11 @@ pub fn sweep(cli: &Cli, app: &App, store: &RunStore, base: &RunSpec, path: &str,
         let mut s = base.clone();
         // `req.days` or `@1.days` for another argument than the first.
         let (i, p) = app.manifest.entry.as_ref().map_or((0, path), |e| e.locate(path));
-        let req = s.args.get_mut(i).ok_or_else(|| anyhow!("the export takes no argument {i}"))?;
+        let n = s.args.len();
+        let req = s.args.get_mut(i).ok_or_else(|| match n {
+            0 => anyhow!("the export takes no arguments"),
+            n => anyhow!("the export has no argument {i}: it takes {n}, counted from 0"),
+        })?;
         set_value(req, p, v)?;
         specs.push(s);
     }
@@ -413,7 +417,8 @@ fn leaves(v: &Value, path: String, out: &mut Vec<(String, Value)>) {
     match v {
         Value::Array(a) if !a.is_empty() && a.iter().all(|p| p.as_array().is_some_and(|p| p.len() == 2 && p[0].is_string())) => {
             for p in a {
-                leaves(&p[1], format!("{path}.{}", p[0].as_str().unwrap_or_default()), out);
+                let key = p[0].as_str().unwrap_or_default();
+                leaves(&p[1], if path.is_empty() { key.to_string() } else { format!("{path}.{key}") }, out);
             }
         }
         Value::Array(a) => a.iter().enumerate().for_each(|(i, x)| leaves(x, format!("{path}[{i}]"), out)),
@@ -695,4 +700,176 @@ pub fn wasi(app: &App, store: &RunStore) -> Result<Value> {
         },
         "note": "reads of the insecure random seed (hash maps) are not counted",
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use appfuzz_core::detect::Severity;
+
+    fn error<T: std::fmt::Debug>(r: Result<T>) -> String {
+        r.unwrap_err().to_string()
+    }
+
+    #[test]
+    fn lets_bind_trimmed_names_once() {
+        let lets = lets_of(&["total = out.json.total".into(), "items=host.items#all.result".into(), "eq=a=b".into()]).unwrap();
+        assert_eq!(
+            lets,
+            BTreeMap::from([
+                ("eq".to_string(), "a=b".to_string()),
+                ("items".to_string(), "host.items#all.result".to_string()),
+                ("total".to_string(), "out.json.total".to_string()),
+            ])
+        );
+        assert!(lets_of(&[]).unwrap().is_empty());
+        assert_eq!(error(lets_of(&["total".into()])), "--let needs name=path, got \"total\"");
+        assert_eq!(error(lets_of(&["a=x".into(), " a =y".into()])), "--let binds a twice");
+    }
+
+    #[test]
+    fn sweep_kinds_and_their_values() {
+        let bytes = wat::parse_str(r#"(module (memory 1) (data (i32.const 8) "fetchUsers\00view_mode\00POST"))"#).unwrap();
+        let st = Statics::parse(&bytes).unwrap();
+        let count = |k: &str| sweep_values(k, &st).unwrap().len();
+        assert_eq!(
+            (count("numbers"), count("dates"), count("times"), count("strings")),
+            (SWEEP_NUMBERS.len(), SWEEP_DATES.len(), SWEEP_TIMES.len(), SWEEP_STRINGS.len())
+        );
+        assert!(sweep_values("numbers", &st).unwrap().contains(&"9007199254740993".to_string()));
+        assert!(sweep_values("dates", &st).unwrap().contains(&"2026-02-29".to_string()));
+        // Words come from the binary: camel case is split, short or mixed-case words are dropped.
+        assert_eq!(sweep_values("words", &st).unwrap(), ["POST", "fetch", "view_mode"]);
+        let lengths: Vec<usize> = sweep_values("lengths", &st).unwrap().iter().map(String::len).collect();
+        assert_eq!(lengths, [0, 1, 8, 64, 256, 1024, 4096, 65536]);
+        assert_eq!(error(sweep_values("bogus", &st)), "--gen must be numbers, dates, times, strings, words or lengths, not \"bogus\"");
+    }
+
+    #[test]
+    fn set_value_keeps_numbers_numbers() {
+        let mut req = json!({"limit": 5, "q": "x", "tags": [["color", "red"]]});
+        set_value(&mut req, "limit", "9007199254740993").unwrap();
+        assert_eq!(req["limit"], json!(9007199254740993u64));
+        set_value(&mut req, "limit", "-1.5").unwrap();
+        assert_eq!(req["limit"], json!(-1.5));
+        set_value(&mut req, "limit", "ten").unwrap();
+        assert_eq!(req["limit"], "ten");
+        // Text now: a number stays text.
+        set_value(&mut req, "limit", "7").unwrap();
+        assert_eq!(req["limit"], "7");
+        set_value(&mut req, "q", "42").unwrap();
+        assert_eq!(req["q"], "42");
+        set_value(&mut req, "tags.color", "blue").unwrap();
+        set_value(&mut req, "tags.size", "3").unwrap();
+        assert_eq!(req["tags"], json!([["color", "blue"], ["size", "3"]]));
+        set_value(&mut req, "fresh", "1").unwrap();
+        assert_eq!(req["fresh"], "1");
+        assert_eq!(error(set_value(&mut req, "missing.x", "1")), "no field missing");
+        assert!(error(set_value(&mut json!(3), "", "4")).contains("not inside a record or a list of pairs"));
+    }
+
+    #[test]
+    fn numbers_texts_and_lines() {
+        assert_eq!(num(3.0), json!(3));
+        assert_eq!(num(-4.0), json!(-4));
+        assert_eq!(num(2.5), json!(2.5));
+        assert_eq!(num(1e16), json!(1e16));
+        assert!(num(1e16).is_f64());
+        assert_eq!(num(f64::NAN), Value::Null);
+
+        assert_eq!(short(&"a".repeat(40)), "a".repeat(40));
+        assert_eq!(short(&"a".repeat(41)), format!("{}…[41 bytes]", "a".repeat(20)));
+        // Bytes decide when to cut, characters where.
+        assert_eq!(short(&"é".repeat(30)), format!("{}…[60 bytes]", "é".repeat(20)));
+
+        assert_eq!(visible_text("<p>Hello <b>you</b></p>\n  <br/>there"), "Hello you there");
+        assert_eq!(visible_text("a<b>c"), "a c");
+        assert_eq!(visible_text(""), "");
+
+        assert_eq!(body_lines("<ul><li>a</li>\n  <li>b</li></ul>"), ["<ul>", "<li>a</li>", "<li>b</li>", "</ul>"]);
+        assert_eq!(body_lines("plain text"), ["plain text"]);
+        assert!(body_lines(" \n\n ").is_empty());
+    }
+
+    fn leaves_of(v: Value, path: &str) -> Vec<(String, Value)> {
+        let mut out = Vec::new();
+        leaves(&v, path.to_string(), &mut out);
+        out
+    }
+
+    #[test]
+    fn leaves_name_paths_by_field_pair_key_and_index() {
+        let v = json!({
+            "q": "a", "n": 1,
+            "tags": [["color", "red"], ["size", [1, 2]]],
+            "items": [{"id": 1}, {"id": null}],
+            "z": null,
+            "grid": [[1, 2]],
+        });
+        assert_eq!(
+            leaves_of(v, ""),
+            [
+                ("q".to_string(), json!("a")),
+                ("n".to_string(), json!(1)),
+                ("tags.color".to_string(), json!("red")),
+                ("tags.size[0]".to_string(), json!(1)),
+                ("tags.size[1]".to_string(), json!(2)),
+                ("items[0].id".to_string(), json!(1)),
+                ("grid[0][0]".to_string(), json!(1)),
+                ("grid[0][1]".to_string(), json!(2)),
+            ]
+        );
+        // A list of pairs at the top has no leading dot.
+        assert_eq!(leaves_of(json!([["a", 1], ["b", {"c": 2}]]), ""), [("a".to_string(), json!(1)), ("b.c".to_string(), json!(2))]);
+        assert_eq!(leaves_of(json!([["a", 1]]), "@0"), [("@0.a".to_string(), json!(1))]);
+        assert_eq!(leaves_of(json!({"x": true}), "@0"), [("@0.x".to_string(), json!(true))]);
+        assert_eq!(leaves_of(json!(5), ""), [(String::new(), json!(5))]);
+        assert!(leaves_of(json!([]), "p").is_empty());
+        assert!(leaves_of(Value::Null, "p").is_empty());
+    }
+
+    #[test]
+    fn days_since_1970_of_valid_dates_only() {
+        assert_eq!(days("1970-01-01"), Some(0));
+        assert_eq!(days("1969-12-31"), Some(-1));
+        assert_eq!(days("2026-11-05").unwrap() - days("2026-11-02").unwrap(), 3);
+        // Only the date counts.
+        assert_eq!(days("2026-11-02T23:59:59"), days("2026-11-02"));
+        assert_eq!(days("2026-02-29"), None);
+        assert_eq!(days("2026-11"), None);
+        assert_eq!(days("20261102xx"), None);
+        // The tenth byte inside a character: no panic.
+        assert_eq!(days("2026-11-0é"), None);
+    }
+
+    fn finding(kind: &str, detail: Value) -> Finding {
+        Finding { id: "f1".into(), kind: kind.into(), severity: Severity::Fail, title: String::new(), detail, run: None, confirmed: None }
+    }
+
+    #[test]
+    fn excerpts_show_forty_characters_around_the_canary() {
+        let canary = "cnry12ab1";
+        let reflection = finding("reflection", json!({"canary": canary}));
+        let body = format!("{}{canary}<i>{}", "x".repeat(50), "y".repeat(50));
+        assert_eq!(evidence_excerpt(&reflection, Some(&body)).unwrap(), format!("…{}{canary}<i>{}…", "x".repeat(40), "y".repeat(37)));
+        let body = format!("{}{canary}", "x".repeat(40));
+        assert_eq!(evidence_excerpt(&reflection, Some(&body)).unwrap(), body);
+        let body = format!("{}{canary}", "x".repeat(41));
+        assert_eq!(evidence_excerpt(&reflection, Some(&body)).unwrap(), format!("…{}{canary}", "x".repeat(40)));
+        let body = format!("<p>{canary}<i>x</i></p>");
+        assert_eq!(evidence_excerpt(&reflection, Some(&body)).unwrap(), body);
+        let body = format!("{}{canary}{}", "é".repeat(50), "ü".repeat(50));
+        assert_eq!(evidence_excerpt(&reflection, Some(&body)).unwrap(), format!("…{}{canary}{}…", "é".repeat(40), "ü".repeat(40)));
+        let stored = finding("stored_reflection", json!({"canary": canary}));
+        assert_eq!(evidence_excerpt(&stored, Some(canary)).unwrap(), canary);
+        // A page is needed for a reflection; the canary must be in it.
+        assert_eq!(evidence_excerpt(&reflection, None), None);
+        assert_eq!(evidence_excerpt(&reflection, Some("nothing here")), None);
+        assert_eq!(evidence_excerpt(&finding("reflection", json!({})), Some(&body)), None);
+
+        // Sinks show the host argument, not the page.
+        let sql = finding("sql_injection", json!({"canary": canary, "arg": format!("select '{canary}<i>'")}));
+        assert_eq!(evidence_excerpt(&sql, Some("page")).unwrap(), format!("select '{canary}<i>'"));
+        assert_eq!(evidence_excerpt(&finding("sql_injection", json!({"canary": canary})), Some(&body)), None);
+    }
 }

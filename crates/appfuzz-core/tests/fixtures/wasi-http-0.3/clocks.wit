@@ -1,0 +1,11 @@
+// The `types` interface of wasi:clocks 0.3.0, which wasi:http/types uses,
+// from wasmtime-wasi-http 50.0.1 (src/p3/wit/deps/clocks.wit).
+package wasi:clocks@0.3.0;
+
+/// This interface common types used throughout wasi:clocks.
+@since(version = 0.3.0)
+interface types {
+  /// A duration of time, in nanoseconds.
+  @since(version = 0.3.0)
+  type duration = u64;
+}

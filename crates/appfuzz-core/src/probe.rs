@@ -442,3 +442,112 @@ fn predictable_tokens(app: &App, issuing: &[RunRecord], run: Runner, probes: &mu
     }
     findings
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The result type of each function `wit`'s world exports, by name.
+    fn results(wit: &str) -> std::collections::BTreeMap<String, Type> {
+        let mut resolve = wit_parser::Resolve::new();
+        let pkg = resolve.push_str("probe.wit", wit).unwrap();
+        let world = resolve.select_world(&[pkg], None).unwrap();
+        let mut module = wit_component::dummy_module(&resolve, world, wit_parser::ManglingAndAbi::Standard32);
+        wit_component::embed_component_metadata(&mut module, &resolve, world, wit_component::StringEncoding::UTF8, false).unwrap();
+        let bytes = wit_component::ComponentEncoder::default().module(&module).unwrap().validate(true).encode().unwrap();
+        let engine = crate::harness::engine().unwrap();
+        let component = wasmtime::component::Component::new(&engine, &bytes).unwrap();
+        crate::wit::exports(&engine, &component).into_iter().filter_map(|f| Some((f.name.clone(), f.ty.results().next()?))).collect()
+    }
+
+    const STRINGS: [&str; 7] =
+        ["empty strings", "unicode strings", "2-byte chars", "3-byte chars", "3-byte chars after 1 byte", "4-byte chars", "long strings"];
+
+    #[test]
+    fn value_classes_follow_the_result_type() {
+        let types = results(
+            r#"package test:probe;
+            world app {
+              record item { tags: list<char>, at: tuple<s8, f64> }
+              variant answer { found(option<u8>), gone }
+              export ids: func() -> list<u32>;
+              export count: func() -> result<u32, string>;
+              export done: func() -> result;
+              export flag: func() -> option<bool>;
+              export yes: func() -> bool;
+              export name: func() -> string;
+              export item: func() -> item;
+              export answer: func() -> answer;
+              export nothing: func();
+            }"#,
+        );
+        let names = |f: &str| variants(&types[f]).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        let with = |head: &[&'static str]| [head, &STRINGS[..]].concat();
+        assert_eq!(names("ids"), ["empty list", "long list", "edge numbers"]);
+        assert_eq!(names("count"), with(&["err", "edge numbers"]));
+        assert_eq!(names("done"), ["err"]);
+        assert_eq!(names("flag"), ["none"]);
+        assert!(names("yes").is_empty(), "a bool has no edge values worth a run");
+        assert_eq!(names("name"), with(&[]));
+        // Lists, numbers and strings anywhere in a record, a tuple or a variant.
+        assert_eq!(names("item"), with(&["empty list", "long list", "edge numbers"]));
+        assert_eq!(names("answer"), ["none", "edge numbers"]);
+        assert!(!types.contains_key("nothing"));
+    }
+
+    #[test]
+    fn each_value_class_changes_one_option() {
+        let types = results("package test:probe; world app { export get: func() -> result<option<list<u8>>, string>; }");
+        let classes = variants(&types["get"]);
+        assert_eq!(classes.len(), 5 + STRINGS.len());
+        for (name, opts) in &classes {
+            opts.validate().unwrap_or_else(|e| panic!("{name}: {e}"));
+            let one = || GenOpts { list_len: Some(1), ..Default::default() };
+            let expect = match *name {
+                "empty list" => GenOpts { list_len: Some(0), ..one() },
+                "long list" => GenOpts { list_len: Some(50), ..one() },
+                "err" => GenOpts { results: Some("err".into()), ..one() },
+                "none" => GenOpts { options: Some("none".into()), ..one() },
+                "edge numbers" => GenOpts { numbers: Some("edge".into()), ..one() },
+                "empty strings" => GenOpts { strings: Some("empty".into()), ..one() },
+                "unicode strings" => GenOpts { strings: Some("unicode".into()), ..one() },
+                "2-byte chars" => GenOpts { strings: Some("utf8-2".into()), ..one() },
+                "3-byte chars" => GenOpts { strings: Some("utf8-3".into()), ..one() },
+                "3-byte chars after 1 byte" => GenOpts { strings: Some("utf8-3o".into()), ..one() },
+                "4-byte chars" => GenOpts { strings: Some("utf8-4".into()), ..one() },
+                "long strings" => GenOpts { strings: Some("long".into()), ..one() },
+                other => panic!("unexpected class {other}"),
+            };
+            assert_eq!(serde_json::to_value(opts).unwrap(), serde_json::to_value(&expect).unwrap(), "{name}");
+        }
+    }
+
+    #[test]
+    fn edge_times_are_the_times_they_name() {
+        let mut seen = std::collections::BTreeSet::new();
+        // Monday is 0; 1970-01-01 was a Thursday.
+        let weekday = |t: i64| (t.div_euclid(86_400) + 3).rem_euclid(7);
+        for (now, what) in EDGE_TIMES {
+            let t = crate::wasi::parse_datetime(now).unwrap_or_else(|| panic!("{now} ({what}) does not parse"));
+            let (date, _, time) = crate::wasi::format_datetime(t);
+            assert_eq!(format!("{date}T{time}"), *now, "{what}: no such time");
+            assert!(seen.insert(t), "{now} twice");
+            let day: u32 = date[8..].parse().unwrap();
+            match *what {
+                "leap day" => assert!(date.ends_with("-02-29")),
+                "first second of the year" => assert!(date.ends_with("-01-01") && time == "00:00:00"),
+                "last second of the year" => assert!(date.ends_with("-12-31") && time == "23:59:59"),
+                // The last Sunday of March and of October, the second Sunday of March.
+                "EU DST gap" | "EU DST overlap" => assert!(weekday(t) == 6 && day + 7 > 31, "{what}: {date}"),
+                "US DST gap" => assert!(weekday(t) == 6 && (8..=14).contains(&day), "{what}: {date}"),
+                "midnight on a Monday" => assert!(weekday(t) == 0 && time == "00:00:00"),
+                "end of a Sunday" => assert!(weekday(t) == 6 && time == "23:59:59"),
+                "after the 32-bit epoch overflow" => assert_eq!(t, i64::from(i32::MAX) + 1),
+                "the Unix epoch" => assert_eq!(t, 0),
+                _ => {}
+            }
+        }
+        let whats: std::collections::BTreeSet<_> = EDGE_TIMES.iter().map(|(_, w)| w).collect();
+        assert_eq!(whats.len(), EDGE_TIMES.len(), "two edge times with one name");
+    }
+}

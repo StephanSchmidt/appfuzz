@@ -201,7 +201,8 @@ fn bump_first_number(v: &mut Value, by: u64) -> bool {
     match v {
         Value::Number(x) => match x.as_u64() {
             Some(u) => {
-                *v = json!(u + by);
+                // The largest u64 (an edge value) wraps instead of panicking.
+                *v = json!(u.wrapping_add(by));
                 true
             }
             None => false,
@@ -530,8 +531,9 @@ fn findings(app: &App, knob: &Knob, points: &[Point], growth: &[Growth]) -> Vec<
     let ex = app.manifest.entry.as_ref().map(|e| e.export.clone()).unwrap_or_default();
     for g in growth.iter().filter(|g| g.metric.starts_with("calls ")) {
         let f = &g.metric["calls ".len()..];
+        // The list being grown, also when the knob names it short (`items#all`).
         if let Knob::HostList(src) = knob
-            && src == f
+            && platform_fn(app, src).map_or(src.as_str(), |i| i.key.as_str()) == f
         {
             continue;
         }
@@ -888,6 +890,9 @@ fn dropped_rows(app: &App, spec: &RunSpec, top: &RunRecord, key: &str) -> (Optio
                 Some(_) => None,
             })
             .collect();
+        // A list read twice names each row twice.
+        let mut seen = BTreeSet::new();
+        keys.retain(|k| seen.insert(k.to_string()));
         if keys.is_empty()
             && let Ok(state) = app.initial_state(&spec.plan, spec.seed)
         {
@@ -1542,36 +1547,1531 @@ fn dedupe_by_law(reports: &mut [ScaleReport]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::Manifest;
+    use crate::natural::Natural;
+    use crate::record::{HostCall, Outcome, Totals};
+    use crate::statics::{FuncInfo as StaticFunc, ImportInfo, ModuleInfo};
+    use std::sync::LazyLock;
 
-    /// The result type of `test:shop/items#<f>`.
-    fn result_type(f: &str) -> Type {
-        let wit = "package test:shop; interface items { record big { id: u64 } ids: func() -> list<u32>; bigs: func() -> list<big>; } world app { import items; export run: func() -> u32; }";
-        let wat = r#"
-            (module
-              (import "test:shop/items" "ids" (func (param i32)))
-              (import "test:shop/items" "bigs" (func (param i32)))
-              (memory (export "memory") 1)
-              (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024))
-              (func (export "run") (result i32) (i32.const 0)))"#;
+    const ALL: &str = "test:shop/items#all";
+    const PAGED: &str = "test:shop/items#paged";
+    const GET: &str = "test:shop/items#get";
+    const SAVE: &str = "test:shop/items#save";
+    const COUNT: &str = "test:shop/items#count";
+
+    const WIT: &str = r#"
+        package test:shop;
+
+        interface items {
+            record item { id: u32, name: string }
+            record big { id: u64 }
+            all: func() -> list<item>;
+            paged: func() -> list<item>;
+            maybe: func() -> option<list<item>>;
+            fallible: func() -> result<list<item>, string>;
+            names: func() -> list<string>;
+            ids: func() -> list<u32>;
+            bigs: func() -> list<big>;
+            no-ok: func() -> result<_, string>;
+            get: func(id: u32) -> option<item>;
+            save: func(id: string);
+            count: func() -> u32;
+            pair: func() -> tuple<u8, bool>;
+            ratio: func() -> f64;
+            either: func() -> result<u32, string>;
+        }
+
+        world app {
+            import items;
+            record request { days: u32, small: u8, name: string, query: list<tuple<string, string>> }
+            export handle: func(req: request, extra: list<u32>) -> string;
+        }
+    "#;
+
+    /// A component that imports `items` and exports `handle`; it never runs.
+    static COMPONENT: LazyLock<Vec<u8>> = LazyLock::new(|| {
         let mut resolve = wit_parser::Resolve::new();
-        let pkg = resolve.push_str("test.wit", wit).unwrap();
+        let pkg = resolve.push_str("shop.wit", WIT).unwrap();
         let world = resolve.select_world(&[pkg], Some("app")).unwrap();
-        let mut bytes = wat::parse_str(wat).unwrap();
-        wit_component::embed_component_metadata(&mut bytes, &resolve, world, wit_component::StringEncoding::UTF8, false).unwrap();
-        let bytes = wit_component::ComponentEncoder::default().module(&bytes).unwrap().validate(true).encode().unwrap();
-        let app = App::from_bytes(crate::manifest::Manifest::for_wasm(std::path::Path::new("test.wasm")), bytes).unwrap();
-        let key = format!("test:shop/items#{f}");
-        app.imports.iter().flat_map(|i| &i.funcs).find(|x| x.key == key).unwrap().ty.results().next().unwrap()
+        let mut module = wit_component::dummy_module(&resolve, world, wit_parser::ManglingAndAbi::Standard32);
+        wit_component::embed_component_metadata(&mut module, &resolve, world, wit_component::StringEncoding::UTF8, false).unwrap();
+        wit_component::ComponentEncoder::default().module(&module).unwrap().validate(true).encode().unwrap()
+    });
+
+    fn app(manifest: &str) -> App {
+        let m: Manifest = toml::from_str(&format!("[app]\nwasm = \"shop.wasm\"\n{manifest}")).unwrap();
+        App::from_bytes(m, COMPONENT.clone()).unwrap()
+    }
+
+    fn result_type(app: &App, f: &str) -> Type {
+        platform_fn(app, f).unwrap().ty.results().next().unwrap()
+    }
+
+    fn base(app: &App) -> RunSpec {
+        let req = json!({"days": 3, "small": 1, "name": "ada", "query": [["view", "list"]]});
+        app.spec(app.export("handle").unwrap(), vec![req, json!([1, 2])], Plan::default(), 7)
+    }
+
+    fn call(func: &str, args: Value, result: Option<Value>) -> HostCall {
+        let result_items = result.as_ref().and_then(crate::detect::list_in).map(|l| l.len() as u32);
+        HostCall { func: func.into(), args: args.as_object().cloned().unwrap_or_default(), result, result_items, ..HostCall::default() }
+    }
+
+    fn record(spec: &RunSpec, kind: OutcomeKind, events: Vec<HostCall>, result: Value) -> RunRecord {
+        RunRecord {
+            id: spec.id(),
+            spec: spec.clone(),
+            outcome: Outcome { kind, message: None, stack: vec![] },
+            result: Some(result),
+            command_exit_code: None,
+            totals: Totals { host_calls: events.len() as u32, ..Totals::default() },
+            events,
+            capture_limited: false,
+            guest_error: None,
+            rejected_output: None,
+            memory_limit_hit: false,
+            stdout: String::new(),
+            stderr: String::new(),
+            shopify: None,
+        }
+    }
+
+    fn point(n: u64) -> Point {
+        Point {
+            n,
+            run: format!("r{n}"),
+            outcome: OutcomeKind::Ok,
+            calls: BTreeMap::new(),
+            host_calls: 0,
+            fuel: 5000,
+            peak_memory: 1 << 16,
+            virtual_ms: json!(0),
+            virtual_ns: Natural::default(),
+            cost: 0,
+            output_bytes: 100,
+            host_arg_bytes: 0,
+            rows: BTreeMap::new(),
+            host_result_bytes: 0,
+            fuel_limit: None,
+        }
+    }
+
+    fn points(sizes: &[u64], set: impl Fn(u64, &mut Point)) -> Vec<Point> {
+        sizes
+            .iter()
+            .map(|&n| {
+                let mut p = point(n);
+                set(n, &mut p);
+                p
+            })
+            .collect()
+    }
+
+    /// Calls to `f` at each size.
+    fn calls(sizes: &[u64], f: &'static str, c: impl Fn(u64) -> u64) -> Vec<Point> {
+        points(sizes, |n, p| {
+            p.calls.insert(f.into(), c(n) as u32);
+        })
+    }
+
+    fn growth<'a>(r: &'a ScaleReport, metric: &str) -> &'a Growth {
+        r.growth.iter().find(|g| g.metric == metric).unwrap_or_else(|| panic!("no growth of {metric}: {:?}", r.growth))
+    }
+
+    fn found<'a>(r: &'a ScaleReport, kind: &str) -> Vec<&'a Finding> {
+        r.findings.iter().filter(|f| f.kind == kind).collect()
+    }
+
+    fn one<'a>(r: &'a ScaleReport, kind: &str) -> &'a Finding {
+        let f = found(r, kind);
+        assert_eq!(f.len(), 1, "{kind}: {:#?}", r.findings);
+        f[0]
+    }
+
+    const SIZES: [u64; 5] = [1, 2, 4, 8, 16];
+
+    // --- Knobs -----------------------------------------------------------
+
+    #[test]
+    fn knobs_parse_from_their_prefix_or_shape() {
+        assert_eq!(Knob::parse("fn:customers#all").unwrap(), Knob::HostList("customers#all".into()));
+        assert_eq!(Knob::parse("items#all").unwrap(), Knob::HostList("items#all".into()));
+        assert_eq!(Knob::parse("len:query.q").unwrap(), Knob::FieldLen("query.q".into()));
+        // An explicit field may contain `#`.
+        assert_eq!(Knob::parse("field:a#b").unwrap(), Knob::Field("a#b".into()));
+        assert_eq!(Knob::parse("query.days").unwrap(), Knob::Field("query.days".into()));
+        assert_eq!(Knob::parse("@1").unwrap(), Knob::Field("@1".into()));
+    }
+
+    #[test]
+    fn knobs_say_what_n_is() {
+        assert_eq!(Knob::HostList("x#all".into()).describe(), "length of the list x#all returns");
+        assert_eq!(Knob::Field("@2".into()).describe(), "number of elements in argument 2");
+        assert_eq!(Knob::Field("@1.page".into()).describe(), "request field @1.page = n");
+        assert_eq!(Knob::Field("query.days".into()).describe(), "request field query.days = n");
+        assert_eq!(Knob::FieldLen("name".into()).describe(), "length of request field name");
+        let wire = serde_json::to_value(Knob::FieldLen("q".into())).unwrap();
+        assert_eq!(wire, json!({"kind": "field_len", "target": "q"}));
+        assert_eq!(serde_json::from_value::<Knob>(wire).unwrap(), Knob::FieldLen("q".into()));
+    }
+
+    #[test]
+    fn argument_paths_split_into_index_and_path() {
+        assert_eq!(split_arg("@1.page"), (1, "page"));
+        assert_eq!(split_arg("@1.a.b"), (1, "a.b"));
+        assert_eq!(split_arg("@2"), (2, ""));
+        assert_eq!(split_arg("query.days"), (0, "query.days"));
+        // An index that is no number means the first argument.
+        assert_eq!(split_arg("@x.y"), (0, "y"));
+    }
+
+    #[test]
+    fn default_sizes_follow_the_knob() {
+        assert_eq!(default_sizes(&Knob::HostList("f".into())), COUNT_SIZES.to_vec());
+        assert_eq!(default_sizes(&Knob::Field("f".into())), FIELD_SIZES.to_vec());
+        assert_eq!(default_sizes(&Knob::FieldLen("f".into())), LENGTH_SIZES.to_vec());
+        // Request fields go further than host lists.
+        assert!(FIELD_SIZES.last() > COUNT_SIZES.last());
+    }
+
+    // --- Setting request values -------------------------------------------
+
+    #[test]
+    fn resized_values_keep_the_old_shape() {
+        assert_eq!(resized(Some(&json!(5)), 9, false), json!(9));
+        assert_eq!(resized(Some(&json!(5)), 3, true), json!("aaa"));
+        assert_eq!(resized(Some(&json!("12")), 4, false), json!("4"));
+        assert_eq!(resized(None, 4, false), json!("4"));
+        assert_eq!(resized(None, 0, true), json!(""));
+        // An empty list has nothing to copy.
+        assert_eq!(resized(Some(&json!([])), 4, false), json!("4"));
+        assert_eq!(resized(Some(&json!([1, 2])), 0, false), json!([]));
+        // Copies of list elements get distinct numbers.
+        assert_eq!(resized(Some(&json!([1, 2])), 5, false), json!([1, 2, 1001, 1002, 2001]));
+        assert_eq!(
+            resized(Some(&json!([{"id": 7, "name": "a"}])), 3, false),
+            json!([{"id": 7, "name": "a"}, {"id": 1007, "name": "a"}, {"id": 2007, "name": "a"}])
+        );
+        // Text cannot be told apart.
+        assert_eq!(resized(Some(&json!(["a"])), 2, false), json!(["a", "a"]));
+    }
+
+    #[test]
+    fn the_first_unsigned_number_is_bumped() {
+        let mut v = json!({"a": "x", "b": [-1, 2.5, 3], "c": 4});
+        assert!(bump_first_number(&mut v, 10));
+        assert_eq!(v, json!({"a": "x", "b": [-1, 2.5, 13], "c": 4}));
+        for mut v in [json!(-1), json!(1.5), json!("7"), json!(null), json!([]), json!({})] {
+            let before = v.clone();
+            assert!(!bump_first_number(&mut v, 10));
+            assert_eq!(v, before);
+        }
+    }
+
+    #[test]
+    fn bumping_the_largest_number_does_not_overflow() {
+        // A request list may hold the largest u64 (the fuzzer's edge values).
+        // It wraps, as release builds always did, and stays distinct.
+        assert_eq!(resized(Some(&json!([u64::MAX])), 2, false), json!([u64::MAX, 999]));
+    }
+
+    #[test]
+    fn query_values_are_read_before_the_fragment() {
+        assert_eq!(query_value("/a?x=1&y=2#f", "y").as_deref(), Some("2"));
+        assert_eq!(query_value("/a?x=1#y=3", "y"), None);
+        assert_eq!(query_value("/a?flag&x=1", "flag").as_deref(), Some(""));
+        assert_eq!(query_value("/a?xx=1", "x"), None);
+        assert_eq!(query_value("/a", "x"), None);
+    }
+
+    #[test]
+    fn query_parameters_are_set_once_and_encoded_only_where_needed() {
+        assert_eq!(with_query("/a", "n", "5"), "/a?n=5");
+        assert_eq!(with_query("/a?", "n", ""), "/a?n=");
+        // An existing value is replaced (and moves to the end).
+        assert_eq!(with_query("/a?n=1&m=2", "n", "5"), "/a?m=2&n=5");
+        // A bare key counts as set; a longer key is another parameter.
+        assert_eq!(with_query("/a?&n&nn=3", "n", "7"), "/a?nn=3&n=7");
+        // Only what would split the value is encoded; the fragment stays.
+        assert_eq!(with_query("/a?n=1#top", "n", "a b&c#d%"), "/a?n=a b%26c%23d%25#top");
+        assert_eq!(query_value(&with_query("/a?m=1#f", "n", "9"), "n").as_deref(), Some("9"));
+    }
+
+    #[test]
+    fn fields_are_set_in_records_pair_lists_and_urls() {
+        let mut req = json!({"days": 2, "form": {"n": 1}, "query": [["days", "3"]], "uri": "/p?x=1"});
+        set_field(&mut req, "days", 9, false).unwrap();
+        set_field(&mut req, "form.n", 4, false).unwrap();
+        set_field(&mut req, "form.text", 3, true).unwrap();
+        set_field(&mut req, "query.days", 30, false).unwrap();
+        set_field(&mut req, "query.limit", 5, false).unwrap();
+        set_field(&mut req, "uri?x", 8, false).unwrap();
+        set_field(&mut req, "uri?q", 3, true).unwrap();
+        assert_eq!(req, json!({"days": 9, "form": {"n": 4, "text": "aaa"}, "query": [["days", "30"], ["limit", "5"]], "uri": "/p?x=8&q=aaa"}));
+        assert_eq!(set_field(&mut req, "nope.x", 1, false).unwrap_err().to_string(), "no field nope");
+        assert_eq!(set_field(&mut req, "days.x", 1, false).unwrap_err().to_string(), "days.x: not inside a record or a list of pairs");
+        assert_eq!(set_field(&mut req, "form?x", 1, false).unwrap_err().to_string(), "no URL field form");
+        assert_eq!(set_field(&mut req, "nope?x", 1, false).unwrap_err().to_string(), "no URL field nope");
+    }
+
+    #[test]
+    fn text_is_set_in_records_pair_lists_and_urls() {
+        let mut req = json!({"form": {"name": 1}, "query": [], "uri": "/p?x=1"});
+        set_text(&mut req, "form.name", "ada").unwrap();
+        set_text(&mut req, "query.view", "week").unwrap();
+        set_text(&mut req, "query.view", "month").unwrap();
+        set_text(&mut req, "uri?view", "a&b").unwrap();
+        assert_eq!(req, json!({"form": {"name": "ada"}, "query": [["view", "month"]], "uri": "/p?x=1&view=a%26b"}));
+        assert!(set_text(&mut req, "missing.name", "x").is_err());
+        assert!(set_text(&mut req, "form?x", "x").is_err());
+    }
+
+    #[test]
+    fn keys_compared_byte_by_byte_are_solved_from_fuel() {
+        let secret = "k3y-";
+        let fuel = |k: &str| 100 + 7 * k.chars().zip(secret.chars()).take_while(|(a, b)| a == b).count() as u64;
+        assert_eq!(solve_key(4, &fuel).as_deref(), Some(secret));
+        assert_eq!(solve_key(0, &fuel).as_deref(), Some(""));
+        // No gradient: every guess costs the same.
+        assert_eq!(solve_key(3, &|_| 42), None);
+        // A character outside the alphabet ties all guesses.
+        let upper = |k: &str| 100 + u64::from(k.starts_with('K'));
+        assert_eq!(solve_key(1, &upper), None);
+        assert_eq!(filler(3, '~'), "~~~");
+        assert_eq!(filler(0, '~'), "");
+    }
+
+    // --- Growing host lists -----------------------------------------------
+
+    #[test]
+    fn steady_plans_pin_lists_to_one_happy_element() {
+        let p = steady(&Plan::default());
+        let g = p.0["_defaults"].response.generate.clone().unwrap();
+        assert_eq!((g.list_len, g.options.as_deref(), g.results.as_deref()), (Some(1), Some("some"), Some("ok")));
+        // Defaults of the plan's own win.
+        let mut own = Plan::default();
+        own.0.insert("_defaults".into(), FnPlan { response: Response { latency_ms: Some(3.0), ..Default::default() }, ..Default::default() });
+        own.0.insert(ALL.into(), FnPlan::default());
+        assert_eq!(steady(&own), own);
+    }
+
+    #[test]
+    fn copies_get_fresh_ids_and_names() {
+        let mut e = json!({"id": 3, "n": 9, "name": "Ann #2", "tag": "x"});
+        uniquify(&mut e, 4, 10);
+        assert_eq!(e, json!({"id": 15, "n": 9, "name": "Ann #5", "tag": "x"}));
+        // Without a numeric id, the first number is the id.
+        let mut e = json!({"id": "abc", "count": 2, "flag": true});
+        uniquify(&mut e, 0, 10);
+        assert_eq!(e, json!({"id": "abc #1", "count": 1, "flag": true}));
+        let (mut n, mut s, mut b) = (json!(5), json!("s"), json!(true));
+        uniquify(&mut n, 4, 0);
+        uniquify(&mut s, 4, 0);
+        uniquify(&mut b, 4, 0);
+        assert_eq!((n, s, b), (json!(5), json!("s #5"), json!(true)), "a number counts on from the largest");
+    }
+
+    #[test]
+    fn grown_lists_keep_the_template_then_add_copies() {
+        let app = app("");
+        let ty = result_type(&app, ALL);
+        let t = json!([{"id": 4, "name": "a"}, {"id": 9, "name": "b"}]);
+        let v = grow(&ty, Some(&t), 5, 1, &GenOpts::default()).unwrap();
+        assert_eq!(
+            v,
+            json!([{"id": 4, "name": "a"}, {"id": 9, "name": "b"}, {"id": 12, "name": "a #3"}, {"id": 13, "name": "b #4"}, {"id": 14, "name": "a #5"}])
+        );
+        assert_eq!(grow(&ty, Some(&t), 1, 1, &GenOpts::default()).unwrap(), json!([{"id": 4, "name": "a"}]));
+        assert_eq!(grow(&ty, Some(&t), 0, 1, &GenOpts::default()).unwrap(), json!([]));
+        let names = grow(&result_type(&app, "names"), Some(&json!(["a", "b"])), 4, 1, &GenOpts::default()).unwrap();
+        assert_eq!(names, json!(["a", "b", "a #3", "b #4"]));
+    }
+
+    #[test]
+    fn grown_lists_without_a_template_are_generated_and_distinct() {
+        let app = app("");
+        let ty = result_type(&app, ALL);
+        let v = grow(&ty, None, 6, 3, &GenOpts::default()).unwrap();
+        let list = v.as_array().unwrap();
+        assert_eq!(list.len(), 6);
+        let ids: BTreeSet<u64> = list.iter().map(|e| e["id"].as_u64().unwrap()).collect();
+        let names: BTreeSet<&str> = list.iter().map(|e| e["name"].as_str().unwrap()).collect();
+        assert_eq!((ids.len(), names.len()), (6, 6), "{v}");
+        let Type::List(l) = &ty else { panic!("{ty:?}") };
+        assert!(list.iter().all(|e| json_to_val(e, &l.ty()).is_ok()));
+        // The same seed grows the same list.
+        assert_eq!(grow(&ty, None, 6, 3, &GenOpts::default()).unwrap(), v);
+        // An element that does not fit the type is replaced.
+        let bad = grow(&ty, Some(&json!([{"id": "x"}])), 2, 3, &GenOpts::default()).unwrap();
+        assert!(bad.as_array().unwrap().iter().all(|e| json_to_val(e, &l.ty()).is_ok()), "{bad}");
+        // Generate options shape the new elements.
+        let opts = GenOpts { strings: Some("=zz".into()), ..Default::default() };
+        let zz = grow(&ty, None, 3, 3, &opts).unwrap();
+        assert!(zz.as_array().unwrap().iter().all(|e| e["name"].as_str().unwrap().starts_with("zz #")), "{zz}");
     }
 
     #[test]
     fn copies_of_a_number_list_do_not_repeat_the_template() {
-        let v = grow(&result_type("ids"), Some(&json!([1, 2, 3])), 6, 1, &GenOpts::default()).unwrap();
+        let app = app("");
+        let v = grow(&result_type(&app, "ids"), Some(&json!([1, 2, 3])), 6, 1, &GenOpts::default()).unwrap();
         assert_eq!(v, json!([1, 2, 3, 7, 8, 9]));
-        // Ids count on from the largest; the largest u64 wraps.
-        let v = grow(&result_type("bigs"), Some(&json!([{"id": 4}, {"id": 2}])), 3, 1, &GenOpts::default()).unwrap();
+        // Ids count on from the largest.
+        let v = grow(&result_type(&app, "bigs"), Some(&json!([{"id": 4}, {"id": 2}])), 3, 1, &GenOpts::default()).unwrap();
         assert_eq!(v, json!([{"id": 4}, {"id": 2}, {"id": 7}]));
-        let v = grow(&result_type("bigs"), Some(&json!([{"id": u64::MAX}])), 2, 1, &GenOpts::default()).unwrap();
-        assert_eq!(v, json!([{"id": u64::MAX}, {"id": 1}]));
+    }
+
+    #[test]
+    fn copies_of_the_largest_id_do_not_overflow() {
+        let app = app("");
+        let v = grow(&result_type(&app, "bigs"), Some(&json!([{"id": u64::MAX}])), 3, 1, &GenOpts::default()).unwrap();
+        assert_eq!(v, json!([{"id": u64::MAX}, {"id": 1}, {"id": 2}]));
+    }
+
+    #[test]
+    fn lists_inside_options_and_results_grow() {
+        let app = app("");
+        let t = json!({"some": [{"id": 1, "name": "a"}]});
+        let v = grow(&result_type(&app, "maybe"), Some(&t), 2, 1, &GenOpts::default()).unwrap();
+        assert_eq!(v, json!({"some": [{"id": 1, "name": "a"}, {"id": 3, "name": "a #2"}]}));
+        let t = json!({"ok": [{"id": 1, "name": "a"}]});
+        let v = grow(&result_type(&app, "fallible"), Some(&t), 2, 1, &GenOpts::default()).unwrap();
+        assert_eq!(v, json!({"ok": [{"id": 1, "name": "a"}, {"id": 3, "name": "a #2"}]}));
+        // An error template has no list: a generated one grows.
+        let v = grow(&result_type(&app, "fallible"), Some(&json!({"err": "x"})), 3, 1, &GenOpts::default()).unwrap();
+        assert_eq!(v["ok"].as_array().unwrap().len(), 3);
+        let err = |f: &str| grow(&result_type(&app, f), None, 2, 1, &GenOpts::default()).unwrap_err().to_string();
+        assert_eq!(err("no-ok"), "result without an ok type");
+        assert_eq!(err("count"), "the result has no list to grow");
+        assert_eq!(err("get"), "the result has no list to grow");
+    }
+
+    #[test]
+    fn list_functions_are_those_that_return_a_list() {
+        let app = app("");
+        let got: BTreeSet<String> = list_functions(&app).into_iter().collect();
+        let want: BTreeSet<String> = ["all", "paged", "maybe", "fallible", "names", "ids", "bigs"].iter().map(|f| format!("test:shop/items#{f}")).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn platform_functions_are_found_by_their_full_key_or_its_end() {
+        let app = app("");
+        for name in [ALL, "items#all", "all"] {
+            assert_eq!(platform_fn(&app, name).map(|f| f.key.as_str()), Some(ALL), "{name}");
+        }
+        assert!(platform_fn(&app, "ll").is_none());
+        assert!(platform_fn(&app, "shop/items#al").is_none());
+        assert!(platform_fn(&app, "handle").is_none());
+    }
+
+    // --- Applying a knob ----------------------------------------------------
+
+    #[test]
+    fn a_host_list_knob_returns_n_elements_and_keeps_the_latency() {
+        let app = app("");
+        let mut b = base(&app);
+        let response = Response { ret: Some(json!([{"id": 1, "name": "a"}])), trap: Some("x".into()), latency_ms: Some(4.0), ..Default::default() };
+        b.plan.0.insert(ALL.into(), FnPlan { response, ..Default::default() });
+        let s = apply(&app, &b, &Knob::HostList("items#all".into()), 3).unwrap();
+        let r = &s.plan.0[ALL].response;
+        assert_eq!(r.ret, Some(json!([{"id": 1, "name": "a"}, {"id": 3, "name": "a #2"}, {"id": 4, "name": "a #3"}])));
+        assert_eq!((r.trap.as_deref(), r.generate.is_none(), r.latency_ms), (None, true, Some(4.0)));
+        assert_eq!(s.args, b.args);
+    }
+
+    #[test]
+    fn new_host_elements_follow_the_functions_or_the_default_generate_options() {
+        let app = app("");
+        let generate = |s: &str| Response { generate: Some(GenOpts { strings: Some(format!("={s}")), ..Default::default() }), ..Default::default() };
+        let mut b = base(&app);
+        b.plan.0.insert("_defaults".into(), FnPlan { response: generate("dflt"), ..Default::default() });
+        let names = |s: &RunSpec| -> Vec<String> {
+            s.plan.0[ALL].response.ret.as_ref().unwrap().as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap().to_string()).collect()
+        };
+        let s = apply(&app, &b, &Knob::HostList(ALL.into()), 2).unwrap();
+        assert!(names(&s).iter().all(|n| n.starts_with("dflt #")), "{:?}", names(&s));
+        b.plan.0.insert(ALL.into(), FnPlan { response: generate("own"), ..Default::default() });
+        let s = apply(&app, &b, &Knob::HostList(ALL.into()), 2).unwrap();
+        assert!(names(&s).iter().all(|n| n.starts_with("own #")), "{:?}", names(&s));
+    }
+
+    #[test]
+    fn host_list_knobs_need_a_platform_function_with_a_list() {
+        let app = app("");
+        let b = base(&app);
+        let err = |f: &str| apply(&app, &b, &Knob::HostList(f.into()), 2).unwrap_err().to_string();
+        assert_eq!(err("nope#x"), "no platform import nope#x");
+        assert_eq!(err("save"), "save returns nothing");
+        assert_eq!(err("count"), "the result has no list to grow");
+    }
+
+    #[test]
+    fn request_knobs_set_fields_lengths_and_whole_arguments() {
+        let app = app("");
+        let b = base(&app);
+        let s = apply(&app, &b, &Knob::Field("days".into()), 40).unwrap();
+        assert_eq!(s.args[0]["days"], json!(40));
+        let s = apply(&app, &b, &Knob::Field("query.view".into()), 6).unwrap();
+        assert_eq!(s.args[0]["query"], json!([["view", "6"]]));
+        let s = apply(&app, &b, &Knob::FieldLen("name".into()), 5).unwrap();
+        assert_eq!(s.args[0]["name"], json!("aaaaa"));
+        let s = apply(&app, &b, &Knob::Field("@1".into()), 3).unwrap();
+        assert_eq!(s.args[1], json!([1, 2, 1001]));
+        assert_eq!(s.plan, b.plan);
+        assert_eq!(apply(&app, &b, &Knob::Field("@5".into()), 3).unwrap_err().to_string(), "the export has no argument 5");
+        assert!(apply(&app, &b, &Knob::Field("nope.x".into()), 3).is_err());
+    }
+
+    const DATASET: &str = r#"
+        [datasets.items]
+        rows = 4
+        key = "id"
+        template = { id = 1, name = "Item" }
+        [functions."test:shop/items#all"]
+        query = { dataset = "items" }
+        [functions."test:shop/items#paged"]
+        query = { dataset = "items", page = { max = 50 } }
+    "#;
+
+    #[test]
+    fn a_dataset_knob_sizes_the_collection() {
+        let app = app(DATASET);
+        let b = base(&app);
+        let s = apply(&app, &b, &Knob::HostList("all".into()), 50).unwrap();
+        assert_eq!(s.plan.0["_defaults"].dataset_rows["items"], 50);
+        assert!(!s.plan.0.contains_key(ALL));
+        assert!(apply(&app, &b, &Knob::HostList("all".into()), 10_000).is_ok());
+        assert_eq!(apply(&app, &b, &Knob::HostList("all".into()), 10_001).unwrap_err().to_string(), "dataset scale exceeds 10000");
+    }
+
+    #[test]
+    fn specs_fit_the_export_or_are_not_requests() {
+        let app = app("");
+        let mut s = base(&app);
+        assert!(fits(&app, &s));
+        s.args[0]["small"] = json!(256);
+        assert!(!fits(&app, &s));
+        s.export = "nope".into();
+        assert!(fits(&app, &s));
+    }
+
+    // --- Budgets ------------------------------------------------------------
+
+    #[test]
+    fn budgets_are_exceeded_only_above_their_limit() {
+        let mut p = point(1);
+        p.cost = 101;
+        assert!(Budget::Cost(100).exceeds(&p) && !Budget::Cost(101).exceeds(&p));
+        p.cost = u128::from(u64::MAX) + 1;
+        assert!(Budget::Cost(u64::MAX).exceeds(&p));
+        p.fuel = 50;
+        assert!(Budget::Fuel(40).exceeds(&p) && !Budget::Fuel(50).exceeds(&p));
+        // A run's own fuel limit (Shopify) wins over the manifest's.
+        p.fuel_limit = Some(60);
+        assert!(!Budget::Fuel(40).exceeds(&p));
+        p.fuel_limit = Some(49);
+        assert!(Budget::Fuel(4000).exceeds(&p));
+        p.peak_memory = 10;
+        assert!(Budget::Memory(9).exceeds(&p) && !Budget::Memory(10).exceeds(&p));
+        p.virtual_ns = Natural::from(2_500_000u64);
+        assert!(Budget::Latency(2.0).exceeds(&p) && !Budget::Latency(2.5).exceeds(&p));
+        assert!(!Budget::Latency(f64::INFINITY).exceeds(&p) && !Budget::Latency(f64::NAN).exceeds(&p));
+        assert_eq!((Budget::Cost(7).approximate(), Budget::Latency(1.5).approximate()), (7.0, 1.5));
+        assert_eq!((Budget::Memory(7).display(), Budget::Latency(1.5).display()), (json!(7), json!(1.5)));
+    }
+
+    // --- Points -------------------------------------------------------------
+
+    #[test]
+    fn a_point_measures_one_run() {
+        let app = app("");
+        let s = base(&app);
+        let list = |n: u32| Some(json!((0..n).map(|i| json!({"id": i, "name": "a"})).collect::<Vec<_>>()));
+        let events = vec![call(ALL, json!({}), list(3)), call(GET, json!({"id": 1}), Some(json!({"some": null}))), call(ALL, json!({}), list(2))];
+        let mut r = record(&s, OutcomeKind::Ok, events, json!({"a": 1}));
+        r.totals.fuel = 9;
+        r.totals.cost = 4;
+        r.totals.virtual_ns = Natural::from(2_500_000u64);
+        r.totals.host_result_bytes = 77;
+        r.shopify = Some(crate::shopify::RunInfo::new("t", 1.0));
+        let p = Point::of(8, &r);
+        assert_eq!((p.n, p.run.as_str(), p.outcome, p.host_calls, p.fuel, p.cost), (8, r.id.as_str(), OutcomeKind::Ok, 3, 9, 4));
+        assert_eq!(p.calls, BTreeMap::from([(ALL.to_string(), 2), (GET.to_string(), 1)]));
+        assert_eq!(p.rows, BTreeMap::from([(ALL.to_string(), 5)]));
+        assert_eq!((p.output_bytes, p.host_arg_bytes, p.host_result_bytes), (7, 2 + 8 + 2, 77));
+        assert_eq!(p.virtual_ms, json!(2.5));
+        assert_eq!(p.fuel_limit, Some(r.shopify.as_ref().unwrap().instructions_limit));
+        r.result = None;
+        assert_eq!(Point::of(8, &r).output_bytes, 0);
+    }
+
+    // --- Growth laws, breaking points and findings -----------------------------
+
+    #[test]
+    fn calls_per_element_are_an_n_plus_1_with_the_measured_break() {
+        let app = app("[limits]\ncost_per_request = 100\n");
+        let ps = points(&SIZES, |n, p| {
+            p.calls.insert(ALL.into(), 1);
+            p.calls.insert(GET.into(), (1 + 28 * n) as u32);
+            p.cost = u128::from(1 + 28 * n);
+        });
+        let r = analyze(&app, Knob::HostList(ALL.into()), ps);
+        // Only what changes with n: the one call to `all`, fuel and memory stay.
+        let metrics: Vec<&str> = r.growth.iter().map(|g| g.metric.as_str()).collect();
+        assert_eq!(metrics, [format!("calls {GET}").as_str(), "cost"]);
+        let calls = growth(&r, &format!("calls {GET}"));
+        assert_eq!((calls.law.class, calls.law.text.as_str()), (Class::Linear, "1 + 28·n"));
+        assert_eq!((calls.breaks_at, calls.limit.clone(), calls.break_evidence), (None, None, None));
+        let cost = growth(&r, "cost");
+        assert_eq!((cost.breaks_at, cost.break_evidence, cost.predicted_breaks_at), (Some(4), Some("measured"), Some(4)));
+        assert_eq!(cost.limit, Some(json!(100)));
+        let f = one(&r, "n_plus_1");
+        assert_eq!(f.severity, Severity::Fail);
+        assert_eq!(f.title, format!("calls to {GET} grow as 1 + 28·n with n = length of the list {ALL} returns; cost exceeds its limit at measured n = 4"));
+        assert_eq!(f.detail["breaks_at"], json!([4, "cost"]));
+        assert_eq!((&f.detail["func"], &f.detail["class"], &f.detail["law"]), (&json!(GET), &json!("linear"), &json!("1 + 28·n")));
+        assert_eq!((f.detail["worst_run"].as_str(), f.run.as_deref()), (Some("r16"), Some("r16")));
+        assert_eq!(r.findings.len(), 1, "{:?}", r.findings);
+    }
+
+    #[test]
+    fn a_host_list_that_breaks_a_limit_within_100_elements_fails() {
+        let at = |limit: u64, sizes: &[u64]| {
+            let app = app(&format!("[limits]\ncost_per_request = {limit}\n"));
+            let ps = points(sizes, |n, p| {
+                p.calls.insert(GET.into(), n as u32);
+                p.cost = u128::from(10 * n);
+            });
+            analyze(&app, Knob::HostList(ALL.into()), ps)
+        };
+        let r = at(1000, &[1, 2, 4, 8]);
+        let cost = growth(&r, "cost");
+        assert_eq!((cost.law.text.as_str(), cost.breaks_at, cost.break_evidence, cost.predicted_breaks_at), ("10·n", Some(101), Some("inferred"), Some(101)));
+        let f = one(&r, "n_plus_1");
+        assert_eq!(f.severity, Severity::Warn);
+        assert!(f.title.ends_with("; cost is predicted to exceed its limit at n = 101"), "{}", f.title);
+        assert_eq!(f.detail["break_evidence"], json!("inferred"));
+        let r = at(999, &[1, 2, 4, 8]);
+        assert_eq!(growth(&r, "cost").breaks_at, Some(100));
+        assert_eq!(one(&r, "n_plus_1").severity, Severity::Fail);
+        // The earlier of the measured and the predicted break decides.
+        let sizes = [1, 2, 4, 8, 16, 32, 64, 128];
+        let r = at(999, &sizes);
+        let cost = growth(&r, "cost");
+        assert_eq!((cost.breaks_at, cost.predicted_breaks_at), (Some(128), Some(100)));
+        assert_eq!(one(&r, "n_plus_1").severity, Severity::Fail);
+        assert_eq!(one(&at(1009, &sizes), "n_plus_1").severity, Severity::Warn);
+    }
+
+    #[test]
+    fn a_request_field_that_breaks_a_limit_at_any_size_fails() {
+        let ps = || {
+            points(&[1, 2, 4, 8], |n, p| {
+                p.calls.insert(GET.into(), n as u32);
+                p.cost = u128::from(10 * n);
+            })
+        };
+        let r = analyze(&app("[limits]\ncost_per_request = 100000\n"), Knob::Field("query.days".into()), ps());
+        assert_eq!(growth(&r, "cost").breaks_at, Some(10_001));
+        let f = one(&r, "input_amplification");
+        assert_eq!(f.severity, Severity::Fail);
+        assert!(f.title.starts_with(&format!("calls to {GET} grow as 1·n with n = request field query.days = n;")), "{}", f.title);
+        // Nothing it could break: the growth is a warning.
+        let r = analyze(&app(""), Knob::Field("query.days".into()), ps());
+        assert_eq!(one(&r, "input_amplification").severity, Severity::Warn);
+        assert!(found(&r, "n_plus_1").is_empty());
+    }
+
+    #[test]
+    fn a_limit_out_of_reach_is_never_broken() {
+        let app = app("[limits]\ncost_per_request = 1000000000\n");
+        let ps = points(&SIZES, |n, p| {
+            p.calls.insert(GET.into(), (1 + 28 * n) as u32);
+            p.cost = u128::from(1 + 28 * n);
+        });
+        let r = analyze(&app, Knob::HostList(ALL.into()), ps);
+        let cost = growth(&r, "cost");
+        assert_eq!((cost.breaks_at, cost.break_evidence, cost.predicted_breaks_at), (None, None, None));
+        assert_eq!(cost.limit, Some(json!(1_000_000_000)));
+        let f = one(&r, "n_plus_1");
+        assert_eq!(f.severity, Severity::Warn);
+        assert_eq!(f.title, format!("calls to {GET} grow as 1 + 28·n with n = length of the list {ALL} returns"));
+        assert_eq!(f.detail["breaks_at"], Value::Null);
+    }
+
+    #[test]
+    fn breaks_are_extrapolated_up_to_a_million_elements() {
+        let at = |limit: u64| {
+            let app = app(&format!("[limits]\ncost_per_request = {limit}\n"));
+            let ps = points(&SIZES, |n, p| p.cost = u128::from(1 + 28 * n));
+            analyze(&app, Knob::HostList(ALL.into()), ps).growth.iter().find(|g| g.metric == "cost").and_then(|g| g.breaks_at)
+        };
+        // 1 + 28·n is 28,000,001 at n = 1,000,000.
+        assert_eq!(at(27_999_990), Some(MAX_BREAK_N));
+        assert_eq!(at(28_000_100), None);
+    }
+
+    #[test]
+    fn a_limit_broken_at_the_first_size_breaks_there() {
+        let app = app("[limits]\ncost_per_request = 10\n");
+        let ps = points(&SIZES, |n, p| {
+            p.calls.insert(GET.into(), n as u32);
+            p.cost = u128::from(1 + 28 * n);
+        });
+        let r = analyze(&app, Knob::HostList(ALL.into()), ps);
+        let cost = growth(&r, "cost");
+        assert_eq!((cost.breaks_at, cost.break_evidence, cost.predicted_breaks_at), (Some(1), Some("measured"), Some(1)));
+        assert!(one(&r, "n_plus_1").title.ends_with("; cost exceeds its limit at measured n = 1"));
+    }
+
+    #[test]
+    fn a_break_between_sizes_is_measured_at_the_next_size_and_predicted_exactly() {
+        let app = app("[limits]\ncost_per_request = 50\n");
+        let ps = points(&SIZES, |n, p| {
+            p.calls.insert(GET.into(), n as u32);
+            p.cost = u128::from(10 * n);
+        });
+        let r = analyze(&app, Knob::HostList(ALL.into()), ps);
+        let cost = growth(&r, "cost");
+        // 10·n passes 50 at n = 6; the first size measured above it is 8.
+        assert_eq!((cost.breaks_at, cost.break_evidence, cost.predicted_breaks_at), (Some(8), Some("measured"), Some(6)));
+        let f = one(&r, "n_plus_1");
+        assert_eq!((&f.detail["breaks_at"], &f.detail["predicted_breaks_at"]), (&json!([8, "cost"]), &json!(6)));
+    }
+
+    #[test]
+    fn small_wobbles_and_shrinking_metrics_are_no_growth() {
+        let app = app("");
+        let ps = points(&SIZES, |n, p| {
+            p.fuel = 5000 + 6 * n; // 1.8 % over the range
+            p.host_arg_bytes = 5000 + 20 * n; // 6 %
+            p.peak_memory = 65536 + 4096 * n;
+            p.output_bytes = 200 - 10 * n;
+        });
+        let r = analyze(&app, Knob::Field("n".into()), ps);
+        let metrics: Vec<&str> = r.growth.iter().map(|g| g.metric.as_str()).collect();
+        assert_eq!(metrics, ["peak_memory", "host_arg_bytes"]);
+        assert_eq!(growth(&r, "peak_memory").law.text, "65536 + 4096·n");
+        assert_eq!(growth(&r, "host_arg_bytes").law.text, "5000 + 20·n");
+        // Linear resources are no finding.
+        assert!(r.findings.is_empty(), "{:?}", r.findings);
+    }
+
+    #[test]
+    fn fewer_than_three_good_sizes_fit_no_law() {
+        let app = app("");
+        let r = analyze(&app, Knob::HostList(ALL.into()), calls(&[1, 2], GET, |n| 5 * n));
+        assert!(r.growth.is_empty() && r.findings.is_empty());
+        // Sizes after a failure do not count.
+        let mut ps = calls(&SIZES, GET, |n| 5 * n);
+        ps[2].outcome = OutcomeKind::OutOfFuel;
+        let r = analyze(&app, Knob::HostList(ALL.into()), ps);
+        assert!(r.growth.is_empty(), "{:?}", r.growth);
+        let f = one(&r, "fails_at_size");
+        assert_eq!(f.title, format!("out_of_fuel at n = 4 (length of the list {ALL} returns)"));
+        assert_eq!((f.severity, f.run.as_deref(), &f.detail["n"]), (Severity::Fail, Some("r4"), &json!(4)));
+        assert_eq!(r.findings.len(), 1);
+    }
+
+    #[test]
+    fn points_are_sorted_before_fitting() {
+        let app = app("");
+        let mut ps = calls(&SIZES, GET, |n| 3 * n);
+        ps.reverse();
+        let r = analyze(&app, Knob::Field("n".into()), ps);
+        assert_eq!(r.points.iter().map(|p| p.n).collect::<Vec<_>>(), SIZES);
+        assert_eq!(growth(&r, &format!("calls {GET}")).law.text, "3·n");
+    }
+
+    #[test]
+    fn zeros_fit_no_law_and_growth_from_zero_has_no_intercept() {
+        let app = app("");
+        let ps = points(&[0, 1, 2, 4], |n, p| {
+            (p.fuel, p.peak_memory, p.output_bytes) = (0, 0, 0);
+            p.calls.insert(GET.into(), (3 * n) as u32);
+        });
+        let r = analyze(&app, Knob::Field("n".into()), ps);
+        assert_eq!(r.growth.len(), 1, "{:?}", r.growth);
+        assert_eq!(growth(&r, &format!("calls {GET}")).law.text, "3·n");
+    }
+
+    #[test]
+    fn calls_the_app_caps_are_a_hint() {
+        // Even a write in a loop is no n+1 when the app stops at 4.
+        let app = app(&format!("[functions.\"{SAVE}\"]\neffect = \"write\"\n"));
+        let r = analyze(&app, Knob::HostList(ALL.into()), calls(&SIZES, SAVE, |n| n.min(4)));
+        let g = growth(&r, &format!("calls {SAVE}"));
+        assert_eq!((g.law.class, g.law.text.as_str()), (Class::Capped, "capped at 4"));
+        assert_eq!(one(&r, "n_plus_1").severity, Severity::Info);
+    }
+
+    #[test]
+    fn superlinear_calls_fail_without_any_limit() {
+        let app = app("");
+        let r = analyze(&app, Knob::HostList(ALL.into()), calls(&SIZES, GET, |n| n * n));
+        let g = growth(&r, &format!("calls {GET}"));
+        assert_eq!((g.law.class, g.law.text.as_str()), (Class::Quadratic, "1·n²"));
+        let f = one(&r, "n_plus_1");
+        assert_eq!((f.severity, &f.detail["class"]), (Severity::Fail, &json!("quadratic")));
+    }
+
+    #[test]
+    fn a_change_or_a_loop_with_a_batch_function_fails() {
+        let manifest = format!("[functions.\"{SAVE}\"]\neffect = \"write\"\n[functions.\"test:shop/items#ids\"]\nbatch_of = \"{GET}\"\n");
+        let app = app(&manifest);
+        let ps = points(&SIZES, |n, p| {
+            p.calls.insert(GET.into(), n as u32);
+            p.calls.insert(SAVE.into(), n as u32);
+        });
+        let r = analyze(&app, Knob::HostList(ALL.into()), ps);
+        let by_func = |f: &str| r.findings.iter().find(|x| x.detail["func"] == json!(f)).unwrap();
+        let save = by_func(SAVE);
+        assert_eq!(save.severity, Severity::Fail);
+        assert_eq!(save.title, format!("calls to {SAVE} grow as 1·n with n = length of the list {ALL} returns (effect write: one change per element)"));
+        assert_eq!((&save.detail["effect"], &save.detail["batch"]), (&json!("write"), &Value::Null));
+        let get = by_func(GET);
+        assert_eq!(get.severity, Severity::Fail);
+        assert!(get.title.ends_with("; test:shop/items#ids does it in one call"), "{}", get.title);
+        assert_eq!((&get.detail["effect"], &get.detail["batch"]), (&Value::Null, &json!("test:shop/items#ids")));
+    }
+
+    #[test]
+    fn calls_to_the_list_being_grown_are_no_n_plus_1() {
+        let app = app("");
+        // A paged read calls the list once per page.
+        for knob in [ALL, "items#all", "all"] {
+            let r = analyze(&app, Knob::HostList(knob.into()), calls(&SIZES, ALL, |n| n / 2 + 1));
+            assert_eq!(growth(&r, &format!("calls {ALL}")).law.class, Class::Linear);
+            assert!(found(&r, "n_plus_1").is_empty(), "{knob}: {:?}", r.findings);
+        }
+        // Another list is.
+        let r = analyze(&app, Knob::HostList(PAGED.into()), calls(&SIZES, ALL, |n| n / 2 + 1));
+        assert_eq!(one(&r, "n_plus_1").detail["func"], json!(ALL));
+    }
+
+    /// Every resource grows as 1000 + 10·n².
+    fn quadratic(n: u64, p: &mut Point) {
+        let q = 1000 + 10 * n * n;
+        (p.fuel, p.peak_memory, p.output_bytes, p.host_arg_bytes, p.cost) = (q, q, q, q, u128::from(q));
+        p.virtual_ns = Natural::from(q * 1000);
+    }
+
+    fn by_metric(r: &ScaleReport) -> BTreeMap<String, (String, Severity)> {
+        r.findings.iter().map(|f| (f.detail["metric"].as_str().unwrap().to_string(), (f.kind.clone(), f.severity))).collect()
+    }
+
+    #[test]
+    fn superlinear_resources_are_named_by_what_grows() {
+        let r = analyze(&app(""), Knob::Field("n".into()), points(&SIZES, quadratic));
+        let want = [
+            ("cost", "superlinear_growth"),
+            ("virtual_ms", "cpu_blowup"),
+            ("fuel", "cpu_blowup"),
+            ("peak_memory", "memory_blowup"),
+            ("output_bytes", "output_amplification"),
+            ("host_arg_bytes", "payload_amplification"),
+        ];
+        // A request field is the requester's to choose: each is a warning.
+        let want: BTreeMap<String, (String, Severity)> = want.iter().map(|(m, k)| (m.to_string(), (k.to_string(), Severity::Warn))).collect();
+        assert_eq!(by_metric(&r), want);
+        let fuel = r.findings.iter().find(|f| f.detail["metric"] == json!("fuel")).unwrap();
+        assert_eq!(fuel.title, "fuel grows as 1000 + 10·n² with n = request field n = n");
+        assert_eq!(fuel.detail["class"], json!("quadratic"));
+    }
+
+    #[test]
+    fn superlinear_resources_of_a_host_list_warn_only_within_1000_elements() {
+        // Fuel breaks its limit at n = 14,142 and memory (64 MiB) at 2,591: hints.
+        let r = analyze(&app(""), Knob::HostList(ALL.into()), points(&SIZES, quadratic));
+        assert!(by_metric(&r).values().all(|(_, s)| *s == Severity::Info), "{:?}", by_metric(&r));
+        // 1 MB of memory is reached at n = 317.
+        let r = analyze(&app("[limits]\nmemory = 1000000\n"), Knob::HostList(ALL.into()), points(&SIZES, quadratic));
+        assert_eq!(growth(&r, "peak_memory").predicted_breaks_at, Some(317));
+        let m = by_metric(&r);
+        assert_eq!((m["peak_memory"].1, m["fuel"].1), (Severity::Warn, Severity::Info));
+    }
+
+    #[test]
+    fn a_fuel_limit_that_grows_with_the_input_is_taken_from_the_largest_run() {
+        let app = app("[limits]\nfuel = 10\n");
+        // Shopify: each run has its own limit, growing with the cart.
+        let ps = points(&SIZES, |n, p| {
+            p.fuel = 1000 * n;
+            p.fuel_limit = Some(10_000 + 1000 * n);
+        });
+        let r = analyze(&app, Knob::Field("n".into()), ps);
+        let fuel = growth(&r, "fuel");
+        // No run went over its own limit; 1000·n passes 26,000 at n = 27.
+        assert_eq!((fuel.breaks_at, fuel.break_evidence, fuel.limit.clone()), (Some(27), Some("inferred"), Some(json!(26_000))));
+    }
+
+    #[test]
+    fn failures_are_blamed_on_the_size_only_when_the_app_failed() {
+        let app = app("");
+        let mut ps = calls(&SIZES, GET, |n| 2 * n);
+        ps[4].outcome = OutcomeKind::Trap;
+        let r = analyze(&app, Knob::HostList(ALL.into()), ps);
+        // The worst run is the largest size that worked.
+        assert_eq!(one(&r, "n_plus_1").detail["worst_run"], json!("r8"));
+        assert_eq!(one(&r, "fails_at_size").run.as_deref(), Some("r16"));
+        // Runs appfuzz could not make, or stopped at the budget, are no failure.
+        for kind in [OutcomeKind::Error, OutcomeKind::PlanError, OutcomeKind::BudgetExceeded] {
+            let mut ps = calls(&SIZES, GET, |n| 2 * n);
+            ps[4].outcome = kind;
+            assert!(found(&analyze(&app, Knob::HostList(ALL.into()), ps), "fails_at_size").is_empty(), "{kind:?}");
+        }
+        // Nothing worked: no size to blame.
+        let r = analyze(&app, Knob::HostList(ALL.into()), points(&SIZES, |_, p| p.outcome = OutcomeKind::Trap));
+        assert!(r.findings.is_empty() && r.growth.is_empty());
+    }
+
+    #[test]
+    fn finding_ids_are_stable_and_tell_knobs_and_exports_apart() {
+        let ids = |app: &App, knob: Knob| analyze(app, knob, calls(&SIZES, GET, |n| n)).findings.into_iter().map(|f| f.id).collect::<Vec<_>>();
+        let plain = app("");
+        let a = ids(&plain, Knob::HostList(ALL.into()));
+        assert_eq!(a.len(), 1);
+        assert_eq!(a, ids(&plain, Knob::HostList(ALL.into())));
+        assert_ne!(a, ids(&plain, Knob::HostList(PAGED.into())));
+        assert_ne!(a, ids(&app("[entry]\nexport = \"handle\"\n"), Knob::HostList(ALL.into())));
+    }
+
+    // --- Words, constants and request knobs -------------------------------------
+
+    fn module(strings: &[&str], imports: Vec<ImportInfo>, funcs: Vec<StaticFunc>) -> ModuleInfo {
+        ModuleInfo {
+            id: "m".into(),
+            index: 0,
+            role: "main".into(),
+            start: 0,
+            end: 0,
+            imports,
+            exports: vec![],
+            func_imports: 0,
+            funcs,
+            strings: strings.iter().map(|s| (0, s.to_string())).collect(),
+            has_names: false,
+        }
+    }
+
+    fn function(index: u32, calls: &[u32], cmp_consts: &[i64], text: &[&str]) -> StaticFunc {
+        StaticFunc {
+            index,
+            name: None,
+            start: 0,
+            end: 0,
+            calls: calls.iter().map(|&c| (c, 0)).collect(),
+            call_indirect: 0,
+            loops: vec![],
+            instructions: 0,
+            text_consts: text.iter().map(|t| (0, t.to_string())).collect(),
+            cmp_consts: cmp_consts.to_vec(),
+            magic: vec![],
+        }
+    }
+
+    #[test]
+    fn dictionary_words_are_split_from_packed_strings() {
+        let strings = ["viewMode=week&copies=3", "POST /api/v1", "x", "Hello", "__debug__", "a-very-long-identifier-that-is-too-long", "page_size9", "9lives"];
+        let st = Statics { modules: vec![module(&strings, vec![], vec![function(0, &[], &[], &["limit"])]), module(&["view"], vec![], vec![])] };
+        assert_eq!(dictionary(&st, 100), ["v1", "api", "POST", "view", "week", "debug", "limit", "copies", "page_size9"]);
+        // The shortest words are kept.
+        assert_eq!(dictionary(&st, 3), ["v1", "api", "POST"]);
+        assert!(dictionary(&Statics { modules: vec![] }, 10).is_empty());
+    }
+
+    #[test]
+    fn compared_constants_come_from_code_that_reaches_the_host() {
+        let host = ImportInfo { module: "test:shop/items".into(), name: "get".into(), kind: "func".into(), func: Some(0), host: Some(GET.into()) };
+        let funcs =
+            vec![function(1, &[0], &[13, 13, 1, 1_000_001, 7, 1_000_000, -5], &[]), function(2, &[1], &[7, 2], &[]), function(3, &[], &[99, 99, 99], &[])];
+        let st = Statics { modules: vec![module(&[], vec![host], funcs)] };
+        // Most common first, then smallest; 1, negatives and huge values are no modes.
+        assert_eq!(compare_constants(&st, 10), [7, 13, 2, 1_000_000]);
+        assert_eq!(compare_constants(&st, 2), [7, 13]);
+    }
+
+    #[test]
+    fn request_leaves_and_pair_keys_are_knobs() {
+        let req = json!({"days": 3, "id": "42", "name": "ada", "empty": "", "query": [["page", "2"], ["q", "x"]],
+                         "tags": [1, 2], "none": [], "flag": true, "nested": {"limit": 5}});
+        let (knobs, pairs) = request_knobs(&[req, json!(7), json!({"x": "9"})]);
+        let f = |p: &str| Knob::Field(p.into());
+        let l = |p: &str| Knob::FieldLen(p.into());
+        let want = [
+            f("days"),
+            f("id"),
+            l("id"),
+            l("name"),
+            l("empty"),
+            f("query.page"),
+            l("query.page"),
+            l("query.q"),
+            f("tags"),
+            f("nested.limit"),
+            f("@1"),
+            f("@2.x"),
+            l("@2.x"),
+        ];
+        assert_eq!(knobs, want);
+        assert_eq!(pairs, ["query", "none"]);
+        // A first argument that is a list of pairs.
+        let (knobs, pairs) = request_knobs(&[json!([["a", "1"]]), json!("5")]);
+        assert_eq!(knobs, [f("a"), l("a"), f("@1"), l("@1")]);
+        assert_eq!(pairs, ["@0"]);
+        assert_eq!(request_knobs(&[]), (vec![], vec![]));
+    }
+
+    // --- Behaviour, modes and duplicates ------------------------------------------
+
+    #[test]
+    fn behaviour_is_outcome_answer_and_calls() {
+        let app = app("");
+        let s = base(&app);
+        let events = || vec![call(GET, json!({"id": 1}), None), call(GET, json!({"id": 2}), None), call(ALL, json!({}), None)];
+        let r = record(&s, OutcomeKind::Ok, events(), json!("a"));
+        let b = behaviour(&r);
+        assert!(b.starts_with("Ok|") && b.ends_with(&format!("|{GET}×2,{ALL}×1")), "{b}");
+        assert_eq!(b.split('|').nth(1).unwrap().len(), 8);
+        // Arguments do not count; the answer does, except for calls_behaviour.
+        let mut other_args = r.clone();
+        other_args.events[0].args.insert("id".into(), json!(9));
+        assert_eq!(behaviour(&other_args), b);
+        let other_answer = record(&s, OutcomeKind::Ok, events(), json!("b"));
+        assert_ne!(behaviour(&other_answer), b);
+        assert_eq!(calls_behaviour(&other_answer), format!("Ok|{GET}×2,{ALL}×1"));
+        assert_eq!(calls_behaviour(&r), calls_behaviour(&other_answer));
+        let mut failed = r.clone();
+        failed.outcome.kind = OutcomeKind::Trap;
+        assert_ne!(calls_behaviour(&failed), calls_behaviour(&r));
+        let mut silent = r.clone();
+        silent.result = None;
+        assert_eq!(behaviour(&silent), format!("Ok||{GET}×2,{ALL}×1"));
+    }
+
+    #[test]
+    fn findings_in_a_mode_get_their_own_id_and_say_the_mode() {
+        let f = Finding::new("n_plus_1", "k", Severity::Warn, "calls grow".into(), json!({"func": GET}), Some("r1"));
+        let g = in_context(f.clone(), "query.view=week");
+        assert_eq!((g.kind.as_str(), g.severity, g.run.as_deref()), ("n_plus_1", Severity::Warn, Some("r1")));
+        assert_eq!(g.title, "calls grow (with query.view=week)");
+        assert_eq!(g.detail, json!({"func": GET, "context": "query.view=week"}));
+        assert_ne!(g.id, f.id);
+        assert_eq!(g.id, in_context(f.clone(), "query.view=week").id);
+        assert_ne!(g.id, in_context(f, "query.view=day").id);
+        let plain = Finding::new("x", "k", Severity::Info, "t".into(), Value::Null, None);
+        assert_eq!(in_context(plain, "m").detail, Value::Null);
+    }
+
+    fn law_finding(func: &str, class: &str) -> Finding {
+        let detail = json!({"knob": Knob::HostList(ALL.into()), "func": func, "class": class});
+        Finding::new("n_plus_1", &format!("{func}\0{class}"), Severity::Warn, format!("calls to {func}"), detail, None)
+    }
+
+    fn report_with(context: Option<&str>, findings: Vec<Finding>) -> ScaleReport {
+        ScaleReport { knob: Knob::HostList(ALL.into()), context: context.map(str::to_string), points: vec![], growth: vec![], findings }
+    }
+
+    #[test]
+    fn one_law_under_many_modes_is_one_finding() {
+        let a = law_finding(GET, "linear");
+        let mut reports = vec![
+            report_with(Some("view=week"), vec![in_context(a.clone(), "view=week"), law_finding(GET, "quadratic")]),
+            report_with(None, vec![a.clone()]),
+            report_with(Some("mode=x"), vec![in_context(a.clone(), "mode=x")]),
+        ];
+        dedupe_by_law(&mut reports);
+        // The finding without a mode stays and names the other modes.
+        assert_eq!(reports[1].findings.len(), 1);
+        let kept = &reports[1].findings[0];
+        assert_eq!((kept.id.as_str(), kept.title.as_str()), (a.id.as_str(), "calls to test:shop/items#get (and 2 more modes)"));
+        assert_eq!(kept.detail["also_with"], json!(["view=week", "mode=x"]));
+        // Another law is another problem.
+        assert_eq!(reports[0].findings.len(), 1);
+        assert_eq!(reports[0].findings[0].detail["class"], json!("quadratic"));
+        assert!(reports[2].findings.is_empty());
+    }
+
+    #[test]
+    fn without_a_finding_outside_modes_the_first_mode_keeps_it() {
+        let a = law_finding(GET, "linear");
+        let mut reports = vec![
+            report_with(Some("a=1"), vec![in_context(a.clone(), "a=1")]),
+            report_with(Some("b=2"), vec![in_context(a.clone(), "b=2")]),
+            report_with(None, vec![]),
+        ];
+        dedupe_by_law(&mut reports);
+        assert_eq!(reports[0].findings[0].detail["also_with"], json!(["b=2"]));
+        assert!(reports[0].findings[0].title.ends_with("(with a=1) (and 1 more modes)"), "{}", reports[0].findings[0].title);
+        assert!(reports[1].findings.is_empty());
+        // Twice without a mode: the other one is "no mode".
+        let mut reports = vec![report_with(None, vec![a.clone()]), report_with(None, vec![a.clone()])];
+        dedupe_by_law(&mut reports);
+        assert_eq!(reports[0].findings[0].detail["also_with"], json!(["no mode"]));
+        // Nothing to merge: nothing changes.
+        let mut single = vec![report_with(None, vec![a.clone()])];
+        dedupe_by_law(&mut single);
+        assert_eq!((single[0].findings[0].title.as_str(), single[0].findings[0].detail.get("also_with")), (a.title.as_str(), None));
+    }
+
+    // --- Nested loops -------------------------------------------------------------
+
+    /// Runs at (2, 2), (2, 8), (8, 2) and (8, 8) with these calls to `get`.
+    fn quad_runs(app: &App, counts: [u32; 4], kind: OutcomeKind) -> Vec<Option<RunRecord>> {
+        let s = base(app);
+        let run = |(i, c): (usize, &u32)| {
+            let mut r = record(&s, kind, (0..*c).map(|_| call(GET, json!({}), None)).collect(), Value::Null);
+            r.id = format!("r{i}");
+            Some(r)
+        };
+        counts.iter().enumerate().map(run).collect()
+    }
+
+    #[test]
+    fn calls_for_each_pair_of_elements_are_a_nested_fan_out() {
+        let app = app("");
+        let (a, b) = (Knob::HostList(ALL.into()), Knob::Field("@1".into()));
+        let nested = |counts, kind| nested_finding("handle", GET, &a, &b, &quad_runs(&app, counts, kind));
+        let (n, f) = nested([4, 16, 16, 64], OutcomeKind::Ok).unwrap();
+        assert_eq!((n.calls, n.interaction, n.run.as_str(), &n.outer, &n.inner), ([4, 16, 16, 64], 1.0, "r3", &a, &b));
+        assert_eq!((f.kind.as_str(), f.severity, f.run.as_deref()), ("nested_fan_out", Severity::Warn, Some("r3")));
+        assert_eq!(
+            f.title,
+            format!("{GET} is called for each pair of elements: length of the list {ALL} returns × number of elements in argument 1 (8 × 8 gives 64 calls)")
+        );
+        assert_eq!((&f.detail["calls_2x8"], &f.detail["interaction"]), (&json!(16), &json!(1.0)));
+        // Two loops one after the other add up: no interaction.
+        assert!(nested([4, 10, 10, 16], OutcomeKind::Ok).is_none());
+        // From half a call per pair of elements.
+        assert_eq!(nested([0, 0, 0, 18], OutcomeKind::Ok).unwrap().0.interaction, 0.5);
+        assert!(nested([0, 0, 0, 17], OutcomeKind::Ok).is_none());
+        assert_eq!(nested([0, 0, 0, 25], OutcomeKind::Ok).unwrap().0.interaction, 0.69);
+        // A run that failed, or could not be made, proves nothing.
+        assert!(nested([4, 16, 16, 64], OutcomeKind::Trap).is_none());
+        let mut missing = quad_runs(&app, [4, 16, 16, 64], OutcomeKind::Ok);
+        missing[1] = None;
+        assert!(nested_finding("handle", GET, &a, &b, &missing).is_none());
+    }
+
+    /// Calls `get` days × len(extra) times (or days + len(extra)).
+    fn pairs_app(product: bool) -> impl Fn(&RunSpec) -> RunRecord + Sync {
+        move |s: &RunSpec| {
+            let days = s.args[0]["days"].as_u64().unwrap();
+            let extra = s.args[1].as_array().unwrap().len() as u64;
+            let n = if product { days * extra } else { days + extra };
+            record(s, OutcomeKind::Ok, (0..n).map(|_| call(GET, json!({}), None)).collect(), Value::Null)
+        }
+    }
+
+    #[test]
+    fn a_nested_fan_out_is_measured_again_from_a_spec() {
+        let app = app("");
+        let (a, b) = (Knob::Field("days".into()), Knob::Field("@1".into()));
+        let f = nested_again(&app, &base(&app), GET, &a, &b, &pairs_app(true)).unwrap();
+        assert_eq!((f.kind.as_str(), &f.detail["calls_8x8"], &f.detail["knobs"]), ("nested_fan_out", &json!(64), &json!([a, b])));
+        assert!(nested_again(&app, &base(&app), GET, &a, &b, &pairs_app(false)).is_none());
+        // A knob that cannot be set gives no runs to compare.
+        assert!(nested_again(&app, &base(&app), GET, &Knob::Field("@9".into()), &b, &pairs_app(true)).is_none());
+    }
+
+    #[test]
+    fn knobs_that_drive_up_the_same_function_are_turned_together() {
+        let app = app("");
+        let b = base(&app);
+        let run = pairs_app(true);
+        let report = |knob: &str, context: Option<&str>| {
+            let mut r = scale(&app, &b, Knob::parse(knob).unwrap(), &[1, 2, 4, 8], &run).unwrap();
+            r.context = context.map(str::to_string);
+            r
+        };
+        let reports = vec![report("days", None), report("@1", None), report("len:name", None)];
+        let (found, findings) = nested(&app, &b, &reports, None, &run);
+        assert_eq!(found.len(), 1);
+        assert_eq!((&found[0].outer, &found[0].inner, found[0].calls), (&Knob::Field("days".into()), &Knob::Field("@1".into()), [4, 16, 16, 64]));
+        assert_eq!(findings.len(), 1);
+        // `only` keeps the functions it names.
+        assert!(nested(&app, &b, &reports, Some("#save"), &run).0.is_empty());
+        assert_eq!(nested(&app, &b, &reports, Some("#get"), &run).0.len(), 1);
+        // Knobs turned in a mode are not paired.
+        let moded = vec![report("days", None), report("@1", Some("view=week"))];
+        assert!(nested(&app, &b, &moded, None, &run).0.is_empty());
+    }
+
+    // --- Lists, types and dropped rows --------------------------------------------
+
+    #[test]
+    fn lists_are_found_inside_ok_and_some() {
+        for mut v in [json!([1]), json!({"ok": [1]}), json!({"some": [1]}), json!({"ok": {"some": [1]}})] {
+            list_in_mut(&mut v).unwrap().push(json!(2));
+            assert_eq!(crate::detect::list_in(&v), Some(&vec![json!(1), json!(2)]), "{v}");
+        }
+        for mut v in [json!({"err": [1]}), json!({"ok": [1], "x": 1}), json!(1), json!({"ok": 1})] {
+            assert!(list_in_mut(&mut v).is_none(), "{v}");
+        }
+    }
+
+    #[test]
+    fn result_types_say_whether_they_hold_numbers_or_text() {
+        let app = app("");
+        let holds_of = |f: &str| holds(&result_type(&app, f));
+        assert_eq!(holds_of("all"), (true, true));
+        assert_eq!(holds_of("maybe"), (true, true));
+        assert_eq!(holds_of("names"), (false, true));
+        assert_eq!(holds_of("count"), (true, false));
+        assert_eq!(holds_of("either"), (true, true));
+        assert_eq!(holds_of("no-ok"), (false, true));
+        assert_eq!(holds_of("pair"), (true, false));
+        // Floats are no integer constants to compare with.
+        assert_eq!(holds_of("ratio"), (false, false));
+    }
+
+    fn items(ids: &[u32]) -> Value {
+        json!(ids.iter().map(|i| json!({"id": i, "name": "x"})).collect::<Vec<_>>())
+    }
+
+    fn ret(s: &RunSpec, f: &str) -> Option<Value> {
+        s.plan.0.get(f).and_then(|p| p.response.ret.clone())
+    }
+
+    fn rows_left(drops: &[(String, RunSpec)], f: &str) -> Vec<(String, Option<Value>)> {
+        drops.iter().map(|(row, s)| (row.clone(), ret(s, f))).collect()
+    }
+
+    #[test]
+    fn rows_are_dropped_first_middle_and_last_from_the_list_the_run_saw() {
+        let app = app("");
+        let spec = base(&app);
+        let top = record(&spec, OutcomeKind::Ok, vec![call(ALL, json!({}), Some(items(&[1, 2, 3, 4])))], Value::Null);
+        let (pinned, drops) = dropped_rows(&app, &spec, &top, ALL);
+        // A generated list is pinned first, so a drop changes only that row.
+        assert_eq!(ret(&pinned.unwrap(), ALL), Some(items(&[1, 2, 3, 4])));
+        let want = [("first", items(&[2, 3, 4])), ("middle", items(&[1, 2, 4])), ("last", items(&[1, 2, 3]))];
+        assert_eq!(rows_left(&drops, ALL), want.map(|(r, v)| (r.to_string(), Some(v))));
+    }
+
+    #[test]
+    fn short_lists_drop_each_row_once() {
+        let app = app("");
+        let literal = |list: Value| {
+            let mut spec = base(&app);
+            spec.plan.0.insert(ALL.into(), FnPlan { response: Response { ret: Some(list), ..Default::default() }, ..Default::default() });
+            let (pinned, drops) = dropped_rows(&app, &spec, &record(&spec, OutcomeKind::Ok, vec![], Value::Null), ALL);
+            // The plan's own list needs no pinning.
+            assert!(pinned.is_none());
+            rows_left(&drops, ALL)
+        };
+        assert_eq!(literal(items(&[1, 2])), [("first".to_string(), Some(items(&[2]))), ("middle".to_string(), Some(items(&[1])))]);
+        assert_eq!(literal(items(&[1])), [("first".to_string(), Some(items(&[])))]);
+        assert_eq!(literal(json!({"ok": items(&[5, 6, 7])}))[1], ("middle".to_string(), Some(json!({"ok": items(&[5, 7])}))));
+    }
+
+    #[test]
+    fn rows_cannot_be_dropped_from_a_list_the_run_did_not_read_once() {
+        let app = app("");
+        let spec = base(&app);
+        let nothing = |events: Vec<HostCall>| {
+            let (pinned, drops) = dropped_rows(&app, &spec, &record(&spec, OutcomeKind::Ok, events, Value::Null), ALL);
+            pinned.is_none() && drops.is_empty()
+        };
+        assert!(nothing(vec![]));
+        assert!(nothing(vec![call(ALL, json!({}), Some(items(&[1]))), call(ALL, json!({}), Some(items(&[1])))]));
+        assert!(nothing(vec![call(ALL, json!({}), None)]));
+        assert!(nothing(vec![call(ALL, json!({}), Some(items(&[])))]));
+        assert!(nothing(vec![call(ALL, json!({}), Some(json!({"err": "x"})))]));
+    }
+
+    /// The dataset keys each drop removes.
+    fn dropped_keys(drops: &[(String, RunSpec)]) -> Vec<(String, Value)> {
+        drops
+            .iter()
+            .map(|(row, s)| {
+                let edits = &s.plan.0["_defaults"].dataset_edits;
+                let [crate::dataset::Edit::Drop { dataset, keys }] = &edits[..] else { panic!("{edits:?}") };
+                assert_eq!(dataset, "items");
+                (row.clone(), json!(keys))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dataset_rows_are_dropped_by_key() {
+        let app = app(DATASET);
+        let spec = apply(&app, &base(&app), &Knob::HostList(ALL.into()), 5).unwrap();
+        let top = record(&spec, OutcomeKind::Ok, vec![call(ALL, json!({}), Some(items(&[11, 12, 13, 14, 15])))], Value::Null);
+        let (pinned, drops) = dropped_rows(&app, &spec, &top, ALL);
+        assert!(pinned.is_none());
+        let want = [("first", 11), ("middle", 13), ("last", 15)].map(|(r, k)| (r.to_string(), json!([k])));
+        assert_eq!(dropped_keys(&drops), want);
+        // Without a call to read keys from, the generated collection has them.
+        let (_, drops) = dropped_rows(&app, &spec, &record(&spec, OutcomeKind::Ok, vec![], Value::Null), ALL);
+        let keys: BTreeSet<String> = dropped_keys(&drops).into_iter().map(|(_, k)| k.to_string()).collect();
+        assert_eq!(keys.len(), 3);
+    }
+
+    #[test]
+    fn a_dataset_list_read_twice_still_drops_its_middle_row() {
+        let app = app(DATASET);
+        let spec = apply(&app, &base(&app), &Knob::HostList(ALL.into()), 4).unwrap();
+        let read = || call(ALL, json!({}), Some(items(&[1, 2, 3, 4])));
+        let (_, drops) = dropped_rows(&app, &spec, &record(&spec, OutcomeKind::Ok, vec![read(), read()], Value::Null), ALL);
+        let want = [("first", 1), ("middle", 3), ("last", 4)].map(|(r, k)| (r.to_string(), json!([k])));
+        assert_eq!(dropped_keys(&drops), want);
+    }
+
+    // --- Scaling with a simulated app ------------------------------------------------
+
+    /// An app that reads `all` and gets each item: an n+1 with a fixed answer.
+    fn shop(s: &RunSpec) -> RunRecord {
+        let list = ret(s, ALL).unwrap_or_else(|| items(&[1]));
+        let gets: Vec<HostCall> = list.as_array().unwrap().iter().map(|e| call(GET, json!({"id": e["id"]}), Some(json!({"some": e})))).collect();
+        let n = gets.len() as u64;
+        let mut events = vec![call(ALL, json!({}), Some(list))];
+        events.extend(gets);
+        let mut r = record(s, OutcomeKind::Ok, events, json!({"status": 200}));
+        r.totals.cost = u128::from(1 + n);
+        r
+    }
+
+    const ROWS: [u64; 6] = [1, 2, 4, 8, 16, 32];
+
+    fn sizes_of(r: &ScaleReport) -> Vec<u64> {
+        r.points.iter().map(|p| p.n).collect()
+    }
+
+    #[test]
+    fn scaling_a_host_list_finds_the_n_plus_1_and_the_unbounded_read() {
+        let app = app("[limits]\ncost_per_request = 1000\n");
+        let r = scale(&app, &base(&app), Knob::HostList("items#all".into()), &ROWS, &shop).unwrap();
+        assert_eq!(sizes_of(&r), ROWS);
+        assert_eq!((r.points[5].calls[GET], r.points[5].rows[ALL]), (32, 32));
+        let f = one(&r, "n_plus_1");
+        assert_eq!(f.severity, Severity::Warn);
+        assert_eq!(
+            f.title,
+            format!("calls to {GET} grow as 1·n with n = length of the list items#all returns; cost is predicted to exceed its limit at n = 1000")
+        );
+        let u = one(&r, "unbounded_read");
+        assert_eq!(u.severity, Severity::Warn);
+        assert_eq!(
+            u.title,
+            format!(
+                "{ALL} returns all n rows while the answer stays the same size; some rows never affect it (dropping the first or middle or last row changes nothing); cost is predicted to exceed its limit at n = 1000"
+            )
+        );
+        assert_eq!((&u.detail["n"], &u.detail["rows"], &u.detail["unused_rows"], &u.detail["paged"]), (&json!(32), &json!(32), &json!(true), &Value::Null));
+        let dropped: Vec<(&str, bool)> =
+            u.detail["dropped"].as_array().unwrap().iter().map(|d| (d["row"].as_str().unwrap(), d["unchanged"].as_bool().unwrap())).collect();
+        assert_eq!(dropped, [("first", true), ("middle", true), ("last", true)]);
+        assert_eq!((&u.detail["breaks_at"], &u.detail["break_evidence"]), (&json!([1000, "cost"]), &json!("inferred")));
+        assert_eq!(u.run.as_deref(), Some(r.points[5].run.as_str()));
+    }
+
+    #[test]
+    fn rows_that_each_change_the_answer_are_read_for_a_reason() {
+        let app = app("");
+        // A fixed-size answer that depends on every row.
+        let digest = |s: &RunSpec| {
+            let mut r = shop(s);
+            let ids = r.events[0].result.as_ref().unwrap().to_string();
+            r.result = Some(json!({"digest": blake3::hash(ids.as_bytes()).to_hex()[..16].to_string()}));
+            r
+        };
+        let r = scale(&app, &base(&app), Knob::HostList(ALL.into()), &ROWS, &digest).unwrap();
+        let u = one(&r, "unbounded_read");
+        assert_eq!(u.severity, Severity::Info);
+        assert!(u.title.ends_with("; each dropped row changes it"), "{}", u.title);
+        assert_eq!(u.detail["unused_rows"], json!(false));
+    }
+
+    #[test]
+    fn no_unbounded_read_for_writes_growing_answers_few_rows_or_request_fields() {
+        let none = |app: &App, knob: &str, sizes: &[u64], run: Runner| {
+            found(&scale(app, &base(app), Knob::parse(knob).unwrap(), sizes, run).unwrap(), "unbounded_read").is_empty()
+        };
+        let writes = app(&format!("[functions.\"{ALL}\"]\neffect = \"write\"\n"));
+        assert!(none(&writes, ALL, &ROWS, &shop));
+        let app = app("");
+        let showing = |s: &RunSpec| {
+            let mut r = shop(s);
+            r.result = r.events[0].result.clone();
+            r
+        };
+        assert!(none(&app, ALL, &ROWS, &showing));
+        // Fewer than 16 rows at the largest size, or fewer than 4 sizes.
+        assert!(none(&app, ALL, &[1, 2, 4, 8], &shop));
+        assert!(none(&app, ALL, &[16, 32, 64], &shop));
+        assert!(none(&app, "days", &ROWS, &shop));
+        // The control: these sizes do show it.
+        assert!(!none(&app, ALL, &ROWS, &shop));
+    }
+
+    /// An app that reads the dataset's rows whole and answers the same.
+    fn reader(f: &'static str) -> impl Fn(&RunSpec) -> RunRecord + Sync {
+        move |s: &RunSpec| {
+            let defaults = s.plan.0.get("_defaults");
+            let n = defaults.and_then(|p| p.dataset_rows.get("items").copied()).unwrap_or(4) as u32;
+            let dropped: Vec<Value> = defaults
+                .into_iter()
+                .flat_map(|p| &p.dataset_edits)
+                .flat_map(|e| match e {
+                    crate::dataset::Edit::Drop { keys, .. } => keys.clone(),
+                    _ => vec![],
+                })
+                .collect();
+            let ids: Vec<u32> = (1..=n).filter(|i| !dropped.contains(&json!(i))).collect();
+            let mut r = record(s, OutcomeKind::Ok, vec![call(f, json!({}), Some(items(&ids)))], json!("same"));
+            r.totals.cost = u128::from(1 + n);
+            r
+        }
+    }
+
+    #[test]
+    fn a_whole_read_where_a_paged_query_exists_fails() {
+        let app = app(&format!("{DATASET}\n[limits]\ncost_per_request = 1000\n"));
+        let r = scale(&app, &base(&app), Knob::HostList("all".into()), &ROWS, &reader(ALL)).unwrap();
+        let u = one(&r, "unbounded_read");
+        assert_eq!(u.severity, Severity::Fail);
+        assert!(u.title.starts_with(&format!("{ALL} returns all n rows while the answer stays the same size; some rows never affect it")), "{}", u.title);
+        assert!(u.title.ends_with(&format!("; {PAGED} reads pages of up to 50")), "{}", u.title);
+        assert_eq!(u.detail["paged"], json!({"func": PAGED, "max": 50}));
+        // Reading every page of the paged query is said so.
+        let r = scale(&app, &base(&app), Knob::HostList(PAGED.into()), &ROWS, &reader(PAGED)).unwrap();
+        let u = one(&r, "unbounded_read");
+        assert!(u.title.starts_with(&format!("the app reads every page of {PAGED}, all n rows, while its answer stays the same size")), "{}", u.title);
+        assert!(!u.title.contains("reads pages of up to"), "{}", u.title);
+        assert_eq!(u.detail["paged"], json!({"func": PAGED, "max": 50}));
+    }
+
+    #[test]
+    fn scaling_stops_at_the_first_size_that_fails() {
+        let app = app("");
+        let breaking = |s: &RunSpec| {
+            let mut r = shop(s);
+            if r.events.len() > 8 {
+                r.outcome.kind = OutcomeKind::Unreachable;
+            }
+            r
+        };
+        let r = scale(&app, &base(&app), Knob::HostList(ALL.into()), &ROWS, &breaking).unwrap();
+        assert_eq!(sizes_of(&r), [1, 2, 4, 8]);
+        assert_eq!(one(&r, "fails_at_size").title, format!("unreachable at n = 8 (length of the list {ALL} returns)"));
+        assert!(found(&r, "unbounded_read").is_empty());
+    }
+
+    #[test]
+    fn sizes_the_field_type_cannot_hold_or_shopify_refuses_are_not_run() {
+        let app = app("");
+        let r = scale(&app, &base(&app), Knob::Field("small".into()), &[1, 128, 255, 256, 1024], &shop).unwrap();
+        assert_eq!(sizes_of(&r), [1, 128, 255]);
+        assert!(r.findings.is_empty());
+        let refusing = |s: &RunSpec| {
+            let mut r = shop(s);
+            let mut info = crate::shopify::RunInfo::new("t", 1.0);
+            info.input_bytes = if r.events.len() > 4 { info.input_limit + 1 } else { 0 };
+            r.shopify = Some(info);
+            r
+        };
+        let r = scale(&app, &base(&app), Knob::HostList(ALL.into()), &ROWS, &refusing).unwrap();
+        assert_eq!(sizes_of(&r), [1, 2]);
+        assert!(found(&r, "fails_at_size").is_empty());
+        assert!(scale(&app, &base(&app), Knob::HostList("nope".into()), &ROWS, &shop).is_err());
+    }
+
+    // --- Discovery and amplify --------------------------------------------------------
+
+    /// An app with knobs and keys to find: a `get` per pair of `all` and
+    /// `extra` elements, a `count` per `days`; query `page` changes the
+    /// answer, `q` only reaches a host call, and `sizz` is only compared
+    /// byte by byte.
+    fn modes(s: &RunSpec) -> RunRecord {
+        let req = &s.args[0];
+        let pairs: Vec<(&str, &str)> = req["query"].as_array().unwrap().iter().map(|p| (p[0].as_str().unwrap(), p[1].as_str().unwrap())).collect();
+        let query = |k: &str| pairs.iter().find(|p| p.0 == k).map_or("", |p| p.1);
+        let list = ret(s, ALL).unwrap_or_else(|| items(&[1]));
+        let extra = s.args[1].as_array().unwrap().len();
+        let mut events = vec![call(ALL, json!({}), Some(list.clone()))];
+        for e in list.as_array().unwrap() {
+            events.extend((0..extra).map(|_| call(GET, json!({"id": e["id"]}), None)));
+        }
+        events.extend((0..req["days"].as_u64().unwrap()).map(|_| call(COUNT, json!({}), None)));
+        events.push(call(SAVE, json!({"id": query("q")}), None));
+        let secret = "sizz";
+        let matched: usize =
+            pairs.iter().filter(|p| p.0.len() == secret.len()).map(|p| p.0.chars().zip(secret.chars()).take_while(|(a, b)| a == b).count()).sum();
+        let mut r = record(s, OutcomeKind::Ok, events, json!(format!("page {}", query("page"))));
+        r.totals.fuel = 1000 + 10 * matched as u64;
+        r
+    }
+
+    #[test]
+    fn amplify_finds_knobs_keys_and_nested_loops() {
+        let app = app("");
+        let most_fuel = std::sync::atomic::AtomicU64::new(0);
+        let run = |s: &RunSpec| {
+            most_fuel.fetch_max(s.fuel, std::sync::atomic::Ordering::Relaxed);
+            modes(s)
+        };
+        let a = amplify(&app, &base(&app), None, 64, &run).unwrap();
+        // By a changed answer, by a value seen in a host call, and by fuel.
+        for k in ["query.q", "query.page", "query.sizz"] {
+            assert!(a.discovered_keys.contains(&k.to_string()), "{k}: {:?}", a.discovered_keys);
+        }
+        for k in ["fn:test:shop/items#all", "days", "@1", "len:name", "query.sizz"] {
+            assert!(a.knobs.contains(&Knob::parse(k).unwrap()), "{k}: {:?}", a.knobs);
+        }
+        let kinds: BTreeSet<(String, Knob, String)> = a
+            .reports
+            .iter()
+            .filter(|r| r.context.is_none())
+            .flat_map(|r| r.findings.iter().map(|f| (f.kind.clone(), r.knob.clone(), f.detail["func"].as_str().unwrap_or_default().to_string())))
+            .collect();
+        assert!(kinds.contains(&("n_plus_1".into(), Knob::HostList(ALL.into()), GET.into())), "{kinds:?}");
+        assert!(kinds.contains(&("input_amplification".into(), Knob::Field("@1".into()), GET.into())), "{kinds:?}");
+        assert!(kinds.contains(&("input_amplification".into(), Knob::Field("days".into()), COUNT.into())), "{kinds:?}");
+        // Fan-out: the most calls each function was driven to, most first.
+        let get = a.fan_out.iter().find(|f| f.func == GET).unwrap();
+        assert_eq!((get.base_calls, get.max_calls), (2, 1024));
+        assert!(a.fan_out.windows(2).all(|w| w[0].max_calls >= w[1].max_calls));
+        assert!(a.fan_out.iter().all(|f| f.func != ALL && f.func != SAVE), "{:?}", a.fan_out.iter().map(|f| &f.func).collect::<Vec<_>>());
+        // A get per pair of `all` and `extra` elements.
+        assert_eq!(a.nested.len(), 1, "{:?}", a.nested);
+        let n = &a.nested[0];
+        assert_eq!((n.func.as_str(), &n.outer, &n.inner, n.calls), (GET, &Knob::HostList(ALL.into()), &Knob::Field("@1".into()), [4, 16, 16, 64]));
+        assert_eq!(a.findings.len(), 1);
+        assert!(a.runs > 100, "{}", a.runs);
+        // Runs get twice the production fuel at most.
+        assert!(most_fuel.into_inner() <= 2 * app.manifest.limits.fuel);
+    }
+
+    #[test]
+    fn amplify_can_look_at_one_function() {
+        let app = app("");
+        let a = amplify(&app, &base(&app), Some("#count"), 64, &modes).unwrap();
+        assert_eq!(a.fan_out.iter().map(|f| f.func.as_str()).collect::<Vec<_>>(), [COUNT]);
+        assert!(a.nested.is_empty());
+    }
+
+    #[test]
+    fn discovery_without_a_request_turns_host_lists_only() {
+        let app = app("");
+        let mut b = base(&app);
+        b.args.clear();
+        let d = discover(&app, &b, 64, &shop).unwrap();
+        assert_eq!(d.knobs, list_functions(&app).into_iter().map(Knob::HostList).collect::<Vec<_>>());
+        assert!(d.discovered.is_empty() && d.keys.is_empty());
+    }
+
+    #[test]
+    fn discovery_stops_when_the_base_run_lost_evidence() {
+        let app = app("");
+        let limited = |s: &RunSpec| {
+            let mut r = modes(s);
+            r.capture_limited = true;
+            r.outcome.message = Some("trace too long".into());
+            r
+        };
+        let err = discover(&app, &base(&app), 8, &limited).err().unwrap().to_string();
+        assert!(err.starts_with("run r") && err.ends_with(": trace too long"), "{err}");
+        assert!(amplify(&app, &base(&app), None, 8, &limited).is_err());
     }
 }

@@ -60,10 +60,16 @@ enum End {
     Aborted,
 }
 
-/// Reads a body the guest writes, up to [`super::http::MAX_BODY`].
-async fn read(body: &mut Body, into: &Mutex<Captured>) -> wasmtime::Result<()> {
+/// Reads a body the guest writes, up to [`super::http::MAX_BODY`]. The body
+/// stays in `body` between frames, so what the guest sent is still there
+/// when the run stops first ([`drain`]).
+async fn read(body: &Mutex<Option<Body>>, into: &Mutex<Captured>) -> wasmtime::Result<()> {
     loop {
-        let frame = body.frame().await;
+        let frame = std::future::poll_fn(|cx| match body.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            Some(b) => std::pin::pin!(b.frame()).poll(cx),
+            None => Poll::Ready(None),
+        })
+        .await;
         let mut c = into.lock().unwrap_or_else(|e| e.into_inner());
         match frame {
             None => {
@@ -77,6 +83,8 @@ async fn read(body: &mut Body, into: &Mutex<Captured>) -> wasmtime::Result<()> {
             Some(Ok(frame)) => match frame.into_data() {
                 Ok(data) => {
                     if c.body.len() + data.len() > super::http::MAX_BODY {
+                        // What follows would not join up with what was kept.
+                        body.lock().unwrap_or_else(|e| e.into_inner()).take();
                         return Err(wasmtime::format_err!("an HTTP body over {} MiB", super::http::MAX_BODY >> 20));
                     }
                     c.body.extend_from_slice(&data);
@@ -87,6 +95,30 @@ async fn read(body: &mut Body, into: &Mutex<Captured>) -> wasmtime::Result<()> {
                     }
                 }
             },
+        }
+    }
+}
+
+/// The frames of `body` that are already there, once the run has stopped.
+/// A guest's write completes when its bytes are in the body's buffer, before
+/// [`read`] takes them: a trap right after must not lose what was sent. The
+/// end is left as it was: the guest stopped before it.
+fn drain(body: &Mutex<Option<Body>>, into: &Mutex<Captured>) {
+    let Some(mut body) = body.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    let mut c = into.lock().unwrap_or_else(|e| e.into_inner());
+    if c.end != End::Open {
+        return;
+    }
+    let mut cx = Context::from_waker(Waker::noop());
+    while let Poll::Ready(Some(Ok(frame))) = std::pin::pin!(body.frame()).poll(&mut cx) {
+        match frame.into_data() {
+            Ok(data) if c.body.len() + data.len() <= super::http::MAX_BODY => c.body.extend_from_slice(&data),
+            Ok(_) => return,
+            Err(frame) => {
+                if let Ok(t) = frame.into_trailers() {
+                    c.trailers = Some(t);
+                }
+            }
         }
     }
 }
@@ -112,9 +144,9 @@ async fn send(accessor: &Accessor<Host>, req: Resource<Request>) -> wasmtime::Re
         Ok(r) => r,
         Err(e) => return Ok(Err(e.downcast()?)),
     };
-    let (parts, mut body) = req.into_parts();
+    let (parts, body) = req.into_parts();
     let sent = Mutex::new(Captured::default());
-    read(&mut body, &sent).await?;
+    read(&Mutex::new(Some(body)), &sent).await?;
     let sent = sent.into_inner().unwrap_or_else(|e| e.into_inner());
     if sent.end != End::Finished {
         // The guest gave up on the body: the request never completes.
@@ -237,6 +269,8 @@ pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value)
         .context("the wasi:http 0.3 handler's type")?;
     let captured = Arc::new(Mutex::new(Captured::default()));
     let into = captured.clone();
+    let body: Arc<Mutex<Option<Body>>> = Arc::default();
+    let reading = body.clone();
     let (in_flight, clock) = (store.data().in_flight.clone(), store.data().clock.clone());
     let run = store.run_concurrent(async move |accessor| -> wasmtime::Result<()> {
         let req = accessor.with(|mut access| access.as_context_mut().data_mut().table.push(req))?;
@@ -249,15 +283,17 @@ pub(super) fn call_handler(store: &mut Store<Host>, func: Func, request: &Value)
             let res = access.as_context_mut().data_mut().table.delete(res)?;
             res.into_http(&mut access, async { Ok(()) })
         })?;
-        let (parts, mut body) = response.into_parts();
+        let (parts, rest) = response.into_parts();
         into.lock().unwrap_or_else(|e| e.into_inner()).head = Some((parts.status, parts.headers));
-        read(&mut body, &into).await
+        *reading.lock().unwrap_or_else(|e| e.into_inner()) = Some(rest);
+        read(&reading, &into).await
     });
     let called = match until_stuck(run, &in_flight, &clock) {
         Some(Ok(result)) => result,
         Some(Err(e)) => Err(e),
         None => Err(wasmtime::Trap::AsyncDeadlock.into()),
     };
+    drain(&body, &captured);
     let captured = std::mem::take(&mut *captured.lock().unwrap_or_else(|e| e.into_inner()));
     let pairs = |h: &http::HeaderMap| -> Vec<Value> { h.iter().map(|(k, v)| json!([k.as_str(), String::from_utf8_lossy(v.as_bytes())])).collect() };
     let finished = if captured.error {
@@ -395,6 +431,30 @@ mod tests {
         };
         assert_eq!(super::until_stuck(run, &in_flight, &clock), Some(()));
         assert_eq!(clock.with(|c| c.elapsed_ns()), ms(120));
+    }
+
+    #[test]
+    fn host_error_texts_are_the_guests_error_codes() {
+        use super::{ErrorCode, error_code};
+        let codes = [
+            ("dns-timeout", ErrorCode::DnsTimeout),
+            ("destination-not-found", ErrorCode::DestinationNotFound),
+            ("destination-unavailable", ErrorCode::DestinationUnavailable),
+            ("connection-refused", ErrorCode::ConnectionRefused),
+            ("connection-terminated", ErrorCode::ConnectionTerminated),
+            ("connection-timeout", ErrorCode::ConnectionTimeout),
+            ("connection-read-timeout", ErrorCode::ConnectionReadTimeout),
+            ("connection-limit-reached", ErrorCode::ConnectionLimitReached),
+            ("tls-certificate-error", ErrorCode::TlsCertificateError),
+            ("http-request-denied", ErrorCode::HttpRequestDenied),
+            ("http-response-incomplete", ErrorCode::HttpResponseIncomplete),
+            ("http-response-timeout", ErrorCode::HttpResponseTimeout),
+            ("", ErrorCode::InternalError(Some(String::new()))),
+            ("Connection-Refused", ErrorCode::InternalError(Some("Connection-Refused".into()))),
+        ];
+        for (text, code) in codes {
+            assert_eq!(format!("{:?}", error_code(text)), format!("{code:?}"), "{text}");
+        }
     }
 
     #[test]

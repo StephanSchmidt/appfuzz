@@ -128,10 +128,21 @@ fn sniffs_html(body: &str) -> bool {
     TAGS.iter().any(|t| head.starts_with(t) && matches!(head[t.len()..].chars().next(), Some(' ' | '>')))
 }
 
-static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*?(/?)>").unwrap());
-/// Comments, the doctype, and bogus comments such as the empty `<!>` that
-/// Leptos puts between adjacent text nodes: a browser shows `18<!>%` as `18%`.
-pub(crate) static COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->|<![^>]*>").unwrap());
+/// A start or end tag. It ends at the first `>` outside a quoted attribute
+/// value: `title="<b>a</b>"` is valid HTML, and Solid, Svelte and hand-written
+/// templates leave `<` or `>` in attribute values. A quote opens a value only
+/// after `=`; an unclosed one is an ordinary character.
+static TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"<(/?)([a-zA-Z][a-zA-Z0-9-]*)\b(?:[^>"'=]|=[\t\n\x0C\r ]*"[^"]*"|=[\t\n\x0C\r ]*'[^']*'|[="'])*?(/?)>"#).unwrap());
+/// Comments as a browser ends them (`<!-->` and `<!--->` are empty), the
+/// doctype, and bogus comments such as the empty `<!>` that Leptos puts
+/// between adjacent text nodes: a browser shows `18<!>%` as `18%`.
+const COMMENTS: &str = r"<!--(?:-?>|.*?--!?>)|<[!?][^>]*>";
+pub(crate) static COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!("(?s){COMMENTS}")).unwrap());
+/// What a page doesn't show, in the order a browser reads it: comments,
+/// and the code in scripts and style sheets (hydration data, CSS).
+static HIDDEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r"(?is){COMMENTS}|<script\b[^>]*>.*?</script\s*>|<style\b[^>]*>.*?</style\s*>")).unwrap());
 static PERCENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(-?\d+(?:[.,]\d+)?)\s*%").unwrap());
 
 /// Elements without an end tag.
@@ -153,8 +164,8 @@ struct Tag<'a> {
 }
 
 /// The next match of `TAG` at or after `from`, without the regex engine:
-/// `markup_problem` runs on every response.
-fn next_tag(s: &str, from: usize) -> Option<Tag<'_>> {
+/// `markup_problem` runs on every response. `last_gt` is the last `>` in `s`.
+fn next_tag(s: &str, from: usize, last_gt: Option<usize>) -> Option<Tag<'_>> {
     let b = s.as_bytes();
     let word = |i: usize| s[i..].chars().next().is_some_and(regex_syntax::is_word_character);
     let word_before = |i: usize| s[..i].chars().next_back().is_some_and(regex_syntax::is_word_character);
@@ -172,19 +183,41 @@ fn next_tag(s: &str, from: usize) -> Option<Tag<'_>> {
         }
         // `\b` after the name; the regex backtracks to a shorter name.
         let Some(end_name) = (start + 1..=stop).rev().find(|&e| word_before(e) != word(e)) else { continue };
-        let Some(gt) = memchr::memchr(b'>', &b[end_name..]).map(|i| end_name + i) else { continue };
+        let Some(gt) = tag_end(b, end_name, last_gt) else { continue };
         let self_closing = gt > end_name && b[gt - 1] == b'/';
         return Some(Tag { end: gt + 1, close, name: &s[start..end_name], self_closing });
     }
     None
 }
 
+/// The `>` that ends a tag whose name ends at `from`, as `TAG` finds it: the
+/// first one outside a quoted value. A quoted value is skipped when it
+/// closes and a `>` comes after it.
+fn tag_end(b: &[u8], from: usize, last_gt: Option<usize>) -> Option<usize> {
+    let mut i = from;
+    loop {
+        let j = i + memchr::memchr2(b'>', b'=', &b[i..])?;
+        if b[j] == b'>' {
+            return Some(j);
+        }
+        let v = j + 1 + b[j + 1..].iter().take_while(|c| matches!(c, b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')).count();
+        i = match b.get(v) {
+            Some(&q @ (b'"' | b'\'')) => match memchr::memchr(q, &b[v + 1..]).map(|k| v + 1 + k) {
+                Some(end) if last_gt.is_some_and(|g| g > end) => end + 1,
+                _ => j + 1,
+            },
+            _ => j + 1,
+        };
+    }
+}
+
 pub fn markup_problem(body: &str) -> Option<String> {
     let body = COMMENT.replace_all(body, "");
     let lower = body.to_ascii_lowercase();
+    let last_gt = memchr::memrchr(b'>', body.as_bytes());
     let mut stack: Vec<String> = Vec::new();
     let mut pos = 0;
-    while let Some(t) = next_tag(&body, pos) {
+    while let Some(t) = next_tag(&body, pos, last_gt) {
         pos = t.end;
         let close = t.close;
         let name = t.name.to_ascii_lowercase();
@@ -250,9 +283,10 @@ pub(crate) fn strings(v: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
-/// Percentages outside 0–100 in a text (`400 %`, `-5%`).
+/// Percentages outside 0–100 in a text (`400 %`, `-5%`), as a page shows
+/// it: CSS such as `translate(-50%)` is no percentage the user reads.
 pub fn impossible_percentages(text: &str) -> Vec<String> {
-    let text = COMMENT.replace_all(text, "");
+    let text = shown(text);
     PERCENT
         .captures_iter(&text)
         .filter(|c| c[1].replace(',', ".").parse::<f64>().is_ok_and(|x| !(0.0..=100.0).contains(&x)))
@@ -340,8 +374,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
         ));
     }
     let Some(body) = resp.body.as_deref() else { return out };
-    let body = &body[..body.len().min(1 << 20)];
-    let body = &body[..(0..=body.len()).rev().find(|i| body.is_char_boundary(*i)).unwrap_or(0)];
+    let body = &body[..body.floor_char_boundary(1 << 20)];
     // Canary markup is reported as reflection, not as broken markup.
     // Past 1 MiB only a prefix is parsed: its open elements prove nothing
     // (big_output reports such pages).
@@ -366,7 +399,13 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     {
         leaks.push("panic text".into());
     }
-    if let Some(line) = r.stderr.lines().map(str::trim).find(|l| l.len() >= 20 && body.contains(*l)) {
+    // In HTML only the text counts: a short error text like `progress`
+    // (generated from a string in the binary) is in `<progress>` too. The
+    // text is read decoded: renderers escape the quotes of an error text.
+    // Most runs have no error texts: the body is read only when needed.
+    let view = std::cell::OnceCell::new();
+    let shows = |t: &str| view.get_or_init(|| error_view(&resp, body)).contains(t);
+    if let Some(line) = r.stderr.lines().map(str::trim).find(|l| l.len() >= 20 && (body.contains(*l) || shows(l))) {
         leaks.push(format!("stderr line {:?}", line.chars().take(80).collect::<String>()));
     }
     // An error text counts only if no other input carries it too.
@@ -374,11 +413,7 @@ pub fn check(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
     r.spec.args.iter().for_each(|a| strings(a, &mut other));
     r.events.iter().filter_map(|e| e.result.as_ref()).filter(|v| v.get("err").is_none()).for_each(|v| strings(v, &mut other));
     let errs = host_errors(r, m);
-    // In HTML only the text counts: a short error text like `progress`
-    // (generated from a string in the binary) is in `<progress>` too.
-    // Most runs have no error texts: skip the scan of the whole body.
-    let text = if errs.is_empty() { String::new() } else { error_view(&resp, body) };
-    let shown: Vec<&(String, String)> = errs.iter().filter(|(_, t)| text.contains(t.as_str()) && !other.iter().any(|o| o.contains(t.as_str()))).collect();
+    let shown: Vec<&(String, String)> = errs.iter().filter(|(_, t)| shows(t) && !other.iter().any(|o| o.contains(t.as_str()))).collect();
     if let Some((f, t)) = shown.first() {
         leaks.push(format!("the error text {f} returned ({:?})", t.chars().take(60).collect::<String>()));
     }
@@ -910,28 +945,41 @@ fn dedupe(v: Vec<Finding>) -> Vec<Finding> {
     v.into_iter().filter(|f| seen.insert(f.id.clone())).collect()
 }
 
-static TAGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]*>").unwrap());
+/// Entities decoded as a browser shows them. Renderers escape quotes in
+/// text (React `&#x27;`, Vue `&#39;`, maud `&quot;`) and templates write
+/// `&nbsp;` between a number and its unit.
+fn decode(s: &str) -> String {
+    crate::urls::decode_entities(&s.replace("&nbsp;", "\u{a0}"))
+}
+
+/// The text a browser shows of a body: without comments, scripts, style
+/// sheets and tags (a tag ends a word), entities decoded. Server renderers
+/// mark text node boundaries with comments and put hydration data into
+/// scripts; read this way, their pages and plain markup agree.
+fn shown(body: &str) -> String {
+    let text = HIDDEN.replace_all(body, |c: &regex::Captures| if c[0].starts_with("<!") || c[0].starts_with("<?") { "" } else { " " });
+    decode(&TAG.replace_all(&text, " "))
+}
 
 /// The text of an HTML body without its tags, and with attribute values
-/// kept (a `title` or `value` shows text too).
+/// kept (a `title` or `value` shows text too), entities decoded.
 fn visible_text(body: &str) -> String {
     static VALUE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"=\s*(?:"([^"]*)"|'([^']*)')"#).unwrap());
     let body = COMMENT.replace_all(body, "");
-    let mut out = TAGS.replace_all(&body, " ").into_owned();
-    for tag in TAGS.find_iter(&body) {
+    let mut out = TAG.replace_all(&body, " ").into_owned();
+    for tag in TAG.find_iter(&body) {
         for c in VALUE.captures_iter(tag.as_str()) {
             out.push(' ');
             out.push_str(c.get(1).or(c.get(2)).map_or("", |m| m.as_str()));
         }
     }
-    out
+    decode(&out)
 }
 
 /// The visible text of a body as a bag of words, for order-insensitive
 /// comparison.
 pub fn word_bag(body: &str) -> Vec<String> {
-    let text = TAGS.replace_all(&COMMENT.replace_all(body, ""), " ").into_owned();
-    let mut w: Vec<String> = text.split_whitespace().map(str::to_string).collect();
+    let mut w: Vec<String> = shown(body).split_whitespace().map(str::to_string).collect();
     w.sort();
     w
 }
@@ -1002,11 +1050,12 @@ mod tests {
     #[test]
     fn tag_scanner_matches_regex() {
         use rand::{RngExt, SeedableRng};
-        let alphabet = ['<', '/', '>', 'a', 'B', '1', '-', '_', ' ', 'é', '\u{301}', '=', '"', '\n'];
+        let alphabet = ['<', '/', '>', 'a', 'B', '1', '-', '_', ' ', 'é', '\u{301}', '=', '"', '\'', '\t', '\n'];
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
         for _ in 0..200_000 {
             let n = rng.random_range(0..24);
             let s: String = (0..n).map(|_| alphabet[rng.random_range(0..alphabet.len())]).collect();
+            let last_gt = memchr::memrchr(b'>', s.as_bytes());
             let mut want = Vec::new();
             let mut pos = 0;
             while let Some(c) = TAG.captures_at(&s, pos) {
@@ -1015,7 +1064,7 @@ mod tests {
             }
             let mut got = Vec::new();
             let mut pos = 0;
-            while let Some(t) = next_tag(&s, pos) {
+            while let Some(t) = next_tag(&s, pos, last_gt) {
                 pos = t.end;
                 got.push((pos, t.close, t.name.to_string(), t.self_closing));
             }
@@ -1121,5 +1170,530 @@ mod tests {
     fn canaries() {
         let c = canary(7);
         assert!(CANARY.is_match(&c) && c.ends_with("<i>'\""));
+    }
+
+    // Server renderers. The text checks must read what a browser shows, so
+    // a page as a renderer sends it gives the same result as plain markup.
+    // "Verified" samples follow the renderer's source (maud 0.27, tachys
+    // 0.2 / Leptos 0.8, React's server renderer, Vue 3.5's server renderer
+    // and @vue/shared); the others are from memory and say so.
+
+    /// The host error the page shows: a Postgres error, quotes and all.
+    const DB_ERROR: &str = r#"relation "bookings" does not exist"#;
+
+    /// What a browser shows, as plain hand-written markup.
+    const PLAIN: &str = r#"<!DOCTYPE html><html><head><title>Bookings</title></head><body><h1>Bookings</h1><p>Booked by Ann and Bob</p><p class="usage">Usage: 200%</p><p class="error">relation "bookings" does not exist</p></body></html>"#;
+    const PLAIN_FRAGMENT: &str =
+        r#"<h1>Bookings</h1><p>Booked by Ann and Bob</p><p class="usage">Usage: 200%</p><p class="error">relation "bookings" does not exist</p>"#;
+
+    /// (renderer, the page as it sends it, a fragment without `<html>`)
+    const RENDERED: &[(&str, &str, bool)] = &[
+        // Verified: plain HTML; `&<>"` escaped, in text too.
+        (
+            "maud",
+            r#"<!DOCTYPE html><html><head><title>Bookings</title></head><body><h1>Bookings</h1><p>Booked by Ann and Bob</p><p class="usage">Usage: 200%</p><p class="error">relation &quot;bookings&quot; does not exist</p></body></html>"#,
+            false,
+        ),
+        // Verified: `<!>` before a text node that follows text, `&<>`
+        // escaped in text, the hydration bootstrap script, and resources
+        // serialised for hydration as the host returned them. Where the
+        // view macro splits static text is an approximation.
+        (
+            "leptos 0.8",
+            r##"<!DOCTYPE html><html><head><title>Bookings</title><script type="module">(function (root, pkg_path, output_name, wasm_output_name, defer) { const hydrate = () => import(`${root}/${pkg_path}/${output_name}.js`).then(mod => { mod.default({module_or_path: `${root}/${pkg_path}/${wasm_output_name}.wasm`}).then(() => { mod.hydrate(); }); }); if (defer && "requestIdleCallback" in window) { window.requestIdleCallback(hydrate, { timeout: 2000 }); } else { hydrate(); } })("", "pkg", "bookings", "bookings", false);</script></head><body><h1>Bookings</h1><p>Booked by <!>Ann<!> and <!>Bob</p><p class="usage">Usage: <!>200<!>%</p><p class="error">relation "bookings" does not exist</p><script>__RESOLVED_RESOURCES[0] = "[{\"name\":\"Ann\"},{\"name\":\"Bob\"}]";</script></body></html>"##,
+            false,
+        ),
+        // Verified: `<!-- -->` between adjacent text, `"&'<>` escaped
+        // (`'` as `&#x27;`). The Suspense boundary `<!--$-->…<!--/$-->`
+        // is React 18's, from memory.
+        (
+            "react renderToString",
+            r#"<html><head><title>Bookings</title></head><body><h1>Bookings</h1><!--$--><p>Booked by <!-- -->Ann<!-- --> and <!-- -->Bob</p><p class="usage">Usage: <!-- -->200<!-- -->%</p><!--/$--><p class="error">relation &quot;bookings&quot; does not exist</p></body></html>"#,
+            false,
+        ),
+        // From memory: Svelte 5's markers `<!--[-->`, `<!--]-->` and
+        // `<!---->`, scoped classes, `&<` escaped in text, and the style
+        // sheet `css: "injected"` puts in the head. Placement approximate.
+        (
+            "svelte 5",
+            r#"<!doctype html><html><head><title>Bookings</title><style id="svelte-1x2y3z">.usage.svelte-1x2y3z{color:teal}.dialog.svelte-1x2y3z{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%)}</style></head><body><!--[--><h1>Bookings</h1><!----> <p>Booked by Ann and Bob</p> <p class="usage svelte-1x2y3z">Usage: 200%</p> <!--[--><p class="error svelte-1x2y3z">relation "bookings" does not exist</p><!--]--> <dialog class="dialog svelte-1x2y3z"></dialog><!--]--></body></html>"#,
+            false,
+        ),
+        // Verified: fragments `<!--[-->…<!--]-->`, `<!---->` for a false
+        // v-if, `"&'<>` escaped. Scoped `data-v-…` attributes and Nuxt's
+        // `__NUXT_DATA__` payload are from memory.
+        (
+            "vue 3",
+            r#"<!DOCTYPE html><html><head><title>Bookings</title></head><body><div id="__nuxt"><!--[--><h1 data-v-7fa5cd90>Bookings</h1><p data-v-7fa5cd90>Booked by Ann and Bob</p><p class="usage" data-v-7fa5cd90>Usage: 200%</p><!--[--><p class="error" data-v-7fa5cd90>relation &quot;bookings&quot; does not exist</p><!--]--><!----><!--]--></div><script type="application/json" data-nuxt-data="nuxt-app" data-ssr="true" id="__NUXT_DATA__">[["ShallowReactive",1],{"data":2},{"bookings":3},["Ann","Bob"]]</script></body></html>"#,
+            false,
+        ),
+        // From memory: `data-hk` attributes, `<!--$-->…<!--/-->` around
+        // inserted values, the `_$HY` bootstrap and a hydration payload.
+        (
+            "solid",
+            r#"<!DOCTYPE html><html><head><title>Bookings</title><script>window._$HY||(e=>{let t=e=>e&&e.hasAttribute&&(e.hasAttribute("data-hk")?e:t(e.host&&e.host.nodeType?e.host:e.parentNode));["click","input"].forEach((o=>document.addEventListener(o,(o=>{if(!e.events)return;let s=t(o.composedPath&&o.composedPath()[0]||o.target);s&&!e.completed.has(s)&&e.events.push([s,o])}))))})(window._$HY={events:[],completed:new WeakSet,r:{}});</script></head><body><h1 data-hk="0-0-0-0">Bookings</h1><p data-hk="0-0-0-1">Booked by <!--$-->Ann<!--/--> and <!--$-->Bob<!--/--></p><p class="usage" data-hk="0-0-0-2">Usage: <!--$-->200<!--/-->%</p><p class="error" data-hk="0-0-0-3">relation "bookings" does not exist</p><script>_$HY.r["0-0-0-4"]=[{name:"Ann"},{name:"Bob"}];</script></body></html>"#,
+            false,
+        ),
+        // An htmx fragment: plain markup, no `<html>` or `<body>`.
+        (
+            "htmx fragment",
+            r#"<div id="bookings" hx-swap-oob="true"><h1>Bookings</h1><p>Booked by Ann and Bob</p><p class="usage">Usage: 200%</p><p class="error">relation "bookings" does not exist</p></div>"#,
+            true,
+        ),
+    ];
+
+    fn plain(fragment: bool) -> &'static str {
+        if fragment { PLAIN_FRAGMENT } else { PLAIN }
+    }
+
+    /// A run of export `h` with the request `args` that returned `result`,
+    /// after host calls `(func, args, result)`.
+    fn run_of(args: Value, result: Value, calls: Vec<(&str, Value, Value)>, stderr: &str) -> RunRecord {
+        crate::envelope::Trace {
+            export: "h".into(),
+            args: vec![args],
+            events: calls
+                .into_iter()
+                .map(|(f, a, r)| crate::envelope::TraceCall {
+                    func: f.into(),
+                    args: a.as_object().cloned().unwrap_or_default(),
+                    result: Some(r),
+                    ..Default::default()
+                })
+                .collect(),
+            result: Some(result),
+            stderr: stderr.into(),
+            ..Default::default()
+        }
+        .to_record()
+    }
+
+    /// A GET that answered 200 with the HTML page `body`.
+    fn page_run(body: &str, calls: Vec<(&str, Value, Value)>, stderr: &str) -> RunRecord {
+        let result = json!({"status": 200, "headers": [["content-type", "text/html; charset=utf-8"]], "body": body});
+        run_of(json!({"method": "GET", "path": "/bookings"}), result, calls, stderr)
+    }
+
+    fn site() -> Manifest {
+        toml::from_str("[app]\nwasm = 'a.wasm'\n[entry]\nexport = 'h'\noutput = { status = 'status', body = 'body', headers = 'headers' }\n").unwrap()
+    }
+
+    fn kinds(findings: Vec<Finding>) -> Vec<String> {
+        let mut k: Vec<String> = findings.into_iter().map(|f| f.kind).collect();
+        k.sort();
+        k
+    }
+
+    fn db_error() -> Vec<(&'static str, Value, Value)> {
+        vec![("acme:db/bookings#list", json!({}), json!({"err": DB_ERROR}))]
+    }
+
+    #[test]
+    fn rendered_pages_show_the_same_percentages() {
+        assert_eq!(impossible_percentages(PLAIN), ["200%"]);
+        for (renderer, page, fragment) in RENDERED {
+            assert_eq!(impossible_percentages(page), impossible_percentages(plain(*fragment)), "{renderer}");
+        }
+    }
+
+    #[test]
+    fn rendered_pages_show_the_same_words() {
+        for (renderer, page, fragment) in RENDERED {
+            assert_eq!(word_bag(page), word_bag(plain(*fragment)), "{renderer}");
+        }
+    }
+
+    #[test]
+    fn rendered_pages_are_well_formed() {
+        assert_eq!(markup_problem(PLAIN), None);
+        for (renderer, page, _) in RENDERED {
+            assert_eq!(markup_problem(page), None, "{renderer}");
+            // An element left open is found through the markers too.
+            let open = page.replacen("</h1>", "", 1);
+            assert!(markup_problem(&open).is_some_and(|p| p.contains("<h1>")), "{renderer}");
+        }
+        // React 18 streaming placeholders, Vue teleports, Svelte's else branch.
+        for page in [
+            r#"<!--$?--><template id="B:0"></template><p>Loading</p><!--/$-->"#,
+            "<!--teleport start--><!--teleport end--><div><!--teleport start anchor--><!--teleport anchor--></div>",
+            "<!--[!--><p>No bookings</p><!--]-->",
+            "<table><tbody><!--[--><tr><td>Ann</td></tr><!--]--></tbody></table>",
+        ] {
+            assert_eq!(markup_problem(page), None, "{page}");
+        }
+    }
+
+    #[test]
+    fn every_renderer_leaks_the_error_text_alike() {
+        let m = site();
+        assert_eq!(kinds(check(&page_run(PLAIN, db_error(), ""), &m)), ["inconsistent_response", "leaky_error"]);
+        for (renderer, page, _) in RENDERED {
+            let found = check(&page_run(page, db_error(), ""), &m);
+            let leak = found.iter().find(|f| f.kind == "leaky_error").map(|f| f.detail["error"]["text"].clone());
+            assert_eq!(leak, Some(json!(DB_ERROR)), "{renderer}");
+            assert_eq!(kinds(found), ["inconsistent_response", "leaky_error"], "{renderer}");
+        }
+    }
+
+    #[test]
+    fn hydration_data_is_not_what_the_page_shows() {
+        // The page shows the names sorted; the hydration payload carries
+        // them as the host returned them. Reversed, the payload is another
+        // word, but the page is the same.
+        let leptos = |data: &str| format!("<ul><li>Ann</li><li>Bob</li></ul><script>__RESOLVED_RESOURCES[0] = {data:?};</script>");
+        assert_eq!(word_bag(&leptos(r#"[{"name":"Ann"},{"name":"Bob"}]"#)), word_bag(&leptos(r#"[{"name":"Bob"},{"name":"Ann"}]"#)));
+        let nuxt = |data: &str| format!(r#"<ul><li>Ann</li><li>Bob</li></ul><script type="application/json" id="__NUXT_DATA__">{data}</script>"#);
+        assert_eq!(word_bag(&nuxt(r#"[["Ann","Bob"]]"#)), word_bag(&nuxt(r#"[["Bob","Ann"]]"#)));
+        assert_eq!(word_bag(&nuxt("[]")), ["Ann", "Bob"]);
+    }
+
+    #[test]
+    fn percentages_as_a_browser_shows_them() {
+        let p = impossible_percentages;
+        // Entities and inline elements: each shows 200 %.
+        assert_eq!(p("<p>200&#37;</p>"), ["200%"]);
+        assert_eq!(p("<p>200&#x25;</p>"), ["200%"]);
+        assert_eq!(p("<p>200&nbsp;%</p>"), ["200\u{a0}%"]);
+        assert_eq!(p("<p>200\u{a0}%</p>"), ["200\u{a0}%"]);
+        assert_eq!(p("<p><b>200</b>%</p>").len(), 1);
+        assert_eq!(p("<p><span>-5</span><!-- -->%</p>"), ["-5 %"]);
+        // Code is no text: CSS, scripts, data blocks, attributes.
+        assert_eq!(p("<style>.dialog{top:50%;transform:translate(-50%,-50%)}</style><p>40%</p>"), Vec::<String>::new());
+        assert_eq!(p(r#"<p style="width:150%">40%</p>"#), Vec::<String>::new());
+        assert_eq!(p(r#"<div class="w-[200%] -translate-x-[50%]">40%</div>"#), Vec::<String>::new());
+        assert_eq!(p("<script>const r = 1000 % 7;</script><p>40%</p>"), Vec::<String>::new());
+        assert_eq!(p(r#"<script type="application/json">{"discount":"-20%"}</script>"#), Vec::<String>::new());
+        // Comments and, in HTML, CDATA: a bogus comment up to the first `>`.
+        assert_eq!(p("<p>a<!-- 250% -->b<![CDATA[250%]]>c<?php 250% ?></p>"), Vec::<String>::new());
+        assert_eq!(p("<p><![CDATA[a > 250%]]></p>"), ["250%"]);
+        // `<!-->` and `<!--->` are empty comments; `--!>` ends one too.
+        assert_eq!(p("<p><!-->250%<!-- x --></p>"), ["250%"]);
+        assert_eq!(p("<p><!--->-5%<!-- x --></p>"), ["-5%"]);
+        assert_eq!(p("<p><!-- x --!>300%<!-- y --></p>"), ["300%"]);
+        // A JSON or text body has no markup to remove.
+        assert_eq!(p(r#"{"usage": "250%"}"#), ["250%"]);
+        assert_eq!(p("usage: 250 % (a < b)"), ["250 %"]);
+    }
+
+    #[test]
+    fn word_bags_read_entities_and_skip_code() {
+        // React, Vue and maud escape what Leptos and Svelte send as it is.
+        let want = word_bag(r#"<p>Ann's "Deluxe" room & breakfast</p>"#);
+        for sent in [
+            "<p>Ann&#x27;s &quot;Deluxe&quot; room &amp; breakfast</p>",
+            "<p>Ann&#39;s &quot;Deluxe&quot; room &amp; breakfast</p>",
+            "<p>Ann's &quot;Deluxe&quot; room &amp; breakfast</p>",
+            "<p>Ann's <!>\"Deluxe\"<!> room &amp; breakfast</p>",
+        ] {
+            assert_eq!(word_bag(sent), want, "{sent}");
+        }
+        assert_eq!(word_bag("<p>12&nbsp;rooms</p>"), word_bag("<p>12\u{a0}rooms</p>"));
+        // An escaped entity is text.
+        assert_eq!(word_bag("<p>a&amp;nbsp;b</p>"), ["a&nbsp;b"]);
+        // Scripts, styles, comments and attributes add no words.
+        assert_eq!(word_bag(r#"<style>.a{color:red}</style><script>var x = "hidden";</script><p title="tip" data-hk="0-0">Hi<!-- note --></p>"#), ["Hi"]);
+        // `<` that starts no tag is text.
+        assert_eq!(word_bag("<p>1 < 2</p>"), ["1", "2", "<"]);
+        // Attribute values with `>` in them (Svelte leaves it) end no tag.
+        assert_eq!(word_bag(r#"<p x-show="n > 0" title="a > b">Hi</p>"#), ["Hi"]);
+    }
+
+    #[test]
+    fn markup_inside_quoted_attribute_values_is_text() {
+        // Valid HTML a browser reads as one tag each: Bootstrap popovers,
+        // Alpine expressions, renderers that leave `<` and `>` in values.
+        for ok in [
+            r#"<button data-bs-content="<b>Hi</b>">x</button>"#,
+            r#"<div x-html="open ? '<b>Open</b>' : '<i>Closed</i>'"></div>"#,
+            r#"<p title='<em>x</em>'>y</p>"#,
+            r#"<p title = "</p>">y</p>"#,
+            r#"<div x-show="n > 0"><span>x</span></div>"#,
+        ] {
+            assert_eq!(markup_problem(ok), None, "{ok}");
+        }
+        // A quote that never closes is an ordinary character…
+        assert_eq!(markup_problem(r#"<p title=a"b>x</p>"#), None);
+        assert_eq!(markup_problem(r#"<p title="x>y</p>"#), None);
+        // …and one that swallows an end tag leaves its element open, as in
+        // a browser.
+        assert_eq!(markup_problem(r#"<div><p class="a>x</p></div><p class="b">y</p>"#).as_deref(), Some("<div> is never closed"));
+    }
+
+    #[test]
+    fn leaky_errors_read_escaped_text() {
+        let m = site();
+        let shown = |page: &str, t: &str| {
+            let calls = vec![("acme:db/bookings#list", json!({}), json!({"err": t}))];
+            kinds(check(&page_run(page, calls, ""), &m)).contains(&"leaky_error".to_string())
+        };
+        let t = r#"can't reach "db-7.internal:5432""#;
+        for page in [
+            "<p>can&#x27;t reach &quot;db-7.internal:5432&quot;</p>",
+            "<p>can&#39;t reach &quot;db-7.internal:5432&quot;</p>",
+            "<p>can't reach &quot;db-7.internal:5432&quot;</p>",
+            r#"<p>can't reach <!>"db-7.internal:5432"</p>"#,
+            r#"<input value="can&#39;t reach &quot;db-7.internal:5432&quot;">"#,
+        ] {
+            assert!(shown(page, t), "{page}");
+        }
+        // Only in a style sheet: not shown. In hydration data: sent to the
+        // browser, as Leptos serialises an error boundary's errors.
+        let t = "could not reach db-7.internal:5432";
+        assert!(!shown(&format!("<style>/* {t} */</style><p>Sorry.</p>"), t));
+        assert!(shown(&format!("<p>Sorry.</p><script>__SERIALIZED_ERRORS.push([0, 0, {t:?}]);</script>"), t));
+        // A stderr line, escaped by the renderer.
+        let line = r#"error: relation "bookings" does not exist at character 15"#;
+        let r = page_run("<pre>error: relation &quot;bookings&quot; does not exist at character 15</pre>", vec![], line);
+        assert_eq!(kinds(check(&r, &m)), ["leaky_error"]);
+        // Panic text, escaped by React.
+        let r = page_run("<pre>thread &#x27;main&#x27; panicked at src/lib.rs:12:5</pre>", vec![], "");
+        let found = check(&r, &m);
+        assert_eq!(found[0].detail["leaks"], json!(["panic text"]));
+    }
+
+    #[test]
+    fn errors_meant_for_users_or_echoed_are_no_leak() {
+        let t = "could not reach db-7.internal:5432";
+        let page = format!("<p>{t}</p>");
+        let calls = || vec![("acme:db/bookings#list", json!({}), json!({"err": t}))];
+        // Error texts written for users.
+        let m = site();
+        let users: Manifest = toml::from_str(
+            "[app]\nwasm = 'a.wasm'\n[entry]\nexport = 'h'\noutput = { status = 'status', body = 'body', headers = 'headers' }\n[functions.\"acme:db/bookings#list\"]\nuser_errors = true\n",
+        )
+        .unwrap();
+        assert_eq!(kinds(check(&page_run(&page, calls(), ""), &users)), Vec::<String>::new());
+        // A text the request carries too, and a short one.
+        let result = json!({"status": 200, "headers": [["content-type", "text/html"]], "body": page});
+        let r = run_of(json!({"method": "GET", "q": t}), result.clone(), calls(), "");
+        assert_eq!(kinds(check(&r, &m)), Vec::<String>::new());
+        let short = run_of(json!({}), json!({"status": 200, "body": "<p>timeout</p>"}), vec![("f", json!({}), json!({"err": "timeout"}))], "");
+        assert_eq!(kinds(check(&short, &m)), Vec::<String>::new());
+        // Panic text the app got as input; a short stderr line.
+        let r = run_of(json!({"q": "it panicked at noon"}), json!({"status": 200, "body": "<p>it panicked at noon</p>"}), vec![], "panicked");
+        assert_eq!(kinds(check(&r, &m)), Vec::<String>::new());
+        // An error status: a leak, but no inconsistency.
+        let r = run_of(json!({}), json!({"status": 503, "headers": [["content-type", "text/html"]], "body": format!("<p>{t}</p>")}), calls(), "");
+        assert_eq!(kinds(check(&r, &m)), ["leaky_error"]);
+    }
+
+    #[test]
+    fn renderer_escaping_is_no_reflection() {
+        let id = "cnry12341";
+        let ctx = |b: &str| breakout(b, id).map(|(c, _)| c);
+        // Escaped as each renderer escapes text and attribute values.
+        for safe in [
+            r#"<p>Hi <!-- -->cnry12341&lt;i&gt;&#x27;&quot;</p>"#,
+            r#"<p>Hi cnry12341&lt;i&gt;&#39;&quot;</p>"#,
+            r#"<p>Hi <!>cnry12341&lt;i&gt;'"</p>"#,
+            r#"<p title="cnry12341&lt;i&gt;'&quot;">x</p>"#,
+            r#"<!--[--><p>Hi cnry12341&lt;i>'"</p><!--]-->"#,
+            r#"<p title="cnry12341&lt;i>'&quot;">x</p>"#,
+            r#"<p data-hk="0-0-0-1">Hi <!--$-->cnry12341&lt;i>'"<!--/--></p>"#,
+        ] {
+            assert_eq!(ctx(safe), None, "{safe}");
+        }
+        // Raw HTML through each renderer's escape hatch, between its markers.
+        for raw in [
+            r#"<!--$--><div>cnry12341<i>'"</div><!--/$-->"#,
+            r#"<!--[--><div><!---->cnry12341<i>'"<!----></div><!--]-->"#,
+            r#"<div data-v-7fa5cd90>cnry12341<i>'"</div>"#,
+            r#"<div>Hi <!>cnry12341<i>'"</div>"#,
+        ] {
+            assert_eq!(ctx(raw), Some("text"), "{raw}");
+        }
+        // Leptos's hydration data: JSON in a Debug-quoted string, `<` as
+        // `<`, so the canary's quote can't end it.
+        let data = format!("{:?}", r#"[{"name":"cnry12341<i>'\""}]"#.replace('<', "\\u003c"));
+        assert_eq!(ctx(&format!("<li>cnry12341&lt;i&gt;'\"</li><script>__RESOLVED_RESOURCES[0] = {data};</script>")), None);
+    }
+
+    #[test]
+    fn canaries_through_framework_markup() {
+        let m = site();
+        let c = canary(1);
+        let id = &c[..c.find('<').unwrap()];
+        let html = |body: String| json!({"status": 200, "headers": [["content-type", "text/html"]], "body": body});
+        let args = json!({"method": "GET", "query": [["q", c]]});
+        // A request canary raw in a React Suspense boundary.
+        let found = check(&run_of(args.clone(), html(format!("<!--$--><p>{c}</p><!--/$-->")), vec![], ""), &m);
+        assert_eq!(kinds(found.clone()), ["reflection"]);
+        assert_eq!((found[0].detail["field"].as_str(), found[0].severity), (Some("query.q"), Severity::Fail));
+        assert!(found[0].title.contains("the query parameter `q`"), "{}", found[0].title);
+        // Escaped by the renderer: nothing.
+        let escaped = format!("<p>{id}&lt;i&gt;&#x27;&quot;</p>");
+        assert_eq!(kinds(check(&run_of(args.clone(), html(escaped), vec![], ""), &m)), Vec::<String>::new());
+        // A host canary raw, in Svelte's markers: stored reflection.
+        let calls = vec![("acme:cms/pages#get", json!({}), json!({"ok": {"title": c}}))];
+        let found = check(&run_of(json!({}), html(format!("<!--[--><h1>{c}</h1><!--]-->")), calls, ""), &m);
+        assert_eq!(kinds(found.clone()), ["stored_reflection"]);
+        assert_eq!(found[0].detail["func"], "acme:cms/pages#get");
+        // The request canary unchanged in a host call: passthrough (info),
+        // unless the field has a role meant for the host.
+        let calls = || vec![("acme:db/search#run", json!({"term": c}), json!({"ok": []}))];
+        let found = check(&run_of(args.clone(), json!({"status": 200, "body": "ok"}), calls(), ""), &m);
+        assert_eq!(kinds(found.clone()), ["input_passthrough"]);
+        assert_eq!((found[0].detail["exact"].as_bool(), found[0].severity), (Some(true), Severity::Info));
+        let mut roles = site();
+        roles.entry.as_mut().unwrap().fields.insert("today".into(), "clock.date".into());
+        let dated = json!({"method": "GET", "today": c});
+        let calls_dated = vec![("acme:db/search#run", json!({"day": c}), json!({"ok": []}))];
+        assert_eq!(kinds(check(&run_of(dated, json!({"status": 200, "body": "ok"}), calls_dated, ""), &roles)), Vec::<String>::new());
+        // Without a body, the passthrough is still found.
+        let found = check(&run_of(args, json!({"status": 204}), calls(), ""), &m);
+        assert_eq!(kinds(found), ["input_passthrough"]);
+        // An attack string that runs in a Vue page's script.
+        let attack = json!({"query": [["q", "';alert(1)//"]]});
+        let page = html("<!--[--><script>var q = '';alert(1)//';</script><!--]-->".into());
+        let found = check(&run_of(attack, page, vec![], ""), &m);
+        assert_eq!((kinds(found.clone()), found[0].detail["context"].as_str()), (vec!["reflection".to_string()], Some("script")));
+    }
+
+    #[test]
+    fn trusted_markup_is_no_stored_reflection() {
+        let m: Manifest = toml::from_str(
+            "[app]\nwasm = 'a.wasm'\n[entry]\nexport = 'h'\noutput = { status = 'status', body = 'body', headers = 'headers' }\n[functions.\"acme:cms/pages#get\"]\nresult = { html = \"html\" }\n",
+        )
+        .unwrap();
+        let c = canary(2);
+        let calls = vec![("acme:cms/pages#get", json!({}), json!({"html": c}))];
+        let r = run_of(json!({}), json!({"status": 200, "headers": [["content-type", "text/html"]], "body": format!("<article>{c}</article>")}), calls, "");
+        assert_eq!(kinds(check(&r, &m)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn framework_fragments_are_read_as_html() {
+        // Headers without a content type: a browser sniffs the start.
+        let sniffed: Manifest = toml::from_str("[app]\nwasm = 'a.wasm'\n[entry]\nexport = 'h'\noutput = { body = 'body', headers = 'headers' }\n").unwrap();
+        let html = |m: &Manifest, body: &str| response(&run_of(json!({}), json!({"body": body, "headers": []}), vec![], ""), m).html;
+        for page in
+            ["<!--[--><p>Hi</p><!--]-->", "<!--$--><div>Hi</div><!--/$-->", r#"<div data-hk="0-0-0-0">Hi</div>"#, "\n<!DOCTYPE html><html>", "<p>a<!>b</p>"]
+        {
+            assert!(html(&sniffed, page), "{page}");
+        }
+        // htmx swaps rows and list items in; opened on their own, a browser
+        // shows them as text. Without headers, any tag is markup.
+        let body_only: Manifest = toml::from_str("[app]\nwasm = 'a.wasm'\n[entry]\nexport = 'h'\noutput = { body = 'body' }\n").unwrap();
+        for fragment in ["<tr><td>Ann</td></tr>", "<li>Ann</li>", "<span>Ann</span>"] {
+            assert!(!html(&sniffed, fragment), "{fragment}");
+            assert!(html(&body_only, fragment), "{fragment}");
+        }
+        // The manifest's format, then the content type, decide.
+        let format: Manifest =
+            toml::from_str("[app]\nwasm = 'a.wasm'\n[entry]\nexport = 'h'\noutput = { body = 'body', headers = 'headers', body_format = 'html' }\n").unwrap();
+        assert!(html(&format, "<tr><td>Ann</td></tr>"));
+        let typed =
+            |ct: &str| response(&run_of(json!({}), json!({"body": "<p>x</p>", "headers": [{"name": "Content-Type", "value": ct}]}), vec![], ""), &format);
+        assert!(!typed("application/json").html);
+        assert!(typed("text/html; charset=utf-8").html);
+        assert_eq!(typed("text/plain").headers, [("Content-Type".to_string(), "text/plain".to_string())]);
+    }
+
+    #[test]
+    fn responses_read_through_the_manifest() {
+        let m = site();
+        let status = |s: Value| response(&run_of(json!({}), json!({"status": s, "body": "x"}), vec![], ""), &m).status;
+        assert_eq!(status(json!(" 201 ")), Some(201));
+        assert_eq!(status(json!("ok")), None);
+        assert_eq!(status(json!(true)), None);
+        // Header entries as pairs or records; anything else is no header.
+        let headers = json!([["a", "1"], {"key": "b", "value": "2"}, {"name": "c", "value": 3}, ["d", "4", "5"], "e"]);
+        let r = response(&run_of(json!({}), json!({"headers": headers, "body": "x"}), vec![], ""), &m);
+        assert_eq!(r.headers, [("a".into(), "1".into()), ("b".into(), "2".into())]);
+        // A body that is not text or bytes is none; without a mapping the
+        // whole string result is the body.
+        assert!(response(&run_of(json!({}), json!({"body": {"html": "x"}}), vec![], ""), &m).body.is_none());
+        let bare: Manifest = toml::from_str("[app]\nwasm = 'a.wasm'\n").unwrap();
+        let r = response(&run_of(json!({}), json!("<p>Hi</p>"), vec![], ""), &bare);
+        assert_eq!((r.body.as_deref(), r.html), (Some("<p>Hi</p>"), true));
+        assert!(!is_body(&json!([1, 256])) && is_body(&json!([])) && !is_body(&json!(1)));
+    }
+
+    #[test]
+    fn response_well_formedness() {
+        let m = site();
+        let check_of = |args: Value, result: Value| kinds(check(&run_of(args, result, vec![], ""), &m));
+        let get = json!({"method": "GET"});
+        assert_eq!(check_of(get.clone(), json!({"status": 0, "body": "ok"})), ["invalid_response"]);
+        // One finding for the first bad header.
+        let found = check(&run_of(get.clone(), json!({"status": 200, "headers": [["x y", "1"], ["x-a", "a\r\nb"]], "body": "ok"}), vec![], ""), &m);
+        assert_eq!((found.len(), found[0].detail["header"].as_str()), (1, Some("x y")));
+        assert_eq!(check_of(get.clone(), json!({"status": 200, "headers": [["x-a", "a\r\nSet-Cookie: s=1"]], "body": "ok"})), ["invalid_response"]);
+        // Bytes that are not UTF-8: a warn as text, fine as an image.
+        assert_eq!(check_of(get.clone(), json!({"status": 200, "headers": [], "body": [255, 216]})), ["invalid_response"]);
+        assert_eq!(check_of(get.clone(), json!({"status": 200, "headers": [["content-type", "image/jpeg"]], "body": [255, 216]})), Vec::<String>::new());
+        // Content-Length against the body, except where no body is sent.
+        let sized = |status: i64, cl: &str| json!({"status": status, "headers": [["content-length", cl]], "body": "héllo"});
+        assert_eq!(check_of(get.clone(), sized(200, "6")), Vec::<String>::new());
+        assert_eq!(check_of(get.clone(), sized(200, "5")), ["invalid_response"]);
+        assert_eq!(check_of(get.clone(), sized(200, "x")), ["invalid_response"]);
+        assert_eq!(check_of(json!({"method": "head"}), sized(200, "999")), Vec::<String>::new());
+        assert_eq!(check_of(get.clone(), sized(304, "999")), Vec::<String>::new());
+        assert_eq!(check_of(get.clone(), sized(204, "999")), Vec::<String>::new());
+        // Broken markup, but not where only a 1 MiB prefix is read.
+        let html = |body: String| json!({"status": 200, "headers": [["content-type", "text/html"]], "body": body});
+        assert_eq!(check_of(get.clone(), html("<div><span>x</div>".into())), ["broken_markup"]);
+        assert_eq!(check_of(get.clone(), html(format!("<div>{}", "é".repeat(1 << 19)))), Vec::<String>::new());
+        // A canary's markup is reflection, not broken markup.
+        assert_eq!(check_of(json!({"q": canary(3)}), html(format!("<p>{}</p>", canary(3)))), ["reflection"]);
+        // Scripts from elsewhere in HTML no output label covers: a warn.
+        let found = check(&run_of(get.clone(), html(r#"<script src="https://cdn.example/react.js"></script><div id="root"></div>"#.into()), vec![], ""), &m);
+        assert_eq!((kinds(found.clone()), found[0].severity), (vec!["unpinned_script".to_string()], Severity::Warn));
+    }
+
+    #[test]
+    fn a_module_that_never_answers() {
+        let mut m = site();
+        m.host = Some(std::sync::Arc::new(toml::from_str("[platform]\nname = 'p'\nstart = '_start'\n").unwrap()));
+        let mut r = run_of(json!({}), json!(null), vec![], "");
+        r.result = None;
+        assert_eq!(kinds(check(&r, &m)), ["invalid_response"]);
+        assert_eq!(kinds(check(&r, &site())), Vec::<String>::new());
+    }
+
+    #[test]
+    fn echo_reruns_change_error_texts() {
+        assert_eq!(rot("Db-7 down!"), "Qo-2 qbja!");
+        let texts = BTreeSet::from(["db-7 down".to_string()]);
+        assert_eq!(swap(&json!({"err": ["x: db-7 down", 7, {"m": "db-7 down"}]}), &texts), json!({"err": ["x: qo-2 qbja", 7, {"m": "qo-2 qbja"}]}));
+        let f = leaky("h", vec!["panic text".into(), "the error text f returned (\"db-7 down\")".into()], Some(("f", "db-7 down")), Some("r1"));
+        assert_eq!((error_text(&f), f.severity, f.run.as_deref()), (Some("db-7 down"), Severity::Warn, Some("r1")));
+        assert!(f.title.contains("panic text; the error text f returned"));
+        assert_eq!(error_text(&leaky("h", vec!["panic text".into()], None, None)), None);
+        let r = page_run("<p>db-7 down</p>", vec![("f", json!({}), json!({"err": "db-7 down"}))], "");
+        let found = check(&r, &site());
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|f| error_text(f) == Some("db-7 down")), "{found:?}");
+        assert_eq!(error_text(&Finding::new("crash", "x", Severity::Fail, "x".into(), json!({"error": "db-7 down"}), None)), None);
+    }
+
+    #[test]
+    fn canary_shapes() {
+        let u = url_canary(7);
+        assert!(u.starts_with("https://cnry") && u.ends_with(".example/") && CANARY.is_match(&u) && !u.contains('<'));
+        let bare: Manifest = toml::from_str("[app]\nwasm = 'a.wasm'\n").unwrap();
+        assert_eq!(canary_for(&bare, 7), canary(7));
+        let sinks: Manifest = toml::from_str("[app]\nwasm = 'a.wasm'\n[functions.\"acme:db/q#run\"]\nparams = { sql = \"sql\" }\n").unwrap();
+        let c = canary_for(&sinks, 1);
+        assert_eq!(c, format!("{}{SINK_TAIL}", canary(1)));
+        // Each canary taken out in turn, with its markup and tail.
+        let t = format!("a {c} b {u} c");
+        assert_eq!(without_canaries(&t), [format!("a  b {u} c"), format!("a {c} b  c")]);
+        // Canaries by request path; `[[name, value]]` pairs by name.
+        let mut found = BTreeSet::new();
+        canary_paths(&json!({"query": [["q", c]], "items": ["x", u], "n": 3, "pairs": []}), "@0".into(), &mut found);
+        let ids: Vec<(String, String)> = found.into_iter().collect();
+        assert_eq!(ids.iter().map(|(_, p)| p.as_str()).collect::<Vec<_>>(), ["@0.query.q", "@0.items.1"]);
+    }
+
+    #[test]
+    fn script_types_that_run() {
+        for t in [None, Some(""), Some("module"), Some("text/javascript"), Some(" Text/JavaScript; charset=utf-8"), Some("application/ecmascript")] {
+            assert!(is_js(t), "{t:?}");
+        }
+        for t in ["application/json", "application/ld+json", "importmap", "speculationrules", "text/template"] {
+            assert!(!is_js(Some(t)), "{t}");
+        }
+        assert_eq!(header_parts(&json!({"name": "a", "key": "b", "value": "c"})).map(|(n, _)| n.clone()), Some(json!("a")));
     }
 }
