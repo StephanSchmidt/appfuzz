@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `[entry] one_of`: the combinations of request fields the platform
+  sends, such as a route and its methods:
+  `one_of = [{ handler = "save", "req.method" = "POST" }, …]`. The list is
+  closed: a request that is no row has its findings lowered to info. The
+  fuzzer starts from every row, so every route is reached. `[[entry.rules]]`
+  stay for limits on some requests only.
 - `[entry.response]`: a response made from host calls. On a platform
   where the app calls `page#set-html(name, html)` or `page#redirect(path)`
   and returns nothing, the manifest names the calls that set the status,

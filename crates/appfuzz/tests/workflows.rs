@@ -3949,6 +3949,68 @@ fn entry_rules_keep_requests_to_what_the_platform_sends() {
 }
 
 #[test]
+fn one_of_lists_the_requests_the_platform_sends() {
+    let f = Fixture::new(true);
+    // run(handler, method) crashes on save with a method other than POST,
+    // and, in the second build, on every list.
+    let wit = "package test:workflow; world app { export run: func(handler: string, method: string) -> string; }";
+    let wat = |crash: &str| {
+        format!(
+            r#"(module (memory (export "memory") 1)
+        (global $next (mut i32) (i32.const 1024))
+        (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32) (local i32)
+          (local.set 4 (global.get $next))
+          (global.set $next (i32.and (i32.add (i32.add (global.get $next) (local.get 3)) (i32.const 8)) (i32.const -8)))
+          (local.get 4))
+        (func (export "run") (param i32 i32 i32 i32) (result i32)
+          (if {crash} (then unreachable))
+          (i32.store (i32.const 0) (i32.const 0))
+          (i32.store (i32.const 4) (i32.const 0))
+          (i32.const 0)))"#
+        )
+    };
+    let save_not_post = "(i32.and (i32.eq (i32.load8_u (local.get 0)) (i32.const 115)) (i32.ne (i32.load8_u (local.get 2)) (i32.const 80)))";
+    std::fs::write(f.dir.join("app.wasm"), component(wit, &wat(save_not_post))).unwrap();
+    f.edit("request = \"safe\"", "request = [\"save\", \"POST\"]");
+    let plain = std::fs::read_to_string(&f.manifest).unwrap();
+    let rows = "one_of = [{ handler = \"list\", method = \"enum:GET,HEAD\" }, { handler = \"save\", method = \"POST\" }]";
+    let with =
+        |rows: &str| std::fs::write(&f.manifest, plain.replace("request = [\"save\", \"POST\"]", &format!("request = [\"save\", \"POST\"]\n{rows}"))).unwrap();
+    with(rows);
+    let crash = |run: &Value| run["findings"].as_array().unwrap().iter().find(|x| x["kind"] == "crash").map(|x| x["severity"].clone());
+    let (code, ok) = f.cli(&["run"]);
+    assert_eq!((code, crash(&ok)), (0, None), "{ok}");
+    // A combination no row lists never comes: its crash is a hint.
+    let (_, never) = f.cli(&["run", "--args", r#"["save", "GET"]"#]);
+    assert_eq!(crash(&never), Some(json!("info")), "{never}");
+    // So is a handler no row names (it starts with an s, too).
+    let (_, unknown) = f.cli(&["run", "--args", r#"["show", "GET"]"#]);
+    assert_eq!(crash(&unknown), Some(json!("info")), "{unknown}");
+    let (_, why) = f.cli(&["explain", "last"]);
+    assert!(why.to_string().contains(r#"{"handler":"show","method":"GET"}"#), "{why}");
+    let (_, fuzzed) = f.cli(&["fuzz", "--runs", "60", "--fresh"]);
+    assert_ne!(crash(&fuzzed), Some(json!("fail")), "{fuzzed}");
+    // Fuzzing starts from every row: the crash on list shows in the first
+    // runs, although the request is a save.
+    let list = "(i32.eq (i32.load8_u (local.get 0)) (i32.const 108))";
+    std::fs::write(f.dir.join("app.wasm"), component(wit, &wat(list))).unwrap();
+    let (_, started) = f.cli(&["fuzz", "--runs", "4", "--fresh"]);
+    assert_eq!(crash(&started), Some(json!("fail")), "{started}");
+    std::fs::write(&f.manifest, &plain).unwrap();
+    let (_, open) = f.cli(&["fuzz", "--runs", "4", "--fresh"]);
+    assert_eq!(crash(&open), None, "without rows the first runs stay on save: {open}");
+    // A misspelt field, or a value of the wrong type, is an error.
+    with(&rows.replace("handler = \"list\"", "handlr = \"list\""));
+    let (code, bad) = f.cli(&["run"]);
+    assert_eq!(code, 3, "{bad}");
+    assert!(bad["error"].as_str().unwrap().contains("entry.one_of[0] \"handlr\""), "{bad}");
+    with(&rows.replace("handler = \"save\"", "handler = 3"));
+    let (code, bad) = f.cli(&["run"]);
+    assert_eq!(code, 3, "{bad}");
+    assert!(bad["error"].as_str().unwrap().contains("entry.one_of[1] \"handler\""), "{bad}");
+}
+
+#[test]
 fn labels_reach_into_stored_json() {
     let f = Fixture::new(false);
     // run() logs the record get("k") returns.

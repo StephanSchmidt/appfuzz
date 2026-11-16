@@ -2057,15 +2057,35 @@ fn check_entry(manifest: &mut Manifest, exports: &[FuncInfo]) -> Result<()> {
     Ok(())
 }
 
-/// `[[entry.rules]]`: every `when` path is a request field, every matcher
-/// compiles, and every constraint fits its field's type.
+/// `[entry] one_of` and `[[entry.rules]]`: every path is a request field,
+/// every value and constraint fits its field's type, and every matcher
+/// compiles.
 fn check_entry_rules(entry: &crate::manifest::Entry, params: &[(String, Type)]) -> Result<()> {
     let param = |path: &str| -> Result<(Type, String)> {
         let (i, rest) = entry.locate(path);
-        let (_, ty) = params.get(i).context("entry.rules needs a request argument")?;
+        let (_, ty) = params.get(i).context("entry.one_of and entry.rules need a request argument")?;
         Ok((ty.clone(), rest.to_string()))
     };
     let names = if params.len() > 1 { format!(" (paths start with a parameter: {})", entry.params.join(", ")) } else { String::new() };
+    for (n, row) in entry.one_of.iter().enumerate() {
+        if row.is_empty() {
+            bail!("entry.one_of[{n}] is empty: name the fields of one combination the platform sends");
+        }
+        for (path, pick) in row {
+            let (ty, rest) = param(path)?;
+            let at =
+                crate::constraints::path_type(&ty, &rest).with_context(|| format!("entry.one_of[{n}] {path:?}: no such field in {}{names}", entry.export))?;
+            match pick {
+                crate::manifest::Pick::Is(v) => {
+                    crate::value::json_to_val(v, &at).with_context(|| format!("entry.one_of[{n}] {path:?}"))?;
+                    if let Some(c) = entry.values.get(path).filter(|c| !c.holds(v)) {
+                        bail!("entry.one_of[{n}] {path:?}: {v} breaks entry.values {c}");
+                    }
+                }
+                crate::manifest::Pick::Keeps(c) => crate::constraints::validate_type(&ty, &rest, c).with_context(|| format!("entry.one_of[{n}] {path:?}"))?,
+            }
+        }
+    }
     for (n, rule) in entry.rules.iter().enumerate() {
         if rule.when.is_empty() || rule.values.is_empty() {
             bail!("entry.rules[{n}] needs `when` (the requests it is about) and `values` (what they keep to)");

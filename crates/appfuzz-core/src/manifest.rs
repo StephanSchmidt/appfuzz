@@ -184,6 +184,10 @@ pub struct Entry {
     /// Accepted guest input domains; unlike `values`, invalid values can arrive.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub input_values: BTreeMap<String, crate::value_contract::Domain>,
+    /// The combinations of request fields the platform sends (a route and
+    /// its methods), one row each: a request matches a row or never comes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub one_of: Vec<BTreeMap<String, Pick>>,
     /// What the platform lets through for some requests only: request
     /// fields that go together (a route and its method).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -205,8 +209,47 @@ pub struct EntryRule {
     pub values: BTreeMap<String, crate::constraints::Constraint>,
 }
 
+/// A field of an `[entry] one_of` row: a value the field equals (`"POST"`,
+/// `3`, `true`), or a constraint it keeps to (`"enum:GET,HEAD"`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pick {
+    Is(Value),
+    Keeps(crate::constraints::Constraint),
+}
+
+impl Pick {
+    pub fn holds(&self, v: &Value) -> bool {
+        match self {
+            Pick::Is(x) => crate::plan::matches(x, v),
+            Pick::Keeps(c) => c.holds(v),
+        }
+    }
+}
+
+impl Serialize for Pick {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Pick::Is(v) => v.serialize(s),
+            Pick::Keeps(c) => c.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Pick {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let mut v = Value::deserialize(d)?;
+        // Text that starts like a constraint is one, as in `values`.
+        if let Some(s) = v.as_str()
+            && s.split_once(':').is_some_and(|(kind, _)| matches!(kind, "range" | "len" | "enum" | "format" | "unique"))
+        {
+            return crate::constraints::Constraint::parse(s).map(Pick::Keeps).map_err(serde::de::Error::custom);
+        }
+        crate::value::toml_none(&mut v);
+        Ok(Pick::Is(v))
+    }
+}
+
 impl Entry {
-    /// Whether the platform limits request fields, always or by rule.
     /// Whether the parameter `param` of host function `func` (which takes
     /// `n_params`) is a field of `[entry.response]`.
     pub fn response_param(&self, func: &str, param: &str, n_params: usize) -> bool {
@@ -217,8 +260,35 @@ impl Entry {
         })
     }
 
+    /// Whether the platform limits request fields, always or by row or rule.
     pub fn constrains(&self) -> bool {
-        !self.values.is_empty() || !self.rules.is_empty()
+        !self.values.is_empty() || !self.one_of.is_empty() || !self.rules.is_empty()
+    }
+
+    /// Whether the request is one of the `one_of` rows: every field of the
+    /// row is there and keeps to it.
+    pub fn is_row(&self, args: &[Value], row: &BTreeMap<String, Pick>) -> bool {
+        row.iter().all(|(p, pick)| self.field(args, p).is_some_and(|v| pick.holds(v)))
+    }
+
+    /// For a request no `one_of` row allows: the fields the rows name, and
+    /// the request's values there.
+    pub fn outside_one_of(&self, args: &[Value]) -> Option<(String, Value)> {
+        if self.one_of.is_empty() || self.one_of.iter().any(|row| self.is_row(args, row)) {
+            return None;
+        }
+        let paths: std::collections::BTreeSet<&String> = self.one_of.iter().flat_map(BTreeMap::keys).collect();
+        let values = paths.iter().map(|p| ((*p).clone(), self.field(args, p).cloned().unwrap_or(Value::Null))).collect();
+        Some((paths.into_iter().map(String::as_str).collect::<Vec<_>>().join(", "), Value::Object(values)))
+    }
+
+    /// The row a request is made to keep to: none when it is one already,
+    /// else the one `seed` picks.
+    pub fn row_for(&self, args: &[Value], seed: u64) -> Option<&BTreeMap<String, Pick>> {
+        if self.one_of.iter().any(|row| self.is_row(args, row)) {
+            return None;
+        }
+        self.one_of.get(usize::try_from(seed % self.one_of.len().max(1) as u64).unwrap_or(0))
     }
 
     /// The `values` of the rules whose `when` the request matches.
@@ -898,6 +968,55 @@ mod tests {
         let mut args = req("save", "GET");
         crate::constraints::conform_request(&mut args, &m, 1);
         assert_eq!(args[1]["method"], "POST");
+    }
+
+    #[test]
+    fn one_of_lists_the_requests_the_platform_sends() {
+        let mut m: Manifest = toml::from_str(
+            r#"
+            [app]
+            wasm = "a.wasm"
+            [entry]
+            export = "acme:web/handler#start"
+            one_of = [
+              { handler = "list", "req.method" = "enum:GET,HEAD" },
+              { handler = "save", "req.method" = "POST" },
+              { handler = "delete", "req.method" = "POST", "req.admin" = true },
+            ]
+            "#,
+        )
+        .unwrap();
+        m.entry.as_mut().unwrap().params = vec!["handler".into(), "req".into()];
+        let e = m.entry.as_ref().unwrap();
+        assert_eq!(e.one_of[0]["req.method"], Pick::Keeps(crate::constraints::Constraint::parse("enum:GET,HEAD").unwrap()));
+        assert_eq!(e.one_of[1]["req.method"], Pick::Is(json!("POST")), "plain text is the value itself");
+        let req = |h: &str, method: &str, admin: bool| vec![json!(h), json!({"method": method, "admin": admin})];
+        let broken = |args: &[Value]| crate::constraints::broken_request(args, &m);
+        assert!(broken(&req("list", "HEAD", false)).is_empty());
+        assert!(broken(&req("save", "POST", true)).is_empty(), "a field the row leaves out is free");
+        // Closed: a combination no row lists, or a handler none names.
+        for args in [req("save", "GET", false), req("delete", "POST", false), req("show", "GET", false)] {
+            let b = broken(&args);
+            assert_eq!(b.len(), 1, "{args:?}");
+            assert_eq!(b[0].0, "handler, req.admin, req.method");
+            assert_eq!(b[0].2, json!({"handler": args[0], "req.admin": args[1]["admin"], "req.method": args[1]["method"]}));
+        }
+        // Conforming keeps a request that is a row, else makes it one, and
+        // reaches every row.
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..32 {
+            let mut args = req("x", "PATCH", false);
+            crate::constraints::conform_request(&mut args, &m, seed);
+            assert!(broken(&args).is_empty(), "{args:?}");
+            seen.insert(args[0].as_str().unwrap().to_string());
+        }
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        let mut args = req("list", "HEAD", false);
+        crate::constraints::conform_request(&mut args, &m, 1);
+        assert_eq!(args, req("list", "HEAD", false));
+        // A malformed constraint is an error, not a value.
+        let bad = toml::from_str::<Manifest>("[app]\nwasm = \"a.wasm\"\n[entry]\nexport = \"x\"\none_of = [{ n = \"range:9..1\" }]\n");
+        assert!(bad.unwrap_err().to_string().contains("lower bound exceeds upper bound"));
     }
 
     #[test]

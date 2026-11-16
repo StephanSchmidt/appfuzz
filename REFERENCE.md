@@ -180,22 +180,42 @@ argument with the `http.` roles, or the first. Clock roles fill the field
 from the virtual clock and follow it when `probe times` or the fuzzer moves
 the clock: `clock.rfc3339` as `2026-11-02T10:00:00Z`.
 
-Fields that go together are `[[entry.rules]]`. Here the platform routes
-`POST /signup` to the handler and nothing else, so `req.method` follows
-`route`:
+Fields that go together are `[entry] one_of`: the combinations the
+platform sends. Here it routes `POST /signup` and `GET /` to the
+handler, and nothing else:
+
+```toml
+[entry]
+one_of = [
+  { route = "POST /signup", "req.method" = "POST" },
+  { route = "GET /", "req.method" = "enum:GET,HEAD" },
+]
+```
+
+A request keeps to a row when every field the row names equals its value
+(plain text, a number, `true`) or keeps to its constraint (text that
+starts with `range:`, `len:`, `enum:`, `format:` or `unique:`). Fields
+the row leaves out are free, and `[entry] values` still apply. A request
+that is no row never comes: the fuzzer starts from one request per row
+(unless an example is one already) and keeps to the rows as it keeps to
+`values`, and a run that is none has its findings lowered to info with
+`detail.invalid_request`, which names the fields and the request's
+values there. A path the export doesn't have, or a value of the wrong
+type, is an error.
+
+`[[entry.rules]]` limit some requests and leave the others open. A
+request that matches `when` (all of its matchers, the ones of host
+rules) keeps to `values` too:
 
 ```toml
 [[entry.rules]]
-when = { route = "POST /signup" }
-values = { "req.method" = "enum:POST" }
+when = { plan = "free" }
+values = { "query.days" = "range:1..7" }
 ```
 
-A request that matches `when` (all of its matchers, the ones of host
-rules) keeps to `values` too, after `[entry] values`. The fuzzer keeps
-to them as it keeps to `values`, and a run that breaks one has its
-findings lowered to info with `detail.invalid_request`. A `when` path the
-export doesn't have is an error. On a platform (`platform.toml`), the
-rules are the platform's, like `values`.
+The fuzzer applies `values`, then `one_of`, then the rules. On a
+platform (`platform.toml`), `one_of` and the rules are the platform's,
+like `values`.
 
 ## Structured payload search
 

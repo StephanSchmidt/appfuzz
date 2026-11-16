@@ -279,6 +279,12 @@ pub(crate) fn conform_host(value: &mut Value, ty: &Type, constraints: &[(String,
 }
 
 pub(crate) fn conform_request_typed(args: &mut [Value], app: &crate::harness::App, export: &str, seed: u64) -> Result<()> {
+    conform_request_row(args, app, export, seed, None)
+}
+
+/// [`conform_request_typed`], with the `one_of` row to keep to (`row`),
+/// or the one `seed` picks when the request is none of them.
+pub(crate) fn conform_request_row(args: &mut [Value], app: &crate::harness::App, export: &str, seed: u64, row: Option<usize>) -> Result<()> {
     if let Some(f) = app.manifest.shopify.as_ref().and_then(|s| s.function.as_ref()) {
         f.conform(export, args);
     }
@@ -286,12 +292,19 @@ pub(crate) fn conform_request_typed(args: &mut [Value], app: &crate::harness::Ap
     if !entry.constrains() || !crate::harness::fn_key_eq(&entry.export, export) {
         return Ok(());
     }
-    // Each argument keeps to the guarantees on its own paths; the rules see
-    // the request after `values` shaped it.
+    // Each argument keeps to the guarantees on its own paths; `one_of` and
+    // the rules see the request after `values` shaped it.
     let types: Vec<Type> = app.export(export)?.ty.params().map(|(_, t)| t).collect();
     let always: Vec<(String, Constraint)> = entry.values.iter().map(|(p, c)| (p.clone(), c.clone())).collect();
-    for phase in 0..2 {
-        let constraints = if phase == 0 { always.clone() } else { entry.rule_values(args) };
+    for phase in 0..3 {
+        let constraints = match phase {
+            0 => always.clone(),
+            1 => match row.map_or_else(|| entry.row_for(args, seed), |n| entry.one_of.get(n)) {
+                Some(row) => super::keep_row(entry, args, row),
+                None => continue,
+            },
+            _ => entry.rule_values(args),
+        };
         let mut by_arg: BTreeMap<usize, Vec<(String, Constraint)>> = BTreeMap::new();
         for (path, c) in constraints {
             let (i, rest) = entry.locate(&path);

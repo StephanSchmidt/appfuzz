@@ -389,24 +389,34 @@ values = { score = "range:0..100", name = "len:1..80" }
 values = { "" = "unique:pod_id,date,hour" }
 ```
 
-Request fields that go together, such as a route and its method, are
-`[[entry.rules]]`: a request that matches `when` keeps to `values` as
-well. `when` takes the matchers of host rules (below). The fuzzer keeps
-to the rules like it keeps to `values`, and a run that breaks one has
-its findings lowered to info. Without them, a GET to a handler only
-the platform's POST reaches looks like a `write_on_safe_method`.
+Request fields that go together, such as a route and its methods, are
+`[entry] one_of`: the combinations the platform sends, one row each. A
+row's field is a value (`"POST"`, `3`, `true`) or a constraint
+(`"enum:GET,HEAD"`); fields a row leaves out are free. The list is
+closed: a request that is none of the rows never reaches the app. The
+fuzzer starts from every row and keeps to them like it keeps to
+`values`, and a run that is no row has its findings lowered to info.
+Without them, a GET to a handler only the platform's POST reaches looks
+like a `write_on_safe_method`.
 
 ```toml
 [entry]
-values = { handler = "enum:list,save,delete" }
+one_of = [
+  { handler = "list", "req.method" = "enum:GET,HEAD" },
+  { handler = "save", "req.method" = "POST" },
+  { handler = "delete", "req.method" = "POST" },
+]
+```
 
-[[entry.rules]]
-when = { handler = "save" }
-values = { "req.method" = "enum:POST" }
+When the platform limits only some requests and lets the rest through,
+`[[entry.rules]]` say so: a request that matches `when` keeps to
+`values` as well, and every other request is open. `when` takes the
+matchers of host rules (below).
 
+```toml
 [[entry.rules]]
-when = { handler = { regex = "^(list|show)$" } }
-values = { "req.method" = "enum:GET,HEAD" }
+when = { plan = "free" }
+values = { "query.days" = "range:1..7" }
 ```
 
 ## Rules: `rules = [ { when = {…}, return = … } ]`
@@ -460,5 +470,5 @@ in the manifest; a plan rule with `result` is an error.
 When the export takes several parameters, a path starts with the
 parameter's name: for `handle(route: string, req: request)`,
 `fields = { "req.now" = "clock.rfc3339" }`. `@1.now` names the second
-argument by position. The same goes for `[entry] values`, `[[entry.rules]]` and
+argument by position. The same goes for `[entry] values`, `one_of`, `[[entry.rules]]` and
 `input_values`. With one parameter, paths start inside it, as before.

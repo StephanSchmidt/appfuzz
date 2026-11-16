@@ -1666,6 +1666,19 @@ pub fn fuzz(
             seeds.push(RunSpec { args, ..steady_base.clone() });
         }
     }
+    // One request per combination the platform sends that no example is.
+    if let Some(entry) = app.manifest.entry.as_ref().filter(|e| crate::harness::fn_key_eq(&e.export, &base.export)) {
+        for (n, row) in entry.one_of.iter().enumerate() {
+            if seeds.iter().any(|s| entry.is_row(&s.args, row)) {
+                continue;
+            }
+            let mut args = base.args.clone();
+            if crate::constraints::conform_request_row(&mut args, app, &base.export, base.seed, Some(n)).is_ok() {
+                seeds.push(RunSpec { args: args.clone(), ..base.clone() });
+                seeds.push(RunSpec { args, ..steady_base.clone() });
+            }
+        }
+    }
     let discovery_runs = std::sync::atomic::AtomicU64::new(0);
     let mut modes = Vec::new();
     let mut keys = Vec::new();

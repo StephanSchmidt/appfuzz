@@ -150,6 +150,7 @@ pub fn default_manifest(manifest: &mut Manifest, imports: &[Interface], exports:
             no_pii: false,
             values: Default::default(),
             input_values: Default::default(),
+            one_of: Vec::new(),
             rules: Vec::new(),
             response: Default::default(),
         });

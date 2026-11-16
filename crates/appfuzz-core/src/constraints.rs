@@ -20,7 +20,7 @@ mod typed;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
-pub(crate) use typed::{conform_host, conform_request_typed, path_type, validate_type};
+pub(crate) use typed::{conform_host, conform_request_row, conform_request_typed, path_type, validate_type};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constraint {
@@ -343,13 +343,18 @@ fn conform_node(v: &mut Value, segs: &[&str], c: &Constraint, seed: u64, n: &mut
 /// The request fields that break their constraint: (path, constraint, value).
 pub fn broken_request(args: &[Value], m: &crate::manifest::Manifest) -> Vec<(String, String, Value)> {
     let Some(e) = &m.entry else { return Vec::new() };
-    e.values_for(args)
+    let mut out: Vec<_> = e
+        .values_for(args)
         .into_iter()
         .filter_map(|(p, c)| {
             let v = e.field(args, &p)?;
             (!c.holds(v)).then(|| (p, c.to_string(), v.clone()))
         })
-        .collect()
+        .collect();
+    if let Some((fields, values)) = e.outside_one_of(args) {
+        out.push((fields, "a combination [entry] one_of lists".into(), values));
+    }
+    out
 }
 
 /// The request fields of a run that break their constraint, and the inputs
@@ -376,16 +381,41 @@ pub fn broken_request_for(record: &crate::record::RunRecord, m: &crate::manifest
 /// Makes the request's constrained fields keep to their constraints.
 pub fn conform_request(args: &mut [Value], m: &crate::manifest::Manifest, seed: u64) {
     let Some(e) = &m.entry else { return };
-    // The rules see the request after `values` shaped it.
+    // `one_of` and the rules see the request after `values` shaped it.
     let always: Vec<_> = e.values.iter().map(|(p, c)| (p.clone(), c.clone())).collect();
-    for phase in 0..2 {
-        let constraints = if phase == 0 { always.clone() } else { e.rule_values(args) };
+    for phase in 0..3 {
+        let constraints = match phase {
+            0 => always.clone(),
+            1 => e.row_for(args, seed).map(|row| keep_row(e, args, row)).unwrap_or_default(),
+            _ => e.rule_values(args),
+        };
         for (i, (p, c)) in constraints.iter().enumerate() {
             if let Some(slot) = e.field_mut(args, p) {
                 *slot = c.conform(slot, seed.wrapping_add(i as u64));
             }
         }
     }
+}
+
+/// Sets the fields a `one_of` row fixes to a value, and returns the
+/// constraints of the others.
+pub(crate) fn keep_row(
+    e: &crate::manifest::Entry,
+    args: &mut [Value],
+    row: &std::collections::BTreeMap<String, crate::manifest::Pick>,
+) -> Vec<(String, Constraint)> {
+    let mut constraints = Vec::new();
+    for (p, pick) in row {
+        match pick {
+            crate::manifest::Pick::Is(v) => {
+                if let Some(slot) = e.field_mut(args, p) {
+                    *slot = v.clone();
+                }
+            }
+            crate::manifest::Pick::Keeps(c) => constraints.push((p.clone(), c.clone())),
+        }
+    }
+    constraints
 }
 
 #[cfg(test)]

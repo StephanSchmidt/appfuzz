@@ -132,6 +132,7 @@ fn from_str(text: &str, dir: &Path, component: Option<&str>) -> Result<Manifest>
             no_pii: false,
             values: Default::default(),
             input_values: Default::default(),
+            one_of: Vec::new(),
             rules: Vec::new(),
             response: Default::default(),
         });
