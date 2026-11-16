@@ -614,7 +614,7 @@ the run's `stderr`.
 
 ## Where it fits: AppOS
 
-appfuzz is the review step of [AppOS](https://appfuzz.dev/appos/), an
+appfuzz is the review step of [AppOS](https://appos.build), an
 architecture for web apps that people outside engineering build with
 agents. The site is a shell run by the platform team, and every feature is
 an app: a WebAssembly component the shell runs in a sandbox. It works like a
