@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
 
 - `[entry] one_of`: the combinations of request fields the platform
   sends, such as a route and its methods:
@@ -33,6 +33,8 @@
   forged credentials, and no `auth_bypass`.
 - `probe values` tries odd values of functions marked `fails = false`
   too; it leaves out only the error.
+- wasmtime 50.0.2, with the fixes for RUSTSEC-2026-0566 to 0573: an app
+  under test could abort appfuzz or grow its memory without bound.
 
 ## 0.8.1
 
