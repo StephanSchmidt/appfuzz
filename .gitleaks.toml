@@ -6,7 +6,7 @@ useDefault = true
 [[allowlists]]
 description = "fake keys in unit tests"
 regexTarget = "match"
-regexes = ['''sk_live_0123456789''']
+regexes = ['''sk_live_0123456789''', '''sk_live_9f8e7d6c5b4a''', '''sk_0123456789abcdef''']
 
 [[allowlists]]
 description = "forged JWTs that probe auth sends (unsigned, wrong signature)"
