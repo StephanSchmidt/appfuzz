@@ -5,7 +5,7 @@
 COV = cargo llvm-cov --workspace
 SKIP_BENCH = -- --exact --skip bench
 
-.PHONY: coverage coverage-html coverage-lcov speed browser
+.PHONY: coverage coverage-html coverage-lcov speed browser leaks
 
 coverage:
 	$(COV) --summary-only $(SKIP_BENCH)
@@ -64,3 +64,15 @@ browser:
 	{ echo "parse5"; cat browser/js/node_modules/parse5/LICENSE; \
 	  echo; echo "parse5 entities"; cat browser/js/node_modules/parse5/node_modules/entities/LICENSE; \
 	} > $(BROWSER_ASSETS)/LICENSES.parse5.txt
+
+# Secrets in the whole git history, as CI checks them (.gitleaks.toml), with
+# the gitleaks CI uses (Linux x64), fetched into target/ once.
+GITLEAKS_VERSION = 8.30.1
+GITLEAKS = target/gitleaks-$(GITLEAKS_VERSION)/gitleaks
+
+leaks: $(GITLEAKS)
+	$(GITLEAKS) git --redact --no-banner .
+
+$(GITLEAKS):
+	mkdir -p $(@D)
+	curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v$(GITLEAKS_VERSION)/gitleaks_$(GITLEAKS_VERSION)_linux_x64.tar.gz" | tar -xz -C $(@D) gitleaks
