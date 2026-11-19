@@ -259,11 +259,13 @@ mod tests {
 
     #[test]
     fn calendar_parsing_agrees_with_an_independent_calendar() {
-        for year in [1, 4, 100, 400, 1900, 1970, 2000, 2024, 9999] {
-            for month in 1..=12 {
-                for day in 1..=31 {
+        for year in [1i16, 4, 100, 400, 1900, 1970, 2000, 2024, 9999] {
+            for month in 1i8..=12 {
+                for day in 1i8..=31 {
                     let text = format!("{year:04}-{month:02}-{day:02}T23:59:59");
-                    let expected = chrono::NaiveDate::from_ymd_opt(year, month, day).map(|date| date.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp());
+                    let expected = jiff::civil::Date::new(year, month, day)
+                        .ok()
+                        .map(|date| i64::from(date.since(jiff::civil::date(1970, 1, 1)).unwrap().get_days()) * 86_400 + 86_399);
                     assert_eq!(parse_datetime(&text), expected, "{text}");
                 }
             }

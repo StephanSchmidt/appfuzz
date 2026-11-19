@@ -35,10 +35,10 @@ toml = "0.8"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 wasmparser = "0.262"
 wasm-encoder = { version = "0.262", features = ["wasmparser"] }
-wasmtime = { version = "50.0.0", features = ["anyhow", "call-hook"] }
-wasmtime-wasi = "50.0.0"
+wasmtime = { version = "50.0.2", features = ["anyhow", "call-hook"] }
+wasmtime-wasi = "50.0.2"
 wiggle = { version = "50.0.0", default-features = false }
-wasmtime-wasi-http = { version = "50.0.0", default-features = false, features = ["p2", "p3", "component-model-async"] }
+wasmtime-wasi-http = { version = "50.0.2", default-features = false, features = ["p2", "p3", "component-model-async"] }
 # Spin builds wasm32-wasip1 modules into components with this adapter; appfuzz does the same.
 wasi-preview1-component-adapter-provider = "50.0.1"
 bytes = "1"
@@ -46,7 +46,9 @@ http = "1"
 http-body-util = "0.1"
 wit-component = "0.262"
 cel = { version = "=0.15.0", default-features = false, features = ["regex", "chrono"] }
+# Only for cel: its timestamps and durations are chrono types.
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

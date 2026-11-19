@@ -41,6 +41,7 @@ http.workspace = true
 http-body-util.workspace = true
 cel.workspace = true
 chrono.workspace = true
+jiff.workspace = true
 wit-component = { workspace = true, features = ["dummy-module"] }
 wit-parser = "0.262"
 witx = "0.9"

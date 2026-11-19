@@ -1154,6 +1154,7 @@ fn functions() -> Context<'static, 'static> {
         };
         Cel::Bool(key(&a) == key(&b))
     });
+    // cel's timestamps and durations are chrono types: the one place chrono stays.
     let _ = ctx.add_function("date", |This(s): This<Arc<String>>| -> Result<Cel, ExecutionError> {
         let d = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").map_err(|e| ExecutionError::function_error("date", format!("{s:?}: {e}")))?;
         Ok(Cel::Timestamp(d.and_hms_opt(0, 0, 0).unwrap().and_utc().fixed_offset()))

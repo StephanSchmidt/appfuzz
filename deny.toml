@@ -9,7 +9,13 @@ all-features = true
 # add it with a reason: ignore = [{ id = "RUSTSEC-…", reason = "…" }]
 unmaintained = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+  # cel 0.15 is built on chrono and chrono-tz, and its timestamps and
+  # durations are chrono types. No known vulnerability; appfuzz's own dates
+  # use jiff. Drop these when cel moves off chrono.
+  { id = "RUSTSEC-2026-0543", reason = "chrono, unmaintained: cel's time types" },
+  { id = "RUSTSEC-2026-0555", reason = "chrono-tz, unmaintained: cel needs it" },
+]
 
 [licenses]
 # Permissive licenses only: appfuzz ships MIT binaries.

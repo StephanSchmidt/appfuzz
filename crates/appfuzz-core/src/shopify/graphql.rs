@@ -1037,10 +1037,10 @@ impl<'a> Sent<'a> {
             Sent::Finite => v.as_f64().is_some_and(f64::is_finite),
             Sent::Quantity => v.as_i64().is_some_and(|n| n >= 1),
             Sent::Gid(_) => v.as_str().and_then(|s| s.strip_prefix("gid://shopify/")).is_some_and(|rest| rest.contains('/')),
-            Sent::Date => v.as_str().is_some_and(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()),
-            Sent::DateTime => v
-                .as_str()
-                .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok() || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").is_ok()),
+            Sent::Date => v.as_str().is_some_and(|s| jiff::civil::Date::strptime("%Y-%m-%d", s).is_ok()),
+            Sent::DateTime => {
+                v.as_str().is_some_and(|s| s.parse::<jiff::Timestamp>().is_ok() || jiff::civil::DateTime::strptime("%Y-%m-%dT%H:%M:%S", s).is_ok())
+            }
         }
     }
 
@@ -1058,8 +1058,8 @@ impl<'a> Sent<'a> {
                 json!(format!("gid://shopify/{t}/{n}"))
             }
             Sent::Date | Sent::DateTime => {
-                let at = chrono::DateTime::from_timestamp(946_684_800 + (h % (40 * 365 * 86_400)) as i64, 0).unwrap_or_default();
-                json!(if matches!(self, Sent::Date) { at.format("%Y-%m-%d").to_string() } else { at.format("%Y-%m-%dT%H:%M:%SZ").to_string() })
+                let at = jiff::Timestamp::from_second(946_684_800 + (h % (40 * 365 * 86_400)) as i64).unwrap_or(jiff::Timestamp::UNIX_EPOCH);
+                json!(at.strftime(if matches!(self, Sent::Date) { "%Y-%m-%d" } else { "%Y-%m-%dT%H:%M:%SZ" }).to_string())
             }
         }
     }
