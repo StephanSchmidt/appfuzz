@@ -3895,6 +3895,14 @@ fn labels_and_values_name_the_keys_of_a_pair_list() {
     for p in &pairs {
         assert!(serde_json::from_str::<Value>(p[1].as_str().unwrap()).is_ok(), "{p}");
     }
+    // `*.$.*`: every field of every stored record.
+    with("[functions.\"test:workflow/kv#scan\"]\nresult = { \"*\" = \"json\", \"*.$.*\" = \"pii\" }\n");
+    let (code, run) = f.cli(&["run", "--trace", "--plan", r#"{"_defaults": {"generate": {"list_len": 3}}}"#]);
+    assert_eq!(code, 0, "{run}");
+    for p in scan(&run) {
+        let fields = appfuzz_core::labels::values_at(&p[1], "$.*");
+        assert!(!fields.is_empty() && fields.iter().all(|s| s.ends_with("@mail.example")), "{p}");
+    }
     // `values` take `*` too.
     with("[functions.\"test:workflow/kv#scan\"]\nvalues = { \"*\" = \"enum:on,off\" }\n");
     let (_, run) = f.cli(&["run", "--trace"]);

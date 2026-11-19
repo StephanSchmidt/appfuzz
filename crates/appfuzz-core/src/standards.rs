@@ -423,7 +423,7 @@ pub struct Context {
 impl Context {
     pub fn new(m: &Manifest, export: &str, request: Option<&serde_json::Value>) -> Context {
         use crate::labels::Label;
-        let labels = m.functions.values().flat_map(|f| f.params.values().copied().chain(f.result.iter().flat_map(|r| r.paths()).map(|(_, l)| l)));
+        let labels = m.functions.values().flat_map(|f| f.params.values().flat_map(|l| l.iter()).chain(f.result.iter().flat_map(|r| r.paths()).map(|(_, l)| l)));
         Context {
             sinks: m.has_sinks(),
             identity: crate::identity::declared(m),

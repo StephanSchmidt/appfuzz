@@ -97,7 +97,7 @@ fn request_matches_do_not_change_which_parameters_may_receive_private_values() {
         r.events.push(event(2, SINK, json!({"value":SECRET}), Value::Null));
         let mut m = manifest(name);
         for allowed in [None, Some(other), Some(label)] {
-            m.functions.get_mut(SINK).unwrap().params = allowed.map(|l| [("value".into(), l)].into()).unwrap_or_default();
+            m.functions.get_mut(SINK).unwrap().params = allowed.map(|l| [("value".into(), l.into())].into()).unwrap_or_default();
             let f = labels::check(&r, &m);
             assert_eq!(f.iter().any(|f| f.detail["n"] == 2 && f.severity == Severity::Fail), allowed != Some(label), "{name} {allowed:?}: {f:?}");
         }

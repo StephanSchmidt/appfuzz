@@ -185,14 +185,14 @@ enum Destination {
 struct Place {
     name: String,
     text: String,
-    label: Option<Label>,
+    labels: Vec<Label>,
     effect: bool,
     destination: Destination,
 }
 
 impl Place {
     fn new(name: &str, text: String) -> Self {
-        Self { name: name.into(), text, label: None, effect: false, destination: Destination::Other }
+        Self { name: name.into(), text, labels: Vec::new(), effect: false, destination: Destination::Other }
     }
 }
 
@@ -229,7 +229,11 @@ fn encoded(r: &RunRecord, m: &Manifest, srcs: &[Source]) -> Vec<Finding> {
         for (p, a) in e.text_args().iter() {
             let mut ss = Vec::new();
             strings(a, &mut ss);
-            places.push(Place { label: m.param_label(&e.func, p), effect, ..Place::new(&format!("the parameter {p} of {}", e.func), ss.join("\n")) });
+            places.push(Place {
+                labels: m.param_labels(&e.func, p).map(|l| l.iter().collect()).unwrap_or_default(),
+                effect,
+                ..Place::new(&format!("the parameter {p} of {}", e.func), ss.join("\n"))
+            });
         }
     }
 
@@ -237,7 +241,7 @@ fn encoded(r: &RunRecord, m: &Manifest, srcs: &[Source]) -> Vec<Finding> {
         let encs = encodings(&s.value, s.label.is_some());
         for place in &places {
             let text = &place.text;
-            if text.len() < ENCODED_MIN || text.contains(&s.value) || (s.label.is_some() && place.label == s.label) {
+            if text.len() < ENCODED_MIN || text.contains(&s.value) || s.label.is_some_and(|l| place.labels.contains(&l)) {
                 continue;
             }
             if let Some(owner) = &s.response_owner {

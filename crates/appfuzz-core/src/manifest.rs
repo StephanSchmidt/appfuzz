@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::labels::{Label, ResultLabels};
+use crate::labels::{Label, ParamLabels, ResultLabels};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -554,9 +554,10 @@ pub struct FunctionSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<crate::plan::Rule>,
     /// Labels of parameters: a sink (`sql`, `path`, `shell`, `url`, `html`,
-    /// `regex`) or what they may receive (`pii`, `secret`).
+    /// `regex`) or what they may receive (`pii`, `secret`). A list gives
+    /// one several: `["json", "pii"]`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub params: BTreeMap<String, Label>,
+    pub params: BTreeMap<String, ParamLabels>,
     /// Labels of the result: `untrusted`, `html`, `pii`, `secret`, for the
     /// whole result or by field path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -791,9 +792,15 @@ impl Manifest {
         })
     }
 
-    /// The label of a host function parameter.
+    /// The label of a host function parameter; of several, the one that
+    /// isn't `pii` or `secret`.
     pub fn param_label(&self, key: &str, param: &str) -> Option<Label> {
-        self.function(key).and_then(|f| f.params.get(param).copied())
+        self.param_labels(key, param).map(ParamLabels::main)
+    }
+
+    /// All labels of a host function parameter.
+    pub fn param_labels(&self, key: &str, param: &str) -> Option<&ParamLabels> {
+        self.function(key).and_then(|f| f.params.get(param))
     }
 
     /// The labelled result paths of a host function.
@@ -820,7 +827,7 @@ impl Manifest {
 
     /// Whether any parameter is labelled as a sink.
     pub fn has_sinks(&self) -> bool {
-        self.functions.values().any(|f| f.params.values().any(|l| l.is_sink()))
+        self.functions.values().any(|f| f.params.values().any(|l| l.main().is_sink()))
     }
 
     pub fn effect_of(&self, key: &str) -> Option<Effect> {
@@ -1090,6 +1097,31 @@ mod tests {
         let bad: Manifest = toml::from_str("[app]\nwasm = \"a\"\n[functions.\"x#f\"]\nresult = \"sql\"\n").unwrap();
         assert!(crate::labels::check_positions(&bad).is_err());
         assert!(toml::from_str::<Manifest>("[app]\nwasm = \"a\"\n[functions.\"x#f\"]\nparams = { a = \"nosql\" }\n").is_err());
+    }
+
+    #[test]
+    fn a_parameter_takes_one_label_or_a_list() {
+        let parse = |params: &str| toml::from_str::<Manifest>(&format!("[app]\nwasm = \"a\"\n[functions.\"x:y/kv#set\"]\nparams = {params}\n"));
+        let m = parse(r#"{ key = "path", value = ["json", "pii"] }"#).unwrap();
+        crate::labels::check_positions(&m).unwrap();
+        assert_eq!(m.param_label("x:y/kv#set", "key"), Some(Label::Path));
+        // Of several, code that asks for one label gets the one that isn't pii.
+        assert_eq!(m.param_label("x:y/kv#set", "value"), Some(Label::Json));
+        let value = m.param_labels("x:y/kv#set", "value").unwrap();
+        assert!(value.has(Label::Json) && value.has(Label::Pii) && !value.has(Label::Secret));
+        assert_eq!(parse(r#"{ value = ["pii"] }"#).unwrap().param_label("x:y/kv#set", "value"), Some(Label::Pii));
+        // One label is written back as text, several as a list.
+        let f = &m.functions["x:y/kv#set"];
+        assert_eq!(serde_json::to_value(&f.params).unwrap(), serde_json::json!({"key": "path", "value": ["json", "pii"]}));
+        // A misspelt label in a list names the labels there are; a list needs one.
+        let e = parse(r#"{ value = ["json", "pi"] }"#).unwrap_err().to_string();
+        assert!(e.contains("unknown variant `pi`") && e.contains("`pii`"), "{e}");
+        assert!(parse("{ value = [] }").is_err());
+        // Each label must fit a parameter, and besides pii and secret there is one at most.
+        let e = crate::labels::check_positions(&parse(r#"{ value = ["json", "owner"] }"#).unwrap()).unwrap_err().to_string();
+        assert!(e.contains("params.value = \"owner\""), "{e}");
+        assert!(crate::labels::check_positions(&parse(r#"{ value = ["json", "sql"] }"#).unwrap()).is_err());
+        crate::labels::check_positions(&parse(r#"{ value = ["json", "pii", "secret"] }"#).unwrap()).unwrap();
     }
 
     #[test]

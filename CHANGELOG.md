@@ -17,6 +17,11 @@
   `result = { "" = "json", "$.email" = "pii" }` for a store of JSON
   records, also in rules by key. Generated records carry the labelled
   fields.
+- A parameter takes several labels: `params = { value = ["json", "pii"] }`
+  for a store that keeps JSON records with personal data. Personal data
+  written there is no `pii_leak` (nor its encoded form an
+  `encoded_flow`), and the `json` checks still apply. One label as text
+  works as before.
 - Label paths go through an option's value in recorded results, where
   some labels were missed before.
 - `scale`: copies of a list of numbers count on from the largest, so they

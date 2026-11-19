@@ -115,8 +115,10 @@ fn writes(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
 
 /// Ids the run hands to host calls and records it shows.
 fn reads(r: &RunRecord, m: &Manifest) -> Vec<Finding> {
-    let uses_ids =
-        m.functions.values().any(|f| f.params.values().any(|l| *l == Label::UserId) || f.result.iter().flat_map(|r| r.paths()).any(|(_, l)| l == Label::Owner));
+    let uses_ids = m
+        .functions
+        .values()
+        .any(|f| f.params.values().any(|l| l.main() == Label::UserId) || f.result.iter().flat_map(|r| r.paths()).any(|(_, l)| l == Label::Owner));
     if !uses_ids || !declared(m) {
         return Vec::new();
     }

@@ -135,7 +135,7 @@ pub fn defaults(manifest: &mut Manifest, imports: &[Interface]) -> Result<()> {
             .unwrap_or_else(|| f.key.clone());
         let spec = manifest.functions.entry(key).or_default();
         for (p, l) in &k.params {
-            spec.params.entry(p.clone()).or_insert(*l);
+            spec.params.entry(p.clone()).or_insert_with(|| l.clone());
         }
         if spec.effect.is_none() && k.effect.is_some() {
             spec.effect = k.effect;

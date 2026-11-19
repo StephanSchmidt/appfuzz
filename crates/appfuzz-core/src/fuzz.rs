@@ -1443,7 +1443,7 @@ fn flow_seeds(app: &App, base: &RunSpec, keys: &[String], funcs: &[(String, Type
     let request = entry.map_or(0, |e| e.request_arg());
     // A URL sink also gets each canary as the host of a URL: SDKs parse
     // URLs and refuse the quotes of the plain canary before any request.
-    let url_sink = app.manifest.functions.values().any(|f| f.params.values().any(|l| *l == crate::labels::Label::Url));
+    let url_sink = app.manifest.functions.values().any(|f| f.params.values().any(|l| l.main() == crate::labels::Label::Url));
     for url in [false, true].into_iter().filter(|u| !u || url_sink) {
         let make = |n: u64| if url { crate::output::url_canary(n) } else { crate::output::canary_for(&app.manifest, n) };
         let mut req = base.clone();

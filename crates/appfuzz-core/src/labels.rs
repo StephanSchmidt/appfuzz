@@ -90,6 +90,70 @@ impl Label {
     }
 }
 
+/// The labels of one parameter: `"sql"`, or a list, `["json", "pii"]`, for
+/// JSON text that may hold personal data. Never empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamLabels(Vec<Label>);
+
+impl ParamLabels {
+    /// What the parameter is: the label that isn't `pii` or `secret` if
+    /// there is one, else the first.
+    pub fn main(&self) -> Label {
+        self.iter().find(|l| !matches!(l, Label::Pii | Label::Secret)).unwrap_or(self.0[0])
+    }
+
+    /// Whether values with this label may go into the parameter.
+    pub fn has(&self, label: Label) -> bool {
+        self.0.contains(&label)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Label> + '_ {
+        self.0.iter().copied()
+    }
+}
+
+impl From<Label> for ParamLabels {
+    fn from(l: Label) -> Self {
+        ParamLabels(vec![l])
+    }
+}
+
+impl Serialize for ParamLabels {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.0.as_slice() {
+            [one] => one.serialize(s),
+            many => many.serialize(s),
+        }
+    }
+}
+
+// By hand, so a misspelt label still names the labels there are.
+impl<'de> Deserialize<'de> for ParamLabels {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct OneOrMany;
+        impl<'de> serde::de::Visitor<'de> for OneOrMany {
+            type Value = ParamLabels;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a label or a list of labels")
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<ParamLabels, E> {
+                Label::deserialize(serde::de::value::StrDeserializer::new(s)).map(ParamLabels::from)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<ParamLabels, A::Error> {
+                let mut labels = Vec::new();
+                while let Some(l) = seq.next_element()? {
+                    labels.push(l);
+                }
+                if labels.is_empty() {
+                    return Err(serde::de::Error::invalid_length(0, &self));
+                }
+                Ok(ParamLabels(labels))
+            }
+        }
+        d.deserialize_any(OneOrMany)
+    }
+}
+
 /// `result = "secret"` labels the whole result; `result = { email = "pii" }`
 /// labels fields by dot-separated path. Paths walk through lists, options
 /// and the `ok` side of results.
@@ -129,12 +193,15 @@ pub fn check_positions(m: &Manifest) -> Result<()> {
         {
             bail!("[functions.\"{k}\"] batch_of names the function itself");
         }
-        for (p, l) in &f.params {
-            if !l.for_param() {
+        for (p, labels) in &f.params {
+            if let Some(l) = labels.iter().find(|l| !l.for_param()) {
                 bail!(
                     "[functions.\"{k}\"] params.{p} = \"{}\": a parameter label is one of sql, path, shell, url, html, regex, json, pii, secret, user-id",
                     l.name()
                 );
+            }
+            if labels.iter().filter(|l| !matches!(l, Label::Pii | Label::Secret)).count() > 1 {
+                bail!("[functions.\"{k}\"] params.{p}: besides pii and secret, a parameter has one label at most");
             }
         }
         for (p, l) in f.result.iter().chain(f.rules.iter().filter_map(|r| r.result.as_ref())).flat_map(ResultLabels::paths) {
@@ -159,7 +226,7 @@ pub fn check_wit(m: &Manifest, imports: &[Interface]) -> Result<()> {
         for (p, l) in &spec.params {
             match f.ty.params().find(|(n, _)| n == p) {
                 None => bail!("[functions.\"{k}\"] labels the parameter {p}, but {} has no such parameter", f.signature()),
-                Some((_, t)) if !l.is_id() && !crate::fuzz::has_string(&t) => {
+                Some((_, t)) if !l.main().is_id() && !crate::fuzz::has_string(&t) => {
                     bail!("[functions.\"{k}\"] labels the parameter {p}, which holds no text")
                 }
                 _ => {}
@@ -841,13 +908,13 @@ pub(crate) fn leaks_from(r: &RunRecord, m: &Manifest, traced: &[Traced]) -> Vec<
         for (p, a) in arguments.iter() {
             texts.clear();
             str_leaves(a, &mut texts);
-            let label = m.param_label(&e.func, p);
+            let labels = m.param_labels(&e.func, p);
             // A parameter that is the response is judged as the response.
             if entry.is_some_and(|en| en.response_param(&e.func, p, arguments.len())) {
                 continue;
             }
             for i in find.hits_any(&texts) {
-                if label != Some(traced[i].label) {
+                if !labels.is_some_and(|l| l.has(traced[i].label)) {
                     add(i, format!("the parameter {p} of {}", e.func), Severity::Fail, json!({"n": e.n}));
                 }
             }
@@ -1296,6 +1363,14 @@ mod tests {
         assert_eq!(values_at(&v, "*.email"), vec!["x@y.z"]);
         // Lists of records are no pairs.
         assert_eq!(values_at(&json!([{"name": "n"}]), "name"), vec!["n"]);
+        // Every field of every value that is a JSON record: `*.$.*`.
+        let v = json!([["user/1", r#"{"name":"Ann","email":"a@b.c"}"#], ["user/2", r#"{"name":"Bo","tags":["x"]}"#]]);
+        assert_eq!(values_at(&v, "*.$.*"), vec!["Ann", "a@b.c", "Bo", "x"]);
+        let mut v = json!([["k", "x"], ["j", "y"]]);
+        mark(&mut v, &[("*".into(), Label::Json), ("*.$.*".into(), Label::Pii)], 3, "1000");
+        let found = values_at(&v, "*.$.*");
+        assert!(found.len() >= 2 && found.iter().all(|s| s.ends_with("@mail.example")), "{v}");
+        assert_eq!((&v[0][0], &v[1][0]), (&json!("k"), &json!("j")), "keys stay");
     }
 
     #[test]
@@ -1553,5 +1628,64 @@ mod tests {
         let r = pii_run(json!({}), &["p1@mail.example"], json!({"status": 200, "body": "hi"}), "user p1@mail.example");
         let f = leaks(&r, &pii_manifest(false, true));
         assert_eq!((f.len(), f[0].detail["place"].as_str()), (1, Some("the log (stdout)")));
+    }
+
+    /// A page made from host calls: the app reads a record and a secret,
+    /// shows the record with `page#set-html` and writes `written` back with
+    /// `kv#set`, whose `value` has the labels `set`.
+    fn kv_run(set: &str, written: &str, stdout: &str) -> (RunRecord, Manifest) {
+        let record = json!({"name": "Ann", "email": "p1@mail.example"}).to_string();
+        let mut r = pii_run(json!({}), &[], json!({"status": 200, "headers": [], "body": "<p>p1@mail.example</p>"}), stdout);
+        let call = |n: u32, func: &str, args: Value, result: Option<Value>| {
+            let mut c = r.events[0].clone();
+            (c.n, c.func, c.args, c.result) = (n, func.into(), args.as_object().unwrap().clone(), result);
+            c
+        };
+        r.events = vec![
+            call(1, "a:b/kv#get", json!({"key": "user/1"}), Some(json!({ "some": record }))),
+            call(2, "a:b/config#get", json!({"key": "token"}), Some(json!("sk_0123456789abcdef"))),
+            call(3, "a:b/page#set-html", json!({"name": "page", "html": "<p>p1@mail.example</p>"}), None),
+            call(4, "a:b/kv#set", json!({"key": "user/1", "value": written}), None),
+        ];
+        let m = toml::from_str(&format!(
+            r#"
+            [app]
+            wasm = "a.wasm"
+            [entry]
+            export = "h"
+            output = {{ status = "status", body = "body", headers = "headers" }}
+            [entry.response]
+            body = {{ call = "a:b/page#set-html", arg = "html" }}
+            [functions."a:b/kv#get"]
+            result = {{ "" = "json", "$.*" = "pii" }}
+            [functions."a:b/config#get"]
+            result = "secret"
+            [functions."a:b/kv#set"]
+            params = {{ value = {set} }}
+            "#
+        ))
+        .unwrap();
+        (r, m)
+    }
+
+    #[test]
+    fn personal_data_may_go_where_a_parameter_keeps_it() {
+        let record = r#"{"name":"Ann","email":"p1@mail.example"}"#;
+        // Shown in the page and written back to a store that keeps personal data.
+        let (r, m) = kv_run(r#"["json", "pii"]"#, record, "");
+        let f = leaks(&r, &m);
+        assert!(f.is_empty(), "{f:?}");
+        // A store that only takes JSON doesn't.
+        let (r, m) = kv_run(r#""json""#, record, "");
+        let f = leaks(&r, &m);
+        assert_eq!((f.len(), f[0].kind.as_str(), f[0].severity), (1, "pii_leak", Severity::Fail), "{f:?}");
+        assert_eq!(f[0].detail["place"], "the parameter value of a:b/kv#set");
+        // Nor a secret, nor the log.
+        let (r, m) = kv_run(r#"["json", "pii"]"#, r#"{"token":"sk_0123456789abcdef"}"#, "");
+        let f = leaks(&r, &m);
+        assert_eq!((f.len(), f[0].kind.as_str(), f[0].severity), (1, "secret_leak", Severity::Fail), "{f:?}");
+        let (r, m) = kv_run(r#"["json", "pii"]"#, record, "saved p1@mail.example");
+        let f = leaks(&r, &m);
+        assert_eq!((f.len(), f[0].detail["place"].as_str()), (1, Some("the log (stdout)")), "{f:?}");
     }
 }

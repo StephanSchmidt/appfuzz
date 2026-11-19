@@ -43,7 +43,7 @@ fn a_binary_upload_does_not_hide_plaintext_secrets() {
 #[test]
 fn a_secret_label_on_binary_uploads_remains_an_allowed_sink() {
     let (r, mut m) = record(&payload("sk_0123456789abcdef"));
-    m.functions.get_mut(CLIENT_KEY).unwrap().params.insert("body".into(), appfuzz_core::labels::Label::Secret);
+    m.functions.get_mut(CLIENT_KEY).unwrap().params.insert("body".into(), appfuzz_core::labels::Label::Secret.into());
     assert!(!detect::per_run(&r, &m).iter().any(|f| f.kind == "secret_leak"));
 }
 #[test]
@@ -61,7 +61,7 @@ fn binary_uploads_keep_input_passthrough_and_labelled_sink_evidence() {
     let text = "cnryabcd1<i>'\"";
     let (mut r, mut m) = record(&payload(text));
     r.spec.args = vec![json!(text)];
-    m.functions.get_mut(CLIENT_KEY).unwrap().params.insert("body".into(), appfuzz_core::labels::Label::Sql);
+    m.functions.get_mut(CLIENT_KEY).unwrap().params.insert("body".into(), appfuzz_core::labels::Label::Sql.into());
     let found = detect::per_run(&r, &m);
     assert!(found.iter().any(|f| f.kind == "input_passthrough"), "{found:?}");
     assert!(found.iter().any(|f| f.kind == "sql_injection"), "{found:?}");

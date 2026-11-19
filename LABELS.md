@@ -45,6 +45,11 @@ function doesn't have.
 The parameter must hold text (`user-id`: text or a number). Canaries in request fields and host strings
 carry `<i>'"../;$(x)`, and the fuzzer adds attack strings for each sink.
 
+A list gives a parameter several labels. In a store that keeps records
+with personal data, `params = { value = ["json", "pii"] }` is checked as
+JSON, and personal data may go in. Besides `pii` and `secret`, a
+parameter has one label at most.
+
 ## Results: `result = "<label>"` or `result = { <path> = "<label>" }`
 
 A path is dot-separated field names. It goes through lists, options and

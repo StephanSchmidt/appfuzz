@@ -616,7 +616,7 @@ fn func_doc(host: &HostManifest, types: &Types, f: &FuncInfo, caps: &[String]) -
             v["description"] = json!(d);
         }
         if let Some(l) = spec.params.get(&p) {
-            v["label"] = json!(l.name());
+            v["label"] = json!(l);
         }
         if let Some(d) = spec.param_values.get(&p) {
             v["values"] = serde_json::to_value(d).unwrap_or(Value::Null);
@@ -847,7 +847,7 @@ result = { name = "pii" }
         assert_eq!(e.result["body"], crate::markup::OutputLabel::HtmlSafe);
         let f = &m.functions["shop:web/items#get"];
         assert_eq!((f.cost, f.latency_ms), (Some(2), Some(10.0)));
-        assert_eq!(f.params["id"], Label::Sql);
+        assert_eq!(f.params["id"].main(), Label::Sql);
         assert_eq!(f.result.as_ref().unwrap().paths().len(), 2);
         assert_eq!(f.description.as_deref(), Some("One item by id."));
     }
